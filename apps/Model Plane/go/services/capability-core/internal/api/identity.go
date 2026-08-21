@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/triodelab/model-plane/pkg/authctx"
 )
@@ -32,4 +33,21 @@ func verifiedHasScope(request *http.Request, scope string) bool {
 		return false
 	}
 	return principal.HasScope(scope)
+}
+
+// verifiedIsAdmin derives admin status exclusively from the verified
+// principal's signed scopes, mirroring model-gateway's is_admin_claim
+// (rust/services/model-gateway/src/ownership.rs) so the two authorities
+// agree on what counts as admin.
+func verifiedIsAdmin(request *http.Request) bool {
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok {
+		return false
+	}
+	for _, scope := range principal.Scopes {
+		if scope == "admin" || scope == "org:admin" || strings.HasSuffix(scope, ":admin") {
+			return true
+		}
+	}
+	return false
 }

@@ -344,13 +344,12 @@ func TestWithOrg_IgnoresBlank(t *testing.T) {
 	}
 }
 
-// execution-core must NOT have a minter: its ExecuteStep requires the caller's
-// own identity to equal the request's user, which a service token can never
-// satisfy. Wiring one would only produce confusing failures, and loosening
-// execution-core to accept one is a policy decision, not a wiring fix.
-func TestDefaultScopes_HasNoExecutionCoreAudience(t *testing.T) {
-	if _, ok := DefaultScopes["execution-core"]; ok {
-		t.Fatal("execution-core must not have default mint scopes")
+// execution-core has a minter only for the dedicated scheduled-step lane. The
+// user-bound ExecuteStep/RunAgent methods must remain outside that scope.
+func TestDefaultScopes_ExecutionCoreIsScheduledStepOnly(t *testing.T) {
+	scopes := DefaultScopes[AudienceExecutionCore]
+	if len(scopes) != 1 || scopes[0] != "model:schedule:step" {
+		t.Fatalf("execution-core scopes = %v, want only model:schedule:step", scopes)
 	}
 }
 
@@ -402,7 +401,7 @@ func TestNewMinters_BuildsEveryAudience(t *testing.T) {
 	}
 	for _, audience := range []string{
 		AudienceSessionCore, AudienceInferenceCore,
-		AudienceCapabilityCore, AudienceLettaBridge,
+		AudienceCapabilityCore, AudienceLettaBridge, AudienceExecutionCore,
 	} {
 		minter := minters.Get(audience)
 		if minter == nil {
@@ -451,6 +450,30 @@ func TestUnaryInterceptor_MintingPreservesInboundTraceHeaders(t *testing.T) {
 	}
 	if got := inv.authorizationAt(0); got != "Bearer service-token" {
 		t.Fatalf("authorization = %q", got)
+	}
+}
+
+func TestUnaryInterceptorForMethodsDoesNotMintForUserBoundExecutionCalls(t *testing.T) {
+	minter := &fakeMinter{audience: AudienceExecutionCore, minted: "scheduled-token"}
+	inv := &capturingInvoker{}
+	interceptor := UnaryInterceptorForMethods(minter, nil, map[string]struct{}{
+		"/model_plane.v1.ExecutionCore/ExecuteScheduledStep": {},
+	})
+	if err := interceptor(
+		context.Background(),
+		"/model_plane.v1.ExecutionCore/ExecuteStep",
+		orgRequest{org: "org-1"},
+		nil,
+		nil,
+		inv.invoke,
+	); err != nil {
+		t.Fatalf("interceptor returned %v", err)
+	}
+	if got := inv.authorizationAt(0); got != "" {
+		t.Fatalf("user-bound execution call received service bearer %q", got)
+	}
+	if len(minter.orgs) != 0 {
+		t.Fatalf("user-bound execution call minted for orgs %v", minter.orgs)
 	}
 }
 

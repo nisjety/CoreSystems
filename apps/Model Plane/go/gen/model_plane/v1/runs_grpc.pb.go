@@ -19,11 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RunService_GetRun_FullMethodName          = "/model_plane.v1.RunService/GetRun"
-	RunService_ListRuns_FullMethodName        = "/model_plane.v1.RunService/ListRuns"
-	RunService_CancelRun_FullMethodName       = "/model_plane.v1.RunService/CancelRun"
-	RunService_ListSystemRuns_FullMethodName  = "/model_plane.v1.RunService/ListSystemRuns"
-	RunService_ResolveRunOwner_FullMethodName = "/model_plane.v1.RunService/ResolveRunOwner"
+	RunService_GetRun_FullMethodName                        = "/model_plane.v1.RunService/GetRun"
+	RunService_GetScheduledStepContext_FullMethodName       = "/model_plane.v1.RunService/GetScheduledStepContext"
+	RunService_ListRuns_FullMethodName                      = "/model_plane.v1.RunService/ListRuns"
+	RunService_CancelRun_FullMethodName                     = "/model_plane.v1.RunService/CancelRun"
+	RunService_ListSystemRuns_FullMethodName                = "/model_plane.v1.RunService/ListSystemRuns"
+	RunService_ResolveRunOwner_FullMethodName               = "/model_plane.v1.RunService/ResolveRunOwner"
+	RunService_ResolveThreadOwner_FullMethodName            = "/model_plane.v1.RunService/ResolveThreadOwner"
+	RunService_ResolveRunActionAuthority_FullMethodName     = "/model_plane.v1.RunService/ResolveRunActionAuthority"
+	RunService_ResolveScheduledStepAuthority_FullMethodName = "/model_plane.v1.RunService/ResolveScheduledStepAuthority"
 )
 
 // RunServiceClient is the client API for RunService service.
@@ -35,6 +39,11 @@ const (
 type RunServiceClient interface {
 	// Get a run by ID.
 	GetRun(ctx context.Context, in *GetRunRequest, opts ...grpc.CallOption) (*RunDetail, error)
+	// Get the minimal goal/status context for one service-owned scheduled step.
+	// This is deliberately narrower than GetRun: Execution Core uses its
+	// dedicated session:scheduled-step credential and cannot read arbitrary run
+	// transcripts or human-owned run metadata.
+	GetScheduledStepContext(ctx context.Context, in *GetScheduledStepContextRequest, opts ...grpc.CallOption) (*ScheduledStepContext, error)
 	// List runs for a thread.
 	ListRuns(ctx context.Context, in *ListRunsRequest, opts ...grpc.CallOption) (*ListRunsResponse, error)
 	// Cancel a running or queued run.
@@ -52,6 +61,26 @@ type RunServiceClient interface {
 	// execution mutations. Returns only a boolean to avoid disclosing another
 	// tenant's run metadata.
 	ResolveRunOwner(ctx context.Context, in *ResolveRunOwnerRequest, opts ...grpc.CallOption) (*ResolveRunOwnerResponse, error)
+	// ResolveThreadOwner — authoritative tenant/user ownership check for a
+	// thread, mirroring ResolveRunOwner exactly. Also used to authorize
+	// capability-core's memory scope='session' rows: session and thread are
+	// the same underlying resource in this codebase (see agent_memory's writer
+	// in dreaming.rs, which stores a thread_id under scope='thread'), so
+	// scope='session' calls this RPC with the same thread_id too. Returns only
+	// a boolean to avoid disclosing another tenant's thread metadata.
+	ResolveThreadOwner(ctx context.Context, in *ResolveThreadOwnerRequest, opts ...grpc.CallOption) (*ResolveThreadOwnerResponse, error)
+	// ResolveRunActionAuthority returns the non-secret, immutable run/thread
+	// bindings Control needs before issuing one target-owner action decision.
+	// It is restricted to Control's exact action-authorizer service identity;
+	// it is not a general run-inspection or user-impersonation API.
+	ResolveRunActionAuthority(ctx context.Context, in *ResolveRunActionAuthorityRequest, opts ...grpc.CallOption) (*ResolveRunActionAuthorityResponse, error)
+	// ResolveScheduledStepAuthority returns the exact active prepared scheduled
+	// run binding for Control's per-step decision. It is narrower than ordinary
+	// run inspection: the caller supplies only immutable identifiers/digests,
+	// while Session Core derives the human subject and Space from the durable
+	// scheduled-run record. No goal, transcript, tool, credential, or decision
+	// bearer crosses this boundary.
+	ResolveScheduledStepAuthority(ctx context.Context, in *ResolveScheduledStepAuthorityRequest, opts ...grpc.CallOption) (*ResolveScheduledStepAuthorityResponse, error)
 }
 
 type runServiceClient struct {
@@ -66,6 +95,16 @@ func (c *runServiceClient) GetRun(ctx context.Context, in *GetRunRequest, opts .
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RunDetail)
 	err := c.cc.Invoke(ctx, RunService_GetRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runServiceClient) GetScheduledStepContext(ctx context.Context, in *GetScheduledStepContextRequest, opts ...grpc.CallOption) (*ScheduledStepContext, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScheduledStepContext)
+	err := c.cc.Invoke(ctx, RunService_GetScheduledStepContext_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +151,36 @@ func (c *runServiceClient) ResolveRunOwner(ctx context.Context, in *ResolveRunOw
 	return out, nil
 }
 
+func (c *runServiceClient) ResolveThreadOwner(ctx context.Context, in *ResolveThreadOwnerRequest, opts ...grpc.CallOption) (*ResolveThreadOwnerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveThreadOwnerResponse)
+	err := c.cc.Invoke(ctx, RunService_ResolveThreadOwner_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runServiceClient) ResolveRunActionAuthority(ctx context.Context, in *ResolveRunActionAuthorityRequest, opts ...grpc.CallOption) (*ResolveRunActionAuthorityResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveRunActionAuthorityResponse)
+	err := c.cc.Invoke(ctx, RunService_ResolveRunActionAuthority_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runServiceClient) ResolveScheduledStepAuthority(ctx context.Context, in *ResolveScheduledStepAuthorityRequest, opts ...grpc.CallOption) (*ResolveScheduledStepAuthorityResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveScheduledStepAuthorityResponse)
+	err := c.cc.Invoke(ctx, RunService_ResolveScheduledStepAuthority_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunServiceServer is the server API for RunService service.
 // All implementations must embed UnimplementedRunServiceServer
 // for forward compatibility.
@@ -121,6 +190,11 @@ func (c *runServiceClient) ResolveRunOwner(ctx context.Context, in *ResolveRunOw
 type RunServiceServer interface {
 	// Get a run by ID.
 	GetRun(context.Context, *GetRunRequest) (*RunDetail, error)
+	// Get the minimal goal/status context for one service-owned scheduled step.
+	// This is deliberately narrower than GetRun: Execution Core uses its
+	// dedicated session:scheduled-step credential and cannot read arbitrary run
+	// transcripts or human-owned run metadata.
+	GetScheduledStepContext(context.Context, *GetScheduledStepContextRequest) (*ScheduledStepContext, error)
 	// List runs for a thread.
 	ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error)
 	// Cancel a running or queued run.
@@ -138,6 +212,26 @@ type RunServiceServer interface {
 	// execution mutations. Returns only a boolean to avoid disclosing another
 	// tenant's run metadata.
 	ResolveRunOwner(context.Context, *ResolveRunOwnerRequest) (*ResolveRunOwnerResponse, error)
+	// ResolveThreadOwner — authoritative tenant/user ownership check for a
+	// thread, mirroring ResolveRunOwner exactly. Also used to authorize
+	// capability-core's memory scope='session' rows: session and thread are
+	// the same underlying resource in this codebase (see agent_memory's writer
+	// in dreaming.rs, which stores a thread_id under scope='thread'), so
+	// scope='session' calls this RPC with the same thread_id too. Returns only
+	// a boolean to avoid disclosing another tenant's thread metadata.
+	ResolveThreadOwner(context.Context, *ResolveThreadOwnerRequest) (*ResolveThreadOwnerResponse, error)
+	// ResolveRunActionAuthority returns the non-secret, immutable run/thread
+	// bindings Control needs before issuing one target-owner action decision.
+	// It is restricted to Control's exact action-authorizer service identity;
+	// it is not a general run-inspection or user-impersonation API.
+	ResolveRunActionAuthority(context.Context, *ResolveRunActionAuthorityRequest) (*ResolveRunActionAuthorityResponse, error)
+	// ResolveScheduledStepAuthority returns the exact active prepared scheduled
+	// run binding for Control's per-step decision. It is narrower than ordinary
+	// run inspection: the caller supplies only immutable identifiers/digests,
+	// while Session Core derives the human subject and Space from the durable
+	// scheduled-run record. No goal, transcript, tool, credential, or decision
+	// bearer crosses this boundary.
+	ResolveScheduledStepAuthority(context.Context, *ResolveScheduledStepAuthorityRequest) (*ResolveScheduledStepAuthorityResponse, error)
 	mustEmbedUnimplementedRunServiceServer()
 }
 
@@ -151,6 +245,9 @@ type UnimplementedRunServiceServer struct{}
 func (UnimplementedRunServiceServer) GetRun(context.Context, *GetRunRequest) (*RunDetail, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRun not implemented")
 }
+func (UnimplementedRunServiceServer) GetScheduledStepContext(context.Context, *GetScheduledStepContextRequest) (*ScheduledStepContext, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetScheduledStepContext not implemented")
+}
 func (UnimplementedRunServiceServer) ListRuns(context.Context, *ListRunsRequest) (*ListRunsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListRuns not implemented")
 }
@@ -162,6 +259,15 @@ func (UnimplementedRunServiceServer) ListSystemRuns(context.Context, *ListSystem
 }
 func (UnimplementedRunServiceServer) ResolveRunOwner(context.Context, *ResolveRunOwnerRequest) (*ResolveRunOwnerResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveRunOwner not implemented")
+}
+func (UnimplementedRunServiceServer) ResolveThreadOwner(context.Context, *ResolveThreadOwnerRequest) (*ResolveThreadOwnerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveThreadOwner not implemented")
+}
+func (UnimplementedRunServiceServer) ResolveRunActionAuthority(context.Context, *ResolveRunActionAuthorityRequest) (*ResolveRunActionAuthorityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveRunActionAuthority not implemented")
+}
+func (UnimplementedRunServiceServer) ResolveScheduledStepAuthority(context.Context, *ResolveScheduledStepAuthorityRequest) (*ResolveScheduledStepAuthorityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveScheduledStepAuthority not implemented")
 }
 func (UnimplementedRunServiceServer) mustEmbedUnimplementedRunServiceServer() {}
 func (UnimplementedRunServiceServer) testEmbeddedByValue()                    {}
@@ -198,6 +304,24 @@ func _RunService_GetRun_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(RunServiceServer).GetRun(ctx, req.(*GetRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunService_GetScheduledStepContext_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetScheduledStepContextRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).GetScheduledStepContext(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_GetScheduledStepContext_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).GetScheduledStepContext(ctx, req.(*GetScheduledStepContextRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -274,6 +398,60 @@ func _RunService_ResolveRunOwner_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunService_ResolveThreadOwner_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveThreadOwnerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).ResolveThreadOwner(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_ResolveThreadOwner_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).ResolveThreadOwner(ctx, req.(*ResolveThreadOwnerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunService_ResolveRunActionAuthority_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveRunActionAuthorityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).ResolveRunActionAuthority(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_ResolveRunActionAuthority_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).ResolveRunActionAuthority(ctx, req.(*ResolveRunActionAuthorityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunService_ResolveScheduledStepAuthority_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveScheduledStepAuthorityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).ResolveScheduledStepAuthority(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_ResolveScheduledStepAuthority_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).ResolveScheduledStepAuthority(ctx, req.(*ResolveScheduledStepAuthorityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunService_ServiceDesc is the grpc.ServiceDesc for RunService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -284,6 +462,10 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetRun",
 			Handler:    _RunService_GetRun_Handler,
+		},
+		{
+			MethodName: "GetScheduledStepContext",
+			Handler:    _RunService_GetScheduledStepContext_Handler,
 		},
 		{
 			MethodName: "ListRuns",
@@ -300,6 +482,18 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveRunOwner",
 			Handler:    _RunService_ResolveRunOwner_Handler,
+		},
+		{
+			MethodName: "ResolveThreadOwner",
+			Handler:    _RunService_ResolveThreadOwner_Handler,
+		},
+		{
+			MethodName: "ResolveRunActionAuthority",
+			Handler:    _RunService_ResolveRunActionAuthority_Handler,
+		},
+		{
+			MethodName: "ResolveScheduledStepAuthority",
+			Handler:    _RunService_ResolveScheduledStepAuthority_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

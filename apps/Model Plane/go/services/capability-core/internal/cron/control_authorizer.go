@@ -68,6 +68,7 @@ func (a *ControlFireAuthorizer) AuthorizeScheduledRun(ctx context.Context, inten
 		return ScheduledRunPreparation{}, fmt.Errorf("build scheduled run authorization request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Service-Id", "capability-core")
 	request.Header.Set("X-Service-Token", a.token)
 	response, err := a.client.Do(request)
 	if err != nil {
@@ -243,6 +244,7 @@ func (a *ControlFireAuthorizer) AuthorizeFire(ctx context.Context, intent FireIn
 		return fmt.Errorf("build Control schedule authorization request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Service-Id", "capability-core")
 	request.Header.Set("X-Service-Token", a.token)
 	response, err := a.client.Do(request)
 	if err != nil {

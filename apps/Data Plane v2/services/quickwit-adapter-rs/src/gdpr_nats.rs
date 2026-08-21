@@ -61,7 +61,11 @@ const SHARED_INBOX_PREFIX: &str = "_INBOX.QUICKWIT_ADAPTER_GDPR";
 ///
 /// Returns an error if the initial NATS connection fails, the stream is
 /// unavailable, or the pre-provisioned consumer is missing/misconfigured.
-pub async fn run(pool: PgPool, nats_url: String) -> anyhow::Result<()> {
+pub async fn run(
+    pool: PgPool,
+    nats_url: String,
+    quickwit: crate::quickwit::QuickwitClient,
+) -> anyhow::Result<()> {
     info!(%nats_url, subject = SUBJECT, "quickwit-adapter GDPR erasure consumer connecting");
 
     let client = connect_shared(&nats_url).await?;
@@ -98,9 +102,28 @@ pub async fn run(pool: PgPool, nats_url: String) -> anyhow::Result<()> {
             }
         };
 
-        match handle_message(&pool, &msg.payload).await {
-            Ok(Outcome::Purged { org_id, rows }) => {
-                info!(org_id = %org_id, rows, "quickwit-adapter purged organization admin-job data");
+        match handle_message(&pool, &quickwit, &msg.payload).await {
+            Ok(Outcome::Purged {
+                org_id,
+                rows,
+                index_pruned,
+            }) => {
+                if index_pruned {
+                    info!(
+                        org_id = %org_id,
+                        rows,
+                        index_pruned,
+                        "quickwit-adapter purged organization data and submitted an index delete task"
+                    );
+                } else {
+                    // Not info: the org's documents are still searchable.
+                    error!(
+                        org_id = %org_id,
+                        rows,
+                        "quickwit-adapter purged organization bookkeeping WITHOUT pruning the \
+                         index; the org's documents remain searchable"
+                    );
+                }
                 if let Err(e) = msg.ack().await {
                     warn!(error = %e, "ack failed after purge");
                 }
@@ -140,19 +163,32 @@ async fn connect_shared(url: &str) -> Result<async_nats::Client, async_nats::Con
 }
 
 enum Outcome {
-    Purged { org_id: String, rows: u64 },
+    Purged {
+        org_id: String,
+        rows: u64,
+        /// Carried so the completion log records whether the searchable copy was
+        /// pruned, not just how many bookkeeping rows went. Without it an
+        /// operator auditing an erasure cannot tell from logs whether the org's
+        /// documents were actually removed from the index.
+        index_pruned: bool,
+    },
     Skipped,
 }
 
-async fn handle_message(pool: &PgPool, payload: &[u8]) -> anyhow::Result<Outcome> {
+async fn handle_message(
+    pool: &PgPool,
+    quickwit: &crate::quickwit::QuickwitClient,
+    payload: &[u8],
+) -> anyhow::Result<Outcome> {
     let Some(erasure) = parse_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
     else {
         return Ok(Outcome::Skipped);
     };
 
-    let summary = purge_organization_data(pool, &erasure.org_id).await?;
+    let summary = purge_organization_data(pool, &erasure.org_id, Some(quickwit)).await?;
     Ok(Outcome::Purged {
         org_id: erasure.org_id,
         rows: summary.total(),
+        index_pruned: summary.index_delete_task_submitted,
     })
 }

@@ -637,6 +637,137 @@ mod tests {
         );
     }
 
+    /// The classifier is a pure function over its arguments only — no clock,
+    /// RNG, global mutable state, or hidden I/O — so the same input must yield
+    /// the exact same output every time, in any order, with no warm-up effect.
+    /// This is the property the "<10ms sovereign, CPU-only" claim depends on:
+    /// a router that could answer differently for identical requests would not
+    /// be safe to reason about at a fixed latency/cost budget.
+    #[test]
+    fn classify_decision_is_deterministic_for_the_same_input() {
+        let p = policy();
+        let messages = [user(
+            "Can you analyze this architecture and explain the trade-offs, step by step?",
+        )];
+        let tools = vec![tool("mcp__srv__execute_query")];
+
+        let baseline = classify(&p, &messages, &tools, "auto");
+        for _ in 0..200 {
+            assert_eq!(
+                classify(&p, &messages, &tools, "auto"),
+                baseline,
+                "classify() must return the same Complexity for identical input on every call"
+            );
+        }
+
+        // Same property one level up the stack: choose() over the classifier's
+        // (deterministic) output is itself deterministic for a fixed policy.
+        let first_choice = choose(&p, VerevonMode::Balance, baseline, BudgetPosture::Healthy);
+        for _ in 0..200 {
+            assert_eq!(
+                choose(&p, VerevonMode::Balance, baseline, BudgetPosture::Healthy),
+                first_choice,
+                "choose() must resolve the same model id for identical (policy, mode, complexity, posture)"
+            );
+        }
+    }
+
+    /// End-to-end determinism through the actual call path used in production:
+    /// `resolve()` (`parse_mode` → classify → choose) with no budget client wired
+    /// (mirrors a cost-core outage / Unknown posture) must be byte-for-byte
+    /// reproducible across repeated calls with the same request.
+    #[tokio::test]
+    async fn resolve_decision_is_deterministic_for_the_same_request() {
+        let p = policy();
+        let messages = [user("please refactor this function")];
+
+        let baseline = resolve(
+            &p,
+            "verevon-genius",
+            &messages,
+            &[],
+            "auto",
+            "org1",
+            "u1",
+            "bearer-1",
+            None,
+        )
+        .await
+        .expect("verevon mode resolves");
+
+        for _ in 0..50 {
+            let again = resolve(
+                &p,
+                "verevon-genius",
+                &messages,
+                &[],
+                "auto",
+                "org1",
+                "u1",
+                "bearer-1",
+                None,
+            )
+            .await
+            .expect("verevon mode resolves");
+            assert_eq!(again.model, baseline.model);
+            assert_eq!(again.mode, baseline.mode);
+            assert_eq!(again.complexity, baseline.complexity);
+            assert_eq!(again.posture, baseline.posture);
+        }
+    }
+
+    /// Exercises the *actual* (mode × complexity) routing-policy table through
+    /// a custom, operator-shaped `RoutingPolicy` — not the shipped default —
+    /// end-to-end via `resolve()`. Proves the policy's thresholds and table
+    /// cells, not just its cheap-fallback/downgrade edge cases, actually drive
+    /// what model a real request resolves to.
+    #[tokio::test]
+    async fn resolve_end_to_end_honours_a_custom_policy_table_and_thresholds() {
+        let mut p = policy();
+        // A stricter policy: any reasoning keyword alone is enough to be
+        // "Complex" (threshold 1 instead of the default 3), and the Balance
+        // row's complex cell points at a distinct model so the test can prove
+        // the custom cell — not the default one — was actually used.
+        p.complexity.complex_threshold = 1;
+        p.table.balance.complex = "custom-policy-complex-model".to_owned();
+
+        let messages = [user("please derive the closed-form solution")];
+        let decision = resolve(
+            &p,
+            "verevon-balance",
+            &messages,
+            &[],
+            "auto",
+            "",
+            "",
+            "",
+            None,
+        )
+        .await
+        .expect("verevon mode resolves");
+
+        assert_eq!(decision.complexity, Complexity::Complex);
+        assert_eq!(decision.model, "custom-policy-complex-model");
+
+        // The unmodified default policy must NOT reach the same conclusion —
+        // proving the routing decision came from the custom policy, not from
+        // some default baked in elsewhere.
+        let default_decision = resolve(
+            &policy(),
+            "verevon-balance",
+            &messages,
+            &[],
+            "auto",
+            "",
+            "",
+            "",
+            None,
+        )
+        .await
+        .expect("verevon mode resolves");
+        assert_ne!(default_decision.model, "custom-policy-complex-model");
+    }
+
     #[test]
     fn choose_budget_prefers_cheap() {
         let p = policy();

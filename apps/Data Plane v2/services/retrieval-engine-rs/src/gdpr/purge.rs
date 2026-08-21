@@ -60,6 +60,14 @@ pub struct PurgeSummary {
     pub admin_audit_log: u64,
     pub agent_retrieval_configs: u64,
     pub context_pins: u64,
+    /// The org's cache version after the purge bumped it, invalidating every
+    /// semantic-cache entry the org had in Dragonfly.
+    ///
+    /// Not a row count and deliberately outside `total()`: entries are not
+    /// deleted key-by-key, they become unreachable because the version embedded
+    /// in their key no longer matches. `None` when the bump could not be
+    /// recorded — see the purge's doc comment.
+    pub cache_version_after: Option<i64>,
 }
 
 impl PurgeSummary {
@@ -75,13 +83,43 @@ impl PurgeSummary {
 }
 
 /// Hard-purge every org-scoped row this crate owns for `org_id`, in one
-/// transaction.
+/// transaction, then invalidate the org's cached retrieval results.
+///
+/// # Cache invalidation
+///
+/// Deleting the rows above does not by itself remove the org's answers from the
+/// semantic cache in Dragonfly: cached retrieval results are keyed
+/// `…{org_id}:v{org_version}:s{scope}:{key}`, so they survive independently of
+/// Postgres. Until this bumped the version, an org erasure left its previously
+/// cached results retrievable — the content, still served, after the source rows
+/// were gone.
+///
+/// The version bump is the invalidation: every existing key embeds the old
+/// version and can no longer be constructed by a reader, so the whole org's
+/// cached results become unreachable in one write. That is why this does not
+/// (and cannot practically) scan-and-delete keys — `cache_key` is a hash, so
+/// there is no key pattern to match per org beyond the prefix, and a wildcard
+/// scan across a shared Dragonfly is exactly the operation to avoid on an
+/// erasure path.
+///
+/// ⚠ **Not covered**: the embedding cache (`…embed:{model_version}:{text_hash}`)
+/// is content-addressed with no org in its key and is shared across orgs by
+/// design, so it cannot be purged per-org. It stores vectors keyed by a hash of
+/// text, with no org attribution — flagged here rather than left implicit,
+/// because "the cache is cleared" would otherwise overstate what happens.
 ///
 /// # Errors
 ///
 /// Returns an error if the transaction fails to begin, any statement fails,
 /// or the commit fails. On error nothing is purged — the transaction rolls
 /// back, so a NAK'd redelivery retries the whole purge cleanly.
+///
+/// The version bump happens AFTER the commit and is best-effort: it cannot
+/// fail the purge, because the rows are already gone and a redelivery would
+/// re-run a no-op delete. A failed bump is logged by
+/// [`crate::cache::org_version::bump`] and surfaces here as
+/// `cache_version_after: None`, which a caller should treat as "cached results
+/// may still be served for this org" and retry.
 pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Result<PurgeSummary> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
 
@@ -123,12 +161,29 @@ pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Res
         .rows_affected();
 
     tx.commit().await?;
+
+    // After the commit, deliberately: bumping first would invalidate the cache
+    // for a purge that might then roll back, discarding a healthy cache for no
+    // reason. Bumping after means the only failure mode is a stale-but-orphaned
+    // cache, which the None below reports.
+    let cache_version_after = match crate::cache::org_version::bump(pool, org_id).await {
+        version if version > 0 => Some(version),
+        _ => {
+            tracing::error!(
+                org_id,
+                "GDPR erasure purged Postgres rows but could NOT bump the org cache version;                  previously cached retrieval results may still be served for this org"
+            );
+            None
+        }
+    };
+
     Ok(PurgeSummary {
         retrieval_runs,
         access_audit_log,
         admin_audit_log,
         agent_retrieval_configs,
         context_pins,
+        cache_version_after,
     })
 }
 
@@ -136,16 +191,47 @@ pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Res
 mod tests {
     use super::*;
 
-    #[test]
-    fn purge_summary_total_sums_every_field() {
-        let summary = PurgeSummary {
+    fn summary_with_rows() -> PurgeSummary {
+        PurgeSummary {
             retrieval_runs: 3,
             access_audit_log: 5,
             admin_audit_log: 1,
             agent_retrieval_configs: 2,
             context_pins: 4,
+            cache_version_after: Some(7),
+        }
+    }
+
+    #[test]
+    fn purge_summary_total_sums_every_row_field() {
+        assert_eq!(summary_with_rows().total(), 15);
+    }
+
+    /// The cache version is a version number, not a quantity. Folding it into
+    /// `total()` would make an erasure log a row count that no table produced.
+    #[test]
+    fn purge_summary_total_excludes_the_cache_version() {
+        let bumped = summary_with_rows();
+        let not_bumped = PurgeSummary {
+            cache_version_after: None,
+            ..bumped
         };
-        assert_eq!(summary.total(), 15);
+        assert_eq!(bumped.total(), not_bumped.total());
+        assert_eq!(not_bumped.total(), 15);
+    }
+
+    /// A failed bump must be distinguishable from a successful one, because it
+    /// means the org's cached results may still be served after erasure.
+    #[test]
+    fn a_failed_cache_bump_is_reported_as_none_not_zero() {
+        let failed = PurgeSummary {
+            cache_version_after: None,
+            ..summary_with_rows()
+        };
+        assert!(
+            failed.cache_version_after.is_none(),
+            "a failed bump must surface as None so callers can retry, not as a version of 0              that reads like a real value"
+        );
     }
 
     /// Static-analysis guard: every `DELETE` must be parameterized (never

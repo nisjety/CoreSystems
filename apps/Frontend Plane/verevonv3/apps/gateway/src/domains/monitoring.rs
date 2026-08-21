@@ -64,7 +64,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_monitors).post(create_monitor),
         )
         .route(
-            "/api/v1/monitoring/schedules/:id",
+            "/api/v1/monitoring/schedules/{id}",
             axum::routing::delete(delete_monitor),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))

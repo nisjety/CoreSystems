@@ -32,6 +32,7 @@ mod routing_policy_grpc;
 mod run_service_grpc;
 mod service_token;
 mod space_deletion_reconciler;
+mod space_membership_nats;
 mod store;
 mod terminalization;
 
@@ -110,6 +111,26 @@ async fn main() -> Result<()> {
         })
         .await
     });
+    let space_membership_pool = pool.clone();
+    // Same shared cross-plane broker as the GDPR consumer above, over its own
+    // independent connection — a plain subscribe, not a JetStream durable
+    // consumer, so unlike the GDPR path this needs no extra deployment
+    // provisioning to function (see space_membership_nats.rs's module docs).
+    let space_membership_nats_url = std::env::var("NATS_SHARED_URL").unwrap_or_default();
+    let space_membership_handle = tokio::spawn(async move {
+        if space_membership_nats_url.is_empty() {
+            warn!(
+                "NATS_SHARED_URL not set; session-core Space membership change consumer disabled"
+            );
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core Space membership change consumer", move || {
+            let pool = space_membership_pool.clone();
+            let nats_url = space_membership_nats_url.clone();
+            async move { space_membership_nats::run(pool, nats_url).await }
+        })
+        .await
+    });
     let compaction_handle = tokio::spawn(compaction::run(pool.clone()));
     let dreaming_pool = pool.clone();
     let dreaming_letta_memory = letta_memory.clone();
@@ -167,6 +188,7 @@ async fn main() -> Result<()> {
         result = nats_handle => result??,
         result = orchestration_nats_handle => result??,
         result = gdpr_erasure_handle => result??,
+        result = space_membership_handle => result??,
         result = compaction_handle => result??,
         result = dreaming_handle => result??,
         result = semantic_reconciliation_handle => result??,

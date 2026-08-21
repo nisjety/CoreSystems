@@ -38,7 +38,7 @@ use crate::{
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/memory", get(list_memory))
-        .route("/api/v1/memory/:id", delete(delete_memory))
+        .route("/api/v1/memory/{id}", delete(delete_memory))
         // Per-org/user rate limiting, ordered like `agents_runs.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first →

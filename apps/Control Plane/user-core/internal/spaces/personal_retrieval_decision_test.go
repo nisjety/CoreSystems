@@ -21,7 +21,7 @@ func TestIssuePersonalRetrievalDecisionIsTargetBoundAndSeparateFromThreadCreate(
 	if err != nil {
 		t.Fatalf("IssuePersonalRetrievalDecision: %v", err)
 	}
-	if decision.ActionID != personalRetrievalAction || decision.ServiceAudience != personalRetrievalAudience || decision.ActionSchemaHash != personalRetrievalSchema {
+	if decision.ActionID != retrievalReadAction || decision.ServiceAudience != retrievalReadAudience || decision.ActionSchemaHash != retrievalReadSchema {
 		t.Fatalf("incorrect retrieval target: %+v", decision)
 	}
 	if len(decision.Permissions) != 1 || decision.Permissions[0] != "retrieval:read" {

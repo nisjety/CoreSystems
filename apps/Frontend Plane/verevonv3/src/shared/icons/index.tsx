@@ -2883,3 +2883,32 @@ export const AlignCenter = (props: LucideProps) => <Icon {...props} name="text-a
   d: 'M19 19H5',
   key: 'vjpgq2'
 }]]} />
+
+// Added for main's Spaces/agents surface (BellRing, Compass, Puzzle). Path data
+// copied verbatim from lucide-solid@1.17.0, same source as every icon above.
+export const BellRing = (props: LucideProps) => <Icon {...props} name="bell-ring" iconNode={[['path', {
+  d: 'M10.268 21a2 2 0 0 0 3.464 0',
+  key: 'vwvbt9'
+}], ['path', {
+  d: 'M22 8c0-2.3-.8-4.3-2-6',
+  key: '5bb3ad'
+}], ['path', {
+  d: 'M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326',
+  key: '11g9vi'
+}], ['path', {
+  d: 'M4 2C2.8 3.7 2 5.7 2 8',
+  key: 'tap9e0'
+}]]} />
+export const Compass = (props: LucideProps) => <Icon {...props} name="compass" iconNode={[['circle', {
+  cx: '12',
+  cy: '12',
+  r: '10',
+  key: '1mglay'
+}], ['path', {
+  d: 'm16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z',
+  key: '9ktpf1'
+}]]} />
+export const Puzzle = (props: LucideProps) => <Icon {...props} name="puzzle" iconNode={[['path', {
+  d: 'M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z',
+  key: 'w46dr5'
+}]]} />

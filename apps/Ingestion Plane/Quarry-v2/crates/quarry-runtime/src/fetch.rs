@@ -23,6 +23,13 @@ pub struct FetchResponse {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub duration_ms: u64,
+    /// The driver that actually produced this response. Set by each
+    /// concrete driver; fallback wrappers (`FallbackDriver`,
+    /// `TransportFallbackDriver`) pass it through untouched. Consumers
+    /// must attribute output to this field, not to `Driver::kind()` on
+    /// the driver they hold — after chain rotation the wrapper's
+    /// `kind()` still reports the planned primary.
+    pub served_by: DriverKind,
 }
 
 /// Redirect-hop ceiling for `do_fetch`. Real sites commonly chain
@@ -388,6 +395,7 @@ impl StaticDriver {
             headers,
             body,
             duration_ms: start.elapsed().as_millis() as u64,
+            served_by: DriverKind::Static,
         }))
     }
 }
@@ -723,10 +731,13 @@ mod tests {
     #[tokio::test]
     async fn static_driver_selects_the_pinned_client_for_preflighted_dns() {
         let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
+        // 93.184.216.34, not an RFC 5737 TEST-NET literal: `resolve_guard`
+        // (which `pin` runs through) now blocks the documentation ranges too,
+        // so a 203.0.113.0/24 address is no longer "preflighted" here.
         let hints = FetchHints {
             resolved_target: Some(crate::dns_guard::ResolvedTarget {
                 host: "rebind.example".to_string(),
-                addresses: vec!["203.0.113.17:443".parse().unwrap()],
+                addresses: vec!["93.184.216.34:443".parse().unwrap()],
             }),
             ..FetchHints::default()
         };
@@ -843,10 +854,12 @@ mod tests {
         let pool = ProxyPool::from_env_string("socks5://proxy.example:1080");
         let driver =
             StaticDriver::with_proxy_pool(Duration::from_secs(2), "QuarryTest/1.0", pool).unwrap();
+        // 93.184.216.34, not an RFC 5737 TEST-NET literal -- see the sibling
+        // static-driver test above for why 203.0.113.0/24 no longer works.
         let hints = FetchHints {
             resolved_target: Some(crate::dns_guard::ResolvedTarget {
                 host: "rebind.example".to_string(),
-                addresses: vec!["203.0.113.17:443".parse().unwrap()],
+                addresses: vec!["93.184.216.34:443".parse().unwrap()],
             }),
             ..FetchHints::default()
         };

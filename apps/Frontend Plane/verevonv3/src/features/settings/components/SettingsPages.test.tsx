@@ -763,11 +763,14 @@ describe('workspace settings page', () => {
 
     render(() => <VerevonWorkspaceSettingsPage section="integrations" />)
 
-    // The two connections render as one combined detail line each (email ·
-    // display name · account id · …), not an isolated email-only text node,
-    // so match the email as a substring rather than the row's exact text.
-    expect(await screen.findByText(/ima@example\.com/)).toBeTruthy()
-    expect(screen.getByText(/second@example\.com/)).toBeTruthy()
+    // Each connection renders as its own provider row whose detail line is one
+    // combined string (email · display name · account id · …), not an isolated
+    // email-only text node. Assert per row so this also proves the two accounts
+    // are two separate Google Workspace rows, not one row mentioning both.
+    const workspaceRows = await screen.findAllByText('Google Workspace')
+    const imaRow = workspaceRows.find((row) => row.closest('.verevon-settings-integration-row')?.textContent?.includes('ima@example.com') ?? false)
+    expect(imaRow).toBeTruthy()
+    expect(workspaceRows.find((row) => row.closest('.verevon-settings-integration-row')?.textContent?.includes('second@example.com'))).toBeTruthy()
     expect(screen.getAllByRole('button', { name: 'Koble til annen konto' })).toHaveLength(2)
   })
 

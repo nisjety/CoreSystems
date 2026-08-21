@@ -246,7 +246,14 @@ pub(crate) async fn run_agent(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &dyn ManagedRunTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
-    let tools = merged_tool_defs(&req.org_id, &req.user_id, &req.tools).await;
+    let tools = merged_tool_defs(
+        &req.run_id,
+        &req.org_id,
+        &req.user_id,
+        &req.tools,
+        capability_policy,
+    )
+    .await;
     run_agent_with_tools(
         state,
         session_channel,
@@ -269,16 +276,16 @@ pub(crate) async fn run_agent(
 /// Vec at ~line 154), so the `runtime_loop` dispatch arm can route them. A
 /// built-in name always wins a (vanishingly unlikely) collision.
 async fn merged_tool_defs(
+    run_id: &str,
     org_id: &str,
     user_id: &str,
     client_tools: &[pb::ToolDefinition],
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
 ) -> Vec<pb::ToolDefinition> {
     let mut tools = offered_tool_defs();
     if let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() {
         for tool in client.list_tools(org_id, user_id).await {
-            if !tools.iter().any(|existing| existing.name == tool.name) {
-                tools.push(tool);
-            }
+            append_untrusted_tool_defs(&mut tools, &[tool]);
         }
     }
     // chat-parity: fold in the caller's declared tools (RunAgentRequest.tools),
@@ -286,18 +293,69 @@ async fn merged_tool_defs(
     // A built-in or org MCP tool of the same name wins (the governed server
     // definition is authoritative and non-overridable); any NEW client tool
     // name is admitted into both the offered set and the purpose-lock allowlist.
+    // Reserved owner actions are the exception: only a future run-bound,
+    // server-resolved catalog may offer them, never a caller or MCP registry.
     // Execution still flows through the gated execute_step dispatch, so this
     // never bypasses the permission/HITL gate; a name with no resolvable
     // executor returns a graceful error the loop feeds back to the model.
-    for tool in client_tools {
-        if tool.name.trim().is_empty() {
+    append_untrusted_tool_defs(&mut tools, client_tools);
+    match capability_policy
+        .resolve_server_tool_definitions(run_id, org_id)
+        .await
+    {
+        Ok(resolved_tools) => append_server_resolved_tool_defs(&mut tools, &resolved_tools),
+        Err(error) => tracing::warn!(
+            code = ?error.code(),
+            run_id,
+            "server-resolved owner-action view unavailable; reserved tool remains absent"
+        ),
+    }
+    tools
+}
+
+fn append_untrusted_tool_defs(
+    tools: &mut Vec<pb::ToolDefinition>,
+    untrusted_tools: &[pb::ToolDefinition],
+) {
+    for tool in untrusted_tools {
+        if tool.name.trim().is_empty() || is_server_resolved_tool_name(&tool.name) {
             continue;
         }
         if !tools.iter().any(|existing| existing.name == tool.name) {
             tools.push(tool.clone());
         }
     }
-    tools
+}
+
+// The only source permitted to add a reserved owner action is Capability
+// Core's run-bound resolver. Its client validates the signed Control view and
+// fixed schema before this helper sees a definition; this final exact-name
+// allowlist prevents a compromised catalog response from becoming a general
+// tool injection channel.
+fn append_server_resolved_tool_defs(
+    tools: &mut Vec<pb::ToolDefinition>,
+    resolved_tools: &[pb::ToolDefinition],
+) {
+    for tool in resolved_tools {
+        if tool.name != crate::ticket_tools::TOOL_NAME
+            || tool.description.trim().is_empty()
+            || serde_json::from_str::<serde_json::Value>(&tool.parameters_json).is_err()
+        {
+            continue;
+        }
+        if !tools.iter().any(|existing| existing.name == tool.name) {
+            tools.push(tool.clone());
+        }
+    }
+}
+
+// A Model-facing action that crosses an owner-plane boundary must not be
+// advertised merely because a caller can name it. `tickets.create` remains
+// absent until Capability Core, Control, and Conversation Core resolve a fresh
+// run-bound view. This is intentionally an exact identifier check: aliases and
+// near-matches have no executor binding and fail closed in capability policy.
+fn is_server_resolved_tool_name(name: &str) -> bool {
+    name.trim() == crate::ticket_tools::TOOL_NAME
 }
 
 /// Run-level driver for `req` with an explicit tool allowlist: plan transition →
@@ -1103,7 +1161,7 @@ fn browser_act_parameters_json() -> String {
 /// `model-gateway::tool_loop::builtin_tool_defs` pattern. This set IS the
 /// purpose-lock scope: only these tools may be called.
 fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
-    vec![
+    let tools = vec![
         pb::ToolDefinition {
             name: "yr_weather".to_owned(),
             description: "Get the current Yr/met.no weather forecast for a coordinate in Norway.".to_owned(),
@@ -1224,7 +1282,15 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             description: "Delegate a self-contained sub-task to a subagent that runs its own tool loop with the SAME tools you have, then returns only its final answer. Its work happens in an isolated context, so use it when a sub-task needs many tool calls whose intermediate output you do not need (e.g. 'find every carrier that ships dangerous goods to Svalbard and summarise the cheapest'). Give it one clear, self-contained goal — it cannot see this conversation, cannot ask you questions, cannot delegate further, and cannot run tools that require human approval. Its rounds come out of THIS run's budget, so do not delegate work you can do in a call or two yourself.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent, including any context it needs"},"max_rounds":{"type":"integer","minimum":1,"description":"Optional cap on the subagent's tool rounds; capped by this run's remaining budget"}},"required":["goal"]}"#.to_owned(),
         },
-    ]
+    ];
+    // `tickets.create` deliberately stays absent here. A compiled adapter or
+    // environment configuration is not an actor grant, and the owner catalog
+    // still marks Model execution unavailable until a deployment has proven
+    // both capability health and the Control/Conversation decision path. When
+    // that server-authoritative availability projection is added, it can
+    // surface this exact schema. Until then, caller and MCP definitions cannot
+    // smuggle this reserved name into the model-facing tool set.
+    tools
 }
 
 /// Frame a round of tool outcomes as a context message appended to the
@@ -1417,6 +1483,15 @@ async fn continuation_descriptor(
             "ZDR runs cannot persist an approval continuation descriptor",
         ));
     }
+    // A server-resolved owner action is approval-only even when the outer run
+    // was requested with `auto`. Preserve that stricter semantic in the
+    // descriptor/fingerprint so a future continuation worker cannot mistake
+    // the retained request for an auto-approved generic tool call.
+    let permission_mode = if crate::permission::requires_durable_owner_approval(tool_name) {
+        "ask"
+    } else {
+        permission_mode
+    };
     let mut input: JsonValue = serde_json::from_str(tool_input).map_err(|_| {
         tonic::Status::invalid_argument(
             "approval-gated tool input must be valid JSON before it can be persisted",
@@ -1455,7 +1530,24 @@ async fn continuation_descriptor(
     let canonical = serde_json::to_string(&scope)
         .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))?;
     let action_fingerprint = blake3::hash(canonical.as_bytes()).to_hex().to_string();
-    serde_json::to_string(&json!({
+    let ticket_binding = if tool_name == crate::ticket_tools::TOOL_NAME {
+        Some(
+            crate::ticket_tools::continuation_binding(
+                &serde_json::to_string(&input).map_err(|_| {
+                    tonic::Status::internal("could not encode ticket continuation input")
+                })?,
+                &req.run_id,
+                &req.org_id,
+                step_id,
+            )
+            .map_err(|_| {
+                tonic::Status::invalid_argument("tickets.create continuation input is invalid")
+            })?,
+        )
+    } else {
+        None
+    };
+    let mut descriptor = json!({
         "version": 1,
         "run_id": req.run_id,
         "org_id": req.org_id,
@@ -1466,8 +1558,21 @@ async fn continuation_descriptor(
         "input": input,
         "permission_mode": permission_mode,
         "action_fingerprint": action_fingerprint,
-    }))
-    .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))
+    });
+    if let Some((schema_sha256, payload_sha256, ticket_idempotency_key)) = ticket_binding {
+        let object = descriptor
+            .as_object_mut()
+            .expect("continuation descriptor is an object");
+        object.insert("schema_sha256".to_owned(), json!(schema_sha256));
+        object.insert("payload_sha256".to_owned(), json!(payload_sha256));
+        object.insert(
+            "ticket_idempotency_key".to_owned(),
+            json!(ticket_idempotency_key),
+        );
+        object.insert("owner_user_id".to_owned(), json!(req.user_id));
+    }
+    serde_json::to_string(&descriptor)
+        .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))
 }
 
 /// Fills in `input.to`'s carrier-notification contact for `book_shipment`
@@ -1841,6 +1946,38 @@ mod tests {
         );
     }
 
+    /// `tickets.create` is the one tool `permission::requires_durable_owner_approval`
+    /// classifies as owner-approval-only, so its descriptor must come back `ask`
+    /// even when the outer run asked for `auto`. The input has to be a VALID
+    /// `tickets.create` payload (`conversation_id` is required, both by the
+    /// frozen `TICKET_CREATE_MODEL_PARAMETERS_JSON` schema and by
+    /// `ticket_tools::parse_arguments`) — with `{}` the ticket continuation
+    /// binding rejects it as `invalid_argument` and the permission assertion
+    /// below is never reached.
+    #[tokio::test]
+    async fn owner_action_descriptor_cannot_preserve_auto_permission() {
+        let request = pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        };
+        let raw = continuation_descriptor(
+            &request,
+            "step-1",
+            crate::ticket_tools::TOOL_NAME,
+            r#"{"conversation_id":"conv_1"}"#,
+            "auto",
+        )
+        .await
+        .expect("retained owner-action descriptor");
+        let descriptor: serde_json::Value = serde_json::from_str(&raw).expect("descriptor json");
+        assert_eq!(
+            descriptor["permission_mode"], "ask",
+            "a later continuation must retain the owner-required approval posture"
+        );
+    }
+
     /// `booked_by` is never a model-supplied argument (the model has no
     /// reason to know its own run's acting user id), so the persisted
     /// descriptor must inject it from `req.user_id` itself — otherwise the
@@ -1921,6 +2058,119 @@ mod tests {
         assert!(
             retrieval_signature("knowledge_search", r#"{"query":"q","route":"graph"}"#).is_none()
         );
+    }
+
+    #[test]
+    fn untrusted_tool_definitions_cannot_advertise_ticket_create_before_a_server_resolver_exists() {
+        let mut tools = offered_tool_defs();
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool.name.trim() == crate::ticket_tools::TOOL_NAME),
+            "the static catalog must not advertise a server-resolved owner action"
+        );
+        append_untrusted_tool_defs(
+            &mut tools,
+            &[
+                pb::ToolDefinition {
+                    name: crate::ticket_tools::TOOL_NAME.to_owned(),
+                    description: "forged ticket action".to_owned(),
+                    parameters_json: "{}".to_owned(),
+                },
+                pb::ToolDefinition {
+                    name: format!("  {}  ", crate::ticket_tools::TOOL_NAME),
+                    description: "forged whitespace ticket action".to_owned(),
+                    parameters_json: "{}".to_owned(),
+                },
+                pb::ToolDefinition {
+                    name: "custom.read".to_owned(),
+                    description: "caller extension".to_owned(),
+                    parameters_json: "{}".to_owned(),
+                },
+            ],
+        );
+
+        assert!(
+            !tools
+                .iter()
+                .any(|tool| tool.name.trim() == crate::ticket_tools::TOOL_NAME),
+            "a caller must not turn a reserved owner action into a model-offered tool"
+        );
+        assert!(
+            tools.iter().any(|tool| tool.name == "custom.read"),
+            "the guard must not change the existing extension behavior for non-reserved tools"
+        );
+    }
+
+    #[test]
+    fn only_the_server_resolved_view_may_offer_ticket_create() {
+        let mut tools = offered_tool_defs();
+        append_server_resolved_tool_defs(
+            &mut tools,
+            &[pb::ToolDefinition {
+                name: crate::ticket_tools::TOOL_NAME.to_owned(),
+                description: "Control-resolved ticket action".to_owned(),
+                parameters_json: r#"{"type":"object","required":["conversation_id"]}"#.to_owned(),
+            }],
+        );
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == crate::ticket_tools::TOOL_NAME));
+
+        let before = tools.len();
+        append_server_resolved_tool_defs(
+            &mut tools,
+            &[pb::ToolDefinition {
+                name: "tickets.create.alias".to_owned(),
+                description: "forged alias".to_owned(),
+                parameters_json: "{}".to_owned(),
+            }],
+        );
+        assert_eq!(
+            tools.len(),
+            before,
+            "resolver may not widen its fixed catalog"
+        );
+    }
+
+    struct TicketViewPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for TicketViewPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+
+        async fn resolve_server_tool_definitions(
+            &self,
+            run_id: &str,
+            org_id: &str,
+        ) -> Result<Vec<pb::ToolDefinition>, Status> {
+            if run_id != "run-1" || org_id != "org-1" {
+                return Err(Status::permission_denied(
+                    "unexpected model action view binding",
+                ));
+            }
+            Ok(vec![pb::ToolDefinition {
+                name: crate::ticket_tools::TOOL_NAME.to_owned(),
+                description: "Control-resolved ticket action".to_owned(),
+                parameters_json: crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON
+                    .to_owned(),
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn merged_tool_defs_accepts_ticket_only_from_the_run_bound_policy_view() {
+        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &TicketViewPolicy).await;
+        assert!(tools
+            .iter()
+            .any(|tool| tool.name == crate::ticket_tools::TOOL_NAME));
     }
 
     #[test]
@@ -2006,6 +2256,13 @@ mod tests {
             _org_id: &str,
         ) -> Result<String, SessionTerminalTokenError> {
             Ok("test-heartbeat-service-token".to_owned())
+        }
+
+        async fn scheduled_step_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("test-scheduled-step-service-token".to_owned())
         }
     }
 
@@ -2297,6 +2554,29 @@ mod tests {
         ) -> Result<Response<pb::PrepareScheduledRunThreadResponse>, Status> {
             Err(Status::unimplemented(
                 "prepare_scheduled_run_thread not used",
+            ))
+        }
+
+        async fn start_scheduled_run(
+            &self,
+            _: Request<pb::StartScheduledRunRequest>,
+        ) -> Result<Response<pb::StartRunResponse>, Status> {
+            Err(Status::unimplemented("start_scheduled_run not used"))
+        }
+
+        async fn claim_scheduled_step(
+            &self,
+            _: Request<pb::ClaimScheduledStepRequest>,
+        ) -> Result<Response<pb::ClaimScheduledStepResponse>, Status> {
+            Err(Status::unimplemented("claim_scheduled_step not used"))
+        }
+
+        async fn record_scheduled_step_receipt(
+            &self,
+            _: Request<pb::RecordScheduledStepReceiptRequest>,
+        ) -> Result<Response<pb::RecordScheduledStepReceiptResponse>, Status> {
+            Err(Status::unimplemented(
+                "record_scheduled_step_receipt not used",
             ))
         }
 
@@ -2867,6 +3147,9 @@ mod tests {
             tool_restrictions: Vec::new(),
             enabled: true,
             origin: "background_review".to_owned(),
+            scope: "org".to_owned(),
+            owner_user_id: String::new(),
+            shared_with: Vec::new(),
         }
     }
 

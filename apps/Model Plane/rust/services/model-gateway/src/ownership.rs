@@ -24,6 +24,7 @@ pub const KIND_MCP: &str = "mcp";
 pub const KIND_PLUGIN: &str = "plugin";
 pub const KIND_COMMAND: &str = "command";
 pub const KIND_HOOK: &str = "hook";
+pub const KIND_SKILL: &str = "skill";
 
 /// Resource scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,6 +191,26 @@ impl OwnershipStore {
             .is_some_and(|o| o.usable_by(user_id))
     }
 
+    /// Like [`Self::usable`], but a resource with NO ownership record is
+    /// allowed through rather than failing closed. For registries with a
+    /// second, untracked provenance alongside the ownership-tracked one
+    /// (skills: disk-loaded/operator-pushed skills never get an ownership
+    /// record, only learned ones pulled from capability-core do) — an
+    /// untracked resource must stay visible to everyone, exactly as it always
+    /// has been, rather than vanishing the moment ownership tracking exists
+    /// for the registry at all.
+    #[must_use]
+    pub fn usable_or_untracked(
+        &self,
+        org_id: &str,
+        kind: &str,
+        resource_id: &str,
+        user_id: &str,
+    ) -> bool {
+        self.get(org_id, kind, resource_id)
+            .is_none_or(|o| o.usable_by(user_id))
+    }
+
     /// Is the resource visible to `(user_id, is_admin)` in a management view?
     /// Unknown ownership fails closed.
     #[must_use]
@@ -319,6 +340,17 @@ mod tests {
         assert!(!store.usable("o", "mcp", "legacy", "anyone"));
         assert!(!store.visible("o", "mcp", "legacy", "anyone", false));
         assert!(!store.can_modify("o", "mcp", "legacy", "anyone", true));
+    }
+
+    #[test]
+    fn usable_or_untracked_allows_unknown_resources_but_still_gates_known_ones() {
+        let store = OwnershipStore::new();
+        // No record at all (e.g. a disk-loaded skill) — allowed for anyone.
+        assert!(store.usable_or_untracked("o", "skill", "disk-skill", "anyone"));
+        // A tracked private resource still gates normally.
+        store.set("o", "skill", "s1", Ownership::user("alice"));
+        assert!(store.usable_or_untracked("o", "skill", "s1", "alice"));
+        assert!(!store.usable_or_untracked("o", "skill", "s1", "bob"));
     }
 
     #[test]

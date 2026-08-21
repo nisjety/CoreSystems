@@ -128,3 +128,34 @@ export async function updateOrganizationSupportAIMode(organizationId: string, su
   const mode = record(metadata?.supportAi)?.mode
   return mode === 'off' || mode === 'assist' || mode === 'review' ? mode : supportAiMode
 }
+
+/**
+ * ADR-0003's org layer of the authored-instruction hierarchy. Any active org
+ * member may read it (it shapes every member's chat turns); writing is
+ * org-admin gated at the gateway (`orgs/instructions.rs`). Storage is Convex
+ * (`organizations.instructions`), a different backend than the ZDR/support-AI
+ * posture above — hence a separate `/instructions` route rather than a third
+ * field on `/settings`.
+ */
+export async function getOrganizationInstructions(organizationId: string): Promise<string> {
+  const payload = await requestJson<unknown>(
+    `/api/v1/orgs/${encodeURIComponent(organizationId)}/instructions`,
+  )
+  const instructions = record(payload)?.instructions
+  return typeof instructions === 'string' ? instructions : ''
+}
+
+export async function updateOrganizationInstructions(
+  organizationId: string,
+  instructions: string,
+): Promise<string> {
+  const payload = await requestJson<unknown>(
+    `/api/v1/orgs/${encodeURIComponent(organizationId)}/instructions`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ instructions }),
+    },
+  )
+  const saved = record(payload)?.instructions
+  return typeof saved === 'string' ? saved : instructions
+}

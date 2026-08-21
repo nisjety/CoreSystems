@@ -5,6 +5,7 @@ import { OrgDeletionDangerZone } from '@/features/settings/components/OrgDeletio
 import { TrustCenterSection } from '@/features/settings/components/TrustCenterSection'
 import { McpServersSection } from '@/features/settings/components/McpServersSection'
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
+import { OrgInstructionsSection } from '@/features/settings/components/OrgInstructionsSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
@@ -208,6 +209,8 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   mcp: [],
   // Skills renders its own live list + form, so it carries no shared status grid.
   skills: [],
+  // Org instructions renders its own live field + form, so no shared status grid.
+  'org-instructions': [],
   // Plugins renders its own live list + form, so it carries no shared status grid.
   plugins: [],
   // Cron schedules render their own live list + form, so no shared status grid.
@@ -458,6 +461,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'skills'}>
         <SkillsSection />
+      </Match>
+      <Match when={props.section === 'org-instructions'}>
+        <OrgInstructionsSection />
       </Match>
       <Match when={props.section === 'plugins'}>
         <PluginsSection />

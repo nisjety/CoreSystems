@@ -14,8 +14,11 @@ describe('Control Plane deployment contract', () => {
       resolve(process.cwd(), '..', 'docker-compose.yml'),
       'utf8',
     );
+    // The backreference keys the terminator to the same service-level indent
+    // (2 or 4 spaces), so the contract survives YAML reformatting and never
+    // terminates early on a deeper `depends_on` mention of the same name.
     const authService = compose.match(
-      /\n {2}auth-core:\n[\s\S]*?\n {2}user-core:\n/,
+      /\n( {2,4})auth-core:\n[\s\S]*?\n\1user-core:\n/,
     )?.[0];
 
     expect(authService).toBeDefined();
@@ -34,7 +37,7 @@ describe('Control Plane deployment contract', () => {
       'utf8',
     );
     const authService = compose.match(
-      /\n {2}auth-core:\n[\s\S]*?\n {2}user-core:\n/,
+      /\n( {2,4})auth-core:\n[\s\S]*?\n\1user-core:\n/,
     )?.[0];
 
     expect(authService).toBeDefined();
@@ -152,10 +155,10 @@ describe('Control Plane deployment contract', () => {
       'utf8',
     );
     const authService = compose.match(
-      /\n {2}auth-core:\n[\s\S]*?\n {2}user-core:\n/,
+      /\n( {2,4})auth-core:\n[\s\S]*?\n\1user-core:\n/,
     )?.[0];
     const userService = compose.match(
-      /\n {2}user-core:\n[\s\S]*?\n {2}org-core:\n/,
+      /\n( {2,4})user-core:\n[\s\S]*?\n\1org-core:\n/,
     )?.[0];
 
     expect(authService).toContain('USER_CORE_GRPC_CLIENT_CREDENTIAL:');
@@ -190,7 +193,7 @@ describe('Control Plane deployment contract', () => {
       'utf8',
     );
     const sessionService = compose.match(
-      /\n {2}session-core:\n[\s\S]*?\n {2}audit-nats-provisioner:\n/,
+      /\n( {2,4})session-core:\n[\s\S]*?\n\1audit-nats-provisioner:\n/,
     )?.[0];
     const sources = [
       resolve(process.cwd(), 'src', 'internal', 'internal-oauth.controller.ts'),

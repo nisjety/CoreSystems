@@ -33,11 +33,11 @@ use crate::{
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route(
-            "/api/v1/documents/:id/shares",
+            "/api/v1/documents/{id}/shares",
             get(list_shares).post(create_share),
         )
         .route(
-            "/api/v1/documents/:id/shares/:subject_id",
+            "/api/v1/documents/{id}/shares/{subject_id}",
             delete(revoke_share),
         )
         .route("/api/v1/shares/shared-with-me", get(shared_with_me))

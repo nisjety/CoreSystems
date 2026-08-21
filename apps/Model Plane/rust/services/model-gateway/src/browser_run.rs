@@ -881,6 +881,16 @@ mod tests {
             Err(Status::unimplemented("not used by browser control test"))
         }
 
+        async fn execute_scheduled_step(
+            &self,
+            _request: tonic::Request<mp_contracts::model_plane::v1::ExecuteScheduledStepRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ExecuteScheduledStepResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "scheduled steps are not used by browser control test",
+            ))
+        }
+
         async fn resume_run(
             &self,
             _request: tonic::Request<ResumeRunRequest>,

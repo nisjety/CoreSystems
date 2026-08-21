@@ -448,6 +448,13 @@ services:
       # disables the resolve path — servers with no stored OAuth tokens are
       # unaffected either way.
       MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # ADR-0003 — the platform layer of the authored-instruction hierarchy
+      # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
+      # configuration, deliberately not a database row (no "platform
+      # operator" authority tier exists in this codebase). Composed ahead of
+      # the org and Space layers on every chat turn. Empty means no platform
+      # layer, same silent-absent contract as the other layers.
+      PLATFORM_SYSTEM_INSTRUCTIONS: ${PLATFORM_SYSTEM_INSTRUCTIONS:-}
     networks:
       default: {}
       inter-plane-bus:
@@ -492,6 +499,12 @@ services:
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       SESSION_CORE_AUTH_AUDIENCE: ${SESSION_CORE_AUTH_AUDIENCE:-session-core}
+      # Scheduled runs accept only Control-signed, short-lived preparation and
+      # execution decisions. These are public verification material, never a
+      # Control signing key. Leaving either value empty keeps the RPCs
+      # fail-closed, which is the intended unprovisioned-development state.
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
       # Dedicated short-lived service-principal credentials for the optional
       # session-core -> letta-bridge path. When LETTA_MEMORY_ADDR is non-empty,
       # session-core fails startup closed unless all three are configured.
@@ -567,7 +580,7 @@ services:
       INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
-      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
+      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai,cohere}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
       # Verevon intent layer — turns the verevon-budget/-balance/-genius modes into
@@ -594,6 +607,16 @@ services:
       AZURE_ANTHROPIC_ENDPOINT: ${AZURE_ANTHROPIC_ENDPOINT:-}
       AZURE_ANTHROPIC_API_KEY: ${AZURE_ANTHROPIC_API_KEY:-}
       AZURE_ANTHROPIC_DEPLOYMENTS: ${AZURE_ANTHROPIC_DEPLOYMENTS:-}
+      # Azure AI Foundry Cohere (core-ai-rg, same resource as AZURE_OPENAI_*
+      # above but the unified "AI Model Inference API" route, not the classic
+      # /openai/deployments/{name} shape). When set, the `cohere` provider
+      # slot serves Command A Plus — exclusive_catalog, so it never absorbs
+      # another provider's traffic.
+      AZURE_COHERE_ENDPOINT: ${AZURE_COHERE_ENDPOINT:-}
+      AZURE_COHERE_API_KEY: ${AZURE_COHERE_API_KEY:-}
+      AZURE_COHERE_API_VERSION: ${AZURE_COHERE_API_VERSION:-2024-05-01-preview}
+      AZURE_COHERE_DEPLOYMENT: ${AZURE_COHERE_DEPLOYMENT:-cohere-command-a-plus}
+      AZURE_COHERE_REGION: ${AZURE_COHERE_REGION:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
       OPENAI_CHAT_MODELS: ${OPENAI_CHAT_MODELS:-}
@@ -619,10 +642,48 @@ services:
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2025-01-01-preview}
       AZURE_OPENAI_REGION: ${AZURE_OPENAI_REGION:-}
-      # Fail closed for ZDR requests unless an operator has evidence that this
-      # exact deployment is covered by a provider-side ZDR contract. Region is
-      # not sufficient evidence. Keep false until that contract is verified.
+      # Azure AI Foundry Claude is a SEPARATE Azure resource from Azure OpenAI, so
+      # it carries its own region. Neither may inherit the other's geography: an
+      # unset region here means "cannot prove EU", classified as no residency
+      # commitment rather than promoted to EU.
+      AZURE_ANTHROPIC_REGION: ${AZURE_ANTHROPIC_REGION:-}
+      # Declared Azure OpenAI deployment type (DataZoneStandard / Standard /
+      # GlobalStandard). Neither the endpoint host nor the region reveals this, and
+      # a Global deployment in an EU region still processes inference worldwide —
+      # so leaving it unset means the EU boundary cannot be proven, and the
+      # provider is classified as making no residency commitment.
+      AZURE_OPENAI_DEPLOYMENT_TYPE: ${AZURE_OPENAI_DEPLOYMENT_TYPE:-}
+      # Deny-by-default: an explicitly Global/Worldwide deployment type refuses to
+      # boot unless this is set, because it voids the EU residency claim.
+      MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT: ${MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT:-false}
+      # Records that a provider making no residency commitment is accepted. Without
+      # it the service still boots but logs a warning per such provider.
+      MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY: ${MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY:-false}
+      # ZDR is evidence-bound. The legacy boolean below is read ONLY to reject an
+      # unbacked assertion: with it true and no attestation supplied, the service
+      # refuses to boot rather than silently serving ZDR traffic on no evidence.
+      # Supply all five variables per resource, or leave the boolean false.
+      # REVIEW_BY bounds the claim: past that date the attestation stops granting
+      # ZDR rather than coasting on nobody remembering the approval lapsed.
+      #   printf '%s\n%s\n%s\n%s\n%s\n' \
+      #     "$RESOURCE_ID" "$APPROVAL_REF" "$EFFECTIVE_DATE" "$REVIEW_BY" "$REVIEWER" \
+      #     | sha256sum
       AZURE_OPENAI_ZDR_CONFIRMED: ${AZURE_OPENAI_ZDR_CONFIRMED:-false}
+      AZURE_OPENAI_ZDR_RESOURCE_ID: ${AZURE_OPENAI_ZDR_RESOURCE_ID:-}
+      AZURE_OPENAI_ZDR_APPROVAL_REF: ${AZURE_OPENAI_ZDR_APPROVAL_REF:-}
+      AZURE_OPENAI_ZDR_EFFECTIVE_DATE: ${AZURE_OPENAI_ZDR_EFFECTIVE_DATE:-}
+      AZURE_OPENAI_ZDR_REVIEW_BY: ${AZURE_OPENAI_ZDR_REVIEW_BY:-}
+      AZURE_OPENAI_ZDR_REVIEWER: ${AZURE_OPENAI_ZDR_REVIEWER:-}
+      AZURE_OPENAI_ZDR_DIGEST: ${AZURE_OPENAI_ZDR_DIGEST:-}
+      # The Foundry Claude resource has its own retention approval, so its own
+      # attestation. Before this existed no Claude route could serve ZDR at all.
+      AZURE_ANTHROPIC_ZDR_CONFIRMED: ${AZURE_ANTHROPIC_ZDR_CONFIRMED:-false}
+      AZURE_ANTHROPIC_ZDR_RESOURCE_ID: ${AZURE_ANTHROPIC_ZDR_RESOURCE_ID:-}
+      AZURE_ANTHROPIC_ZDR_APPROVAL_REF: ${AZURE_ANTHROPIC_ZDR_APPROVAL_REF:-}
+      AZURE_ANTHROPIC_ZDR_EFFECTIVE_DATE: ${AZURE_ANTHROPIC_ZDR_EFFECTIVE_DATE:-}
+      AZURE_ANTHROPIC_ZDR_REVIEW_BY: ${AZURE_ANTHROPIC_ZDR_REVIEW_BY:-}
+      AZURE_ANTHROPIC_ZDR_REVIEWER: ${AZURE_ANTHROPIC_ZDR_REVIEWER:-}
+      AZURE_ANTHROPIC_ZDR_DIGEST: ${AZURE_ANTHROPIC_ZDR_DIGEST:-}
       AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
       AZURE_OPENAI_CHAT_DEPLOYMENTS: ${AZURE_OPENAI_CHAT_DEPLOYMENTS:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
@@ -750,6 +811,22 @@ services:
       # make both sides mandatory so an allow cannot cross the dispatch gate
       # without an Ed25519 proof.
       EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY: ${EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY:-}
+      # The scheduled-step lane independently verifies the short-lived Control
+      # decision at the Execution Core effect boundary. Reuse the deployment's
+      # Control public key set; an absent key keeps the lane disabled.
+      EXECUTION_CORE_SCHEDULED_STEP_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      EXECUTION_CORE_SCHEDULED_STEP_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # Governed tickets.create adapter. All bindings are intentionally empty
+      # by default: the adapter stays disabled until Control, Conversation
+      # Core, and Execution Core have distinct, least-privilege credentials.
+      # Never place the values in this Compose file; provision them through the
+      # deployment's private environment/secret store.
+      CONTROL_PLANE_USER_CORE_URL: ${CONTROL_PLANE_USER_CORE_URL:-}
+      EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN: ${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:-}
+      CONVERSATION_CORE_AGENT_ACTION_URL: ${CONVERSATION_CORE_AGENT_ACTION_URL:-}
+      CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN: ${CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN:-}
+      EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN: ${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:-}
+      EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK:-false}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
@@ -906,11 +983,20 @@ services:
       # is `persistent`: session-core refuses any ZDR credential for a
       # non-`:read` scope, and StartRun is a write.
       #
-      # execution-core is deliberately NOT in that audience list — its
-      # ExecuteStep requires the caller's identity to equal the request's user,
-      # which no service token can satisfy. See internal/servicecred.
+      # execution-core is minted only for the dedicated scheduled-step RPC;
+      # the gRPC client filters that bearer by method. ExecuteStep and RunAgent
+      # remain user-bound and never receive this service credential. See
+      # internal/servicecred.
       ORCHESTRATOR_CORE_SERVICE_ID: ${ORCHESTRATOR_CORE_SERVICE_ID:-orchestrator-core}
       ORCHESTRATOR_CORE_SERVICE_API_KEY: ${ORCHESTRATOR_CORE_SERVICE_API_KEY:-}
+      # Fresh Control authority for the StartScheduledRun activity. The
+      # dedicated credential is intentionally optional in dev: without every
+      # value the activity fails closed instead of using a standing grant.
+      CONTROL_USER_CORE_URL: ${CONTROL_USER_CORE_URL:-}
+      ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN: ${ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN:-}
+      ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN: ${ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN:-}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
     depends_on:
       temporal:
         condition: service_healthy
@@ -955,6 +1041,15 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       CAPABILITY_CORE_SERVICE_ID: ${CAPABILITY_CORE_SERVICE_ID:-capability-core}
       CAPABILITY_CORE_SERVICE_API_KEY: ${CAPABILITY_CORE_SERVICE_API_KEY:-}
+      # Capability Core reauthorizes every due scheduled fire directly with
+      # Control before it can prepare a service-owned Session Core thread.
+      # The credential must be registered only as capability-core with
+      # spaces:schedule:reauthorize; it is intentionally distinct from the
+      # Orchestrator effect-time credential below. Empty values fail closed.
+      CONTROL_USER_CORE_URL: ${CONTROL_USER_CORE_URL:-}
+      CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN: ${CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN:-}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
       APIS_GURU_OPENAPI_DIRECTORY_PATH: ${APIS_GURU_OPENAPI_DIRECTORY_PATH:-/var/lib/capability-core/openapi-directory}
       # Optional Letta tool-definition ranking. This is not memory/passages
       # search and never expands the durable tenant-scoped capability catalog.
@@ -1051,6 +1146,22 @@ services:
       # deployment has built and deployed its own consumer of
       # mp.v1.capability.task.dispatched.
       TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH: ${TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH:-}
+      # --- AUTO-2: run-watch notify consumer ----------------------------------
+      # "Notify me when this run finishes" — internal/runwatch.Notifier calls
+      # notification-core's delegated POST /notification-requests (Application
+      # Plane) for every user who watched a run once its terminal event
+      # arrives. Reached over inter-plane-bus (see the networks: block below);
+      # NOTIFICATION_CORE_URL defaults to the same address the other planes
+      # already use for it (see e.g. Ingestion Plane/docker-compose.yml). Empty
+      # either var and startRunWatchConsumer simply does not start the
+      # consumer (logged) — the rest of capability-core is unaffected.
+      NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
+      # Must be registered on notification-core's side as the "capability-core"
+      # delegation principal (NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN in
+      # Application Plane/docker-compose.yml) — same shared-secret pattern as
+      # NOTIFICATION_GATEWAY_SERVICE_TOKEN/NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN
+      # there, just a third, independently-revocable caller identity.
+      NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN: ${NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN:-}
     volumes:
       - mp-capability-core-data:/var/lib/capability-core
     depends_on:
@@ -1060,6 +1171,16 @@ services:
         condition: service_healthy
       orchestrator-core:
         condition: service_started
+    networks:
+      # Model Plane's own default network, plus inter-plane-bus so the
+      # run-watch notify consumer above can reach notification-core, which is
+      # itself joined to inter-plane-bus (Application Plane/docker-compose.yml).
+      # Mirrors session-core's and model-gateway's identical two-network block
+      # elsewhere in this file — capability-core had no networks: key at all
+      # before this (implicit default-only), which is why this key is new here
+      # rather than an addition to an existing list.
+      default: {}
+      inter-plane-bus: {}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/healthz"]
       interval: 10s

@@ -179,16 +179,31 @@ pub use vision::{
 pub(crate) mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
-    use quarry_browser::{BrowserDriver, BrowserSession, SessionInner};
+    use quarry_browser::{BrowserDriver, BrowserDriverCapabilities, BrowserSession, SessionInner};
     use quarry_core::error::QuarryResult;
     use quarry_core::lease::BrowserLease;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    /// In-crate stand-in for the local, fully governed Chromium driver. It is
+    /// the test double the runtime's own execution paths are exercised
+    /// against, so it must advertise the same visual-evidence capability the
+    /// real `ChromiumoxideDriver` does — `ObservationRunner::execute` refuses
+    /// `Screenshot`/`Pdf` actions on any driver that does not claim it.
+    /// Capabilities it genuinely cannot honour (notably
+    /// `atomic_target_actions`, whose verified-target path this mock does not
+    /// implement) stay at the deny-by-default value.
     pub struct MockBrowserDriver;
 
     #[async_trait]
     impl BrowserDriver for MockBrowserDriver {
+        fn capabilities(&self) -> BrowserDriverCapabilities {
+            BrowserDriverCapabilities {
+                full_visual_fidelity: true,
+                ..BrowserDriverCapabilities::default()
+            }
+        }
+
         async fn configure_egress_policy(
             &self,
             _session: &BrowserSession,

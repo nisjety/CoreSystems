@@ -197,7 +197,7 @@ pub fn record_chat_turn(
         org_id,
         user_id,
         run_id,
-        injected_skill_ids(state, org_id, turn_query, injected_limit),
+        injected_skill_ids(state, org_id, user_id, turn_query, injected_limit),
     );
 }
 
@@ -345,6 +345,7 @@ fn truncate_bytes(value: &str, max: usize) -> String {
 fn injected_skill_ids(
     state: &crate::state::AppState,
     org_id: &str,
+    user_id: &str,
     turn_query: &str,
     limit: i32,
 ) -> Vec<String> {
@@ -362,6 +363,8 @@ fn injected_skill_ids(
             limit,
             min_score: 0.0,
         },
+        &state.ownership,
+        user_id,
     ) else {
         return Vec::new();
     };

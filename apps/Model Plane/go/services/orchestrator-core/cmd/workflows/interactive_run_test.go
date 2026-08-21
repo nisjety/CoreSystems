@@ -73,6 +73,8 @@ func newTestEnv(t *testing.T) (*testsuite.TestWorkflowEnvironment, *activities.A
 	// non-activity helper methods (e.g. SetPublisher) that do not match
 	// Temporal's activity signature contract.
 	env.RegisterActivityWithOptions(a.StartRunActivity, activity.RegisterOptions{Name: "StartRunActivity"})
+	env.RegisterActivityWithOptions(a.StartScheduledRunActivity, activity.RegisterOptions{Name: "StartScheduledRunActivity"})
+	env.RegisterActivityWithOptions(a.ExecuteScheduledStepActivity, activity.RegisterOptions{Name: "ExecuteScheduledStepActivity"})
 	// New runs drive the step loop per turn via ExecuteStepActivity; the legacy
 	// whole-loop ExecuteStepLoopActivity stays registered for old-history replay.
 	env.RegisterActivityWithOptions(a.ExecuteStepLoopActivity, activity.RegisterOptions{Name: "ExecuteStepLoopActivity"})
@@ -130,6 +132,133 @@ func TestInteractiveRun_HappyPath_EmitsRunCompletedWithOrgID(t *testing.T) {
 	assert.Equal(t, input.RunID, payload["run_id"])
 	_, hasSummary := payload["summary"]
 	assert.True(t, hasSummary, "completion payload should include summary")
+}
+
+// TestScheduledRun_UsesPreparedThreadAndCompletes verifies the dedicated
+// schedule lane. It must call StartScheduledRunActivity with the exact
+// non-secret preparation facts; it must not route through StartRunActivity,
+// which could create a different service thread for the same fire.
+func TestScheduledRun_UsesPreparedThreadAndCompletes(t *testing.T) {
+	env, _, stub := newTestEnv(t)
+	input := ScheduledRunInput{
+		RunID: "task-schedule-1", ThreadID: "thread-schedule-1", OrgID: "org-1",
+		SpaceRef: "space-1", SubjectID: "user-1",
+		ScheduleID: "schedule-1", FireKey: "2026-08-14T00:00:00Z",
+		TemplateDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PolicyDigest:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		IdempotencyKey: "schedule-1:2026-08-14T00:00:00Z",
+		Goal:           "summarise the work queue", Policy: "execute", Retention: activities.RetentionDurable,
+	}
+	env.OnActivity(
+		"StartScheduledRunActivity",
+		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
+		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+	).Return(activities.RunMetadata{
+		RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
+		UserID: activities.SystemActorID,
+	}, nil).Once()
+	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, mock.MatchedBy(func(intent activities.ScheduledStepExecutionIntent) bool {
+		return intent.RunID == input.RunID && intent.ThreadID == input.ThreadID &&
+			intent.OrgID == input.OrgID && intent.SpaceRef == input.SpaceRef &&
+			intent.SubjectID == input.SubjectID && intent.ScheduleID == input.ScheduleID &&
+			intent.FireKey == input.FireKey && intent.TemplateDigest == input.TemplateDigest &&
+			intent.StepID == input.RunID+":step:0" && intent.StepIndex == 0 &&
+			intent.IdempotencyKey == input.IdempotencyKey+":step:0" && intent.PolicyDigest != ""
+	})).Return(activities.StepResult{StepIndex: 0, Completed: true, ToolName: "scheduled-step"}, nil).Once()
+
+	env.ExecuteWorkflow(ScheduledRunSupervision, input)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	_, decoded := decodeOnlyEnvelope(t, stub.Events())
+	assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
+	assert.Equal(t, input.OrgID, decoded.OrgID)
+	env.AssertExpectations(t)
+}
+
+func TestScheduledRun_UnknownOutcomeStopsWithoutAnotherStep(t *testing.T) {
+	env, _, stub := newTestEnv(t)
+	input := ScheduledRunInput{
+		RunID: "task-schedule-unknown", ThreadID: "thread-schedule-unknown", OrgID: "org-1",
+		SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1", FireKey: "fire-unknown",
+		TemplateDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PolicyDigest:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		IdempotencyKey: "schedule-1:fire-unknown", Goal: "summarise the work queue", Policy: "execute",
+		Retention: activities.RetentionDurable,
+	}
+	env.OnActivity(
+		"StartScheduledRunActivity",
+		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
+		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+	).Return(activities.RunMetadata{RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID, UserID: activities.SystemActorID}, nil).Once()
+	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, mock.Anything).
+		Return(activities.StepResult{
+			StepIndex: 0, ToolName: "scheduled-step", UnknownOutcome: true,
+			Metadata: map[string]string{"receipt_id": "receipt-unknown"},
+		}, nil).Once()
+
+	env.ExecuteWorkflow(ScheduledRunSupervision, input)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.Error(t, env.GetWorkflowError())
+	_, decoded := decodeOnlyEnvelope(t, stub.Events())
+	assert.Equal(t, "RUN_FAILED", decoded.EventType)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(decoded.Payload, &payload))
+	reason, _ := payload["reason"].(string)
+	assert.Contains(t, reason, "unknown")
+}
+
+// TestScheduledRun_RetryKeepsTheSameStepIdempotencyTuple verifies the Temporal
+// retry boundary for a transient worker/transport failure. A retry is allowed
+// for an indeterminate activity error, but it must replay the exact same
+// deterministic step ID and idempotency key; the owner/Session receipt ledger
+// is what makes that repeated delivery safe. This test intentionally does not
+// use the non-retryable unknown_outcome result.
+func TestScheduledRun_RetryKeepsTheSameStepIdempotencyTuple(t *testing.T) {
+	env, _, stub := newTestEnv(t)
+	input := ScheduledRunInput{
+		RunID: "task-schedule-retry", ThreadID: "thread-schedule-retry", OrgID: "org-1",
+		SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1", FireKey: "fire-retry",
+		TemplateDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PolicyDigest:   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		IdempotencyKey: "schedule-1:fire-retry", Goal: "summarise the work queue", Policy: "execute",
+		Retention: activities.RetentionDurable,
+	}
+	env.OnActivity(
+		"StartScheduledRunActivity",
+		mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
+		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+	).Return(activities.RunMetadata{
+		RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
+		UserID: activities.SystemActorID,
+	}, nil).Once()
+
+	var seen []activities.ScheduledStepExecutionIntent
+	stepMatcher := mock.MatchedBy(func(intent activities.ScheduledStepExecutionIntent) bool {
+		return intent.RunID == input.RunID && intent.ThreadID == input.ThreadID &&
+			intent.TemplateDigest == input.TemplateDigest && intent.PolicyDigest == input.PolicyDigest
+	})
+	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, stepMatcher).
+		Run(func(args mock.Arguments) {
+			seen = append(seen, args.Get(1).(activities.ScheduledStepExecutionIntent))
+		}).Return(activities.StepResult{}, errors.New("worker lost after provider submit")).Once()
+	env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, stepMatcher).
+		Run(func(args mock.Arguments) {
+			seen = append(seen, args.Get(1).(activities.ScheduledStepExecutionIntent))
+		}).Return(activities.StepResult{StepIndex: 0, Completed: true, ToolName: "scheduled-step"}, nil).Once()
+
+	env.ExecuteWorkflow(ScheduledRunSupervision, input)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Len(t, seen, 2)
+	assert.Equal(t, seen[0].StepID, seen[1].StepID)
+	assert.Equal(t, seen[0].IdempotencyKey, seen[1].IdempotencyKey)
+	assert.Equal(t, uint32(0), seen[0].StepIndex)
+	assert.Equal(t, uint32(0), seen[1].StepIndex)
+	_, decoded := decodeOnlyEnvelope(t, stub.Events())
+	assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
 }
 
 // TestInteractiveRun_StartRunFailure_EmitsRunFailedWithOrgID forces

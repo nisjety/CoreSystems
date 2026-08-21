@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func baseEnvironment(t *testing.T) {
 	t.Helper()
@@ -91,5 +94,77 @@ func TestLoadRejectsUnknownDeliveryMode(t *testing.T) {
 	t.Setenv("NOTIFICATION_DELIVERY_MODE", "stub")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want invalid delivery mode error")
+	}
+}
+
+func TestLoadRejectsShortDeliveryCallbackSecret(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_CALLBACK_SECRET", "too-short")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "NOTIFICATION_DELIVERY_CALLBACK_SECRET") {
+		t.Fatalf("Load() error = %v, want callback secret validation error", err)
+	}
+}
+
+func TestLoadAllowsEmptyDeliveryCallbackSecret(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_CALLBACK_SECRET", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DeliveryCallbackSecret != "" {
+		t.Fatalf("DeliveryCallbackSecret = %q, want empty", cfg.DeliveryCallbackSecret)
+	}
+}
+
+func TestLoadDefaultsDeliveryWorkerDisabled(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "disabled")
+	t.Setenv("NOTIFICATION_DELIVERY_WORKER_ENABLED", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DeliveryWorkerEnabled {
+		t.Fatal("DeliveryWorkerEnabled = true, want false by default")
+	}
+}
+
+func TestLoadRejectsDeliveryWorkerWithoutProvider(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "disabled")
+	t.Setenv("NOTIFICATION_DELIVERY_WORKER_ENABLED", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "requires NOTIFICATION_DELIVERY_MODE=novu") {
+		t.Fatalf("Load() error = %v, want disabled-provider rejection", err)
+	}
+}
+
+func TestLoadRejectsDeliveryWorkerWithoutCallbackVerifier(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "novu")
+	t.Setenv("NOVU_SECRET_KEY", "provider-test-key")
+	t.Setenv("NOTIFICATION_DELIVERY_WORKER_ENABLED", "true")
+	t.Setenv("NOTIFICATION_DELIVERY_CALLBACK_SECRET", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "requires NOTIFICATION_DELIVERY_CALLBACK_SECRET") {
+		t.Fatalf("Load() error = %v, want callback-verifier rejection", err)
+	}
+}
+
+func TestLoadAcceptsDeliveryWorkerWithExplicitProviderAndVerifier(t *testing.T) {
+	baseEnvironment(t)
+	t.Setenv("NOTIFICATION_DELIVERY_MODE", "novu")
+	t.Setenv("NOVU_SECRET_KEY", "provider-test-key")
+	t.Setenv("NOTIFICATION_DELIVERY_WORKER_ENABLED", "true")
+	t.Setenv("NOTIFICATION_DELIVERY_CALLBACK_SECRET", "delivery-callback-secret-32-bytes-minimum")
+	t.Setenv("NOTIFICATION_DELIVERY_WORKER_POLL_INTERVAL", "250ms")
+	t.Setenv("NOTIFICATION_DELIVERY_WORKER_LEASE", "2s")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.DeliveryWorkerEnabled || cfg.DeliveryWorkerPollInterval.String() != "250ms" || cfg.DeliveryWorkerLease.String() != "2s" {
+		t.Fatalf("worker config = enabled:%v poll:%s lease:%s", cfg.DeliveryWorkerEnabled, cfg.DeliveryWorkerPollInterval, cfg.DeliveryWorkerLease)
 	}
 }

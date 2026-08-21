@@ -98,6 +98,7 @@ type PersonalThreadDecisionEvidence struct {
 	ThreadCreateEntitled     bool
 	RetrievalReadEntitled    bool
 	ImportWriteEntitled      bool
+	AgentActionEntitled      bool
 	ScheduleFireEntitled     bool
 	ResourceAuthorizationRef string
 }
@@ -157,6 +158,29 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedThread() error {
 	return e.Privacy.Validate()
 }
 
+// ValidateForSharedRetrieval mirrors ValidateForSharedThread's actor/audience
+// rules but for a read effect: any active member (not only editor/manager/
+// owner) may retrieve, matching the personal-Space retrieval role floor in
+// validatePersonalAuthority.
+func (e PersonalThreadDecisionEvidence) ValidateForSharedRetrieval() error {
+	if err := e.Membership.Validate(); err != nil {
+		return err
+	}
+	if e.Membership.Kind == KindPersonal {
+		return fmt.Errorf("shared retrieval decision requires a non-personal Space")
+	}
+	if !matchesOneOf(e.Membership.Role, "viewer", "editor", "manager", "owner") {
+		return fmt.Errorf("Space role %q cannot retrieve in a shared Space", e.Membership.Role)
+	}
+	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
+		return fmt.Errorf("shared Space recipient audience is required")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.RetrievalReadEntitled {
+		return fmt.Errorf("shared Space retrieval authority is incomplete")
+	}
+	return e.Privacy.Validate()
+}
+
 // ValidateForRetrieval keeps retrieval authorization distinct from durable
 // thread creation. A deployment must opt into both effect classes explicitly.
 func (e PersonalThreadDecisionEvidence) ValidateForRetrieval() error {
@@ -181,6 +205,30 @@ func (e PersonalThreadDecisionEvidence) ValidateForImport() error {
 	}
 	if !e.ImportWriteEntitled {
 		return fmt.Errorf("import entitlement is not active")
+	}
+	return nil
+}
+
+// ValidateForAgentAction is intentionally independent from a thread-create
+// decision. A Model run can request a target-specific owner action only when
+// the current Control policy permits it; the target owner must still authorize
+// its own resource immediately before the effect.
+func (e PersonalThreadDecisionEvidence) ValidateForAgentAction() error {
+	if e.Membership.Kind == KindPersonal {
+		if err := e.validatePersonalAuthority(); err != nil {
+			return err
+		}
+	} else if err := e.ValidateForSharedThread(); err != nil {
+		return err
+	}
+	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
+		return fmt.Errorf("Space role %q cannot request an agent action", e.Membership.Role)
+	}
+	if !e.AgentActionEntitled {
+		return fmt.Errorf("agent action entitlement is not active")
+	}
+	if e.Privacy.ZeroDataRetention {
+		return fmt.Errorf("zero data retention forbids durable owner actions")
 	}
 	return nil
 }

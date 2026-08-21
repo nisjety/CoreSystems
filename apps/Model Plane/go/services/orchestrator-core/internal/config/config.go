@@ -58,6 +58,17 @@ type Config struct {
 	// ServicePrincipalKey is that principal's secret (`x-service-api-key`,
 	// ORCHESTRATOR_CORE_SERVICE_API_KEY). Never logged.
 	ServicePrincipalKey string
+
+	// ControlUserCoreURL is the internal Control endpoint used only by the
+	// scheduled-run activity to obtain a fresh effect-time decision.
+	ControlUserCoreURL string
+	// ControlScheduleExecutionServiceToken is Orchestrator Core's separate
+	// Control service credential. Empty intentionally disables scheduled runs
+	// rather than replaying Capability Core's preparation authority.
+	ControlScheduleExecutionServiceToken string
+	ControlScheduleStepServiceToken      string
+	ControlSpaceDecisionKeyID            string
+	ControlSpaceDecisionPublicKeyBase64  string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -86,6 +97,12 @@ func Load() Config {
 		AuthCoreURL:         strings.TrimSpace(os.Getenv("AUTH_CORE_URL")),
 		ServicePrincipalID:  strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_SERVICE_ID")),
 		ServicePrincipalKey: strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_SERVICE_API_KEY")),
+
+		ControlUserCoreURL:                   strings.TrimSpace(os.Getenv("CONTROL_USER_CORE_URL")),
+		ControlScheduleExecutionServiceToken: strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN")),
+		ControlScheduleStepServiceToken:      strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN")),
+		ControlSpaceDecisionKeyID:            strings.TrimSpace(os.Getenv("CONTROL_SPACE_DECISION_KEY_ID")),
+		ControlSpaceDecisionPublicKeyBase64:  strings.TrimSpace(os.Getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64")),
 	}
 }
 

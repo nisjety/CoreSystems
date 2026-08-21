@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,7 +12,38 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"google.golang.org/grpc"
+
+	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 )
+
+// fakeRunServiceClient is a scripted mpv1.RunServiceClient double for
+// MEM-2's resource-ownership authorization tests. It embeds the interface
+// itself (nil) so every method other than the two overridden below panics if
+// a test ever calls it by mistake, rather than silently returning a zero
+// value.
+type fakeRunServiceClient struct {
+	mpv1.RunServiceClient
+	calls      int
+	authorized bool
+	err        error
+}
+
+func (f *fakeRunServiceClient) ResolveRunOwner(_ context.Context, _ *mpv1.ResolveRunOwnerRequest, _ ...grpc.CallOption) (*mpv1.ResolveRunOwnerResponse, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &mpv1.ResolveRunOwnerResponse{Authorized: f.authorized}, nil
+}
+
+func (f *fakeRunServiceClient) ResolveThreadOwner(_ context.Context, _ *mpv1.ResolveThreadOwnerRequest, _ ...grpc.CallOption) (*mpv1.ResolveThreadOwnerResponse, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &mpv1.ResolveThreadOwnerResponse{Authorized: f.authorized}, nil
+}
 
 type memoryRows struct {
 	entries []memoryEntry
@@ -55,9 +87,18 @@ func (rows *memoryRows) Values() ([]any, error) { return nil, nil }
 func (rows *memoryRows) RawValues() [][]byte    { return nil }
 func (rows *memoryRows) Conn() *pgx.Conn        { return nil }
 
-func memoryAuthenticatedHandler(t *testing.T, database registryDatabase) (http.Handler, string, string) {
+// memoryAuthenticatedHandler wires a MemoryHandler over the given database
+// fake. The optional trailing argument supplies a RunServiceClient double for
+// the run/thread/session resource-authorization tests; every other test in
+// this file omits it and gets a nil client (the "session-core dial disabled"
+// fail-closed path).
+func memoryAuthenticatedHandler(t *testing.T, database registryDatabase, runs ...mpv1.RunServiceClient) (http.Handler, string, string) {
 	t.Helper()
-	memory := NewMemoryHandler(nil)
+	var runClient mpv1.RunServiceClient
+	if len(runs) > 0 {
+		runClient = runs[0]
+	}
+	memory := NewMemoryHandler(nil, runClient)
 	memory.pool = database
 	mux := http.NewServeMux()
 	memory.Register(mux)
@@ -66,7 +107,7 @@ func memoryAuthenticatedHandler(t *testing.T, database registryDatabase) (http.H
 
 func TestMemoryHandlerFailsClosedWithoutVerifiedIdentityContext(t *testing.T) {
 	database := &recordingDatabase{}
-	memory := NewMemoryHandler(nil)
+	memory := NewMemoryHandler(nil, nil)
 	memory.pool = database
 	mux := http.NewServeMux()
 	memory.Register(mux)
@@ -286,22 +327,31 @@ func TestMemoryPrivateCreatePinsOwnerAndMutationsUseVerifiedActor(t *testing.T) 
 		}
 	})
 
-	for _, scope := range []string{"run", "thread", "workspace", "session"} {
-		t.Run(scope+" write is quarantined without ownership contract", func(t *testing.T) {
-			before := len(database.execs)
-			body := `{"scope":"` + scope + `","key":"unsafe","content":"unsafe"}`
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(body))
-			request.Header.Set("Authorization", "Bearer "+writeToken)
-			response := httptest.NewRecorder()
-			handler.ServeHTTP(response, request)
-			if response.Code != http.StatusServiceUnavailable {
-				t.Fatalf("status = %d, body=%s, want 503", response.Code, response.Body.String())
-			}
-			if len(database.execs) != before {
-				t.Fatal("unverified resource-scoped write reached durable storage")
-			}
-		})
-	}
+	// workspace is the one scope MEM-2 deliberately did NOT build an
+	// authorization check for: no table, owner column, or RPC anywhere in
+	// Model Plane resolves "who owns workspace X" (session-core's
+	// workspace_id is a content-selection hint only; capability-core's own
+	// ScopeKindWorkspace is rejected at capability-invocation time). Building
+	// a check here would mean fabricating an authorization concept that
+	// doesn't exist in the data model, so this stays quarantined
+	// unconditionally, independent of whether a session_id is supplied or a
+	// RunServiceClient is wired — unlike run/thread/session below, which now
+	// have their own dedicated authorization tests in
+	// TestMemoryResourceScopedWriteAuthorization.
+	t.Run("workspace write is quarantined without an ownership model", func(t *testing.T) {
+		before := len(database.execs)
+		body := `{"scope":"workspace","key":"unsafe","content":"unsafe"}`
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+writeToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, body=%s, want 503", response.Code, response.Body.String())
+		}
+		if len(database.execs) != before {
+			t.Fatal("workspace-scoped write reached durable storage")
+		}
+	})
 
 	t.Run("caller supplied session binding is quarantined for user scope", func(t *testing.T) {
 		before := len(database.execs)
@@ -317,6 +367,123 @@ func TestMemoryPrivateCreatePinsOwnerAndMutationsUseVerifiedActor(t *testing.T) 
 			t.Fatal("unverified session binding reached durable storage")
 		}
 	})
+}
+
+// TestMemoryResourceScopedWriteAuthorization covers MEM-2: run/thread/session
+// scoped memory writes now call Session Core's RunService instead of being
+// unconditionally quarantined (workspace, which has no ownership contract
+// anywhere in Model Plane, is covered separately in
+// TestMemoryPrivateCreatePinsOwnerAndMutationsUseVerifiedActor and stays
+// quarantined unconditionally).
+func TestMemoryResourceScopedWriteAuthorization(t *testing.T) {
+	for _, scope := range []string{"run", "thread", "session"} {
+		t.Run(scope+" authorized owner write succeeds", func(t *testing.T) {
+			database := &recordingDatabase{}
+			runs := &fakeRunServiceClient{authorized: true}
+			handler, _, writeToken := memoryAuthenticatedHandler(t, database, runs)
+
+			body := `{"scope":"` + scope + `","session_id":"resource-a","key":"k","content":"v"}`
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+writeToken)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusCreated {
+				t.Fatalf("status = %d, body=%s, want 201", response.Code, response.Body.String())
+			}
+			if runs.calls != 1 {
+				t.Fatalf("session core lookup calls = %d, want 1", runs.calls)
+			}
+			call := database.execs[len(database.execs)-1]
+			sessionIDArg, _ := call.args[2].(*string)
+			if len(call.args) < 9 || sessionIDArg == nil || *sessionIDArg != "resource-a" || call.args[3] != scope {
+				t.Fatalf("insert args = %v, want resource id threaded into session_id and scope=%s", call.args, scope)
+			}
+		})
+
+		t.Run(scope+" unauthorized write is rejected with 403 not 503", func(t *testing.T) {
+			database := &recordingDatabase{}
+			runs := &fakeRunServiceClient{authorized: false}
+			handler, _, writeToken := memoryAuthenticatedHandler(t, database, runs)
+
+			body := `{"scope":"` + scope + `","session_id":"resource-a","key":"k","content":"v"}`
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+writeToken)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, body=%s, want 403", response.Code, response.Body.String())
+			}
+			if len(database.execs) != 0 {
+				t.Fatal("denied resource-scoped write reached durable storage")
+			}
+		})
+
+		t.Run(scope+" missing resource id is 400 and never calls session core", func(t *testing.T) {
+			database := &recordingDatabase{}
+			runs := &fakeRunServiceClient{authorized: true}
+			handler, _, writeToken := memoryAuthenticatedHandler(t, database, runs)
+
+			body := `{"scope":"` + scope + `","key":"k","content":"v"}`
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+writeToken)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body=%s, want 400", response.Code, response.Body.String())
+			}
+			if runs.calls != 0 {
+				t.Fatal("missing resource id must not reach session core")
+			}
+			if len(database.execs) != 0 {
+				t.Fatal("missing resource id reached durable storage")
+			}
+		})
+
+		t.Run(scope+" session core unreachable fails closed as 503 not 403", func(t *testing.T) {
+			database := &recordingDatabase{}
+			runs := &fakeRunServiceClient{err: errors.New("transport error")}
+			handler, _, writeToken := memoryAuthenticatedHandler(t, database, runs)
+
+			body := `{"scope":"` + scope + `","session_id":"resource-a","key":"k","content":"v"}`
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+writeToken)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, body=%s, want 503 (unreachable is not the same as denied)", response.Code, response.Body.String())
+			}
+			if len(database.execs) != 0 {
+				t.Fatal("write reached durable storage despite an unreachable authority")
+			}
+		})
+
+		t.Run(scope+" nil session core client fails closed as 503", func(t *testing.T) {
+			// A nil RunServiceClient means the session-core dial is disabled
+			// or failed at startup — an availability problem, not a "no"
+			// answer, so this is deliberately 503 (resourceAuthUnavailable),
+			// not 403, matching the "unreachable" case above rather than the
+			// "denied" case.
+			database := &recordingDatabase{}
+			handler, _, writeToken := memoryAuthenticatedHandler(t, database)
+
+			body := `{"scope":"` + scope + `","session_id":"resource-a","key":"k","content":"v"}`
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/memory", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+writeToken)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, body=%s, want 503", response.Code, response.Body.String())
+			}
+			if len(database.execs) != 0 {
+				t.Fatal("write reached durable storage with no session core client configured")
+			}
+		})
+	}
 }
 
 func TestMemoryForeignPrivateMutationsFailClosed(t *testing.T) {
@@ -495,10 +662,15 @@ func TestMemoryResolveDoesNotMixUnselectedPrivateResources(t *testing.T) {
 	}
 }
 
-func TestMemoryResolveRejectsUnsupportedResourceSelectors(t *testing.T) {
+// TestMemoryResolveRejectsWorkspaceSelector: workspace is deferred, not
+// merely "not yet implemented across the board" — MEM-2 gave run_id and
+// thread_id real support (see TestMemoryResolveAppliesRunAndThreadPrecedence
+// below); workspace_id alone still 501s because no ownership model exists
+// for it anywhere in Model Plane.
+func TestMemoryResolveRejectsWorkspaceSelector(t *testing.T) {
 	database := &recordingDatabase{}
 	handler, readToken, _ := memoryAuthenticatedHandler(t, database)
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/memory/resolve?run_id=run-a", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/memory/resolve?workspace_id=workspace-a", nil)
 	request.Header.Set("Authorization", "Bearer "+readToken)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -507,7 +679,118 @@ func TestMemoryResolveRejectsUnsupportedResourceSelectors(t *testing.T) {
 		t.Fatalf("status = %d, body=%s, want 501", response.Code, response.Body.String())
 	}
 	if len(database.queries) != 0 {
-		t.Fatal("unsupported resource selector reached durable storage")
+		t.Fatal("workspace resource selector reached durable storage")
+	}
+}
+
+// TestMemoryResolveAppliesRunAndThreadPrecedence: MEM-2 unblocked run_id and
+// thread_id resolution. Combined with session_id, the merge picks the
+// narrowest scope first: run > thread > session > user > org > global.
+func TestMemoryResolveAppliesRunAndThreadPrecedence(t *testing.T) {
+	now := time.Now().UTC()
+	runID := "run-a"
+	threadID := "thread-a"
+	sessionID := "session-a"
+	database := &recordingDatabase{rows: &memoryRows{entries: []memoryEntry{
+		{ID: "org", OrgID: "org-a", Scope: "org", Key: "preference", Content: "shared", Owner: "user-z", CreatedAt: now, UpdatedAt: now},
+		{ID: "user", OrgID: "org-a", Scope: "user", Key: "preference", Content: "owned", Owner: "user-a", CreatedAt: now, UpdatedAt: now},
+		{ID: "session", OrgID: "org-a", SessionID: &sessionID, Scope: "session", Key: "preference", Content: "session-level", Owner: "user-a", CreatedAt: now, UpdatedAt: now},
+		{ID: "thread", OrgID: "org-a", SessionID: &threadID, Scope: "thread", Key: "preference", Content: "thread-level", Owner: "user-a", CreatedAt: now, UpdatedAt: now},
+		{ID: "run", OrgID: "org-a", SessionID: &runID, Scope: "run", Key: "preference", Content: "run-level", Owner: "user-a", CreatedAt: now, UpdatedAt: now},
+	}}}
+	handler, readToken, _ := memoryAuthenticatedHandler(t, database)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/memory/resolve?run_id=run-a&thread_id=thread-a&session_id=session-a", nil)
+	request.Header.Set("Authorization", "Bearer "+readToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Entries    []memoryEntry `json:"entries"`
+		Count      int           `json:"count"`
+		Precedence []string      `json:"precedence"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	wantPrecedence := []string{"run", "thread", "session", "user", "org", "global"}
+	if len(body.Precedence) != len(wantPrecedence) {
+		t.Fatalf("precedence = %v, want %v", body.Precedence, wantPrecedence)
+	}
+	for i, scope := range wantPrecedence {
+		if body.Precedence[i] != scope {
+			t.Fatalf("precedence = %v, want %v", body.Precedence, wantPrecedence)
+		}
+	}
+	// All entries share the key "preference"; the narrowest scope (run) must
+	// win the merge over thread/session/user/org.
+	if body.Count != 1 || len(body.Entries) != 1 || body.Entries[0].Content != "run-level" {
+		t.Fatalf("resolved body = %+v, want only the run-scoped entry to win", body)
+	}
+}
+
+// TestMemoryResolveDoesNotMixUnselectedRunOrThreadResources mirrors
+// TestMemoryResolveDoesNotMixUnselectedPrivateResources for the two new
+// selectors: a run/thread row must not leak into a resolve call that never
+// asked for that run_id/thread_id.
+func TestMemoryResolveDoesNotMixUnselectedRunOrThreadResources(t *testing.T) {
+	now := time.Now().UTC()
+	runID := "run-a"
+	threadID := "thread-a"
+	database := &recordingDatabase{rows: &memoryRows{entries: []memoryEntry{
+		{ID: "run", OrgID: "org-a", SessionID: &runID, Scope: "run", Key: "preference", Content: "must-not-leak", Owner: "user-a", CreatedAt: now, UpdatedAt: now},
+		{ID: "thread", OrgID: "org-a", SessionID: &threadID, Scope: "thread", Key: "preference", Content: "must-not-leak", Owner: "user-a", CreatedAt: now, UpdatedAt: now},
+		{ID: "user", OrgID: "org-a", Scope: "user", Key: "preference", Content: "owned", Owner: "user-a", CreatedAt: now, UpdatedAt: now},
+	}}}
+	handler, readToken, _ := memoryAuthenticatedHandler(t, database)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/memory/resolve", nil)
+	request.Header.Set("Authorization", "Bearer "+readToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Entries []memoryEntry `json:"entries"`
+		Count   int           `json:"count"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Count != 1 || len(body.Entries) != 1 || body.Entries[0].Scope != "user" {
+		t.Fatalf("unselected run/thread resources leaked into resolve: %+v", body)
+	}
+}
+
+// TestMemoryResolveRunAndThreadSelectorsRemainOwnerPinned is the regression
+// check for MEM-2 §0(b)'s design decision: reads never call Session Core
+// again on the resolve path — memoryVisibilitySQL's owner=actor filter,
+// already proven at write time (authorizeResourceOwner), is what keeps a
+// run/thread row private. This asserts the generated SQL still ANDs that
+// filter in for the new run_id/thread_id clauses; get this wrong and a
+// stale-owner memory row becomes readable by whoever currently owns the run
+// or thread.
+func TestMemoryResolveRunAndThreadSelectorsRemainOwnerPinned(t *testing.T) {
+	database := &recordingDatabase{}
+	handler, readToken, _ := memoryAuthenticatedHandler(t, database)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/memory/resolve?run_id=run-a&thread_id=thread-a", nil)
+	request.Header.Set("Authorization", "Bearer "+readToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	call := database.queries[0]
+	assertPrivateMemoryQueryPinned(t, call, 1)
+	if !strings.Contains(call.query, "scope='run' AND session_id=$") {
+		t.Fatalf("resolve query = %q, want a run clause", call.query)
+	}
+	if !strings.Contains(call.query, "scope='thread' AND session_id=$") {
+		t.Fatalf("resolve query = %q, want a thread clause", call.query)
 	}
 }
 

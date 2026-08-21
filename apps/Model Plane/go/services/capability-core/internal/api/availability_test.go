@@ -3,7 +3,11 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
@@ -35,7 +40,9 @@ func TestGlobalHealthAttestationRequiresDedicatedServiceScope(t *testing.T) {
 		principal authctx.Principal
 		want      bool
 	}{
-		{name: "exact health authority", principal: authctx.Principal{OrganizationID: "ops", ActorID: "capability-health-attestor", PrincipalType: "service", Scopes: []string{authz.GlobalHealthWriteScope}}, want: true},
+		{name: "exact global execution health authority", principal: authctx.Principal{OrganizationID: "global", ActorID: authz.ExecutionCoreServiceID, PrincipalType: "service", Scopes: []string{authz.GlobalHealthWriteScope}}, want: true},
+		{name: "global scope on tenant execution workload is not global authority", principal: authctx.Principal{OrganizationID: "org-a", ActorID: authz.ExecutionCoreServiceID, PrincipalType: "service", Scopes: []string{authz.GlobalHealthWriteScope}}},
+		{name: "global scope on unrelated global workload is not global authority", principal: authctx.Principal{OrganizationID: "global", ActorID: "service:unrelated", PrincipalType: "service", Scopes: []string{authz.GlobalHealthWriteScope}}},
 		{name: "tenant health reporter is not global authority", principal: authctx.Principal{OrganizationID: "org-a", ActorID: "health", PrincipalType: "service", Scopes: []string{authz.HealthWriteScope}}},
 		{name: "global catalog writer is not health authority", principal: authctx.Principal{OrganizationID: "ops", ActorID: "admin", PrincipalType: "service", Scopes: []string{authz.GlobalWriteScope}}},
 		{name: "user is never global authority", principal: authctx.Principal{OrganizationID: "ops", ActorID: "user-a", PrincipalType: "user", Scopes: []string{authz.GlobalHealthWriteScope}}},
@@ -50,6 +57,211 @@ func TestGlobalHealthAttestationRequiresDedicatedServiceScope(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenericGlobalHealthAttestorCannotAttestOwnerActionTicket(t *testing.T) {
+	t.Parallel()
+
+	principal := authctx.Principal{
+		OrganizationID: "global",
+		ActorID:        genericGlobalHealthAttesterID,
+		PrincipalType:  "service",
+		Scopes:         []string{authz.GlobalHealthWriteScope},
+	}
+	if mayUseGenericGlobalHealthAttestation(principal, ownerActionTicketCapabilityID) {
+		t.Fatal("generic global health attestor may attest owner-action ticket capability")
+	}
+	if !mayUseGenericGlobalHealthAttestation(principal, "cap.command.sandbox") {
+		t.Fatal("generic global health attestor may not attest its ordinary runtime capability")
+	}
+	unprefixed := principal
+	unprefixed.ActorID = "execution-core"
+	if mayUseGenericGlobalHealthAttestation(unprefixed, "cap.command.sandbox") {
+		t.Fatal("unprefixed deployment name was accepted as the signed health identity")
+	}
+	if mayUseGenericGlobalHealthAttestation(principal, "cap.retrieval.query") {
+		t.Fatal("generic global health attestor may attest an unmeasured capability")
+	}
+	otherService := principal
+	otherService.ActorID = "capability-health-attestor"
+	if mayUseGenericGlobalHealthAttestation(otherService, "cap.command.sandbox") {
+		t.Fatal("an unrelated global-health service may attest execution-core capability health")
+	}
+}
+
+func TestGenericGlobalHealthEndpointCannotPersistOwnerActionTicket(t *testing.T) {
+	store := &fakeAvailabilityStore{
+		row: &registry.CapabilityRow{
+			ID: "cap.tool.ticket.create", OrgID: "global", Version: "1",
+			Enabled: true, RiskLevel: models.RiskHigh,
+		},
+		updated: true,
+	}
+	recorder := ownerActionAttestationRecorder(t, store, authz.GlobalHealthWriteScope)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if store.auditAction != "" {
+		t.Fatalf("owner-action attestation reached persistence: %q", store.auditAction)
+	}
+}
+
+func TestUnrelatedGlobalHealthServiceCannotPersistAllowlistedCapability(t *testing.T) {
+	store := &fakeAvailabilityStore{
+		row: &registry.CapabilityRow{
+			ID: "cap.command.sandbox", OrgID: "global", Version: "1",
+			Enabled: true, RiskLevel: models.RiskLow,
+		},
+		updated: true,
+	}
+	recorder := availabilityAttestationRecorder(t, store, "cap.command.sandbox", "global", "service:unrelated", authz.GlobalHealthWriteScope)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if store.auditAction != "" {
+		t.Fatalf("unrelated global health service reached persistence: %q", store.auditAction)
+	}
+}
+
+func TestTenantHealthEndpointCannotPersistGlobalOwnerActionTicket(t *testing.T) {
+	store := &fakeAvailabilityStore{
+		row: &registry.CapabilityRow{
+			ID: "cap.tool.ticket.create", OrgID: "global", Version: "1",
+			Enabled: true, RiskLevel: models.RiskHigh,
+		},
+		updated: true,
+	}
+	recorder := ownerActionAttestationRecorder(t, store, authz.HealthWriteScope)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if store.auditAction != "" {
+		t.Fatalf("tenant health attestation reached persistence: %q", store.auditAction)
+	}
+}
+
+func TestTenantHealthEndpointCannotPersistGlobalRuntimeCapability(t *testing.T) {
+	store := &fakeAvailabilityStore{
+		row: &registry.CapabilityRow{
+			ID: "cap.command.sandbox", OrgID: "global", Version: "1",
+			Enabled: true, RiskLevel: models.RiskLow,
+		},
+		updated: true,
+	}
+	recorder := availabilityAttestationRecorder(t, store, "cap.command.sandbox", "global", "tenant-health", authz.HealthWriteScope)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if store.auditAction != "" {
+		t.Fatalf("tenant health attestation reached global persistence: %q", store.auditAction)
+	}
+}
+
+func TestDedicatedOwnerActionHealthAttestationNeedsExactOwnerAndControlVerifier(t *testing.T) {
+	store := &fakeAvailabilityStore{
+		row: &registry.CapabilityRow{
+			ID: "cap.tool.ticket.create", OrgID: "global", Version: "1",
+			Enabled: true, RiskLevel: models.RiskHigh,
+		},
+		updated: true,
+	}
+	withoutVerifier := &CapabilitiesHandler{availabilityStore: store}
+	recorder := ownerActionHealthRecorder(t, withoutVerifier, authz.ConversationCoreServiceID, authz.OwnerActionHealthWriteScope)
+	if recorder.Code != http.StatusServiceUnavailable || store.auditAction != "" {
+		t.Fatalf("unwired owner health = %d/%q", recorder.Code, store.auditAction)
+	}
+
+	withVerifier := (&CapabilitiesHandler{availabilityStore: store}).WithModelActionViewVerifier(&ControlModelActionViewVerifier{
+		keyID: "control-key", public: make([]byte, 32),
+	})
+	recorder = ownerActionHealthRecorder(t, withVerifier, authz.ConversationCoreServiceID, authz.OwnerActionHealthWriteScope)
+	if recorder.Code != http.StatusOK || store.auditAction != "global_availability_attested" {
+		t.Fatalf("dedicated owner health = %d/%q: %s", recorder.Code, store.auditAction, recorder.Body.String())
+	}
+
+	store.auditAction = ""
+	recorder = ownerActionHealthRecorder(t, withVerifier, authz.ExecutionCoreServiceID, authz.OwnerActionHealthWriteScope)
+	if recorder.Code != http.StatusForbidden || store.auditAction != "" {
+		t.Fatalf("wrong owner health principal = %d/%q", recorder.Code, store.auditAction)
+	}
+}
+
+func ownerActionAttestationRecorder(t *testing.T, store *fakeAvailabilityStore, scope string) *httptest.ResponseRecorder {
+	return availabilityAttestationRecorder(t, store, ownerActionTicketCapabilityID, "global", authz.ConversationCoreServiceID, scope)
+}
+
+func availabilityAttestationRecorder(t *testing.T, store *fakeAvailabilityStore, capabilityID, organizationID, serviceID, scope string) *httptest.ResponseRecorder {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := pem.EncodeToMemory(&pem.Block{
+		Type: "RSA PUBLIC KEY", Bytes: x509.MarshalPKCS1PublicKey(&key.PublicKey),
+	})
+	verifier, err := authctx.NewVerifier(authctx.Config{
+		Audiences:    []string{"capability-core"},
+		Issuer:       "test-issuer",
+		PublicKeyPEM: publicKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	token, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"org_id":         organizationID,
+		"service_id":     serviceID,
+		"principal_type": "service",
+		"scopes":         []string{scope},
+		"zdr":            false,
+		"iss":            "test-issuer",
+		"sub":            serviceID,
+		"aud":            []string{"capability-core"},
+		"iat":            now.Unix(),
+		"nbf":            now.Unix(),
+		"exp":            now.Add(time.Minute).Unix(),
+	}).SignedString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &CapabilitiesHandler{availabilityStore: store}
+	secured := verifier.HTTPMiddleware(authz.AuthorizeHTTP)(http.HandlerFunc(handler.attestAvailability))
+	requestBody := `{"id":"` + capabilityID + `","version":"1","state":"available","reason_code":"runtime_healthy","execution_mode":"agentic","cost_class":"bounded"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/capabilities/availability", strings.NewReader(requestBody))
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	secured.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func ownerActionHealthRecorder(t *testing.T, handler *CapabilitiesHandler, serviceID, scope string) *httptest.ResponseRecorder {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := pem.EncodeToMemory(&pem.Block{Type: "RSA PUBLIC KEY", Bytes: x509.MarshalPKCS1PublicKey(&key.PublicKey)})
+	verifier, err := authctx.NewVerifier(authctx.Config{Audiences: []string{"capability-core"}, Issuer: "test-issuer", PublicKeyPEM: publicKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	token, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"org_id": "global", "service_id": serviceID, "principal_type": "service", "scopes": []string{scope},
+		"zdr": false, "iss": "test-issuer", "sub": serviceID, "aud": []string{"capability-core"},
+		"iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(time.Minute).Unix(),
+	}).SignedString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/capabilities/owner-actions/health", strings.NewReader(`{
+		"id":"cap.tool.ticket.create","version":"1","state":"available",
+		"reason_code":"owner_contract_ready","execution_mode":"agentic","cost_class":"bounded"
+	}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	verifier.HTTPMiddleware(authz.AuthorizeHTTP)(http.HandlerFunc(handler.attestOwnerActionHealth)).ServeHTTP(recorder, request)
+	return recorder
 }
 
 func (store *fakeAvailabilityStore) GetForOrg(_ context.Context, _ string, organizationID string) (*registry.CapabilityRow, error) {

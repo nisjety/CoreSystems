@@ -6,21 +6,27 @@
 //! missing — the reason a granted approval could not yet resume anything —
 //! was a worker on the other end of that lease. This module is that worker:
 //! it claims due deliveries, fetches the exact immutable action descriptor
-//! under its lease, re-executes the one now-attestable action kind
-//! (`execute_provider_action`, see `attestation`/`integration_tools`), and
+//! under its lease, re-executes one of the now-attestable action kinds
+//! (`execute_provider_action`, `book_shipment`, or the dedicated
+//! `tickets.create` owner adapter), and
 //! records an authoritative outcome.
 //!
 //! # Scope, deliberately narrow
 //!
 //! `is_risky_tool` gates a wide set of tools (shell, browser_agent, any MCP
-//! tool, …), but only two are resumable here: `execute_provider_action` and
-//! `book_shipment`. Both share the shape that makes cold resumption safe —
+//! tool, …), but only three are resumable here: `execute_provider_action`,
+//! `book_shipment`, and `tickets.create`. The first two share the shape that
+//! makes cold resumption safe —
 //! a single idempotent-key-gated HTTP call with no session state to
 //! reconstruct, and a durable receipt on the other end (integration-corev2's
 //! `ActionReceipt`, shipping-core's own booking record) that makes a retry
 //! of an already-completed call a safe no-op rather than a duplicate side
-//! effect. `browser_agent` (a live multi-step navigation session) and
-//! arbitrary MCP tools (unknown, third-party idempotency semantics) do not
+//! effect. `tickets.create` is separate: its frozen descriptor is checked
+//! against a pinned schema/payload/idempotency tuple, then it obtains a fresh
+//! Control decision and Conversation Core owner receipt. An ambiguous owner
+//! response is reconciled by idempotency before retry; an unresolved lookup is
+//! terminal `unknown_outcome`. `browser_agent` (a live multi-step navigation
+//! session) and arbitrary MCP tools (unknown, third-party idempotency semantics) do not
 //! share that shape — re-attempting either from a cold descriptor is a
 //! different, larger problem this worker does not attempt. A descriptor
 //! naming any other tool fails closed as `invalid_continuation` rather than
@@ -108,11 +114,12 @@ const APPROVAL_DELIVER_SCOPE: &str = "approval:deliver";
 const REFRESH_SKEW: Duration = Duration::from_secs(30);
 const MAX_TOKEN_TTL_SECONDS: u64 = 3600;
 
-/// The two resumable tool names — see the module doc for why the rest of
+/// The resumable tool names — see the module doc for why the rest of
 /// `is_risky_tool`'s set (`browser_agent`, arbitrary MCP tools, …) isn't
 /// here.
 const PROVIDER_ACTION_TOOL_NAME: &str = "execute_provider_action";
 const SHIPMENT_BOOKING_TOOL_NAME: &str = "book_shipment";
+const TICKETS_CREATE_TOOL_NAME: &str = "tickets.create";
 
 /// The exact allowlist `session-core`'s `validate_failure_code` enforces.
 /// Any other string is rejected server-side, so these are reproduced here
@@ -120,6 +127,9 @@ const SHIPMENT_BOOKING_TOOL_NAME: &str = "book_shipment";
 const FAILURE_CONTINUATION_UNAVAILABLE: &str = "continuation_unavailable";
 const FAILURE_INVALID_CONTINUATION: &str = "invalid_continuation";
 const FAILURE_TRANSIENT_DEPENDENCY: &str = "transient_dependency";
+const FAILURE_APPROVAL_NOT_GRANTED: &str = "approval_not_granted";
+const FAILURE_UNKNOWN_OUTCOME: &str = "unknown_outcome";
+const FAILURE_DEFINITELY_NOT_ACCEPTED: &str = "definitely_not_accepted";
 /// The provider's own read contradicted a write it had accepted. Must stay in
 /// sync with session-core's `ALLOWED_FAILURE_CODES` — session-core rejects any
 /// code outside that list, so it has to accept this one before a worker
@@ -335,6 +345,23 @@ struct ContinuationDescriptor {
     action_kind: String,
     tool_name: String,
     input: Value,
+    #[serde(default)]
+    schema_sha256: String,
+    #[serde(default)]
+    payload_sha256: String,
+    #[serde(default)]
+    ticket_idempotency_key: String,
+    #[serde(default)]
+    owner_user_id: String,
+}
+
+#[derive(Debug)]
+struct TicketContinuationDescriptor {
+    input: Value,
+    schema_sha256: String,
+    payload_sha256: String,
+    ticket_idempotency_key: String,
+    owner_user_id: String,
 }
 
 /// `execute_provider_action`'s own tool-input shape (`runtime_loop::mod::
@@ -360,6 +387,7 @@ struct ProviderActionInput {
 enum ResumableAction {
     ProviderAction(ProviderActionInput),
     ShipmentBooking(Box<crate::shipping_tools::BookInput>),
+    TicketCreate(TicketContinuationDescriptor),
 }
 
 /// What the postcondition step needs to know, captured before the execution
@@ -368,6 +396,7 @@ enum ResumableAction {
 /// re-parsing the descriptor a second time.
 enum VerifierTarget {
     ShipmentBooking,
+    TicketCreate,
     ProviderAction {
         connection_id: String,
         operation: String,
@@ -444,6 +473,26 @@ fn parse_resumable_action(
         SHIPMENT_BOOKING_TOOL_NAME => serde_json::from_value(descriptor.input.clone())
             .map(|input| ResumableAction::ShipmentBooking(Box::new(input)))
             .map_err(|_| FAILURE_INVALID_CONTINUATION),
+        TICKETS_CREATE_TOOL_NAME => {
+            if descriptor.schema_sha256 != crate::ticket_tools::TICKET_CREATE_SCHEMA_SHA256
+                || descriptor.payload_sha256.trim().is_empty()
+                || descriptor.ticket_idempotency_key.trim().is_empty()
+                || descriptor.owner_user_id != descriptor.user_id
+            {
+                return Err(FAILURE_INVALID_CONTINUATION);
+            }
+            serde_json::from_value::<serde_json::Value>(descriptor.input.clone())
+                .map(|input| {
+                    ResumableAction::TicketCreate(TicketContinuationDescriptor {
+                        input,
+                        schema_sha256: descriptor.schema_sha256.clone(),
+                        payload_sha256: descriptor.payload_sha256.clone(),
+                        ticket_idempotency_key: descriptor.ticket_idempotency_key.clone(),
+                        owner_user_id: descriptor.owner_user_id.clone(),
+                    })
+                })
+                .map_err(|_| FAILURE_INVALID_CONTINUATION)
+        }
         _ => Err(FAILURE_INVALID_CONTINUATION),
     }
 }
@@ -872,6 +921,7 @@ async fn process_delivery(
     org_id: &str,
     integration_client: &IntegrationActionsClient,
     shipping_client: Option<&crate::shipping_tools::ShippingToolsClient>,
+    ticket_client: Option<&crate::ticket_tools::AgentTicketActionClient>,
     delivery: pb::ApprovalDelivery,
 ) {
     let descriptor_json =
@@ -935,6 +985,7 @@ async fn process_delivery(
     // below still knows which verifier applies and what it needs to call.
     let verifier_target = match &action {
         ResumableAction::ShipmentBooking(_) => VerifierTarget::ShipmentBooking,
+        ResumableAction::TicketCreate(_) => VerifierTarget::TicketCreate,
         ResumableAction::ProviderAction(input) => VerifierTarget::ProviderAction {
             connection_id: input.connection_id.clone(),
             operation: input.operation.clone(),
@@ -978,6 +1029,59 @@ async fn process_delivery(
                 )
                 .await;
             disposition_for_shipment_booking_result(execution_result)
+        }
+        ResumableAction::TicketCreate(input) => {
+            let Some(ticket_client) = ticket_client else {
+                let disposition = Disposition::RejectBeforeStart {
+                    failure_code: FAILURE_CONTINUATION_UNAVAILABLE,
+                };
+                finalize_before_start(channel, bearer, org_id, &delivery, &disposition).await;
+                return;
+            };
+            let tool_input = match serde_json::to_string(&input.input) {
+                Ok(input) => input,
+                Err(_) => {
+                    let disposition = Disposition::RejectBeforeStart {
+                        failure_code: FAILURE_INVALID_CONTINUATION,
+                    };
+                    finalize_before_start(channel, bearer, org_id, &delivery, &disposition).await;
+                    return;
+                }
+            };
+            let execution_result = ticket_client
+                .execute_approved_continuation(
+                    &tool_input,
+                    &delivery.run_id,
+                    &descriptor.org_id,
+                    &descriptor.step_id,
+                    &input.schema_sha256,
+                    &input.payload_sha256,
+                    &input.ticket_idempotency_key,
+                    &input.owner_user_id,
+                )
+                .await;
+            match execution_result {
+                Ok(receipt) => Disposition::Completed {
+                    provider_receipt_id: receipt,
+                },
+                Err(error) if error == FAILURE_INVALID_CONTINUATION => {
+                    Disposition::FailedTerminal {
+                        failure_code: FAILURE_INVALID_CONTINUATION,
+                    }
+                }
+                Err(error) if error == FAILURE_APPROVAL_NOT_GRANTED => {
+                    Disposition::FailedTerminal {
+                        failure_code: FAILURE_APPROVAL_NOT_GRANTED,
+                    }
+                }
+                Err(error) if error == FAILURE_UNKNOWN_OUTCOME => Disposition::FailedTerminal {
+                    failure_code: FAILURE_UNKNOWN_OUTCOME,
+                },
+                Err(error) if error == FAILURE_DEFINITELY_NOT_ACCEPTED => {
+                    disposition_for_transient_failure()
+                }
+                Err(_) => disposition_for_transient_failure(),
+            }
         }
     };
 
@@ -1027,6 +1131,7 @@ async fn process_delivery(
                     )
                     .await,
                 ),
+                VerifierTarget::TicketCreate => None,
             };
             if let Some(outcome) = &outcome {
                 info!(
@@ -1198,6 +1303,14 @@ async fn run_forever(channel: Channel) {
                     if let Some(integration_client) = IntegrationActionsClient::from_env() {
                         let shipping_client =
                             crate::shipping_tools::ShippingToolsClient::from_env();
+                        let ticket_client =
+                            match crate::ticket_tools::AgentTicketActionClient::from_env() {
+                                Ok(client) => client,
+                                Err(error) => {
+                                    warn!(%error, "approval_delivery_worker: ticket continuation configuration is invalid; tickets.create remains unavailable");
+                                    None
+                                }
+                            };
                         if shipping_client.is_none() {
                             warn!(
                                 "approval_delivery_worker: shipping-core client unavailable, book_shipment continuations will be rejected as continuation_unavailable"
@@ -1209,6 +1322,7 @@ async fn run_forever(channel: Channel) {
                                 tokens,
                                 &integration_client,
                                 shipping_client.as_ref(),
+                                ticket_client.as_ref(),
                                 &org_id,
                             )
                             .await;
@@ -1233,6 +1347,7 @@ async fn poll_one_org(
     tokens: &ApprovalDeliveryTokenProvider,
     integration_client: &IntegrationActionsClient,
     shipping_client: Option<&crate::shipping_tools::ShippingToolsClient>,
+    ticket_client: Option<&crate::ticket_tools::AgentTicketActionClient>,
     org_id: &str,
 ) {
     let bearer = match tokens.token(org_id).await {
@@ -1272,6 +1387,7 @@ async fn poll_one_org(
             org_id,
             integration_client,
             shipping_client,
+            ticket_client,
             delivery,
         )
         .await;
@@ -1315,6 +1431,21 @@ mod tests {
         "action_fingerprint": "def456"
     }"#;
 
+    const VALID_TICKET_DESCRIPTOR: &str = r#"{
+        "version": 1,
+        "run_id": "run-1",
+        "org_id": "org-1",
+        "user_id": "user-1",
+        "step_id": "step-1",
+        "action_kind": "tool_call",
+        "tool_name": "tickets.create",
+        "input": {"conversation_id":"conv-1"},
+        "schema_sha256": "sha256:c3aa12ec85c2d79f08e5e8cc726fd75af10ddab0b29f2a6e0dddb0bd42bb56df",
+        "payload_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ticket_idempotency_key": "tickets.create:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "owner_user_id": "user-1"
+    }"#;
+
     #[test]
     fn parses_a_valid_provider_action_descriptor() {
         let descriptor = parse_descriptor(VALID_DESCRIPTOR).expect("should parse");
@@ -1338,6 +1469,28 @@ mod tests {
         };
         assert_eq!(input.carrier_code, "bring");
         assert_eq!(input.booked_by, "user-1");
+    }
+
+    #[test]
+    fn ticket_continuation_requires_exact_frozen_descriptor_bindings() {
+        let descriptor = parse_descriptor(VALID_TICKET_DESCRIPTOR).expect("should parse");
+        let action = parse_resumable_action(&descriptor).expect("should parse ticket input");
+        let ResumableAction::TicketCreate(ticket) = action else {
+            panic!("expected TicketCreate");
+        };
+        assert_eq!(ticket.owner_user_id, "user-1");
+        assert_eq!(
+            ticket.schema_sha256,
+            crate::ticket_tools::TICKET_CREATE_SCHEMA_SHA256
+        );
+
+        let forged = VALID_TICKET_DESCRIPTOR
+            .replace("owner_user_id\": \"user-1", "owner_user_id\": \"other-user");
+        let descriptor = parse_descriptor(&forged).expect("forged descriptor is valid JSON");
+        assert!(matches!(
+            parse_resumable_action(&descriptor),
+            Err(FAILURE_INVALID_CONTINUATION)
+        ));
     }
 
     #[test]

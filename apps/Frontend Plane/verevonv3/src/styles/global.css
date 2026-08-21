@@ -4357,6 +4357,46 @@ textarea:focus-visible {
   border-color: var(--border);
 }
 
+.verevon-run-watch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.verevon-run-watch-toggle:hover:not(:disabled) {
+  border-color: var(--verevon-accent);
+  color: var(--verevon-accent);
+}
+
+.verevon-run-watch-toggle:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.verevon-run-watch-toggle--active {
+  border-color: var(--verevon-accent);
+  background: color-mix(in srgb, var(--verevon-accent) 12%, transparent);
+  color: var(--verevon-accent-ink);
+}
+
+.dark .verevon-run-watch-toggle {
+  background: var(--verevon-dark-panel, #15161a);
+  border-color: var(--border);
+}
+
+.dark .verevon-run-watch-toggle--active {
+  background: color-mix(in srgb, var(--verevon-accent) 20%, transparent);
+}
+
 .verevon-run-console__eyebrow {
   display: inline-flex;
   align-items: center;
@@ -39929,7 +39969,6 @@ textarea:focus-visible {
 }
 
 .verevon-space-switcher select:focus-visible,
-.verevon-space-primary-action:focus-visible,
 .verevon-space-secondary-action:focus-visible,
 .verevon-space-thread-rail-list a:focus-visible,
 .verevon-space-conversation-row a:focus-visible,
@@ -40137,7 +40176,6 @@ textarea:focus-visible {
   font-size: 12px;
 }
 
-.verevon-space-primary-action,
 .verevon-space-secondary-action {
   display: inline-flex;
   align-items: center;
@@ -40146,25 +40184,6 @@ textarea:focus-visible {
   border-radius: 10px;
   text-decoration: none;
   transition: transform 150ms ease, background-color 150ms ease, border-color 150ms ease;
-}
-
-.verevon-space-primary-action {
-  flex: 0 0 auto;
-  background: var(--verevon-primary);
-  padding: 10px 12px;
-  color: var(--verevon-surface);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.verevon-space-primary-action:hover {
-  background: var(--verevon-primary-hover);
-  color: var(--verevon-surface);
-  transform: translateY(-1px);
-}
-
-.verevon-space-primary-action svg:last-child {
-  opacity: 0.7;
 }
 
 .verevon-space-projection-error {
@@ -40278,10 +40297,333 @@ textarea:focus-visible {
   color: var(--verevon-text);
 }
 
+.verevon-space-view__actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The bind-existing-agent picker list, inside the shared
+   `.verevon-space-create-agent__dialog` chrome. */
+.verevon-space-bind-agent__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.verevon-space-bind-agent__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--verevon-border);
+  background: var(--verevon-surface);
+  padding: 10px 12px;
+}
+
+.verevon-space-bind-agent__icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--verevon-border-strong);
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-bind-agent__body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.verevon-space-bind-agent__body strong {
+  display: block;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.verevon-space-bind-agent__body small {
+  display: block;
+  margin-top: 2px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.verevon-space-bind-agent__status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
 .verevon-space-inline-status {
   margin: -8px 0 14px;
   color: var(--verevon-text-muted);
   font-size: 13px;
+}
+
+/* Agent page §UI-4 narrow-slice installations view. */
+.verevon-agent-installations {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+.verevon-agent-installations__topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.verevon-agent-installations__topbar h1 {
+  margin: 2px 0 0;
+  font-size: 22px;
+  font-weight: 650;
+  color: var(--verevon-text);
+}
+
+.verevon-agent-installations__back {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 1px solid var(--verevon-border);
+  border-radius: 9px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-muted);
+  text-decoration: none;
+  transition: border-color 140ms ease, color 140ms ease;
+}
+
+.verevon-agent-installations__back:hover {
+  border-color: var(--verevon-accent);
+  color: var(--verevon-accent);
+}
+
+.verevon-agent-installations__intro {
+  margin: 8px 0 24px;
+  max-width: 620px;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.verevon-agent-installations__list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-agent-installations__card {
+  border: 1px solid var(--verevon-border);
+  background: var(--verevon-surface);
+  padding: 16px;
+}
+
+.verevon-agent-installations__card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.verevon-agent-installations__card-header strong {
+  display: block;
+  color: var(--verevon-text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.verevon-agent-installations__card-header p {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-agent-installations__card-header > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.verevon-agent-installations__icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--verevon-border-strong);
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-muted);
+}
+
+.verevon-agent-installations__count {
+  flex: 0 0 auto;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.verevon-agent-installations__rooms {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--verevon-border);
+  list-style: none;
+}
+
+.verevon-agent-installations__room {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.verevon-agent-installations__room a {
+  color: var(--verevon-text);
+  font-weight: 550;
+  text-decoration: none;
+}
+
+.verevon-agent-installations__room a:hover {
+  text-decoration: underline;
+}
+
+.verevon-agent-installations__status {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-agent-installations__status--active {
+  color: var(--verevon-text);
+  font-weight: 600;
+}
+
+/* Space agents as room participants. Presented as people-in-a-room rather than
+   as configuration rows, following the coworker model in
+   docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md §4. Status is always text plus a
+   shape — never colour alone — so it survives greyscale and colour blindness. */
+.verevon-space-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-agent {
+  display: flex;
+  gap: 12px;
+  border: 1px solid var(--verevon-border);
+  background: var(--verevon-surface);
+  padding: 14px 16px;
+}
+
+.verevon-space-agent__avatar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--verevon-border-strong);
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.verevon-space-agent__body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.verevon-space-agent__name {
+  margin: 0;
+  color: var(--verevon-text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.verevon-space-agent__title {
+  color: var(--verevon-text-muted);
+  font-weight: 500;
+}
+
+.verevon-space-agent__meta {
+  margin: 3px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-agent__description {
+  margin: 6px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-space-agent__unpublished {
+  margin: 6px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  font-style: italic;
+}
+
+.verevon-space-agent__channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-agent__channel {
+  border: 1px solid var(--verevon-border);
+  background: var(--verevon-surface-soft);
+  padding: 3px 8px;
+  color: var(--verevon-text);
+  font-size: 12px;
+}
+
+.verevon-space-agent__channel-target,
+.verevon-space-agent__channel-status {
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-agent__channels-empty {
+  margin: 8px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  .verevon-space-agent {
+    flex-direction: column;
+    gap: 8px;
+  }
 }
 
 .verevon-space-empty-state {
@@ -40299,7 +40641,9 @@ textarea:focus-visible {
   color: var(--verevon-text-subtle);
 }
 
-.verevon-space-empty-state strong {
+.verevon-space-empty-state strong,
+.verevon-space-empty-state h3 {
+  margin: 0;
   color: var(--verevon-text);
   font-size: 13px;
 }
@@ -40398,6 +40742,14 @@ textarea:focus-visible {
 
 .verevon-space-status--active {
   color: var(--verevon-accent-ink);
+}
+
+.verevon-space-status--failed {
+  color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
+}
+
+.verevon-space-conversation-row[data-failed] {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--verevon-border));
 }
 
 .verevon-space-view .verevon-activity-feed {
@@ -40654,6 +41006,7 @@ textarea:focus-visible {
 .dark .verevon-space-danger-zone h3,
 .dark .verevon-space-room-card__name,
 .dark .verevon-space-empty-state strong,
+.dark .verevon-space-empty-state h3,
 .dark .verevon-space-membership-card strong,
 .dark .verevon-space-conversation-row__body strong,
 .dark .verevon-space-pulse-stats dd {
@@ -40783,14 +41136,6 @@ textarea:focus-visible {
     padding: 23px 17px 18px;
   }
 
-  .verevon-space-primary-action {
-    padding: 9px 10px;
-  }
-
-  .verevon-space-primary-action svg:last-child {
-    display: none;
-  }
-
   .verevon-space-meta {
     font-size: 11px;
   }
@@ -40838,4 +41183,833 @@ textarea:focus-visible {
     margin-top: 2px;
     padding-top: 12px;
   }
+}
+
+/* Space follows Support's productive two-pane geometry: the shared core
+   sidebar owns room navigation, while this surface keeps conversation work
+   and live room state close together. */
+.space-page.verevon-space {
+  padding: 0;
+  background: var(--verevon-surface);
+}
+
+.verevon-space-workroom {
+  width: 100%;
+  min-height: 0;
+  height: 100%;
+  grid-template-columns: minmax(0, 1fr) minmax(238px, 294px);
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.verevon-space-pulse,
+.verevon-space-canvas {
+  background: var(--verevon-surface);
+}
+
+.verevon-space-canvas {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  border: 0;
+}
+
+.verevon-space-pulse {
+  display: block;
+  grid-column: auto;
+  overflow: auto;
+  padding: 0;
+  border-left: 1px solid var(--verevon-border);
+}
+
+
+.verevon-space-header {
+  align-items: center;
+  min-height: 62px;
+  padding: 10px 20px;
+}
+
+.verevon-space-header__title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+}
+
+.verevon-space-header__title::before {
+  display: block;
+  width: 21px;
+  height: 21px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #f39a2d;
+  content: '';
+}
+
+.verevon-space-header .verevon-space-eyebrow { display: none; }
+
+.verevon-space-header h1 {
+  overflow: hidden;
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space-meta { margin: 0; font-size: 10px; }
+
+.verevon-space .verevon-space-cockpit {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.verevon-space .verevon-space-tabs {
+  min-height: 43px;
+  padding: 0 12px;
+}
+
+.verevon-space .verevon-space-tab { padding: 12px 10px 10px; font-size: 11px; }
+
+.verevon-space .verevon-space-panel {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.verevon-space-view { padding: 24px 26px; }
+
+.verevon-space-view--conversations {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+
+.verevon-space-view h2 { font-size: 19px; }
+
+.verevon-space-fresh-conversation {
+  display: grid;
+  width: min(100%, 440px);
+  min-height: min(42vh, 340px);
+  place-content: center;
+  justify-items: center;
+  margin: auto;
+  padding: 32px 24px;
+  text-align: center;
+}
+
+.verevon-space-fresh-conversation__mark {
+  display: grid;
+  position: relative;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  margin-bottom: 16px;
+  border: 1px solid rgb(255 255 255 / 62%);
+  border-radius: 50%;
+  background: #2c8cf4;
+  color: #fff;
+}
+
+.verevon-space-fresh-conversation__mark::before,
+.verevon-space-fresh-conversation__mark::after {
+  position: absolute;
+  top: 22px;
+  width: 5px;
+  height: 16px;
+  border-radius: 999px;
+  background: #fff;
+  content: '';
+}
+
+.verevon-space-fresh-conversation__mark::before {
+  left: 21px;
+  transform: rotate(18deg);
+}
+
+.verevon-space-fresh-conversation__mark::after {
+  right: 21px;
+  transform: rotate(-18deg);
+}
+
+.verevon-space-fresh-conversation .verevon-space-eyebrow {
+  margin: 0;
+  color: var(--verevon-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.11em;
+}
+
+.verevon-space-fresh-conversation h3 {
+  max-width: 360px;
+  margin: 9px 0 0;
+  color: var(--verevon-text);
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+}
+
+.verevon-space-fresh-conversation > p {
+  max-width: 340px;
+  margin: 10px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.verevon-space-fresh-conversation__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  margin-top: 20px;
+  border-radius: 9px;
+  background: #2c8cf4;
+  padding: 0 14px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+  transition: background-color 150ms ease, transform 150ms ease;
+}
+
+.verevon-space-fresh-conversation__action:hover {
+  background: #1479dd;
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.verevon-space-fresh-conversation__action:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 3px;
+}
+
+.verevon-space-conversation-list { gap: 4px; }
+
+.verevon-space-conversation-row {
+  border-color: transparent;
+  border-radius: 10px;
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-space-conversation-row:hover { border-color: transparent; background: color-mix(in srgb, var(--verevon-surface-soft) 82%, #e9eff2 18%); transform: none; }
+
+.verevon-space-conversation-row[data-active] {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--verevon-surface-soft) 76%, #e4efe9 24%);
+}
+
+.verevon-space-conversation-row a { padding: 12px; }
+
+/* The room's own composer (`SpaceRoomComposer.tsx`) — buzz's "the channel is
+   the workspace" plus Grok's teammate ergonomics. Replaces the earlier
+   composer-as-link-to-/chat; see docs/space-defenition.md, "Invocation
+   rule". */
+/* ── Space room timeline (buzz-style shared record) ──────────────────────── */
+
+.verevon-room-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.verevon-room-post {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 14px;
+  background: var(--verevon-surface);
+  padding: 14px 16px 10px;
+}
+
+.verevon-room-post[data-failed] {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--verevon-border));
+}
+
+.verevon-room-turn {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.verevon-room-turn__avatar {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  background: var(--verevon-surface-muted);
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.verevon-room-turn__avatar--agent {
+  background: var(--verevon-text);
+  color: var(--verevon-surface);
+}
+
+.verevon-room-turn__content {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.verevon-room-turn__header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.verevon-room-turn__author {
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  color: var(--verevon-text);
+}
+
+.verevon-room-turn__agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  background: var(--verevon-surface-muted);
+  padding: 1px 8px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.verevon-room-turn__plain {
+  margin: 0;
+  color: var(--verevon-text);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.verevon-room-turn__markdown .verevon-chat-markdown {
+  font-size: 14px;
+}
+
+.verevon-room-post__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--verevon-border);
+  padding-top: 8px;
+  color: var(--verevon-text-subtle);
+  font-size: 11px;
+}
+
+.verevon-room-post__meta time {
+  white-space: nowrap;
+}
+
+.verevon-room-post__reply {
+  margin-left: auto;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  padding: 2px 10px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.verevon-room-post__reply:hover {
+  background: var(--verevon-surface-muted);
+  color: var(--verevon-text);
+}
+
+.verevon-space-room-composer__reply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface-muted);
+  padding: 4px 12px;
+  width: fit-content;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-composer__reply button {
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  color: var(--verevon-text-subtle);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.verevon-space-room-composer__reply button:hover {
+  color: var(--verevon-text);
+}
+
+.verevon-room-intro {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px 4px;
+}
+
+.verevon-room-intro__mark {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 8px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 16px;
+  background: var(--verevon-surface-muted);
+  color: var(--verevon-text-muted);
+}
+
+.verevon-room-intro h3 {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.verevon-room-intro > p {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+}
+
+.verevon-room-intro__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.verevon-room-intro__action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  width: 220px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 14px;
+  background: var(--verevon-surface);
+  padding: 14px;
+  text-align: left;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.verevon-room-intro__action:hover {
+  border-color: var(--verevon-border-strong);
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-room-intro__action-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: var(--verevon-surface-muted);
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-agent__policy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-agent__policy li {
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface-muted);
+  padding: 2px 9px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.verevon-room-intro__action strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.verevon-room-intro__action small {
+  display: block;
+  margin-top: 2px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* ── In-room create-agent dialog (Grok-style) ────────────────────────────── */
+
+.verevon-space-create-agent {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 18, 20, 0.42);
+  padding: 20px;
+}
+
+.verevon-space-create-agent__dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(460px, 100%);
+  max-height: min(86vh, 720px);
+  overflow-y: auto;
+  border: 1px solid var(--verevon-border);
+  border-radius: 18px;
+  background: var(--verevon-surface);
+  padding: 18px 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24);
+}
+
+.verevon-space-create-agent__dialog header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.verevon-space-create-agent__dialog header h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+
+.verevon-space-create-agent__dialog header button {
+  border: none;
+  background: transparent;
+  padding: 4px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-create-agent__preview {
+  display: grid;
+  place-items: center;
+}
+
+.verevon-space-create-agent__avatar {
+  display: grid;
+  place-items: center;
+  width: 68px;
+  height: 68px;
+  border-radius: 999px;
+  color: #fff;
+}
+
+.verevon-space-create-agent__colors {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.verevon-space-create-agent__color {
+  width: 22px;
+  height: 22px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  padding: 0;
+}
+
+.verevon-space-create-agent__color--selected {
+  border-color: var(--verevon-text);
+  box-shadow: 0 0 0 2px var(--verevon-surface);
+}
+
+.verevon-space-create-agent__field {
+  display: grid;
+  gap: 5px;
+}
+
+.verevon-space-create-agent__field span {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.verevon-space-create-agent__field input,
+.verevon-space-create-agent__field textarea {
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface);
+  padding: 9px 12px;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.verevon-space-create-agent__field textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.verevon-space-create-agent__templates p {
+  margin: 0 0 6px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.verevon-space-create-agent__templates > div {
+  display: flex;
+  gap: 8px;
+}
+
+.verevon-space-create-agent__templates > div button {
+  flex: 1;
+  display: grid;
+  gap: 3px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 10px;
+  text-align: left;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.verevon-space-create-agent__templates > div button:hover {
+  border-color: var(--verevon-border-strong);
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-space-create-agent__templates strong {
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.verevon-space-create-agent__templates small {
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.verevon-space-create-agent__dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.verevon-space-create-agent__note {
+  margin: 0;
+  color: var(--verevon-text-subtle);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.verevon-space-create-agent__submit {
+  flex: 0 0 auto;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 999px;
+  background: var(--verevon-text);
+  padding: 8px 18px;
+  color: var(--verevon-surface);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.verevon-space-create-agent__submit:disabled {
+  opacity: 0.5;
+}
+
+.verevon-space-room-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.verevon-space-room-exchange {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 12px 14px;
+}
+
+.verevon-space-room-exchange__user {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+}
+
+.verevon-space-room-exchange__speaker {
+  margin-right: 6px;
+  color: var(--verevon-text-subtle);
+  font-weight: 650;
+}
+
+.verevon-space-room-exchange__assistant .verevon-chat-markdown {
+  font-size: 14px;
+}
+
+.verevon-space-room-composer form {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.verevon-space-room-composer textarea {
+  resize: vertical;
+  border: 1px solid var(--verevon-border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--verevon-surface) 92%, #f7f8fa 8%);
+  padding: 12px 14px;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.verevon-space-room-composer textarea:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+.verevon-space-room-composer button[type="submit"] {
+  align-self: flex-end;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 999px;
+  background: var(--verevon-text);
+  padding: 7px 18px;
+  color: var(--verevon-surface);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.verevon-space-room-composer button[type="submit"]:disabled {
+  opacity: 0.5;
+}
+
+.verevon-space-room-composer__hint {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-mentions {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 6px;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 10px;
+  background: var(--verevon-surface);
+  padding: 4px;
+  list-style: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.verevon-space-room-mentions button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  padding: 6px 10px;
+  color: var(--verevon-text);
+  font-size: 13px;
+  text-align: left;
+}
+
+.verevon-space-room-mentions button:hover {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-space-room-mentions__kind {
+  color: var(--verevon-text-subtle);
+}
+
+.verevon-space-composer-link > svg { margin-left: auto; color: var(--verevon-text-muted); }
+
+.verevon-space-pulse__heading {
+  align-items: center;
+  min-height: 62px;
+  padding: 0 17px;
+  border-bottom: 1px solid var(--verevon-border);
+}
+
+.verevon-space-pulse__heading .verevon-space-eyebrow { display: none; }
+.verevon-space-pulse h2 { margin: 0; font-size: 14px; }
+.verevon-space-pulse__signal { margin: 0; }
+.verevon-space-pulse-card { margin: 16px 14px 0; }
+.verevon-space-pulse-stats { margin: 14px; }
+.verevon-space-pulse__note { margin: 0 14px 16px; }
+
+.dark .space-page.verevon-space,
+.dark .verevon-space-canvas,
+.dark .verevon-space-pulse { background: var(--verevon-dark-surface); }
+
+.dark .verevon-space-pulse,
+.dark .verevon-space-canvas,
+.dark .verevon-space-header,
+.dark .verevon-space-pulse__heading { border-color: rgb(255 255 255 / 10%); }
+
+.dark .verevon-space-conversation-row,
+.dark .verevon-space-composer-link { background: var(--verevon-dark-surface-soft); }
+
+.dark .verevon-space-fresh-conversation__mark {
+  border-color: rgb(255 255 255 / 20%);
+  background: #2d83db;
+}
+
+@media (max-width: 1080px) {
+  .verevon-space-workroom { grid-template-columns: minmax(0, 1fr) minmax(220px, 260px); }
+  .verevon-space-pulse {
+    display: block;
+    grid-column: auto;
+    border-top: 0;
+    border-left: 1px solid var(--verevon-border);
+  }
+}
+
+@media (max-width: 720px) {
+  .verevon-space-workroom { display: block; height: auto; min-height: 100%; }
+  .verevon-space-canvas { min-height: 680px; }
+  .verevon-space-pulse { display: grid; grid-template-columns: minmax(0, 1fr); border-top: 1px solid var(--verevon-border); border-left: 0; }
+  .verevon-space-pulse-card,
+  .verevon-space-pulse-stats,
+  .verevon-space-pulse__note { margin: 0 16px 14px; }
+  .verevon-space-view { padding: 22px 16px; }
+  .verevon-space-view__heading { gap: 12px; }
+  .verevon-space-fresh-conversation { min-height: 260px; padding: 24px 16px; }
 }

@@ -233,6 +233,7 @@ async fn append_user_message(
             role: "user".to_owned(),
             content: goal.to_owned(),
             metadata: None,
+            agent_name: String::new(),
             space_id: space.space_id,
             space_decision_ref: space.space_decision_ref,
             recipient_audience_ref: space.recipient_audience_ref,
@@ -825,15 +826,46 @@ pub(crate) async fn terminalize_direct_inference_run_with_token(
     terminalize_direct_inference_run_with_bearer(state, run, terminal, Some(bearer)).await
 }
 
+/// Why a prepared agent run is being closed without ever having run.
+///
+/// Both variants share the `GatewayAgentDispatchRejected` source — the
+/// gateway's dispatch is the producer that failed either way — and differ only
+/// in the durable failure code, so an operator reading a receipt can tell a
+/// refused request from an unreachable runner. Deliberately a type rather than
+/// a `&str`: the receipt vocabulary (`dispatch_*`) is NOT the client-facing SSE
+/// vocabulary (`agent_dispatch_*`), and passing one where the other belongs
+/// would be silently rejected by Session Core's allowlist at runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentDispatchFailure {
+    /// Execution Core answered with a deterministic refusal, so retrying the
+    /// same request reproduces it.
+    Rejected,
+    /// The request never left the gateway because the connect phase failed, so
+    /// nothing ran and a fresh attempt may succeed.
+    Unreachable,
+}
+
+impl AgentDispatchFailure {
+    /// The allowlisted `failure_code` persisted on the terminal receipt. Must
+    /// stay within `terminalization::ALLOWED_FAILURE_CODES` in Session Core and
+    /// the matching CHECK on `managed_run_terminalization_outbox`.
+    fn failure_code(self) -> &'static str {
+        match self {
+            Self::Rejected => "dispatch_rejected",
+            Self::Unreachable => "dispatch_unreachable",
+        }
+    }
+}
+
 /// Terminalize an agentic run only when Gateway has confirmed execution never
-/// accepted it (for example, a pre-dispatch authentication or request-shape
-/// rejection). Runtime/transport ambiguity must use the observable degraded
-/// dispatch path instead: Gateway must never impersonate agent completion or
-/// override an approval pause.
+/// accepted it — either a pre-dispatch rejection (authentication or
+/// request-shape) or a dispatch that never left this process. Runtime/transport
+/// ambiguity must use the observable degraded dispatch path instead: Gateway
+/// must never impersonate agent completion or override an approval pause.
 pub async fn terminalize_agent_dispatch_rejection_authenticated(
     state: &AppState,
     run: &SessionRun,
-    _failure_code: &'static str,
+    failure: AgentDispatchFailure,
     _delegated_user_bearer: &VerifiedSessionBearer,
 ) -> Result<()> {
     record_gateway_managed_terminal_outcome(
@@ -842,7 +874,7 @@ pub async fn terminalize_agent_dispatch_rejection_authenticated(
         &run.org_id,
         ManagedRunSource::GatewayAgentDispatchRejected,
         TerminalOutcome::Failed,
-        "dispatch_rejected",
+        failure.failure_code(),
     )
     .await
 }
@@ -948,7 +980,7 @@ pub async fn append_assistant_message(
     thread_id: &str,
     content: &str,
 ) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, None).await
+    append_assistant_message_with_bearer(state, thread_id, content, None, None).await
 }
 
 /// Persist an assistant message with an independently verified Session Core
@@ -962,8 +994,16 @@ pub async fn append_assistant_message_authenticated(
     thread_id: &str,
     content: &str,
     bearer: &VerifiedSessionBearer,
+    agent_name: Option<&str>,
 ) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer.as_str())).await
+    append_assistant_message_with_bearer(
+        state,
+        thread_id,
+        content,
+        Some(bearer.as_str()),
+        agent_name,
+    )
+    .await
 }
 
 /// Crate-internal adapter for an ingress boundary that has already verified a
@@ -974,7 +1014,7 @@ pub(crate) async fn append_assistant_message_with_token(
     content: &str,
     bearer: &str,
 ) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer)).await
+    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer), None).await
 }
 
 async fn append_assistant_message_with_bearer(
@@ -982,6 +1022,9 @@ async fn append_assistant_message_with_bearer(
     thread_id: &str,
     content: &str,
     bearer: Option<&str>,
+    // The persona this turn answered as, recorded on the message for the
+    // room's per-turn attribution. Identity history, never authority.
+    agent_name: Option<&str>,
 ) -> Result<()> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -996,6 +1039,7 @@ async fn append_assistant_message_with_bearer(
                 role: "assistant".to_owned(),
                 content: trimmed.to_owned(),
                 metadata: None,
+                agent_name: agent_name.unwrap_or_default().trim().to_owned(),
                 ..Default::default()
             },
             bearer,

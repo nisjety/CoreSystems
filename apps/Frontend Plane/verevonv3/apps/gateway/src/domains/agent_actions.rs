@@ -40,17 +40,17 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/skills", get(list_skills).post(create_skill))
         .route(
-            "/api/v1/skills/:skill_id",
+            "/api/v1/skills/{skill_id}",
             post(update_skill).delete(delete_skill),
         )
         .route("/api/v1/plugins", get(list_plugins).post(create_plugin))
         .route(
-            "/api/v1/plugins/:plugin_id",
+            "/api/v1/plugins/{plugin_id}",
             post(update_plugin).delete(delete_plugin),
         )
         .route("/api/v1/cron", get(list_cron).post(create_cron))
         .route(
-            "/api/v1/cron/:cron_id",
+            "/api/v1/cron/{cron_id}",
             post(update_cron).delete(delete_cron),
         )
         .route("/api/v1/capabilities", get(list_capabilities))

@@ -16,9 +16,26 @@ import (
 )
 
 type Handler struct {
-	cfg           *config.Config
-	service       *conversation.Service
-	supportPolicy SupportPolicyReader
+	cfg                         *config.Config
+	service                     *conversation.Service
+	supportPolicy               SupportPolicyReader
+	runActionDecisionVerifier   *RunActionDecisionVerifier
+	runActionAuthorityValidator RunActionAuthorityValidator
+	// ownerEffectReservationCoordinator is deliberately unset until the
+	// owner-effect-reservation-v1 pending/reserve/commit/finalize flow is wired
+	// end-to-end. Its absence makes the private Model effect route unavailable
+	// rather than falling back to a stale Control read before owner commit.
+	ownerEffectReservationCoordinator OwnerEffectReservationCoordinator
+	ownerGrantDecisionVerifier        *OwnerGrantDecisionVerifier
+}
+
+// OwnerEffectReservationCoordinator is intentionally narrow: it is the only
+// admission point for the completed owner-effect-reservation-v1 protocol. A
+// coordinator must not expose a generic cross-plane effect API.
+type OwnerEffectReservationCoordinator interface {
+	Ready() bool
+	Reserve(context.Context, string, ownerEffectReservationCommitment) (ownerEffectReservationReceipt, error)
+	Commit(context.Context, string, string, ownerEffectReservationCommitment) (ownerEffectReservationReceipt, error)
 }
 
 // SupportPolicyReader is a narrow Control Plane read used only where a
@@ -27,12 +44,53 @@ type SupportPolicyReader interface {
 	SupportPolicy(ctx context.Context, orgID, role string) (clients.SupportPolicy, error)
 }
 
+// RunActionAuthorityValidator re-resolves the Control-owned authorization
+// facts before reservation and immediately before an owner-plane effect.
+// Signature verification tells us a decision was issued by Control; these
+// checks fence decisions that became stale because membership, recipient
+// audience, privacy, or entitlement state changed while the workload was in
+// flight. Control's committed reservation remains the cross-plane ordering
+// receipt; the final read is an additional fail-closed fence, not a claim of
+// distributed transactionality.
+type RunActionAuthorityValidator interface {
+	ValidateRunActionAuthority(ctx context.Context, decision runActionDecision) error
+}
+
 func NewHandler(cfg *config.Config, service *conversation.Service) *Handler {
 	return &Handler{cfg: cfg, service: service}
 }
 
 func (h *Handler) SetSupportPolicyReader(reader SupportPolicyReader) {
 	h.supportPolicy = reader
+}
+
+// SetRunActionDecisionVerifier enables the private execution-core action
+// route. Leaving it nil is intentional: the route then fails closed while the
+// public human API remains available.
+func (h *Handler) SetRunActionDecisionVerifier(verifier *RunActionDecisionVerifier) {
+	h.runActionDecisionVerifier = verifier
+}
+
+// SetRunActionAuthorityValidator completes the private action's current
+// Control reauthorization path. A nil validator intentionally leaves the
+// private route unavailable rather than accepting an otherwise valid but stale
+// signed decision.
+func (h *Handler) SetRunActionAuthorityValidator(validator RunActionAuthorityValidator) {
+	h.runActionAuthorityValidator = validator
+}
+
+// SetOwnerEffectReservationCoordinator enables the private Model owner-action
+// route only when its complete Control reserve/commit client is available.
+// No generic setter exists for individual effect calls; this narrow protocol
+// is the sole cross-plane admission contract.
+func (h *Handler) SetOwnerEffectReservationCoordinator(coordinator OwnerEffectReservationCoordinator) {
+	h.ownerEffectReservationCoordinator = coordinator
+}
+
+// SetOwnerGrantDecisionVerifier enables the separately signed human owner
+// grant lifecycle. It does not enable the private execution-core effect lane.
+func (h *Handler) SetOwnerGrantDecisionVerifier(verifier *OwnerGrantDecisionVerifier) {
+	h.ownerGrantDecisionVerifier = verifier
 }
 
 type addMessageBody struct {
@@ -1809,6 +1867,11 @@ func mapValue(value *map[string]any) map[string]any {
 
 func writeServiceError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, conversation.ErrForbidden):
+		// Owner-resource authorization failures are expected policy outcomes.
+		// Keeping them distinct from internal failures prevents callers from
+		// retrying a denied effect as though the durable outcome were unknown.
+		c.JSON(http.StatusForbidden, errorPayload("forbidden", "You are not authorized to perform this operation."))
 	case errors.Is(err, conversation.ErrPolicyUnavailable):
 		c.JSON(http.StatusServiceUnavailable, errorPayload("support_ai_policy_unavailable", "AI proposals are unavailable until the organization policy can be verified."))
 	case errors.Is(err, conversation.ErrZDRAIProposalForbidden):

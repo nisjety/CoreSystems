@@ -1,7 +1,7 @@
 import { v } from "convex/values";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { assertServiceKey, requireViewerMembership } from "./authz";
+import { assertServiceKey, requireGatewayMember, requireViewerMembership } from "./authz";
 import {
   acknowledgeSpaceLifecycleDelivery,
   canClaimSpaceLifecycleDelivery,
@@ -207,25 +207,6 @@ export const ensurePersonalSpace = mutation({
  * them is a separate change), but a new copy of an authorization check is not
  * something to add.
  */
-async function requireGatewayMember(ctx: any, externalAuthId: string, externalOrgId: string) {
-  const organizations = await ctx.db
-    .query("organizations")
-    .withIndex("by_external_id", (q: any) => q.eq("externalOrgId", externalOrgId))
-    .collect();
-  const organization = organizations.find((candidate: any) => candidate.syncStatus !== "deleted");
-  if (!organization) throw new Error("Organization not found");
-  const members = await ctx.db
-    .query("users")
-    .withIndex("by_external_and_org", (q: any) =>
-      q.eq("externalAuthId", externalAuthId).eq("orgId", organization._id),
-    )
-    .collect();
-  if (!members.some((candidate: any) => candidate.syncStatus !== "deleted")) {
-    throw new Error("Unauthorized");
-  }
-  return organization;
-}
-
 /**
  * Service-key counterpart of `ensurePersonalSpace`, so the BFF can provision a
  * caller's own personal Space. Convex identity is unavailable on that path —
@@ -283,6 +264,137 @@ export const ensurePersonalSpaceForGateway = mutation({
     if (!space) throw new Error("Space creation failed");
     const event = await appendLifecycleEvent(ctx, space, now);
     return { ...space, lifecycleEvent: event };
+  },
+});
+
+/**
+ * The one durable organization room, provisioned idempotently.
+ *
+ * Product rule (VEREVON_UI_COWORK_RESEARCH §"Organization and team Space
+ * model"): registering an organization creates exactly one `room` Space that
+ * every active organization user belongs to. Team, project and external Spaces
+ * are created separately and are visible only to their explicit participants.
+ *
+ * Idempotency is keyed on the `isOrganizationRoom` marker, NOT on
+ * `(externalOrgId, kind)`. Team rooms share the `room` kind, so a kind-based
+ * key would return the first team room as though it were the organization room
+ * — a wrong answer that reads as a successful reuse. Two organization rooms
+ * throw here rather than picking one, matching how the personal-Space
+ * invariant is enforced.
+ *
+ * Like a personal Space this is created `pending_registration` and becomes
+ * usable only once Control acknowledges the registration; the existing
+ * Application -> Control worker carries it.
+ *
+ * # What this deliberately does NOT do
+ *
+ * It does not add the organization's members. Control owns memberships (see
+ * ADR-0001), its `Register` seeds only the owner, and it exposes no
+ * membership-write route today — so a roster has to arrive through a Control
+ * contract, not by this plane asserting one. Until then the room exists and
+ * resolves for its registrar alone, which is the truthful subset rather than a
+ * simulated roster.
+ */
+export const ensureOrganizationRoomForGateway = mutation({
+  args: {
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+    name: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const rooms = await ctx.db
+      .query("spaces")
+      .withIndex("by_external_org", (q: any) => q.eq("externalOrgId", args.externalOrgId))
+      .collect();
+    const existing = rooms.filter(
+      (space: any) => space.kind === "room" && space.isOrganizationRoom === true,
+    );
+    if (existing.length > 1) throw new Error("organization room invariant violated");
+    if (existing[0]) return existing[0];
+
+    const now = Date.now();
+    const recordId = await ctx.db.insert("spaces", {
+      spaceRef: "pending",
+      externalOrgId: args.externalOrgId,
+      kind: "room",
+      isOrganizationRoom: true,
+      name: args.name?.trim() || String(organization.name ?? "").trim() || "Organization",
+      // The registrar owns it for Control's purposes — Register requires an
+      // owner principal with an active membership. That is a registration
+      // fact, not a claim that this room is personal to them.
+      ownerExternalAuthId: args.externalAuthId,
+      createdByExternalAuthId: args.externalAuthId,
+      lifecycle: "pending_registration",
+      lifecycleRevision: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const spaceRef = String(recordId);
+    await ctx.db.patch(recordId, { spaceRef });
+    const space = await ctx.db.get(recordId);
+    if (!space) throw new Error("organization room creation failed");
+    const event = await appendLifecycleEvent(ctx, space, now);
+    return { ...space, lifecycleEvent: event };
+  },
+});
+
+/**
+ * Display facts for every Space in an organization: name, kind, lifecycle.
+ *
+ * This is a LABEL source, not an access decision. Control owns memberships and
+ * decides which Spaces a caller may see; the gateway intersects that
+ * authoritative list with this one, so a Space present here but absent from
+ * Control's index is never shown. Returning the organization's Spaces rather
+ * than a caller-filtered set is therefore safe and keeps the two
+ * responsibilities from blurring — the moment this query started filtering by
+ * membership, it would become a second, lagging authority.
+ *
+ * The caller must still be a live member of the organization, so this is not an
+ * org-wide enumeration endpoint for an outsider.
+ */
+export const spacesForOrgForGateway = query({
+  args: {
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const spaces = await ctx.db
+      .query("spaces")
+      .withIndex("by_external_org", (q: any) => q.eq("externalOrgId", args.externalOrgId))
+      .collect();
+    return spaces.map((space: any) => ({
+      spaceRef: space.spaceRef,
+      name: space.name,
+      kind: space.kind,
+      lifecycle: space.lifecycle,
+      isOrganizationRoom: space.isOrganizationRoom === true,
+    }));
+  },
+});
+
+/** Every organization room Control has registered active, for the re-sync pass. */
+export const listActiveOrganizationRooms = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const spaces = await ctx.db.query("spaces").collect();
+    return spaces
+      .filter(
+        (space: any) =>
+          space.isOrganizationRoom === true &&
+          space.kind === "room" &&
+          space.lifecycle === "active",
+      )
+      .map((space: any) => ({
+        spaceRef: space.spaceRef,
+        externalOrgId: space.externalOrgId,
+      }));
   },
 });
 
@@ -1262,6 +1374,15 @@ export const acknowledgeRegistrationClaim = internalMutation({
       const updated = await ctx.db.get(space._id);
       if (!updated) throw new Error("Space activation update failed");
       await appendLifecycleEvent(ctx, updated, args.now);
+      // Only now is the room usable: Control refuses a membership write to a
+      // Space it has not registered active, so scheduling the roster sync any
+      // earlier would guarantee a rejection.
+      if ((updated as any).isOrganizationRoom === true) {
+        await ctx.scheduler.runAfter(0, internal.spaceMembershipSync.syncOrganizationRoom, {
+          spaceRef: updated.spaceRef,
+          externalOrgId: updated.externalOrgId,
+        });
+      }
     }
     return delivery;
   },
@@ -1308,5 +1429,67 @@ export const rejectRegistrationClaim = internalMutation({
       await appendLifecycleEvent(ctx, updated, args.now, "rejected");
     }
     return { status: "rejected" as const };
+  },
+});
+
+const MAX_SPACE_INSTRUCTIONS_LENGTH = 4000;
+
+/**
+ * ADR-0003 -- the Space layer of the authored-instruction hierarchy. Read by
+ * model-gateway (via the BFF) on every turn in this Space, composed with the
+ * platform and org layers. `null` (no Space, wrong org, or nothing authored)
+ * produces no system-message segment downstream.
+ */
+export const instructionsForGateway = query({
+  args: {
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const space = await getSpaceByRef(ctx, args.spaceRef);
+    if (!space || space.externalOrgId !== args.externalOrgId) return null;
+    return { instructions: space.instructions ?? null };
+  },
+});
+
+/**
+ * ADR-0003 -- Space owner/manager/editor authoring write. The gateway
+ * verifies the caller holds one of those Space roles (Control's live
+ * membership, `editor`/`manager`/`owner`) before calling this; this mutation
+ * only re-verifies org membership (`requireGatewayMember`), the same trust
+ * split every other `*ForGateway` mutation in this file uses -- the
+ * Space-role decision itself is not re-derived here (Space roles are not a
+ * Convex-tracked concept; see `spaceAgents.ts`'s identical convention).
+ */
+export const setInstructionsForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    instructions: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const space = await getSpaceByRef(ctx, args.spaceRef);
+    if (!space || space.externalOrgId !== args.externalOrgId) {
+      throw new Error("Space not found");
+    }
+
+    const instructions = args.instructions?.trim() || undefined;
+    if ((instructions?.length ?? 0) > MAX_SPACE_INSTRUCTIONS_LENGTH) {
+      throw new Error(`Space instructions must be ${MAX_SPACE_INSTRUCTIONS_LENGTH} characters or fewer`);
+    }
+
+    await ctx.db.patch(space._id, {
+      instructions,
+      updatedAt: Date.now(),
+      updatedByExternalAuthId: args.externalAuthId,
+    });
+
+    return { instructions: instructions ?? null };
   },
 });

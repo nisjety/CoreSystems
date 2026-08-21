@@ -141,21 +141,7 @@ export const sidebarSections: SidebarSection[] = [
     href: '/spaces',
     icon: Users,
     description: 'Delt rom for samtaler, arbeid, kunnskap og medlemmer.',
-    panelGroups: [
-      {
-        id: 'spaces-core',
-        label: 'Rom',
-        items: [
-          {
-            id: 'spaces-open',
-            label: 'Åpne rommet',
-            href: '/spaces',
-            icon: Users,
-            description: 'Samtaler, arbeid, kunnskap, aktivitet, agent og medlemmer.',
-          },
-        ],
-      },
-    ],
+    panelGroups: [],
   },
   {
     id: 'messages',

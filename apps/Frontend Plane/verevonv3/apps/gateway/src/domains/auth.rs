@@ -18,13 +18,13 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         // Better Auth sends provider round-trips to these public paths. They
         // stay on the Verevon origin and are forwarded by a bounded, opaque
         // callback proxy; session middleware must not intercept them.
-        .route("/api/auth/callback/:provider", get(public::oauth_callback))
+        .route("/api/auth/callback/{provider}", get(public::oauth_callback))
         .route(
-            "/api/auth/sso/callback/:provider",
+            "/api/auth/sso/callback/{provider}",
             get(public::sso_oidc_callback),
         )
         .route(
-            "/api/auth/sso/saml2/callback/:provider",
+            "/api/auth/sso/saml2/callback/{provider}",
             get(public::sso_saml_callback_get).post(public::sso_saml_callback_post),
         )
         .route("/api/v1/auth/sign-up", post(public::sign_up))
@@ -65,7 +65,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(public::send_password_reset),
         )
         .route("/api/v1/auth/password/reset", post(public::reset_password))
-        .route("/api/v1/auth/oauth/:provider", get(public::oauth_initiate))
+        .route("/api/v1/auth/oauth/{provider}", get(public::oauth_initiate))
         .route("/api/v1/auth/sso/initiate", get(public::sso_initiate));
 
     // Protected routes: session cookie must be valid.

@@ -88,6 +88,12 @@ func main() {
 
 	// ── Wiring ──────────────────────────────────────────────────────────
 	repository := notification.NewRepository(db.Pool)
+	var deliveryVerifier *notification.DeliveryCallbackVerifier
+	if cfg.DeliveryCallbackSecret != "" {
+		deliveryVerifier = notification.NewDeliveryCallbackVerifier(
+			[]byte(cfg.DeliveryCallbackSecret), repository, time.Now,
+		)
+	}
 	publisher := eventing.NewPublisher(natsClient.JS)
 	runtime, err := runtimeclient.NewNovuAdapter(runtimeclient.Config{
 		Mode:      cfg.DeliveryMode,
@@ -115,67 +121,74 @@ func main() {
 	// into the local feed cache so the /notifications endpoints serve the
 	// same payload that Novu would (we keep our own read/seen/archived
 	// semantics). Best-effort — failures log but don't fail the dispatch.
-	notificationService := notification.NewService(
-		repository,
-		runtime,
-		publisher,
+	recipientResolver := notification.RecipientResolveFn(func(
+		ctx context.Context,
+		organizationID string,
+		recipient notification.Recipient,
+	) (*notification.ResolvedRecipient, error) {
+		if recipient.Kind != notification.RecipientKindUser {
+			return nil, notification.ErrRecipientNotAuthorized
+		}
+		providerSubscriberID, err := subSvc.ResolveUser(ctx, organizationID, recipient.ID)
+		if errors.Is(err, subscribers.ErrNotFound) {
+			return nil, notification.ErrRecipientNotAuthorized
+		}
+		if err != nil {
+			return nil, err
+		}
+		return &notification.ResolvedRecipient{
+			Kind:                 notification.RecipientKindUser,
+			ID:                   recipient.ID,
+			ProviderSubscriberID: providerSubscriberID,
+		}, nil
+	})
+	projectFeed := notification.FeedProjector(func(ctx context.Context, params notification.FeedSinkParams) error {
+		_, err := feedSvc.Create(ctx, feed.CreateParams{
+			ID:                    params.RequestID,
+			OrganizationID:        params.OrganizationID,
+			RecipientID:           params.RecipientID,
+			EventType:             params.Type,
+			Channel:               feed.ChannelInApp, // V0: every dispatch creates an in-app row
+			Title:                 params.Title,
+			Body:                  params.Body,
+			CtaLabel:              params.CtaLabel,
+			CtaHref:               params.CtaHref,
+			Payload:               params.Payload,
+			ActorID:               params.ActorID,
+			ActorName:             params.ActorName,
+			ActorEmail:            params.ActorEmail,
+			ActorAvatar:           params.ActorAvatar,
+			Provider:              params.Provider,
+			ProviderTransactionID: params.ProviderTransactionID,
+			Source:                params.Source,
+			DeliveryStatus:        params.DeliveryStatus,
+			SubmittedAt:           params.SubmittedAt,
+			DeliveredAt:           params.DeliveredAt,
+		})
+		return err
+	})
+	notificationOptions := []notification.Option{
 		notification.WithFeedSink(func(ctx context.Context, params notification.FeedSinkParams) {
-			_, err := feedSvc.Create(ctx, feed.CreateParams{
-				ID:                    params.RequestID,
-				OrganizationID:        params.OrganizationID,
-				RecipientID:           params.RecipientID,
-				EventType:             params.Type,
-				Channel:               feed.ChannelInApp, // V0: every dispatch creates an in-app row
-				Title:                 params.Title,
-				Body:                  params.Body,
-				CtaLabel:              params.CtaLabel,
-				CtaHref:               params.CtaHref,
-				Payload:               params.Payload,
-				ActorID:               params.ActorID,
-				ActorName:             params.ActorName,
-				ActorEmail:            params.ActorEmail,
-				ActorAvatar:           params.ActorAvatar,
-				Provider:              params.Provider,
-				ProviderTransactionID: params.ProviderTransactionID,
-				Source:                params.Source,
-				DeliveryStatus:        params.DeliveryStatus,
-				SubmittedAt:           params.SubmittedAt,
-				DeliveredAt:           params.DeliveredAt,
-			})
-			if err != nil {
+			if err := projectFeed(ctx, params); err != nil {
 				log.Printf("notification-core: feed sink write failed for %s: %v", params.RequestID, err)
 			}
 		}),
-		notification.WithRecipientResolver(notification.RecipientResolveFn(func(
-			ctx context.Context,
-			organizationID string,
-			recipient notification.Recipient,
-		) (*notification.ResolvedRecipient, error) {
-			if recipient.Kind != notification.RecipientKindUser {
-				return nil, notification.ErrRecipientNotAuthorized
-			}
-			providerSubscriberID, err := subSvc.ResolveUser(ctx, organizationID, recipient.ID)
-			if errors.Is(err, subscribers.ErrNotFound) {
-				return nil, notification.ErrRecipientNotAuthorized
-			}
-			if err != nil {
-				return nil, err
-			}
-			return &notification.ResolvedRecipient{
-				Kind:                 notification.RecipientKindUser,
-				ID:                   recipient.ID,
-				ProviderSubscriberID: providerSubscriberID,
-			}, nil
-		})),
+		notification.WithRecipientResolver(recipientResolver),
 		notification.WithPreferenceGate(prefSvc),
-	)
+	}
+	if cfg.DeliveryWorkerEnabled {
+		notificationOptions = append(notificationOptions, notification.WithDeliveryQueue(repository))
+	}
+	notificationService := notification.NewService(repository, runtime, publisher, notificationOptions...)
 
 	handler := httpserver.NewHandler(cfg, httpserver.HandlerDeps{
-		Notifications: notificationService,
-		Feed:          feedSvc,
-		Preferences:   prefSvc,
-		Channels:      channelsSvc,
-		Recipients:    subSvc,
+		Notifications:      notificationService,
+		DeliveryVerifier:   deliveryVerifier,
+		DeliveryReconciler: repository,
+		Feed:               feedSvc,
+		Preferences:        prefSvc,
+		Channels:           channelsSvc,
+		Recipients:         subSvc,
 	})
 	delegationVerifier, err := delegation.NewVerifier(delegation.Config{
 		Audience: "notification-core",
@@ -189,6 +202,27 @@ func main() {
 	// subscription handler may call notificationService for as long as this
 	// process accepts events.
 	consumerCtx, consumerCancel := context.WithCancel(context.Background())
+	if cfg.DeliveryWorkerEnabled {
+		workerID := cfg.ServiceName + "-delivery"
+		if hostname, hostnameErr := os.Hostname(); hostnameErr == nil && hostname != "" {
+			workerID += "-" + hostname
+		}
+		deliveryWorker := notification.NewDeliveryWorker(
+			repository,
+			repository,
+			runtime,
+			recipientResolver,
+			notification.WithDeliveryWorkerLease(cfg.DeliveryWorkerLease),
+		)
+		go runDeliveryWorker(consumerCtx, deliveryWorker, workerID, cfg.DeliveryWorkerPollInterval)
+		feedProjectionWorker := notification.NewFeedProjectionWorker(
+			repository,
+			repository,
+			projectFeed,
+			notification.WithFeedProjectionWorkerLease(cfg.DeliveryWorkerLease),
+		)
+		go runFeedProjectionWorker(consumerCtx, feedProjectionWorker, workerID+"-feed", cfg.DeliveryWorkerPollInterval)
+	}
 
 	// ── Application-local and shared-bus consumers ───────────────────────
 	// ConversationFollowedMessageSubscriber is deliberately enabled on this
@@ -255,6 +289,44 @@ func main() {
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
+	}
+}
+
+func runDeliveryWorker(ctx context.Context, worker *notification.DeliveryWorker, workerID string, pollInterval time.Duration) {
+	if worker == nil || pollInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		if _, err := worker.RunOnce(ctx, workerID); err != nil {
+			log.Printf("notification-core: delivery worker run failed: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func runFeedProjectionWorker(ctx context.Context, worker *notification.FeedProjectionWorker, workerID string, pollInterval time.Duration) {
+	if pollInterval <= 0 {
+		pollInterval = 5 * time.Second
+	}
+	for {
+		processed, err := worker.RunOnce(ctx, workerID)
+		if err != nil {
+			log.Printf("notification-core: feed projection worker run failed: %v", err)
+		}
+		if processed {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(pollInterval):
+		}
 	}
 }
 

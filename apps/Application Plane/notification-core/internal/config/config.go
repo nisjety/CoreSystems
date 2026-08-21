@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -20,6 +21,16 @@ type Config struct {
 	NovuSecretKey  string // optional — activates real Novu delivery when set
 	NovuBaseURL    string // optional — override for EU region
 	DeliveryMode   string // "novu" or explicit fail-closed "disabled"
+	// DeliveryWorkerEnabled opts the durable provider-attempt worker into the
+	// server process. It is deliberately false by default; enabling it requires
+	// an explicit provider mode and callback verifier so an operator cannot
+	// accidentally turn a queue into an un-reconciled side effect path.
+	DeliveryWorkerEnabled      bool
+	DeliveryWorkerPollInterval time.Duration
+	DeliveryWorkerLease        time.Duration
+	// DeliveryCallbackSecret is intentionally separate from the provider API
+	// secret. An empty value keeps the callback route fail-closed in dev.
+	DeliveryCallbackSecret string
 
 	// SharedNATSURL/SharedNATSUser/SharedNATSPassword configure a SECOND,
 	// narrowly-scoped connection to the cross-plane control-shared-nats
@@ -40,21 +51,26 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		HTTPPort:           getEnvInt("PORT", 3140),
-		DatabaseURL:        strings.TrimSpace(getEnv("DATABASE_URL", "")),
-		NATSURL:            strings.TrimSpace(getEnv("VEREVON_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://verevon-nats:4222")))),
-		NATSUser:           strings.TrimSpace(getEnv("NATS_USER", "")),
-		NATSPassword:       strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
-		ServiceName:        getEnv("SERVICE_NAME", "notification-core"),
-		NovuSecretKey:      strings.TrimSpace(getEnv("NOVU_SECRET_KEY", "")),
-		NovuBaseURL:        strings.TrimSpace(getEnv("NOVU_BASE_URL", "")),
-		DeliveryMode:       strings.ToLower(strings.TrimSpace(getEnv("NOTIFICATION_DELIVERY_MODE", "disabled"))),
-		SharedNATSURL:      strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_URL", "")),
-		SharedNATSUser:     strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_USER", "")),
-		SharedNATSPassword: strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_PASSWORD", "")),
+		HTTPPort:                   getEnvInt("PORT", 3140),
+		DatabaseURL:                strings.TrimSpace(getEnv("DATABASE_URL", "")),
+		NATSURL:                    strings.TrimSpace(getEnv("VEREVON_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://verevon-nats:4222")))),
+		NATSUser:                   strings.TrimSpace(getEnv("NATS_USER", "")),
+		NATSPassword:               strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
+		ServiceName:                getEnv("SERVICE_NAME", "notification-core"),
+		NovuSecretKey:              strings.TrimSpace(getEnv("NOVU_SECRET_KEY", "")),
+		NovuBaseURL:                strings.TrimSpace(getEnv("NOVU_BASE_URL", "")),
+		DeliveryMode:               strings.ToLower(strings.TrimSpace(getEnv("NOTIFICATION_DELIVERY_MODE", "disabled"))),
+		DeliveryWorkerEnabled:      getEnvBool("NOTIFICATION_DELIVERY_WORKER_ENABLED", false),
+		DeliveryWorkerPollInterval: getEnvDuration("NOTIFICATION_DELIVERY_WORKER_POLL_INTERVAL", 5*time.Second),
+		DeliveryWorkerLease:        getEnvDuration("NOTIFICATION_DELIVERY_WORKER_LEASE", 30*time.Second),
+		DeliveryCallbackSecret:     strings.TrimSpace(getEnv("NOTIFICATION_DELIVERY_CALLBACK_SECRET", "")),
+		SharedNATSURL:              strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_URL", "")),
+		SharedNATSUser:             strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_USER", "")),
+		SharedNATSPassword:         strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_PASSWORD", "")),
 		DelegationKeys: map[string]string{
 			"verevon-gateway": strings.TrimSpace(getEnv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "")),
-			"support-worker": strings.TrimSpace(getEnv("NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN", "")),
+			"support-worker":  strings.TrimSpace(getEnv("NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN", "")),
+			"capability-core": strings.TrimSpace(getEnv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN", "")),
 		},
 	}
 
@@ -77,6 +93,17 @@ func Load() (*Config, error) {
 		}
 	default:
 		return nil, fmt.Errorf("NOTIFICATION_DELIVERY_MODE must be novu or disabled")
+	}
+	if cfg.DeliveryCallbackSecret != "" && !validDelegationSecret(cfg.DeliveryCallbackSecret) {
+		return nil, fmt.Errorf("NOTIFICATION_DELIVERY_CALLBACK_SECRET must be a non-placeholder secret of at least 32 bytes")
+	}
+	if cfg.DeliveryWorkerEnabled {
+		if cfg.DeliveryMode != "novu" {
+			return nil, fmt.Errorf("NOTIFICATION_DELIVERY_WORKER_ENABLED requires NOTIFICATION_DELIVERY_MODE=novu")
+		}
+		if cfg.DeliveryCallbackSecret == "" {
+			return nil, fmt.Errorf("NOTIFICATION_DELIVERY_WORKER_ENABLED requires NOTIFICATION_DELIVERY_CALLBACK_SECRET")
+		}
 	}
 
 	return cfg, nil
@@ -124,5 +151,29 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 
+	return parsed
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
 	return parsed
 }

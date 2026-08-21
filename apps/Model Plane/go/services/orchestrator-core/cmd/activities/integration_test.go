@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,39 @@ type fakeMemoryService struct {
 	indexErr error
 }
 
+type fakeSessionCore struct {
+	mpv1.UnimplementedSessionCoreServer
+
+	startScheduledRunResp *mpv1.StartRunResponse
+	startScheduledRunErr  error
+
+	startScheduledRunReq *mpv1.StartScheduledRunRequest
+}
+
+type fakeExecutionCore struct {
+	mpv1.UnimplementedExecutionCoreServer
+
+	executeScheduledStepResp *mpv1.ExecuteScheduledStepResponse
+	executeScheduledStepErr  error
+	executeScheduledStepReq  *mpv1.ExecuteScheduledStepRequest
+}
+
+func (f *fakeExecutionCore) ExecuteScheduledStep(
+	_ context.Context,
+	req *mpv1.ExecuteScheduledStepRequest,
+) (*mpv1.ExecuteScheduledStepResponse, error) {
+	f.executeScheduledStepReq = req
+	return f.executeScheduledStepResp, f.executeScheduledStepErr
+}
+
+func (f *fakeSessionCore) StartScheduledRun(
+	_ context.Context,
+	req *mpv1.StartScheduledRunRequest,
+) (*mpv1.StartRunResponse, error) {
+	f.startScheduledRunReq = req
+	return f.startScheduledRunResp, f.startScheduledRunErr
+}
+
 func (f *fakeMemoryService) SearchMemory(
 	_ context.Context,
 	_ *mpv1.SearchMemoryRequest,
@@ -118,6 +152,79 @@ func newMemoryServiceConn(t *testing.T, fake *fakeMemoryService) *grpc.ClientCon
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
+}
+
+func newSessionCoreConn(t *testing.T, fake *fakeSessionCore) *grpc.ClientConn {
+	t.Helper()
+	lis := bufconn.Listen(bufSize)
+	srv := grpc.NewServer()
+	mpv1.RegisterSessionCoreServer(srv, fake)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.GracefulStop)
+
+	conn, err := grpc.NewClient(
+		"passthrough://bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func newExecutionCoreConn(t *testing.T, fake *fakeExecutionCore) *grpc.ClientConn {
+	t.Helper()
+	lis := bufconn.Listen(bufSize)
+	srv := grpc.NewServer()
+	mpv1.RegisterExecutionCoreServer(srv, fake)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.GracefulStop)
+
+	conn, err := grpc.NewClient(
+		"passthrough://bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+type fakeScheduledRunExecutionAuthorizer struct {
+	token string
+	err   error
+
+	intent activities.ScheduledRunExecutionIntent
+	calls  int
+}
+
+type fakeScheduledStepDecisionAuthorizer struct {
+	token  string
+	err    error
+	intent activities.ScheduledStepExecutionIntent
+	calls  int
+}
+
+func (a *fakeScheduledStepDecisionAuthorizer) AuthorizeScheduledStep(
+	_ context.Context,
+	intent activities.ScheduledStepExecutionIntent,
+) (string, error) {
+	a.calls++
+	a.intent = intent
+	return a.token, a.err
+}
+
+func (a *fakeScheduledRunExecutionAuthorizer) AuthorizeScheduledRunExecution(
+	_ context.Context,
+	intent activities.ScheduledRunExecutionIntent,
+) (string, error) {
+	a.calls++
+	a.intent = intent
+	return a.token, a.err
 }
 
 func testLogger() *slog.Logger {
@@ -388,4 +495,226 @@ func TestSummarizeMemoryActivity(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, out.ConsolidatedEntries)
 	})
+}
+
+// ─── StartScheduledRunActivity ───────────────────────────────────────────────
+
+func TestStartScheduledRunActivity_ExecutesOnlyWithPreparedExecutionIntent(t *testing.T) {
+	authorizer := &fakeScheduledRunExecutionAuthorizer{token: "execution-token"}
+	fakeSession := &fakeSessionCore{startScheduledRunResp: &mpv1.StartRunResponse{
+		RunId:   "task-scheduled-1",
+		OwnerId: activities.SystemActorID,
+	}}
+	conn := newSessionCoreConn(t, fakeSession)
+	a := activities.NewActivities(testLogger(), &grpcclient.Clients{SessionCore: conn})
+	a.SetScheduledRunExecutionAuthorizer(authorizer)
+
+	meta, err := a.StartScheduledRunActivity(
+		context.Background(),
+		"task-scheduled-1",
+		"thread-scheduled-1",
+		"org-1",
+		"space-1",
+		"user-1",
+		"schedule-1",
+		"2026-08-14T00:00:00Z",
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"schedule-1:2026-08-14T00:00:00Z",
+		"Summarise the queue",
+		"execute",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, fakeSession.startScheduledRunReq)
+	assert.Equal(t, 1, authorizer.calls)
+	assert.Equal(t, "task-scheduled-1", fakeSession.startScheduledRunReq.GetRunId())
+	assert.Equal(t, "thread-scheduled-1", fakeSession.startScheduledRunReq.GetThreadId())
+	assert.Equal(t, "space-1", authorizer.intent.SpaceRef)
+	assert.Equal(t, "execution-token", fakeSession.startScheduledRunReq.GetControlExecutionDecisionToken())
+	assert.Equal(t, "task-scheduled-1", meta.RunID)
+	assert.Equal(t, "thread-scheduled-1", meta.ThreadID)
+	assert.Equal(t, "org-1", meta.OrgID)
+}
+
+func TestExecuteScheduledStepActivityForwardsExactIntentAndDecision(t *testing.T) {
+	fakeExecution := &fakeExecutionCore{
+		executeScheduledStepResp: &mpv1.ExecuteScheduledStepResponse{
+			Status:    "completed",
+			ReceiptId: "receipt-step-1",
+			Output:    "scheduled result",
+		},
+	}
+	authorizer := &fakeScheduledStepDecisionAuthorizer{token: "control-step-decision"}
+	conn := newExecutionCoreConn(t, fakeExecution)
+	a := activities.NewActivities(testLogger(), &grpcclient.Clients{ExecutionCore: conn})
+	a.SetScheduledStepDecisionAuthorizer(authorizer)
+	intent := activities.ScheduledStepExecutionIntent{
+		OrgID:          "org-1",
+		SpaceRef:       "space-1",
+		SubjectID:      "user-1",
+		RunID:          "run-1",
+		ThreadID:       "thread-1",
+		ScheduleID:     "schedule-1",
+		FireKey:        "fire-1",
+		TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		StepID:         "run-1:step:0",
+		StepIndex:      0,
+		PolicyDigest:   "sha256:" + strings.Repeat("b", 64),
+		IdempotencyKey: "fire-1:step:0",
+	}
+
+	step, err := a.ExecuteScheduledStepActivity(context.Background(), intent)
+	require.NoError(t, err)
+	require.NotNil(t, fakeExecution.executeScheduledStepReq)
+	assert.Equal(t, 1, authorizer.calls)
+	assert.Equal(t, intent, authorizer.intent)
+	assert.Equal(t, "control-step-decision", fakeExecution.executeScheduledStepReq.GetControlDecisionToken())
+	assert.Equal(t, "run-1", fakeExecution.executeScheduledStepReq.GetRunId())
+	assert.Equal(t, "space-1", fakeExecution.executeScheduledStepReq.GetSpaceId())
+	assert.Equal(t, "run-1:step:0", fakeExecution.executeScheduledStepReq.GetStepId())
+	assert.Equal(t, "fire-1:step:0", fakeExecution.executeScheduledStepReq.GetIdempotencyKey())
+	assert.Equal(t, "scheduled-step", step.ToolName)
+	assert.Equal(t, "scheduled result", step.Output)
+	assert.True(t, step.Completed)
+	assert.Equal(t, "receipt-step-1", step.Metadata["receipt_id"])
+}
+
+func TestExecuteScheduledStepActivityStopsOnUnknownOutcome(t *testing.T) {
+	fakeExecution := &fakeExecutionCore{
+		executeScheduledStepResp: &mpv1.ExecuteScheduledStepResponse{
+			Status:         "unknown_outcome",
+			ReceiptId:      "receipt-unknown-1",
+			UnknownOutcome: true,
+		},
+	}
+	authorizer := &fakeScheduledStepDecisionAuthorizer{token: "control-step-decision"}
+	conn := newExecutionCoreConn(t, fakeExecution)
+	a := activities.NewActivities(testLogger(), &grpcclient.Clients{ExecutionCore: conn})
+	a.SetScheduledStepDecisionAuthorizer(authorizer)
+
+	intent := activities.ScheduledStepExecutionIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", RunID: "run-unknown", ThreadID: "thread-unknown",
+		ScheduleID: "schedule-1", FireKey: "fire-1", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		StepID: "run-unknown:step:0", StepIndex: 0, PolicyDigest: "sha256:" + strings.Repeat("b", 64), IdempotencyKey: "fire-1:step:0",
+	}
+
+	step, err := a.ExecuteScheduledStepActivity(context.Background(), intent)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outcome is unknown")
+	assert.True(t, step.UnknownOutcome)
+	assert.Equal(t, "receipt-unknown-1", step.Metadata["receipt_id"])
+	assert.Equal(t, "true", step.Metadata["unknown_outcome"])
+}
+
+func TestExecuteScheduledStepActivityStopsOnFailedOutcome(t *testing.T) {
+	fakeExecution := &fakeExecutionCore{
+		executeScheduledStepResp: &mpv1.ExecuteScheduledStepResponse{
+			Status:    "failed",
+			ReceiptId: "receipt-failed-1",
+			Error:     "run_cancelled",
+		},
+	}
+	authorizer := &fakeScheduledStepDecisionAuthorizer{token: "control-step-decision"}
+	conn := newExecutionCoreConn(t, fakeExecution)
+	a := activities.NewActivities(testLogger(), &grpcclient.Clients{ExecutionCore: conn})
+	a.SetScheduledStepDecisionAuthorizer(authorizer)
+
+	intent := activities.ScheduledStepExecutionIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", RunID: "run-failed", ThreadID: "thread-failed",
+		ScheduleID: "schedule-1", FireKey: "fire-1", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		StepID: "run-failed:step:0", StepIndex: 0, PolicyDigest: "sha256:" + strings.Repeat("b", 64), IdempotencyKey: "fire-1:step:0",
+	}
+
+	step, err := a.ExecuteScheduledStepActivity(context.Background(), intent)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not advance")
+	assert.Equal(t, 0, step.StepIndex)
+	assert.Equal(t, "receipt-failed-1", step.Metadata["receipt_id"])
+	assert.Equal(t, "run_cancelled", step.Metadata["error_code"])
+}
+
+func TestExecuteScheduledStepActivityFailsClosedOnInvalidResponse(t *testing.T) {
+	baseIntent := activities.ScheduledStepExecutionIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", RunID: "run-invalid", ThreadID: "thread-invalid",
+		ScheduleID: "schedule-1", FireKey: "fire-1", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		StepID: "run-invalid:step:0", StepIndex: 0, PolicyDigest: "sha256:" + strings.Repeat("b", 64), IdempotencyKey: "fire-1:step:0",
+	}
+
+	for name, response := range map[string]*mpv1.ExecuteScheduledStepResponse{
+		"nil response":   nil,
+		"unknown status": {Status: "pending", ReceiptId: "receipt-invalid-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeExecution := &fakeExecutionCore{executeScheduledStepResp: response}
+			a := activities.NewActivities(testLogger(), &grpcclient.Clients{ExecutionCore: newExecutionCoreConn(t, fakeExecution)})
+			a.SetScheduledStepDecisionAuthorizer(&fakeScheduledStepDecisionAuthorizer{token: "control-step-decision"})
+
+			step, err := a.ExecuteScheduledStepActivity(context.Background(), baseIntent)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "must not advance")
+			if response != nil {
+				assert.Equal(t, "invalid_status", step.Metadata["error_code"])
+				assert.Equal(t, "pending", step.Metadata["status"])
+			}
+		})
+	}
+}
+
+func TestStartScheduledRunActivity_FailsClosedWithoutSessionCoreOrExecutionAuthority(t *testing.T) {
+	a := activities.NewActivities(testLogger(), &grpcclient.Clients{SessionCore: nil})
+	_, err := a.StartScheduledRunActivity(context.Background(), "task-1", "thread-1", "org-1", "space-1", "user-1", "schedule-1", "fire", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "id", "g", "execute")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session-core unavailable for prepared scheduled run")
+
+	a = activities.NewActivities(testLogger(), &grpcclient.Clients{SessionCore: nil})
+	fake := &fakeSessionCore{startScheduledRunResp: &mpv1.StartRunResponse{RunId: "task-1", OwnerId: activities.SystemActorID}}
+	a = activities.NewActivities(testLogger(), &grpcclient.Clients{SessionCore: newSessionCoreConn(t, fake)})
+	_, err = a.StartScheduledRunActivity(context.Background(), "task-1", "thread-1", "org-1", "space-1", "user-1", "schedule-1", "fire", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "id", "g", "execute")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Control scheduled-run execution authority is not configured")
+}
+
+func TestStartScheduledRunActivity_RejectsSessionCoreReceiptMismatch(t *testing.T) {
+	authorizer := &fakeScheduledRunExecutionAuthorizer{token: "execution-token"}
+	fakeSession := &fakeSessionCore{startScheduledRunResp: &mpv1.StartRunResponse{
+		RunId:   "task-other",
+		OwnerId: activities.SystemActorID,
+	}}
+	conn := newSessionCoreConn(t, fakeSession)
+	a := activities.NewActivities(testLogger(), &grpcclient.Clients{SessionCore: conn})
+	a.SetScheduledRunExecutionAuthorizer(authorizer)
+
+	_, err := a.StartScheduledRunActivity(
+		context.Background(),
+		"task-scheduled-1",
+		"thread-scheduled-1",
+		"org-1",
+		"space-1",
+		"user-1",
+		"schedule-1",
+		"2026-08-14T00:00:00Z",
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"schedule-1:2026-08-14T00:00:00Z",
+		"Summarise the queue",
+		"execute",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prepared scheduled run task-scheduled-1 received mismatched Session Core receipt")
+
+	fakeSession.startScheduledRunResp = &mpv1.StartRunResponse{RunId: "task-scheduled-1", OwnerId: "someone-else"}
+	_, err = a.StartScheduledRunActivity(
+		context.Background(),
+		"task-scheduled-1",
+		"thread-scheduled-1",
+		"org-1",
+		"space-1",
+		"user-1",
+		"schedule-1",
+		"2026-08-14T00:00:00Z",
+		"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"schedule-1:2026-08-14T00:00:00Z",
+		"Summarise the queue",
+		"execute",
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "prepared scheduled run task-scheduled-1 received mismatched Session Core receipt")
 }

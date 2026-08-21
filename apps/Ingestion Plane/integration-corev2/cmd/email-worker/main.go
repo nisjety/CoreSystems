@@ -57,6 +57,12 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("initialize token vault")
 	}
+	// Microsoft's token/profile endpoints are fixed deployment config
+	// (cfg.MicrosoftTokenURL, cfg.MicrosoftGraphBaseURL), but are guarded here
+	// purely for consistency with every other provider client
+	// oauth.NewProviderClients wires up via its shared httpClient nil-check —
+	// Microsoft is built and injected before that call runs, so it was the
+	// one provider client that fell outside that choke point.
 	tokens := oauth.NewService(cfg, repo, vault, oauth.NewMicrosoftClient(oauth.MicrosoftClientConfig{
 		ClientID:         cfg.MicrosoftClientID,
 		ClientSecret:     cfg.MicrosoftClientSecret,
@@ -65,7 +71,7 @@ func main() {
 		AuthorizationURL: cfg.MicrosoftAuthorizationURL,
 		TokenURL:         cfg.MicrosoftTokenURL,
 		GraphBaseURL:     cfg.MicrosoftGraphBaseURL,
-		HTTPClient:       &http.Client{Timeout: 15 * time.Second},
+		HTTPClient:       egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second}),
 	}))
 
 	// Shared across every inbound-message provider fetcher below. Graph's

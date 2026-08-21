@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	personalRetrievalAction   = "data.retrieval.read"
-	personalRetrievalAudience = "data-plane-retrieval"
-	personalRetrievalSchema   = "sha256:retrieval-read-v1"
+	retrievalReadAction   = "data.retrieval.read"
+	retrievalReadAudience = "data-plane-retrieval"
+	retrievalReadSchema   = "sha256:retrieval-read-v1"
 )
 
 // PersonalRetrievalDecisionRequest has only a retry identity. Control derives
@@ -34,11 +34,14 @@ func (r PersonalRetrievalDecisionRequest) Validate() error {
 	return nil
 }
 
-func personalRetrievalPayloadDigest(evidence PersonalThreadDecisionEvidence, request PersonalRetrievalDecisionRequest) string {
+// retrievalPayloadDigest is shared by the personal and shared retrieval
+// issuers: it only serializes resolved evidence and request fields, with no
+// personal/shared branching of its own.
+func retrievalPayloadDigest(evidence PersonalThreadDecisionEvidence, request PersonalRetrievalDecisionRequest) string {
 	value := strings.Join([]string{
 		"data.retrieval.read", "v1", evidence.Membership.OrgID, evidence.Membership.SubjectID,
 		evidence.Membership.SpaceRef, request.DecisionRef, evidence.RecipientAudienceRef,
-		evidence.Privacy.PolicyRef, evidence.ResourceAuthorizationRef, personalRetrievalSchema,
+		evidence.Privacy.PolicyRef, evidence.ResourceAuthorizationRef, retrievalReadSchema,
 		request.IdempotencyKey,
 	}, "\x00")
 	sum := sha256.Sum256([]byte(value))
@@ -66,10 +69,10 @@ func IssuePersonalRetrievalDecision(
 		OrgID:                     evidence.Membership.OrgID,
 		SpaceRef:                  evidence.Membership.SpaceRef,
 		SubjectID:                 evidence.Membership.SubjectID,
-		ServiceAudience:           personalRetrievalAudience,
-		ActionID:                  personalRetrievalAction,
-		ActionSchemaHash:          personalRetrievalSchema,
-		PayloadDigest:             personalRetrievalPayloadDigest(evidence, request),
+		ServiceAudience:           retrievalReadAudience,
+		ActionID:                  retrievalReadAction,
+		ActionSchemaHash:          retrievalReadSchema,
+		PayloadDigest:             retrievalPayloadDigest(evidence, request),
 		IdempotencyKey:            strings.TrimSpace(request.IdempotencyKey),
 		RecipientAudienceRef:      strings.TrimSpace(evidence.RecipientAudienceRef),
 		RecipientAudienceHash:     strings.TrimSpace(evidence.RecipientAudienceHash),

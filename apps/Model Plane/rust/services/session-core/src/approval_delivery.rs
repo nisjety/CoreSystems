@@ -36,6 +36,7 @@ const ALLOWED_FAILURE_CODES: &[&str] = &[
     "invalid_continuation",
     "run_not_resumable",
     "approval_not_granted",
+    "unknown_outcome",
     "max_attempts_exhausted",
     "cancelled",
     // The provider accepted the write and its own read then contradicted it.
@@ -1003,6 +1004,7 @@ mod tests {
             "max_attempts_exhausted",
             "cancelled",
             "postcondition_refuted",
+            "unknown_outcome",
         ] {
             assert!(validate_failure_code(accepted).is_ok());
         }

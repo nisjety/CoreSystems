@@ -244,6 +244,7 @@ mod tests {
                 headers: vec![],
                 body: b"ok".to_vec(),
                 duration_ms: 1,
+                served_by: self.kind,
             })
         }
     }
@@ -304,6 +305,7 @@ mod tests {
                 headers: vec![],
                 body: b"blocked".to_vec(),
                 duration_ms: 1,
+                served_by: self.kind,
             })
         }
     }
@@ -323,6 +325,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status, 200);
+        assert_eq!(resp.served_by, DriverKind::Tls);
         assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
     }
@@ -340,6 +343,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status, 403); // exhausted rotation → surface the block
+        assert_eq!(resp.served_by, DriverKind::Tls); // …attributed to the driver that produced it
     }
 
     #[tokio::test]
@@ -354,6 +358,7 @@ mod tests {
         let url: Url = "https://example.com".parse().unwrap();
         let resp = fb.fetch(&url).await.unwrap();
         assert_eq!(resp.status, 200);
+        assert_eq!(resp.served_by, DriverKind::Static);
         assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 0);
     }
@@ -372,6 +377,26 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn rotated_fetch_reports_the_serving_drivers_kind_not_the_primarys() {
+        // The wrapper's kind() intentionally reports the planned primary;
+        // the RESPONSE must carry the driver that actually served. This is
+        // what run output (DriverInfo.kind, meta.json) is stamped from — a
+        // Static-primary run served by Browser must not claim "Static".
+        let primary = Arc::new(FailDriver::new(DriverKind::Static));
+        let fallback = Arc::new(OkDriver::new(DriverKind::Browser));
+        let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
+        drivers.insert(DriverKind::Static, primary.clone());
+        drivers.insert(DriverKind::Browser, fallback.clone());
+
+        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Browser], drivers);
+        let url: Url = "https://example.com".parse().unwrap();
+        let resp = fb.fetch(&url).await.unwrap();
+
+        assert_eq!(fb.kind(), DriverKind::Static);
+        assert_eq!(resp.served_by, DriverKind::Browser);
     }
 
     #[tokio::test]

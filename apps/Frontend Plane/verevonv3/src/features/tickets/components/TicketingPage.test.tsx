@@ -417,6 +417,12 @@ describe('TicketingPage', () => {
     const statusUpdates = vi.mocked(fetch).mock.calls
       .filter(([url, init]) => String(url).endsWith('/api/v1/actions/execute') && init?.method === 'POST')
       .map(([, init]) => JSON.parse(String(init?.body)))
+    expect(statusUpdates).toHaveLength(2)
+    // executeBulkTicketStatusUpdate() awaits one patch per ticket in selection
+    // order, precisely so a partial failure is attributable. Asserting the
+    // ordered, exact request bodies (rather than arrayContaining) is what keeps
+    // that documented contract — and the "own auditable action per ticket"
+    // promise in the review dialog — from silently regressing.
     expect(statusUpdates).toEqual([
       { actionId: 'tickets.update', idempotencyKey: expect.any(String), input: { ticketId: ticketFixture.id, status: 'waiting_team' } },
       { actionId: 'tickets.update', idempotencyKey: expect.any(String), input: { ticketId: relatedTicketFixture.id, status: 'waiting_team' } },

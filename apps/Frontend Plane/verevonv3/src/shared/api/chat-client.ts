@@ -41,6 +41,15 @@ export type ChatInvokeRequest = {
   /** The requested personal Space for a new durable chat thread. The BFF
    * exchanges this selection for a Control-signed, effect-bound decision. */
   spaceRef?: string
+  /**
+   * The Control `subject_id` of a Space agent addressed by `@` mention this
+   * turn (`docs/space-defenition.md`, "Invocation rule"). The gateway is the
+   * one that decides whether this agent may actually answer — it re-resolves
+   * Control membership and the Application binding before injecting a
+   * persona; a mention naming an unbound or inactive agent is rejected, never
+   * silently ignored or silently granted. Meaningless without `spaceRef`.
+   */
+  mentionedAgentRef?: string
   sessionKey?: string
   features?: string[]
   generateImage?: boolean
@@ -356,6 +365,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
     space_ref: request.spaceRef?.trim() || undefined,
+    mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
     browse_web: supportReadOnly ? false : request.browseWeb ?? false,
     generate_image: supportReadOnly ? false : request.generateImage ?? false,
     // Sent as a real field, not just as the `agentic` feature above: the

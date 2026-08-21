@@ -12,12 +12,14 @@
 >    (`quarry-runtime/src/page_renderer.rs`), the `image/png` serve route
 >    (`quarry-edge/src/resource_routes.rs`), and the `page_images.created` emission
 >    (`quarry-runtime/src/page_image.rs`) all exist in Ingestion Plane source today.
->    Still genuinely open, confirmed by grep: no `page_images.deleted` **producer**
->    exists in DP2's document-erasure cascade (`embedding-engine-rs/src/stream/mod.rs`'s
->    `documents.deleted` handler only purges Qdrant vectors — it does not touch the CAS
->    or emit `page_images.deleted`), so the GDPR/CAS-erasure gap called out in Phase 2
->    is real and still open. `W_VISUAL` also still defaults to `0` (shadow) in
->    `docker-compose.yml` — the arm is wired but not live in fusion.
+>    Was genuinely open at the time this note was written. **✅ Closed since**, and by a
+>    cleaner mechanism than the one this plan called for: rather than building a
+>    `page_images.deleted` **producer** and a second consumer of it, embedding-engine-rs's
+>    `document_erasure_consumer.rs` (committed, wired into `main.rs`, tested) subscribes
+>    directly to the `dataplane.documents.deleted` event that already exists and purges
+>    both the page-image Qdrant vectors and the CAS objects itself — no intermediate event,
+>    no second consumer competing for the WorkQueue stream. `W_VISUAL` now defaults to
+>    `0.05` in `docker-compose.yml` — the arm is live in fusion, not shadow.
 > 2. **Phase 3 shipped differently than planned, not "not started."** There is no
 >    ColQwen2 multivector Qdrant collection and no swap of `provider/visual.rs` /
 >    `embed/visual.rs` off Embed v4 — both still call Cohere Embed v4 for visual
@@ -29,9 +31,13 @@
 >    than the "replace the visual embedder" plan below — treat Phase 3's steps as
 >    superseded by this reranker-only shape unless/until the full multivector swap is
 >    separately decided.
-> Phase 1's own gRPC caveat also re-confirmed live: `get_sources`/`get_chunks`/
-> `pack_context` in `retrieval_svc.rs` still bind `req.org_id` straight into SQL with no
-> verified-context check, and no RLS migration (`ENABLE ROW LEVEL SECURITY`) exists yet.
+> Phase 1's own gRPC caveat, as of 2026-07-10: `get_sources`/`get_chunks`/`pack_context` in
+> `retrieval_svc.rs` bind `req.org_id` straight into SQL with no verified-context check. **That
+> half is still true today.** The clause that followed it — "and no RLS migration (`ENABLE ROW
+> LEVEL SECURITY`) exists yet" — is **no longer true as of 2026-08-09**: RLS is enabled on all
+> 35 org-scoped tables and adopted by all 10 Postgres-backed services, so those three gRPC
+> methods now sit behind a database-enforced boundary even though they still read org from the
+> request body. See the Phase 1 RLS section and the current isolation table below.
 
 ## Requirements (restated)
 
@@ -47,11 +53,41 @@
 ## Current state (verified this session)
 
 Visual RAG core built + passing real `cargo test`: authz-safe semantic cache (PR-A),
-Embed v4 provider/consumer/visual-arm (PR-B/C/D), structural chunker (PR-E). Ships dark
-(`W_VISUAL=0`, no producer). Stores: Qdrant (vectors), Postgres (canonical + graph +
+Embed v4 provider/consumer/visual-arm (PR-B/C/D), structural chunker (PR-E). Now live in fusion
+(`W_VISUAL=0.05` default; see the header note above). Stores: Qdrant (vectors), Postgres (canonical + graph +
 ownership), Quickwit (BM25 on MinIO), Dragonfly (exact KV). Fusion = RRF + Cohere rerank.
 
 ## Isolation audit — summary
+
+> **Superseded 2026-08-19.** The table below is the ORIGINAL audit, kept for provenance.
+> Every gap it lists has since been closed; read the current-state table first. Do not quote
+> the original as the system's posture — it says "no RLS" and "body-trusted org", and both are
+> now false.
+
+**Current state (2026-08-19):**
+
+| Path | org | user | account (D-A) |
+|---|---|---|---|
+| Dense / Sparse(PG+Quickwit) / Wiki-ANN / **Visual** | ✅ forced + **RLS** | ✅ fused gate | ✅ opt-in grant |
+| Graph, Wiki-kw, Contradictions, Timeline (aux HTTP) | ✅ **pinned from verified ctx** + **RLS** | ❌/n/a | ✅ opt-in grant |
+| Semantic cache (HTTP) | ✅ **pinned from verified ctx** (scope ✅) | ✅ scope_key | n/a |
+| gRPC Retrieve/Stream | ✅ **JWT org asserted** + **RLS** | ✅ + admin off | ✅ opt-in grant |
+
+**Verdict:** org isolation is now **two independent layers** — the application pins org from a
+verified `AuthContext` (GAP-1/GAP-2, pre-dating this work) *and* Postgres RLS enforces it at the
+database across **all 10** Postgres-backed DPv2 services, so a forgotten `WHERE org_id` yields
+empty results rather than a leak. The account tier exists as D-A's **opt-in per-org grant**,
+resolved live per request (never a token claim, never a stored bypass) and defaulting to denied.
+
+⚠ Two real caveats, neither closed by the above:
+- gRPC `get_sources` / `get_chunks` / `pack_context` still take a **body** org. They are by-id
+  and SQL-org-filtered and now sit behind RLS, so the exposure is bounded — but they do not use
+  the verified-context helper the other paths do.
+- org-core's GDPR erasure procs are `SECURITY DEFINER`, so RLS structurally cannot apply inside
+  them; they rely solely on their own parameterized `WHERE org_id`, with no second layer.
+
+<details>
+<summary>Original audit (pre-2026-08-09) — historical, all gaps since closed</summary>
 
 | Path | org | user | tenant |
 |---|---|---|---|
@@ -60,8 +96,10 @@ ownership), Quickwit (BM25 on MinIO), Dragonfly (exact KV). Fusion = RRF + Coher
 | Semantic cache (HTTP) | ⚠️ **body-trusted org** (scope ✅) | ✅ scope_key | ❌ |
 | gRPC Retrieve/Stream | ⚠️ **no DP-side org binding** | ✅ + admin off | ❌ |
 
-**Verdict:** strong org + per-user on the main `/v1/retrieve` path; **no tenant tier,
+Original verdict: strong org + per-user on the main `/v1/retrieve` path; **no tenant tier,
 no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + gRPC).
+
+</details>
 
 ## Phases
 
@@ -406,9 +444,14 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
   `dataplane-cas` bucket, and the cross-plane NATS/serve/MinIO reachability (all runtime-
   unverified per the critique). These are the live-stack finish line for PR-F.
   **(Verified 2026-07-10: the render hook, serve route, and `page_images.created` emission
-  now exist in source — `page_renderer.rs`, `resource_routes.rs`, `page_image.rs`. Still
-  open: no `page_images.deleted` producer in DP2's erasure cascade, so CAS objects are not
-  purged on document delete/DSAR. See the verified note at the top of this file.)**
+  now exist in source — `page_renderer.rs`, `resource_routes.rs`, `page_image.rs`.)**
+  **✅ CLOSED — the CAS-erasure gap, by a different route than planned.** Rather than the
+  `page_images.deleted` producer this section called for, `document_erasure_consumer.rs`
+  subscribes directly to `dataplane.documents.deleted` and purges the page-image Qdrant
+  vectors AND the CAS objects itself in one step — one erasure event, one consumer, no
+  intermediate producer/consumer pair to keep in sync. Tested (signed-envelope decode,
+  replay rejection, tenant-mismatch rejection); PR-F's remaining finish-line items above
+  are otherwise done.
 - **(b) live-stack progress (2026-06-22):** DP2 infra up; **compose fixed** — `dpv2-minio`
   joined `inter-plane-bus` + `minio-init` now creates `dataplane-cas` (verified created).
   **Cross-plane reachability PROVEN live** (the critique's #1 unverified risk): from
@@ -533,18 +576,69 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
 - **Steps:** extend the Art.17 cascade to **MinIO CAS** (raw + page images) and
   **Meilisearch**; verify Qdrant visual-multivector purge, Quickwit segment prune, and
   Dragonfly/semantic-cache eviction end-to-end. (Page-image Qdrant purge already wired in PR-D.)
-  **Meilisearch's slice of this ✅ (2026-08-07)** — `dataplane.documents.deleted`
-  wired to purge the keyword index (live-verified with a real signed event);
-  MinIO CAS, Qdrant visual-multivector, Quickwit segment prune, and
-  Dragonfly/semantic-cache eviction remain as stated (MinIO CAS closed
-  separately the same day — see the durability plan's adjacent entry).
+  **✅ COMPLETE 2026-08-19.** Meilisearch (2026-08-07) and MinIO CAS (same day) were closed
+  earlier. The remaining three were audited against source on 2026-08-19, and **the plan's own
+  list was wrong in both directions**:
+  - **Qdrant visual-multivector: was NOT a gap.** `embedding-engine-rs/src/gdpr.rs`'s
+    `purge_organization_data` already deletes org-scoped points from all three collections —
+    knowledge, wiki **and visual** — plus every MinIO CAS object, driven by
+    `verevon.gdpr.erasure.requested`. Nothing to build.
+  - **Quickwit index prune: real gap, now closed** (`3360725b`). `quickwit-adapter-rs`'s org
+    purge deleted only its two Postgres bookkeeping tables and never touched the index, so
+    **every one of the org's documents stayed searchable while the purge reported success.**
+    `delete_by_query` already existed (used by the per-document delete path and by
+    `rebuild.rs` with this exact `org_id:` shape); nothing had wired it to org-wide erasure. The
+    prune now runs **before** the Postgres deletes, so an unreachable Quickwit fails the purge
+    with bookkeeping intact to drive a retry, instead of leaving jobs deleted and documents
+    indexed with nothing left to show the prune never ran. Reported as
+    `index_delete_task_submitted` (a bool, not a count) because Quickwit applies delete tasks
+    asynchronously by rewriting splits — on an erasure path, claiming data is already gone is
+    the wrong direction to be wrong in.
+  - **Dragonfly/semantic-cache eviction: real gap, now closed** (`3360725b`). Cached retrieval
+    results are keyed `…{org_id}:v{org_version}:s{scope}:{key}` and outlive the Postgres rows,
+    so an erased org's previously cached answers stayed retrievable after its source rows were
+    gone. The purge now bumps the org's cache version after commit, making every existing key
+    unconstructable in one write — no wildcard scan across a shared Dragonfly, which is exactly
+    the operation to avoid on this path. Failure surfaces as `cache_version_after: None`.
+    ⚠ **Not covered, by construction**: the embedding cache
+    (`embed:{model_version}:{text_hash}`) is content-addressed with no org in its key and is
+    shared across orgs by design, so it cannot be purged per-org.
+  - 💡 **The new test assertion earned its place on first run.** It failed immediately: the cache
+    bump goes through an org-scoped transaction, and the erasure fixture never created the
+    `dataplane_app` role, so the invalidation degraded to a no-op that reported success — the
+    same inert-feature failure this rollout kept surfacing. Fixture now grants the role via the
+    shared helper and creates `org_versions`.
+  - **Live-verified 2026-08-19** on the running stack: a real
+    `verevon.gdpr.erasure.requested` published to the shared broker as `org-core-shared` (for a
+    deliberately **non-existent** org, so no real data was at risk) produced a Quickwit delete
+    task whose query is `org_id` **alone** — distinguishable from the pre-existing per-document
+    tasks that carry both `org_id` and `document_id`. Real corpus untouched (10 docs / 51 units).
+    ⚠ Method note: `wget` does not exist in the Quickwit container, and `2>/dev/null` turned that
+    into an empty response that read like "no delete tasks" — a false baseline. Use `curl` from
+    `quickwit-adapter`, which has it.
+  - Follow-up (`9e59796e`): the completion log reported row counts but was silent on the prune,
+    so an operator auditing an erasure could not tell whether the index was actually pruned. It
+    now carries that, and a purge that skipped the prune logs at **error**.
 - **Risk:** MEDIUM. **Complexity:** LOW-MEDIUM. **Depends on:** Phases 2-4.
 
 ### Phase 6 — Model Plane track *(separate plane — coordinate, don't build in DP)*
-- Local **router classifier** (replaces "Not Diamond"; sovereign <10ms) + routing policy.
+- Local **router classifier** (replaces "Not Diamond"; sovereign <10ms) — **DONE, not to-build.**
+  Already live in Model Plane: the heuristic complexity scorer and mode/budget resolution are
+  `inference-core/src/provider/intent.rs`'s `classify()`/`choose()`/`resolve()`, with the
+  weights/keyword-list/table externalized into a runtime-tunable, session-core-persisted
+  `RoutingPolicy` singleton (`inference-core/src/provider/routing_policy.rs`,
+  `RoutingPolicy::default()` byte-identical to the original compile-time constants). It is the
+  first step of every unary/streaming inference call, via `provider/fallback.rs`'s
+  `FallbackChain::infer`/`infer_stream` → `resolve_intent()`, before any provider or the cache is
+  touched. "Not Diamond" itself was never wired into this repo (2026-08-19 full-repo grep: zero
+  code references, only this doc and `sovereign-rag-blueprint-reconciliation.md` propose
+  replacing it) — this local classifier already satisfies that ask, pure CPU, no network call,
+  no model weights, no training data. Remaining, genuinely open Phase 6 scope below.
 - **Command R+** and **local Llama 3.3 (vLLM)** as **inference-core providers**.
 - Multi-turn session stays in **session-core** (no second Redis).
-- **Risk:** MEDIUM. **Depends on:** Phase 3 GPU (shares the Llama fleet).
+- **Risk:** MEDIUM. **Depends on:** Phase 3 GPU (shares the Llama fleet) — the GPU dependency is
+  for the Command R+/local-Llama provider additions above, not the router classifier, which is
+  pure CPU and already shipped.
 
 ### Phase 7 — Sovereignty/infra *(if self-host confirmed)*
 - Bare-metal EU GPU provisioning (ColQwen2 + Llama), Azure-EU pinning (Sweden/Germany)
@@ -692,11 +786,70 @@ implements each — none of the three are built yet as of this entry.
      at all for this feature, so that half of item 1 has no grounding beyond the original
      one-paragraph decision. Resolving the ownership question is what unblocks writing an
      actual migration.
-  - **Not started**: no schema, no migration, no grant-check code, for either grant. The one
-    prerequisite this sequencing decision named — org-level RLS, validated live, across both
-    planes — is done; the data-access half now has a concrete, source-verified design to
-    build against (item 4) pending the ownership call above. The billing-consolidation half
-    has no design work done beyond the original decision in item 1.
+  5. **✅ BOTH grants built 2026-08-09/10.** Ownership call resolved by the user: **auth-core**.
+     - **Data-access grant** (`87bcf544`): `org_group` + `org_group_grant` in auth-core, and a
+       new `account.data.read` action on the live decision endpoint. Named `org_group`, not
+       `account` — auth-core's schema *already* has an unrelated `account` table (Better Auth's
+       per-user OAuth rows), so "account" would have repeated the exact `microsoft_tenant_id`
+       collision this feature's naming was chosen to avoid. The plan's "admin principal" is the
+       host org's own owner/admin `member` rows; no second membership system was built.
+       Live-verified end to end against the running service: `data.read` unregressed
+       (`member`/`owner`), `account.data.read` denied `no_account_grant` with no grant, allowed
+       `account_grant` with a grant + host owner, denied `not_member` for a non-member, and the
+       org path unchanged while a grant exists. A temporary fixture was used for the positive
+       case and removed, with the prior baseline re-confirmed.
+     - **Grant write path** (`307ad524`): the schema shipped with **no CRUD at all**, so no
+       grant could be created or revoked and any consumer would have sat inert.
+       `/api/v1/internal/org-groups/{grant,revoke}` is service-authed, requires an owner/admin
+       of the **host** org, is idempotent on `(org_group_id, organization_id)`, and announces
+       the change for mirroring. A failed announce never fails a committed mutation.
+     - **Billing-consolidation = plan inheritance only** (`307ad524`), per the user's decision.
+       A member org inherits the host's *tier*; usage, invoices and the Nexi provider customer
+       stay strictly per-org, and `billing_accounts.org_id` remains the billing unit. Full
+       invoice consolidation was deliberately deferred: billing-core charges real money via
+       **Nexi in NOK**, and it would first require settling legal liability, VAT when host and
+       member differ, mid-cycle proration, and the fate of a member's open invoices.
+       billing-core mirrors the grant into its own DB (it cannot read auth-core's) via
+       `organization.billing_group.changed`; all three services share
+       `NATS_URL=nats://controlplane-nats:4222`, which is what makes the subject reachable.
+       ⚠ Worth knowing when tracing this: auth-core *declares*
+       `publishOrganizationPlanChanged` but **nothing calls it** — org-core is the real
+       publisher of `organization.plan.changed`.
+       Inheritance is resolved at READ time and never written onto the member's stored account,
+       so revocation needs no undo. Two load-bearing properties, both tested: it takes the
+       **more privileged** tier so a member is never downgraded into a tier it already pays
+       for, and an active trial is not pulled down by a lower-tier host. Every failure path
+       (missing mirror, unreadable host, absent grant) degrades to the org's own plan. The
+       check sits **last** in `CanUseFeature` so it can only widen access.
+       ⚠ **Deliberately not changed**: the plan published on `billing.account.updated`.
+       org-core mirrors that value and re-publishes `organization.plan.changed`, which
+       billing-core consumes — emitting an inherited plan there could feed back and write the
+       inherited tier onto the member's own *stored* plan, turning a derived grant permanent.
+     - **✅ Applied and live-verified 2026-08-19** (the earlier Docker outage is resolved).
+       `0008_billing_group` was applied by billing-core's own migration runner at startup —
+       `✓ applied migration 0008_billing_group (114ms)`, recorded in its `schema_migrations`
+       ledger — after rebuilding the image, since the runner reads `*.up.sql` from disk rather
+       than an embedded FS. Verified in this order: the full `0001`→`0008` chain applies cleanly
+       in sequence on a disposable Postgres; the `not_self` CHECK, the `ON CONFLICT (org_id)`
+       upsert, the `billing_consolidation` read filter and the partial index all behave as
+       designed; idempotent across a restart (zero re-applies, exactly one ledger row); and the
+       real corpus was untouched throughout (1 account / 26 usage events, before and after).
+       Then proven **end to end on the running system**: a real `organization.billing_group.changed`
+       event published to `controlplane-nats` as `auth-core-control` was mirrored into
+       `billing_group_memberships`, and a revocation payload (null host, `false`) removed the row.
+       Whole Control Plane fleet healthy afterwards, zero restarts, zero errors.
+       💡 The NATS ACLs needed no change — `auth-core-control` may publish `organization.>` and
+       `billing-core-control` subscribes to `organization.>`, so the new subject was already
+       covered. A first publish attempt failed `Authorization Violation` only because it
+       connected anonymously; `controlplane-nats` enforces per-user subject permissions.
+     - ⚠ **Still not deployed**: auth-core was NOT rebuilt with the new grant write path, so
+       `/api/v1/internal/org-groups/{grant,revoke}` is not live yet. It also needs
+       `ORG_GROUP_GRANT_SERVICE_TOKEN` provisioned — the controller fails closed (503) when it
+       is unset, deliberately, rather than accepting every caller. The mirror chain downstream
+       of it is proven; only the HTTP entry point is pending.
+     - ⚠ Also noted, pre-existing: `retrieval-engine`'s service-principal entry has
+       `allowAnyOrg: true`, which the registry loader permits only because `NODE_ENV` is
+       development — it would fail a production render as written.
 - **D-B (text embedder) — DECIDED: migrate to Cohere Embed v4 for dense text.** This
   resolves Phase 3 Step 4's sub-decision below in favor of the original blueprint
   requirement (line 40: "Cohere Embed v4 = dense text (multilingual chunks...)"). Driven by

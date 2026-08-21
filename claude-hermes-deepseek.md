@@ -1,0 +1,1014 @@
+# Model Plane vs. Claude Code, DeepSeek Harness, and Hermes Agent
+
+**A harness-capability audit, feature-parity matrix, and adoption plan.**
+
+Date: 2026-08-16. Scope: `apps/Model Plane` (this repo) vs. three external agent
+harnesses cloned locally at `/Volumes/Lagring/Triodelab/{deepseek-harness,hermes-agent,claude-code-fork}`.
+
+> **This is not the first pass at this question.** Model Plane already has a
+> license-gated external-ideas-harvest (`docs/external-ideas-harvest.md`, mined
+> 2026-05-30 from `codex`/`hermes-agent`/`pi`/`daytona`/`claude-code`) and its own
+> `GOAL.md` already names `claude-code-fork` and `hermes-agent` as parity/idea
+> targets. This document **updates and deepens** that prior work — it adds
+> `deepseek-harness` (not previously analyzed), corrects one factual error in the
+> prior harvest, verifies which prior gaps have since closed, and goes to actual
+> code (not just directory names) for all three external systems. Treat this as
+> a supplement to `external-ideas-harvest.md` and `capability-ownership-matrix.md`,
+> not a replacement.
+
+---
+
+## 0. TL;DR
+
+- **Model Plane's biggest historical gap — real process sandboxing — has
+  substantially closed since the last audit (2026-07-17).** `execution-core` now
+  has real `bwrap` (bubblewrap) + Landlock/seccomp isolation
+  (`rust/services/execution-core/src/{sandbox.rs,executor.rs}`), the same
+  primitive `deepseek-harness` uses and the one Model Plane's own harvest plan
+  recommended vendoring from `codex`. This was not yet true as of the last
+  written audit — update `gap-analysis.md`/`GOAL.md` accordingly.
+- **What's still genuinely missing, confirmed by fresh code reads:** parallel
+  tool-call dispatch within a round (all three external systems support this in
+  some form; Model Plane still runs tool calls in a plain sequential loop),
+  a populated tools/plugins/MCP registry in `capability-core` (still stubs),
+  a real long-term/semantic memory backend (`letta-bridge` is still an in-memory
+  stub — correctly deferred, see §7), and any compaction-quality eval harness
+  (both `hermes-agent` and `deepseek-harness` have one; Model Plane has none).
+- **The single most reusable idea across all three external systems** is the
+  same pattern under different names: a swappable capability = one interface +
+  one adapter shape that both "real OS resource" and "SDK-only/remote backend"
+  implementations satisfy identically (DeepSeek's "capability seam", Hermes's
+  `ProcessHandle` Protocol + `BaseEnvironment` ABC, Claude Code's `ToolDef` →
+  `buildTool()` factory). Model Plane should adopt this explicitly for its own
+  sandbox-backend and memory-adapter abstractions (§7.1).
+- **Model Plane already has some genuinely smart engineering of its own** worth
+  preserving, not just importing — most notably the 2026-08-14 decision to
+  *reject* unifying its two tool-dispatch loops after measuring that the
+  separation is the actual authority boundary (§6).
+- **Honest read on maturity ordering for the *harness* concern specifically**
+  (not the product surface as a whole): DeepSeek Harness's engineering-process
+  discipline (generated/verified docs, blameless postmortems, ADR ledger) is the
+  strongest of the four; Claude Code's tool/permission/sandbox/compaction design
+  is the most battle-tested (it is what has actually shipped to the most users);
+  Hermes has the richest plugin/backend ecosystem and the most honest security
+  posture documentation (including admitting its own defaults are weak); Model
+  Plane has the strongest production-readiness *discipline* (evidence states,
+  coverage gates, signed release artifacts) but the least mature harness-specific
+  feature surface of the four.
+
+---
+
+## 1. Methodology & constraints
+
+Each external system was explored by an independent research pass (direct
+`Read`/`Grep`/`Bash` reads of source and docs, not just READMEs), cross-checked
+against Model Plane's own prior research where it existed. Three constraints
+were binding throughout and are enforced in this document:
+
+1. **License gate (inherited from `external-ideas-harvest.md` §1, applied here
+   too):** `deepseek-harness` is MIT. `hermes-agent` is MIT. `claude-code-fork`
+   is **leaked, unlicensed, proprietary** — Anthropic's actual Claude Code CLI
+   source, exposed via an npm sourcemap and squashed into one third-party
+   commit by whoever archived it locally. Nothing in this document quotes or
+   reproduces source code, comments, or prose from `claude-code-fork`; it is
+   described structurally (file/directory names, control-flow shape, exported
+   symbol names, line/byte counts) exactly as the existing harvest's own rule
+   requires ("shapes only, ZERO code"). The same discipline was applied to the
+   MIT-licensed repos even though it wasn't strictly required, for consistency.
+2. **Verify, don't trust docs.** Every claim about Model Plane's *current* state
+   was checked against source and recent git history as of 2026-08-16, not
+   against the dated docs alone (`docs/core-research/*` and `MODEL_PLANE_STATUS.md`
+   are from 2026-07-16/17; 153 commits have landed in `apps/Model Plane` since).
+   Where a documented gap turned out to be closed (or vice versa), this is
+   called out explicitly rather than silently repeating the old doc.
+3. **One correction to the prior harvest's factual record:** `external-ideas-harvest.md`
+   describes `hermes-agent`'s `background_review` as feeding "Wave 7 fine-tuning."
+   Fresh code reading does not support this — `background_review.py`/`curator.py`
+   (the actual online self-improvement loop) only ever write to local memory/skill
+   files via a tool-whitelisted forked agent; the only dataset-generation code in
+   the repo is `batch_runner.py`, an unrelated offline harness with no code path
+   connecting it to the per-turn loop. If Model Plane's P7 learning-loop item
+   (`external-ideas-harvest.md` remediation #12) is scoped assuming these are one
+   system, rescope it — they are two.
+
+---
+
+## 2. System profiles
+
+### 2.1 Model Plane (this repo)
+Rust + Go agent platform, from-scratch rebuild. Rust owns the hot path (invoke,
+streaming, session assembly, execution loop, provider routing, multimodal); Go
+owns durable control (workflows, registries, policy, scheduling). North star
+(`docs/GOAL.md`): product-surface parity with `claude-code-fork`, selectively
+incorporating ideas from `hermes-agent`, `openai/codex`, and several
+knowledge/memory projects. 153 commits landed in the 30 days before this audit;
+production-readiness discipline is unusually rigorous (signed release artifacts,
+evidence-state tracking, risk-based coverage targets, explicit "not
+production-ready" self-labeling in `MODEL_PLANE_STATUS.md`).
+
+### 2.2 Claude Code CLI (`claude-code-fork`, leaked source, 2026-03-31)
+**Not a community fork** — a one-time unofficial leak of Anthropic's actual
+proprietary CLI, exposed via an npm sourcemap and archived as a single squashed
+commit with no license, no build manifest, and no test files. TypeScript on
+Bun, React/Ink terminal UI, Zod v4, `@anthropic-ai/sdk`. ~30 top-level
+directories organized by concern (`tools/`, `commands/`, `services/`, `utils/`
+— the largest single directory at 564 files). Read-only reference material,
+never a project to build or extend.
+
+### 2.3 DeepSeek Harness (`dsh`)
+DeepSeek AI's open-source (MIT) "everything is a plugin" coding-agent CLI,
+developer preview. ~430K lines of TypeScript across 226 pnpm workspace
+packages, built on Cordis, a vendored DI/typed-event framework. The most
+process-disciplined of the four external/internal systems compared here:
+generated-and-verified documentation, a 688-entry Agent Notes ADR ledger, four
+numbered blameless postmortems.
+
+### 2.4 Hermes Agent (`hermes-agent`)
+Nous Research's open-source (MIT) personal AI agent. Python/`uv`-managed,
+single-process multi-threaded runtime. One agent core driven through a CLI, a
+~20-platform messaging gateway, a TUI, and an Electron desktop app; almost all
+capability growth happens through 21 first-class plugin packages, categorized
+skill packs, and 8 pluggable sandbox/memory backends each. Ships a bundled
+OAuth billing gateway (Nous Portal) covering 300+ models plus web
+search/image-gen/TTS/cloud-browser under one subscription.
+
+---
+
+## 3. Feature-parity matrix
+
+Legend: ✅ real & live · 🟡 partial/stub/opt-in · ❌ absent · — not applicable
+
+| Capability | Model Plane | Claude Code (leaked) | DeepSeek Harness | Hermes Agent |
+|---|---|---|---|---|
+| Real bounded turn/tool-call loop | ✅ `execution-core` runtime_loop | ✅ `QueryEngine.submitMessage` | ✅ `core/agent-loop` | ✅ `conversation_loop.py` |
+| Streaming responses | ✅ SSE `/v1/invoke/stream` | ✅ | ✅ `llm/stream` waterfall | ✅ |
+| Extended-thinking / reasoning budget | 🟡 (routing exists; not confirmed as a first-class budgeted mode) | ✅ configurable budgets | — (not a v1-style "thinking" mode) | — |
+| **Parallel tool-call dispatch within a round** | ❌ sequential `for call in &response.tool_calls` | ✅ (concurrent where safe) | ✅ ordered-or-bounded-concurrent-pool `executionMode` | 🟡 (subagent batches parallel via `ThreadPoolExecutor`; single-turn tool calls not confirmed parallel) |
+| Tool-call retry on transient failure | ❌ (confirmed gap, unchanged since 07-17) | 🟡 (retry/backoff at the API layer) | ✅ `tools/execute` waterfall wraps timeout/retry/metrics | 🟡 |
+| Real OS-level process sandboxing | ✅ **now live** — `bwrap`+Landlock/seccomp (`sandbox.rs`) | ✅ `bwrap` (Linux) + macOS trust-daemon schema | ✅ `bwrap`+Landlock + macOS Seatbelt + Windows ACL runner | 🟡 only via configured `BaseEnvironment` backend; default `local` backend = no isolation |
+| Sandbox enforcement reported as full/partial (not assumed) | ❌ not confirmed | 🟡 (schema implies it, not fully confirmed) | ✅ every backend reports `full`/`partial` explicitly | ❌ |
+| Fail-closed sandbox failure | ✅ policy fail-closed | 🟡 (`dangerouslyDisableSandbox` escape hatch, lockable by enterprise config) | ✅ native launcher exits 125 and refuses to exec on any confinement failure | ❌ `tirith_fail_open: True` default; `network_mode: host` shipped default |
+| HITL / durable approval gate | ✅ `CreateApproval`, `AwaitingApproval` | ✅ 5+2 permission modes, role-specific handlers | ✅ `ctx.approval` one-shot, default-deny | ✅ pattern-based + auxiliary-LLM auto-approve tier |
+| Single shared schema for permission UI + sandbox rules | ❌ not confirmed as unified | ✅ `sandboxTypes.ts` is the single source of truth for both | 🟡 (guards + sandbox policy are separate seams) | ❌ separate scanner + approval + network layers |
+| Session/thread persistence | ✅ Postgres, append-only events, transactional outbox | ✅ | ✅ append-only `SessionEvent` log | ✅ (file/DB-backed via `hermes_state.py`) |
+| Long-term / semantic memory | 🟡 `letta-bridge` in-memory stub only (correctly deferred, see §7) | ✅ `memdir/` + auto-extraction + team sync | 🟡 read-only cross-session query only, no vector memory shipped | ✅ `MemoryProvider` ABC, 8 real backends |
+| Memory-adapter registry (multi-backend) | ❌ deliberately deferred until 2nd backend exists | — (single `memdir` system) | — (no shipped long-term memory system) | ✅ `MemoryManager`, one-external-provider cap + reserved core tool names |
+| Context compaction | 🟡 exists but not confirmed tiered | ✅ 4-tier escalation (time-based → microcompact → provider-native → full LLM) | ✅ capability seam, lock-released-last durability | ✅ 2-owner handoff (native-first, local fallback) |
+| Compaction-quality eval harness (recall, not token-count) | ❌ | ❌ (not observed) | 🟡 (rigor via postmortems/tests, not a dedicated recall harness) | ✅ `evals/compaction/` |
+| Post-compaction selective re-attachment of live file/skill state | ❌ | ✅ budgeted 5-file/5-skill reattachment | 🟡 (surface-preserving cut, not confirmed selective reattachment) | ❌ |
+| One-shot subagent delegation | ✅ (subagent hook exists in execution-core) | ✅ `AgentTool`/`runAgent()` | ✅ `SubagentRun` | ✅ `delegate_task` |
+| Durable/continuable subagent lifecycle | 🟡 `subagent_edges` table exists; not confirmed as a full continuation manager | 🟡 (background-resumable agents via task types) | ✅ explicit continuation manager, FIFO inbox, cold resume | ❌ (leaf agents are disposable) |
+| Fork-semantics subagent (inherit parent history) | ❌ not observed | ✅ `forkSubagent.ts` | 🟡 (session fork exists at `ctx.sessions.fork`, not tool-triggered the same way) | ❌ |
+| Filesystem isolation for concurrent agents (worktrees) | ❌ | ✅ `EnterWorktreeTool`/`ExitWorktreeTool` | ❌ | ❌ |
+| Model-written orchestration script (fan-out/pipeline as real code) | 🟡 Temporal workflows exist but aren't the production path | 🟡 (coordinator mode + task DAG, not model-authored scripts) | ✅ `workflow` (`node:worker_threads`, `agent()`/`pipeline()`/`parallel()` hooks) | ❌ |
+| Hard-coded leaf-vs-orchestrator subagent role split | ❌ | 🟡 (role-specific permission handlers exist) | 🟡 (role via provider config) | ✅ `DELEGATE_BLOCKED_TOOLS` blocklist + `max_spawn_depth` |
+| Plugin system | 🟡 `capability-core` plugin registry = stub | ✅ marketplace-sourced installable units | ✅ "everything is a plugin" on Cordis | ✅ 21 first-class packages, `plugin.yaml` discovery |
+| Skill system | ✅ `agent_skills` registry live | ✅ bundled + user-loaded, incl. a `skillify` skill that generates new skills | ✅ `.agents/skills/`, loaded on-demand into context | ✅ `skills/` + `optional-skills/` |
+| Hook/lifecycle event system | ✅ PreToolUse/PostToolUse (execution-core) | ✅ ~19+ named hook events, 4 action kinds incl. `agent`/`http` | ✅ waterfall/emit/parallel/serial typed events, wire-protocol bridge to Claude Code/Codex hooks | ✅ `invoke_hook()` sites + shell-script bridge |
+| MCP client/registry | 🟡 wired but env-gated; capability-core registry = stub | ✅ (`services/mcp`) | — (not a primary integration surface observed) | 🟡 (`optional-skills/mcp/`) |
+| Multi-provider/model routing abstraction | 🟡 ad-hoc provider structs (per prior harvest, not yet re-verified as fixed) | ✅ | 🟡 (LLM capability seam, single-provider-family focus) | ✅ 300+ models via Nous Portal |
+| Cost/budget tracking | ✅ `cost-core`, genuinely mature, no stubs | 🟡 (`cost-tracker.ts` exists, scope unclear from structure alone) | ❌ not a primary concern | ❌ not a primary concern |
+| Voice I/O | ❌ | ✅ STT/TTS | ❌ | ✅ wakewords, streaming TTS, full Google Meet voice bot |
+| Self-modification / runtime plugin mounting by the agent itself | ❌ | ❌ | ✅ `dsh-tool-cordis` (explicitly non-security-boundary vm mount) | ❌ |
+| Generated, freshness-gated documentation as a CI gate | ❌ | ❌ | ✅ boots real plugins, diffs against committed docs | ❌ |
+| Blameless postmortem / rejected-design ledger | 🟡 (git commit messages narrate rejections, e.g. HARN-1/2; no dedicated ledger) | ❌ (not observable from source alone) | ✅ 4 numbered postmortems + 688-entry Agent Notes ledger | ❌ |
+| Dedicated eval harness (general agent quality) | ✅ "eval harness MVP" recently shipped (git log, 2026-08) | ❌ (not observed) | 🟡 (snapshot-replay tests, not a scored eval harness) | ✅ `evals/readtool`, `evals/compaction` |
+| Signed/attested release artifacts | ✅ artifact-v3, uniquely rigorous among the four | ❌ n/a (leaked snapshot) | ❌ n/a (dev preview) | ❌ n/a |
+| License | Internal/proprietary | **None — leaked proprietary** | MIT | MIT |
+
+---
+
+## 4. Deep comparison by dimension
+
+### 4.1 Agent / turn loop design
+All four converge on the same shape — a **turn** is one-or-more **steps**, a
+step is one model request plus its tool calls — but differ in how explicit that
+shape is as an *architectural contract* versus an implementation detail.
+
+- **DeepSeek Harness** is the most explicit: the turn/step lifecycle is a
+  documented state machine (`docs/agent-lifecycle.md`) with the invariant
+  *model-visible ⟺ logged* enforced at runtime, not just by convention. The
+  driver, the model adapter, and the tool registry are themselves ordinary
+  plugins with no privileged core — the loop's shape is a documented extension
+  point, not something you patch around.
+- **Claude Code** concentrates the entire loop (streaming, tool iteration,
+  extended-thinking handling, retries, token accounting) inside one ~765-line
+  method (`submitMessage`) in an otherwise near-empty class — real single-point-
+  of-complexity risk, independent of the inflated line-count claims in that
+  repo's own `CODEBASE_ASSESSMENT.md` (see §5.4 for the correction).
+- **Hermes** layers a rich per-turn prologue (`turn_context.py`) ahead of the
+  actual model call, including an explicit fix for a documented race: if a
+  background-review fork from the *previous* turn is still running, the new
+  turn interrupts it before making its own API calls on the same
+  session/credentials.
+- **Model Plane** already made its most interesting loop-level decision very
+  recently and it deserves top billing here, not a footnote: on 2026-08-14 a
+  proposal (internally tagged HARN-1/2) to unify `execution-core`'s
+  `execute_step_inner` and `model-gateway`'s `dispatch_tool` into one module
+  and one turn-loop trait was **measured and explicitly withdrawn**. The two
+  dispatchers share zero tools; `dispatch_tool` is an 18-arm *read-only* router
+  whose first act is refusing anything side-effecting, while
+  `execute_step_inner` is the full capability/hook/permission pipeline around
+  sandboxed execution — the refusal boundary between them **is** the authority
+  boundary, and merging them would make an accidental cross-call compile. Three
+  cross-service invariants that were previously "enforced by comment only"
+  (e.g., a deployed agent must never get a smaller tool-call round budget than
+  plain chat) are now asserted at runtime in `cross_service_loop_contract.rs`
+  and mutation-tested (perturb both sides, confirm the assertion fails
+  legibly). **This is a genuinely mature call** — resisting a "collapse it into
+  one module" instinct after actually measuring the coupling cost — and belongs
+  in the "smart implementations" list for Model Plane itself, not just the
+  three external systems.
+
+### 4.2 Tool execution & sandboxing
+This is the dimension with the most actionable, concrete convergence.
+
+All three external systems land on the same idea from different angles: a
+sandbox/execution backend should be **one minimal interface** that both a real
+OS subprocess and an SDK-only/remote backend satisfy identically.
+- DeepSeek: `ctx.sandbox`/`ctx.sandboxPolicy` wraps a same-world subprocess argv
+  in a policy (`read-only`/`workspace-write`/`danger-full-access`); backends
+  (Linux bwrap/Landlock, macOS Seatbelt, Windows ACL runner) each report their
+  own enforcement completeness rather than a boolean.
+- Hermes: `BaseEnvironment` ABC + `ProcessHandle` Protocol; SDK-only backends
+  (Modal, Daytona) wrap their blocking call in a `_ThreadedProcessHandle`
+  adapter that exposes the exact same `poll()/kill()/wait()/stdout` surface as
+  a real `subprocess.Popen`, so the shared execute() machinery (snapshotting,
+  CWD tracking, timeout, interrupt, output capture) is written once.
+- Claude Code: sandbox config is one schema (`entrypoints/sandboxTypes.ts`,
+  explicitly documented in-repo as the single source of truth) consumed by
+  *both* the SDK and the interactive permission system's own allow/deny rules
+  — preventing "what the user approved" and "what the OS actually allows" from
+  drifting into two independently-reasoned-about surfaces.
+
+Model Plane's own sandbox story just crossed an important threshold (§0): real
+`bwrap` isolation is now source-confirmed in `execution-core`. What it does
+**not** yet have is any of the three patterns above — a formal backend
+interface, honest full/partial enforcement reporting, or a single schema shared
+between the policy engine and the sandbox layer. `sandbox-manager`'s own
+create-paths (the Go side — lease/snapshot/reconcile) remain the largest
+still-open piece per the existing Tier 2 harvest plan; the Rust-side OS
+isolation piece of that plan appears to have shipped ahead of the Go side.
+
+### 4.3 Memory & context management
+The three external systems each solved a different sub-problem well and no
+one solved all of them:
+- **Hermes** has the most rigorous *compaction-quality measurement*
+  (`evals/compaction/` scores strategies by recall accuracy against gold
+  questions generated from the discarded region — not token-count reduction)
+  and the cleanest multi-backend memory registry discipline (one external
+  provider at a time, reserved core tool names so a provider schema can never
+  shadow a built-in tool).
+- **Claude Code** has the most sophisticated *compaction escalation* (four
+  tiers, cheapest first, cache-aware) and the most direct fix for compaction's
+  worst failure mode — losing the file you were mid-edit on — via budgeted
+  post-compact reattachment.
+- **DeepSeek Harness** has the strongest *durability* story for the compaction
+  operation itself: the start-of-operation log event is written before work
+  begins and the end event only after the replacement message has landed, so a
+  mid-operation crash is a mechanically detectable orphaned marker rather than
+  a false "finished" record.
+- **Model Plane** has real durable session/event persistence (arguably the
+  most rigorously modeled of the four — single-writer-per-run, ULID-prefixed
+  keys, transactional outbox) but no confirmed tiered compaction strategy and
+  no compaction-quality eval harness at all. Long-term/semantic memory
+  (`letta-bridge`) is correctly left as a single stub rather than
+  over-engineered into a registry no one needs yet (§7.4) — this is a good
+  decision already made, not a gap.
+
+### 4.4 Multi-agent / subagent orchestration
+- **DeepSeek Harness** has the most conceptually rigorous design: it names and
+  separates *disposable one-shot delegation* from *durable continuable
+  subagents* as genuinely different reliability/authorization problems (who
+  may follow up, whether interruption reaches descendants, child-before-parent
+  disposal ordering) — plus two further, distinct orchestration primitives
+  (`ralph` for fresh-agent-per-round statelessness, `workflow` for a
+  model-written JS script with `agent()`/`pipeline()`/`parallel()` coordination
+  hooks and hard concurrency/agent-count caps).
+- **Claude Code** solves a different, also-real problem well: fork-semantics
+  delegation (warm-start from parent history) paired with git-worktree
+  isolation as two small composable primitives, rather than one "parallel
+  agent" mega-mechanism.
+- **Hermes** has the most explicit blast-radius control for delegated work: a
+  hard-coded leaf-vs-orchestrator role split with a literal tool blocklist for
+  leaves and a configurable max recursion depth surfaced in the tool's own
+  schema description (so the model can see the limit, not just be silently
+  bound by it).
+- **Model Plane** has a `subagent_edges` table and a subagent hook in
+  `execution-core`, but nothing in the explored source confirms a continuation
+  manager, a leaf/orchestrator distinction, or fork-semantics warm-start — this
+  is the widest gap of the four dimensions covered here relative to all three
+  external systems, and probably deserves to be its own roadmap phase rather
+  than an incidental line item.
+
+### 4.5 Engineering process & quality culture
+Worth comparing on its own, since it predicts how fast a gap actually closes
+once identified:
+- **DeepSeek Harness** is the standout: documentation that boots real plugins
+  and fails CI if it drifts from source; four numbered blameless postmortems,
+  two of which are explicitly about **fully-covered, all-green code that shipped
+  completely non-functional** (a stray default export dropped a DI injection; a
+  config expression was evaluated in the wrong loader location) — a real,
+  cited lesson that 100% coverage proves lines ran, not that the feature works.
+- **Model Plane** independently proves the same lesson in its own way: the
+  `MODEL_PLANE_STATUS.md`/`ROADMAP.md` correction history (2026-05-30,
+  2026-07-11, 2026-07-13 reconciliations, each explicitly correcting a
+  previous ❌/✅ claim that turned out wrong) and the HARN-1/2 withdrawal are
+  the same discipline — measure before trusting a plan, and say so in writing
+  when the plan was wrong — expressed through commit messages and dated audits
+  rather than a dedicated postmortem directory. **Recommendation: give this its
+  own lightweight home** (§7.6) rather than leaving it scattered across commit
+  bodies and doc-correction footnotes, which is easy to lose track of at 150+
+  commits/month velocity.
+- **Hermes** is the most honest about its own weak defaults — its security docs
+  candidly document an opt-in network-egress-isolation topology while
+  disclosing the shipped default is `network_mode: host` (unrestricted), and a
+  fail-open content scanner default. That kind of documented, undefended gap is
+  more useful than a silent one.
+- **Claude Code (leaked)** cannot be evaluated on process at all — no tests, no
+  CI config, no lint config, and a squashed single-commit history exist in this
+  artifact; nothing about its actual development process is recoverable from
+  the leak.
+
+---
+
+## 5. Smart implementations, spotlighted
+
+### 5.1 DeepSeek Harness
+1. **Waterfall + monotonic-guard split for tool policy** — an open,
+   plugin-extensible pre/post hook chain for ordinary policy, plus a small,
+   fixed, non-reorderable layer of "monotonic guards" for identity-protecting
+   allow/deny decisions that no later-registered plugin can shadow. Solves the
+   classic "middleware ordering is a footgun" problem without sacrificing
+   extensibility.
+2. **Compaction lock released last, not first** — `compaction/start` is logged
+   before work begins, `compaction/end` only after the replacement message has
+   landed, turning a mid-crash into a detectable orphaned-lock state instead of
+   a false completion record.
+3. **Sandbox enforcement reported as a fact, not assumed** — every confinement
+   backend returns an explicit `full`/`partial` value alongside its wrapped
+   argv; the project's own postmortem 0004 shows exactly what breaks when this
+   discipline briefly slipped.
+4. **Generated, boot-verified documentation as a CI gate** — the tool catalog
+   doc is produced by actually booting each tool plugin against a real context
+   and reading its live schema, then failing CI if the committed doc differs
+   from a fresh regeneration.
+5. **Self-modification as one bounded primitive, not N structured tools** — the
+   team explicitly evaluated and rejected a "one tool per capability"
+   self-modification design (documented, with a real tradeoff table) in favor
+   of a single vm-mount primitive plus inspect/unmount — resisting scope creep
+   by identifying what actually needed solving.
+6. **Blameless, numbered postmortems with root-cause-to-guardrail
+   traceability** — each pairs a concrete "why did green CI ship a broken
+   feature" root cause with a guardrail landed in the same fix.
+
+### 5.2 Hermes Agent
+1. **`ProcessHandle` Protocol + threaded-adapter pattern** — one minimal
+   execution-handle interface that a real OS process satisfies natively and an
+   SDK-only backend satisfies via a background-thread adapter, so
+   session/CWD/timeout/interrupt machinery is written once, not once per
+   backend.
+2. **Two-owner compaction handoff, not a race** — native provider-side
+   compaction gets first shot on eligible model+route combinations, clamped a
+   safety margin below the local compressor's own trigger; the local
+   compressor only fires if native didn't. An explicit handoff, not two
+   systems racing to compact the same context.
+3. **`MemoryProvider`'s one-external-provider cap + reserved core tool names**
+   — a hard ceiling on simultaneously-active external memory backends, plus a
+   reserved namespace of core tool names no provider registration can ever
+   shadow.
+4. **Leaf-vs-orchestrator subagent split with a literal tool blocklist** — a
+   hard-coded `DELEGATE_BLOCKED_TOOLS` list (`delegate_task`, `clarify`,
+   `memory`, `send_message`, `cronjob`) for leaf children, a separate
+   orchestrator role that regains only `delegate_task`, and a configurable max
+   recursion depth surfaced honestly in the tool's own model-facing schema
+   description.
+5. **Recall-accuracy compaction eval harness** — `evals/compaction/` scores
+   compaction policies against gold questions generated from the region about
+   to be summarized away, not token-count reduction — a genuinely rare piece
+   of rigor for an open agent project.
+6. **Thread-local approval-callback propagation fix** — subagents run in a
+   `ThreadPoolExecutor`; a documented fix installs a safe non-interactive
+   approval callback into every worker thread at pool-init time specifically
+   to prevent a deadlock against the parent's interactive terminal prompt.
+
+### 5.3 Claude Code (leaked source — described structurally only, no code reproduced)
+1. **Declarative `ToolDef` → `buildTool()` factory** — ~40 independently
+   authored tool folders each export a plain config object (schema,
+   permission classification, prompt, execute function); one factory function
+   turns that declaration into the runtime interface, centralizing typing,
+   immutability, and permission plumbing so no individual tool can forget a
+   safety check.
+2. **Fork-semantics subagent spawning + worktree isolation as two separate
+   primitives** — warm-starting a child from parent history and isolating
+   concurrent filesystem writes are solved by two small composable tools
+   (`forkSubagent` + `EnterWorktreeTool`/`ExitWorktreeTool`) instead of one
+   monolithic "parallel agent" mechanism.
+3. **Escalating, cache-aware compaction tiers** — time-based light clearing →
+   client-side microcompact → provider-native context editing → full LLM
+   summarization, cheapest tier tried first, with explicit tracking of which
+   trims are safe against the prompt-cache prefix.
+4. **One security schema shared by the permission UI and the OS sandbox** — a
+   single documented source-of-truth type is consumed by both the SDK and the
+   interactive approval system's own allow/deny rules, so "what the user
+   approved" and "what the sandbox actually allows" cannot silently diverge.
+5. **One pattern-matching DSL reused for both permission rules and hook
+   triggers** — the same `"Bash(git *)"`-style rule syntax gates both
+   interactive tool approval and whether a configured hook fires at all; one
+   parser is hardened and trusted for two purposes instead of two.
+6. **Post-compact selective, budgeted file/skill reattachment** — after a full
+   compaction, up to 5 previously-read files and 5 previously-active skills
+   are individually and jointly re-attached under hard token budgets, directly
+   targeting compaction's worst failure mode (losing the file you were
+   mid-edit on) without undoing the token savings.
+
+### 5.4 Model Plane itself (a self-audit, since it's easy to only look outward)
+1. **The HARN-1/2 withdrawal** (§4.1) — measuring a "collapse two loops into
+   one" proposal against actual tool overlap (zero) before writing code, and
+   recording why it didn't hold.
+2. **`cross_service_loop_contract.rs`** — cross-service invariants that
+   *cannot* be a build dependency (two independently deployed services) are
+   asserted at runtime and mutation-tested (perturb both sides, confirm
+   legible failure), rather than "enforced by comment" the way they used to be
+   — this is directly comparable to DeepSeek's runtime-asserted
+   model-visible-⟺-logged invariant and is the same quality of discipline.
+3. **The `letta-bridge` memory-adapter deferral** (`capability-ownership-matrix.md`
+   §4.4) — an explicit, dated design call to *not* build a multi-adapter
+   registry for a single in-memory stub, and to build it "when the second
+   real backend lands," recorded as a decision rather than an oversight. This
+   is the correct answer to the same trap DeepSeek's own postmortems and
+   Hermes's `MemoryManager` cap both gesture at from different angles
+   (premature multi-backend abstraction).
+4. **Cost-core's authoritative pricing fallback** — `RecordUsage` prices from
+   the catalogue when `cost_usd` is absent, so the dollar ledger and budget
+   posture are never silently `$0` — a small, easy-to-get-wrong detail handled
+   correctly and tested.
+
+---
+
+## 6. Honest gaps in Model Plane (confirmed by source, 2026-08-16)
+
+- **No parallel tool-call dispatch.** `execution-core`'s runtime loop still
+  processes `response.tool_calls` in a plain sequential `for` loop. All three
+  external systems have some form of concurrent dispatch (DeepSeek's bounded
+  concurrent pool being the most explicit). This is a real latency gap for any
+  turn producing multiple independent tool calls.
+- **No tool retry on transient failure**, confirmed unchanged since the
+  2026-07-17 audit.
+- **`capability-core`'s tools/plugins/MCP registries remain stubs.** Skills,
+  models, routing, and safety registries are live; tools/plugins/MCP are not,
+  per both the prior harvest and a fresh grep for `ToolsRegistry`/
+  `PluginsRegistry`/`McpRegistry`-shaped types (none found).
+- **No compaction-quality eval harness**, and no confirmed tiered compaction
+  strategy — both `hermes-agent` and `claude-code-fork` treat this as a
+  first-class, multi-tier concern; Model Plane's compaction posture could not
+  be confirmed to be more than "a compaction-trigger hook exists."
+- **No durable/continuable subagent lifecycle, leaf/orchestrator role split,
+  or fork-semantics warm-start** — the widest multi-agent gap of the four
+  systems compared (§4.4).
+- **Sandbox enforcement is not reported as a fact.** Now that real `bwrap`
+  isolation exists, it should report `full`/`partial` per-platform the way
+  DeepSeek Harness does, rather than the Go orchestration layer trusting a
+  single implicit flag.
+- **No shared schema between the capability-policy engine and the sandbox
+  layer.** Claude Code's single-source-of-truth pattern (§4.2) directly
+  addresses the failure mode of "what the policy engine approved" and "what
+  the sandbox actually permits" drifting apart — worth an explicit check that
+  Model Plane's `capability_policy.rs` and `sandbox.rs` share one model.
+- **`orchestrator-core`'s Temporal workflows are still not the production
+  dispatch path** — real, tested, but bypassed by the live
+  `model-gateway → execution-core` loop for anything outside a handful of
+  supervised flows. This predates this audit but is worth restating since it
+  directly limits how much of the multi-agent/orchestration gap above can be
+  closed by "just wire up the existing Temporal workflows."
+
+---
+
+## 7. What Model Plane should adopt — prioritized
+
+Ordered by leverage (how many other gaps a single change closes) rather than
+raw effort. Each item states its source and license status.
+
+### 7.1 Formalize the sandbox-backend interface as a true capability seam (High leverage)
+Adopt the pattern all three external systems converge on independently: one
+minimal `SandboxBackend { init_session, execute, cleanup }` trait +
+`SandboxHandle { poll, kill, wait, stdout }` interface (already scoped in
+`external-ideas-harvest.md` #7, hermes-shaped, MIT) that a real `bwrap`-wrapped
+process satisfies natively and a remote/SDK-only future backend (Modal-
+equivalent) satisfies via a thread-or-task adapter — exactly Hermes's
+`_ThreadedProcessHandle` shape. Pair it with **honest `full`/`partial`
+enforcement reporting** per DeepSeek's pattern, forcing `sandbox-manager` (Go)
+to branch on it rather than trust an implicit boolean. This is now unblocked
+by the fact that real bwrap isolation already landed on the Rust side — this
+item is "wrap what exists in the right interface," not "build sandboxing from
+scratch."
+
+### 7.2 Parallel tool-call dispatch (High leverage, contained blast radius)
+Replace the sequential `for call in &response.tool_calls` loop with a bounded
+concurrent dispatch (DeepSeek's `executionMode`: ordered vs. bounded-concurrent-
+pool is a reasonable model — not everything needs to run in parallel, but
+independent read-only calls should). This is a pure latency win with no
+license concerns (describe-and-reimplement, not port).
+
+### 7.3 A leaf/orchestrator subagent role split with a literal tool blocklist (Medium-high leverage)
+Adopt Hermes's pattern directly: a hard-coded blocklist of side-effecting
+tools (delegate/clarify/memory-write/send-message/schedule) for any child
+agent by default, a separate orchestrator role that regains only delegation,
+and a configurable max recursion depth surfaced in the tool's own schema so
+the model can see its own limit. Model Plane's Go orchestration layer
+(`orchestrator-core`) is exactly the place to implement this as a depth
+counter + per-role tool-allowlist gate. MIT, port freely.
+
+### 7.4 A compaction-quality eval harness (Medium leverage, currently zero investment)
+Adopt Hermes's `evals/compaction/` pattern: score any compaction/summarization
+strategy against gold recall questions generated from the discarded region,
+not against token-count reduction alone, and keep it as a CI-adjacent
+artifact so compaction policy changes get a regression signal. Model Plane
+already shipped a general "eval harness MVP" per recent git history — this
+should plug into that infrastructure rather than becoming a parallel harness.
+
+### 7.5 Escalating, cache-aware compaction tiers + post-compact selective reattachment (Medium leverage)
+Adopt Claude Code's shape (structurally, not by code): cheapest-first
+escalation (time-based light clearing → local microcompact → provider-native
+context edit if the model/route supports it → full summarization), and after
+any full compaction, selectively re-attach a small, token-budgeted set of the
+most recently touched files — directly targeting the "lost the file I was
+mid-editing" failure mode.
+
+### 7.6 A lightweight postmortem + rejected-design ledger for Model Plane (Medium leverage, cheap)
+Model Plane already *has* the discipline (HARN-1/2 withdrawal, repeated
+ROADMAP.md correction notes) — it just doesn't have a *home* for it, so the
+next contributor has to grep commit messages to rediscover a settled
+tradeoff. Adopt DeepSeek's shape: a small `docs/postmortem/` (numbered,
+root-cause-to-guardrail) plus a `.agents/notes`-equivalent
+proposed/implemented/rejected/archived ledger. Cheap, no license concerns
+(a documentation practice, not code), and directly prevents "let's reconsider
+X" churn in a multi-plane, multi-contributor system at this commit velocity.
+
+### 7.7 Do NOT over-correct on memory-adapter registries (a "don't adopt" call)
+Both DeepSeek's and Hermes's memory stories are more mature than Model
+Plane's — but Model Plane's own 2026-05-30 decision to defer a
+`MemoryAdapter` registry until a second real backend exists is *already the
+right call*, not a gap to rush-close by copying Hermes's `MemoryProvider` ABC
+today. Revisit only when `letta-bridge` gets a real upstream or a second
+backend is actually planned.
+
+### 7.8 Continue treating `claude-code-fork` as shapes-only (a compliance reminder, not a new item)
+Every item above sourced from `claude-code-fork` is described and adopted as a
+*pattern*, never as ported code — consistent with the binding license gate
+already in `external-ideas-harvest.md` §1. This audit did not find any reason
+to relax that gate.
+
+---
+
+## 8. What NOT to change in Model Plane
+Two decisions already made deserve explicit protection from well-meaning
+"simplification" during any adoption work above:
+
+- **Keep the two tool-dispatch loops separate** (`dispatch_tool` vs.
+  `execute_step_inner`, §4.1/§5.4). The HARN-1/2 withdrawal already settled
+  this with evidence; don't relitigate it while wiring in parallel dispatch or
+  a new sandbox interface — both can be added to `execute_step_inner` without
+  touching the plain-chat router.
+- **Keep `letta-bridge` as a single stub** until a second real memory backend
+  exists (§7.7).
+
+---
+
+## 9. Onboarding artifacts produced alongside this audit
+As part of this pass, onboarding material was generated for all four
+codebases (per the `codebase-onboarding` skill format):
+
+| Repo | `CLAUDE.md` | `ONBOARDING.md` |
+|---|---|---|
+| `apps/Model Plane` (this repo) | **written** (none existed) | **written** |
+| `deepseek-harness` | *left untouched* — an excellent, actively-maintained `CLAUDE.md`/`AGENTS.md` already exists upstream | **written** (new, additive) |
+| `hermes-agent` | **written** (none existed) | **written** |
+| `claude-code-fork` | **written** (none existed) | **written** |
+
+`deepseek-harness/CLAUDE.md` is a real, upstream-maintained file (literally
+documented as a symlink to `AGENTS.md`) — it was deliberately not modified;
+only a new, additive `ONBOARDING.md` was added there.
+
+---
+
+## 11. Addendum (2026-08-16, later pass): Verevon v3 + Model Plane vs. the "browser-web-app-first" bar
+
+Prompted by a follow-up question: since Verevon v3 (`apps/Frontend Plane/verevonv3`)
+is explicitly meant to be a **browser-web-app-first** surface (unlike Claude
+Code/Hermes, which are terminal-first with secondary surfaces, or DeepSeek
+Harness, which treats `dsh-web-app` and `dsh-headless` as equal siblings of one
+core), this addendum checks how far the actual frontend + gateway + Model
+Plane's SSE exposure layer are from that goal, verified against source.
+
+### 11.1 Verdict
+**The runtime/observability half of a browser-first agent web-app is real and
+substantially more complete than a skeptical read expects. The authoring half
+does not exist yet, and is honestly labeled as not existing.** Three
+independent research passes (frontend SPA, the Rust gateway's domain wiring,
+and Model Plane's SSE/`InvokeRequest` exposure layer) found:
+
+- Chat streaming, tool-call visibility (humanized, expandable cards — not raw
+  JSON), artifact rendering (including a deliberately sandboxed HTML iframe),
+  HITL approval (in **two** places: chat and the Agent Run Console, both
+  hitting the same real backend route), subagent-attach/stop visibility (also
+  in two places), a real Agent Run Console with run history + proof bundles +
+  resume/cancel, live memory/skills CRUD (tucked into Settings, not the Agents
+  area), and both a dedicated cost dashboard and inline per-turn cost/token
+  display — are all **live-wired end-to-end**, not mocked, not decorative.
+- The gateway's SSE proxying is genuinely well-hardened: true byte-level
+  passthrough (no buffering/re-encoding), server-derived (not client-forgeable)
+  org scoping, five independently-audience-bound delegated tokens minted
+  per-request and never echoed back to the client.
+- **Configuring or authoring a new agent/workflow from the browser and having
+  it persist or execute is not possible today, on purpose.** `WorkflowBuilder`
+  is a static design preview whose own code comment states the reason:
+  "the model plane is an LLM agent loop, not an n8n DAG runner" — there is no
+  workflow/DAG concept in the backend to bind a visual builder to. Similarly,
+  `ChatbotStudio`'s preset-agent configuration UI is mostly a disclosed mockup
+  because, per its own code comment, "there is no per-org agent-config store
+  yet." Both use a consistent, deliberate `DesignPreviewBadge` "honesty
+  contract" pattern rather than silently faking a save button.
+
+  **Correction (same day, follow-up dig):** "no agent-config store" is too
+  broad a reading of that comment. A real, mature per-org agent-config store
+  already exists — Convex's `agents` table (`apps/Application Plane/convex-core/convex/agents.ts`),
+  with full CRUD (`create`/`update`/`getById`/`listByOrg`), a public-embed-widget
+  security model (rotating secret, 403 without it), and fields for
+  model/temperature/systemPrompt/tone/greeting/tools/knowledgeSources. What's
+  actually missing is narrower: (1) `ChatbotStudio.tsx` simply isn't wired to
+  that store yet (zero data-fetching imports found), and (2) the specific thing
+  `AgentsPage.tsx`'s "Blueprint" badge names as Phase-5-deferred is an
+  *activation pathway* — turning a role template (support/sales/marketing/...)
+  into a real, capability-granted, deployed `agents` row — which is a
+  genuinely new, smaller, and more precisely scoped piece of work than "build
+  a config store from nothing." See the chat discussion for the full breakdown.
+
+### 11.2 Backend landmines that cap what the frontend can ever show
+Two findings from the SSE/`InvokeRequest` pass matter specifically for the
+browser-first goal, because no amount of frontend work can surface a
+capability the backend never actually emits:
+
+- **`ReasoningDelta` is dead.** The SSE event is defined, feature-gated, and
+  already has a client-side dispatch case (`chat-client.ts`) — but is never
+  constructed anywhere in `model-gateway` outside its own unit tests, because
+  `inference-core` has no reasoning/thinking-token channel at all. A browser
+  user will never see a live "thinking" stream today, even though the wiring
+  for it already exists on both ends.
+- **Two structurally different `InvokeRequest` types share one name.** The
+  protobuf message (with the chat-parity audit's added `content_parts`/
+  `tools`/`attachments`/`features` fields) is consumed only by the gRPC
+  transport on `:9090`, which never reads those four fields. The browser-facing
+  HTTP path (`/v1/invoke/stream`, what the SPA actually calls) uses a
+  completely separate hand-written struct where `tools`/`attachments`/
+  `features` *are* real, but `content_parts` has no equivalent at all —
+  multimodal image input goes through a narrower, differently-shaped
+  `attachments` + `vision.rs` path instead. Anyone reading only the proto file
+  would wrongly conclude multimodal input is fully wired; anyone reading only
+  `grpc.rs` would wrongly conclude the chat-parity fields are unimplemented.
+  Worth a docs correction and, longer-term, collapsing to one `InvokeRequest`
+  shape.
+- A built-but-unused surface: `ag_ui.rs` (an AG-UI/CopilotKit-protocol SSE
+  adapter) omits the org/user headers and delegated tokens the sibling chat
+  route treats as mandatory — but has zero callers anywhere in the shipped SPA,
+  so it's an inconsistency to fix or delete, not an active exposure.
+
+### 11.3 How this stacks up against the three external systems' web surfaces
+None of the three external systems are a fair apples-to-apples comparison for
+a *browser* agent web-app specifically:
+- **DeepSeek Harness**'s `dsh-web-app` bundle is real but its depth wasn't
+  profiled in this audit (out of scope — the harness comparison focused on the
+  core/loop/sandbox packages, not the web-app bundle's UI).
+- **Hermes** doesn't clearly have a browser-based *agent* UI as a primary
+  surface (its `web/`/`website/` pair read as a docs site in the exploration
+  done for §2.4, not the agent interface itself) — Electron desktop + CLI +
+  TUI + messaging gateway are its actual UI surfaces.
+- **Claude Code (leaked)** is terminal-first with an IDE/remote bridge, not
+  browser-first at all.
+
+So Verevon v3 isn't behind any of the three on browser-based agent-runtime
+observability — if anything, the combination of a real Agent Run Console with
+proof bundles, dual-surface HITL approval, and dual-surface subagent
+visibility is a *more* complete browser agent-observability surface than
+anything confirmed in the other three systems' web/GUI layers. The gap is
+narrower and more specific than "we're behind": it's "authoring has no backend
+yet," which is a Model Plane backend-scope decision (§6, §7), not a frontend
+shortfall.
+
+### 11.4 What this means for prioritization
+Items already in §7 gain sharper justification from this pass:
+- **§7.2 (parallel tool-call dispatch)** and **§7.3 (leaf/orchestrator subagent
+  split)** now have a concrete frontend consumer waiting for them — the Agent
+  Run Console and `ChatLiveRunPanel` already render subagent-attach events and
+  would show richer orchestration immediately once the backend supports it.
+- **New, frontend-driven item: give `sandbox-manager`/`execution-core` a
+  workflow/DAG-and-agent-config persistence layer before investing further in
+  `WorkflowBuilder`/`ChatbotStudio` UI.** Building more UI on top of these two
+  features would be pure UI investment with no backend to bind to — the
+  current `DesignPreviewBadge` discipline is the right call until that
+  changes, not a shortcut to remove prematurely.
+- **New item: fix or delete `ag_ui.rs`.** It's a real, distinct code path with
+  a security-hygiene gap (missing org/delegated-token headers) and zero live
+  callers — cheap to close either direction, but leaving it as-is is the worst
+  of both options (attack surface with no product value).
+- **New item: resolve the two-`InvokeRequest` naming collision** — at minimum
+  a doc correction so `content_parts`'s proto-only status doesn't get
+  mis-cited as "multimodal is wired" in a future audit; ideally collapse to one
+  shape so the gRPC and HTTP transports stop drifting independently.
+
+---
+
+## 13. Second pass (2026-08-17) — four harnesses, new lenses, plus `pi`
+
+Commissioned with an explicit priority order and a lens per system. `pi`
+(`/Volumes/Lagring/Triodelab/pi`, earendil-works, **MIT**) joins as a fourth
+harness — previously named in `external-ideas-harvest.md` but never actually
+read. Chat-UI-specific conclusions live in `VEREVON_CHAT_DESIGN.md`; this
+section covers the harness/architecture findings.
+
+### 13.1 `pi` — the versatility is real, and so is the trap
+
+**~256K LOC TypeScript, 12 packages, MIT.** The founder's read ("most versatile,
+steep learning curve, a Claude Code competitor for expert users") is accurate,
+and the mechanism is one architectural bet: **keep the core tiny and make the
+extension API almost as powerful as the core**.
+
+pi ships **exactly seven built-in tools** (`read`, `bash`, `edit`, `write`,
+`grep`, `find`, `ls`) and **no MCP, no subagents, no permission prompts, no plan
+mode, no todo list**. A grep across every package confirms zero MCP
+implementation. Everything competitors ship as a built-in, pi ships as an
+example extension you copy — 60+ working examples covering plan mode, subagents,
+permission gating, sandboxing, git checkpointing. (The documented extension table
+was diffed against the filesystem: every documented example exists. No doc drift.)
+
+**The self-extension loop is the genuinely novel part**, and it's a packaging
+decision plus a prompt trick: `package.json` ships `docs` and `examples` in the
+npm `files` array, so an installed pi carries its own reference material on
+disk; the system prompt then hands the model absolute paths to that material
+with a topic-routing table. "Write me an extension that does X" makes the agent
+read its own docs with its own `read` tool, write a `.ts` file, and `/reload`.
+**The agent extends itself using only the file tools it already has.** There is
+no plugin SDK ceremony because the plugin API *is* the internal API.
+
+**The steep learning curve is not config and not a DSL — it's that you write
+TypeScript against a large, unforgiving API with no guardrails.** Four things:
+a ~40-event typed `ExtensionAPI`; an unusual mental model (the session is a
+*tree*, not a log, with fork/branch/compaction-boundary reasoning and an
+explicit `invalidate()` that poisons a stale captured context); no safety rails
+to lean on (no permission system, no core sandbox, `bash` has **no default
+timeout**); and undifferentiated power — a project's `.pi/extensions/*.ts` is
+arbitrary code executed on session start, so *cloning a repo and running pi in
+it is a code-execution event*. The only mitigation is a binary per-directory
+trust store.
+
+**Best portable assets** (all reimplementable freely — MIT, and architecture
+isn't copyrightable anyway):
+- **The no-throw stream envelope** (`lazyStream`) — confirmed and *understated*
+  in our prior note. Every provider call returns a stream synchronously; unknown
+  provider, unconfigured auth, OAuth refresh failure and transport failure all
+  become a terminal in-band error event carrying a well-formed zero-usage
+  message. One error path instead of two; cost accounting never has a hole.
+- **The context-overflow detection table** — 25+ provider-specific regexes *plus*
+  a rate-limit exclusion list (so Bedrock throttling isn't misread as overflow)
+  *plus* two silent-overflow heuristics (one provider accepts overflow silently;
+  another truncates and returns a length-stop with zero output). This is months
+  of operational scar tissue available for free.
+- **Session-as-tree with append-only compaction** — record the summary and the
+  first-kept-entry id; never delete summarized entries. Branch/fork becomes a
+  real feature *and* the untruncated transcript stays available for audit,
+  export and erasure after the model's view is compressed. Directly serves our
+  GDPR posture.
+- **Fail every tool call in an assistant message whose stopReason is `length`,
+  without executing any.** Streamed tool arguments are finalized by a salvage
+  parser, so a truncated message can yield calls that parse and schema-validate
+  while being silently incomplete. This is a real data-corruption class.
+- **Two distinct queued-input semantics** (`steer` = inject after current tool
+  calls, before next model call; `followUp` = wait until the agent would stop,
+  then restart) with sending-during-stream-without-specifying treated as an
+  **error, not a silent default**.
+- **Compositional system prompt** — each tool carries its own snippet and
+  guideline bullets; the builder assembles from whatever tools are active. The
+  only maintainable approach once tool availability varies per tenant/plan/Space.
+
+**⚠️ Major skeptical finding: pi contains a large, well-specified, well-tested
+second architecture that is almost entirely non-functional.** `AgentHarness`
+(`packages/agent/src/harness/`) has a 2,941-line spec, ~10K LOC of substrate and
+~5.7K LOC of tests — and **every lane operation returns a promise rejected with
+`HarnessNotImplemented`**; only `getLeafId()` works. `packages/server` is
+imported by no source file. `pi server`/`pi client` subcommands are fully
+implemented and unit-tested but **unreachable** (never referenced by the arg
+parser). The 667-line crash-recovery reducer has zero callers. The telemetry
+package is consumed only by the unwired harness, so **pi as it actually runs
+emits no spans**. Its top-level test file is literally named
+`agent-harness-scaffold.test.ts`.
+
+Treat `harness.md` as an excellent *design reference* — its three-store
+durability split, single-transaction primitive, "the durable program counter is
+one register holding complete total state", and the effect-sandwich commit
+protocol are a markedly simpler crash-recovery story than event-log replay, and
+answer "what happens when the pod restarts mid-tool-call". But it is **not**
+evidence of a shipping capability. Also: `tui-plan.md`, despite 36KB at repo
+root, is a terminal layout-engine handoff with no bearing on a web product.
+
+### 13.2 DeepSeek Harness — the web-app layer (closing pass 1's gap)
+
+Pass 1 explicitly skipped the web-app bundle. It is the most directly applicable
+material of the four systems, and the strongest single idea is:
+
+**`ConversationNodeDefinition` + keyed renderer registry** — a plugin contributes
+a new *renderable message type* to the browser chat UI, rather than growing a
+central switch. Their acceptance gate is a three-path equivalence test (full
+replace / prepend older page / live append must produce identical state) for
+every new node type.
+
+**Tool presentation as a pure, non-persisted, card-tagged intent owned by the
+tool** — `generic` / `terminal` / `diff` / `read` / `search`, carried as an
+optional sidecar on the tool event, with a documented degradation to flattened
+text. The rule worth copying verbatim: **never persist the view; recompute at
+emission, so improving a card retroactively improves all history.**
+`truncated`/`total` on search results is non-negotiable — it stops the UI
+presenting a capped result as complete.
+
+Also: one **generic keyed projection channel** (`{key, value, seq}`,
+higher-seq-wins, absence-of-key means "feature not composed → render nothing")
+replacing bespoke live-state channels; a **connection-generation + strict
+readiness handshake + gap-repair triad** that directly addresses our recorded
+"stale result lands on the wrong thread" bug class; **approvals in the composer
+via a self-nominating chain slot**; and a **wire-identity lookup seam as the
+single tenancy chokepoint** — one central resolver where org-scoping lives,
+instead of every handler. Given we have found cross-tenant IDOR twice, that last
+one is the highest security-value item on the list.
+
+**⚠️ Do not port their security posture.** `userId`, `tenant` and `principal`
+appear nowhere in the web packages; the README says outright the fence is a
+*reachability* policy, not authentication. One mux stream broadcasts every
+session in the process to every connected browser (fine for one user, a
+cross-tenant leak shape for us). The `Host` header is used as a boundary. The
+plugin manifest and chunks are served **unauthorized**. `--host 0.0.0.0` is
+hard-refused at parse, which means **nothing in the repo has ever been exercised
+as a network-exposed multi-client server** — no TLS, no auth, no origin policy,
+no load testing of the mux fan-out. Also: `session.history` may *create or
+resume an agent just to read a transcript* (a trivial resource-exhaustion vector
+for us — a read must never allocate a runtime), and boot is all-or-nothing (one
+bad feature bundle = full outage; our shell must render core chat with degraded
+features).
+
+### 13.3 Claude Code — the industry-standard patterns, and where they're theatre
+
+The most-copied patterns, with the honest caveats:
+
+**Plan mode is enforced only by prompt text.** There is no plan-mode write block
+in the permission engine — read-only-ness is a re-injected system reminder plus
+ordinary asking behaviour. Worse: **when plan mode is entered from a
+bypass-capable context, the permission check auto-allows every tool while still
+telling the model it is read-only.** For a multi-tenant product exposed to
+untrusted content that is a prompt-injection hole, not a safety mode. *Enforce
+plan mode server-side with its own action allowlist; keep the reminder text only
+as a redundant hint.*
+
+**Two live task systems with an inverted enablement flag** — `TodoWrite` is
+registered but its `isEnabled()` is the negation of the Task-v2 gate, which is
+on for every interactive session. The famous tool is **dead in the interactive
+product**. Skip TodoWrite v1 entirely; go straight to a durable task store with
+`blocks`/`blockedBy` edges and a live subscription, and never render task updates
+as chat messages.
+
+**UI compiled out of the build but still reading as wired** — the
+skill-improvement survey and the classifier-reviewed approval option sit behind
+build-time constants that are false externally. Grepping finds a
+complete-looking implementation no external user can reach. A discipline
+warning for our own codebase, and the same failure class as our `ReasoningDelta`.
+
+Patterns worth taking: the **compound plan-approval control** (approve + choose
+post-approval autonomy level + choose fresh-context, with context-used %
+printed in the option label; rejection requires free text fed back to the
+model) — though *split it into a primary action plus secondary toggles in a
+browser, where you have layout room*; **approvals as a durable addressable
+queue, not modals**, routed to per-action-type components rendering the real
+diff/payload; **"don't ask again" that shows and lets the user edit the exact
+rule** with its scope named, org-scope being an audited admin-gated policy
+change; a **context inspector** itemising the window by category computed
+against what the model will actually see post-compaction; **skill discovery
+capped at ~1% of the window** with description caps and degradation before
+dropping entries; **`context: 'fork'` skills** that run in a sub-agent with
+their own budget; and **@-mentions resolved to typed attachments at send time
+under current permissions** rather than inlined at type time (which is what
+lets you re-check tenant ACLs) — with resolution failures **visible on the
+chip**, since silent drops make the model answer about content it never
+received.
+
+Anti-patterns: an **LLM call on the permission hot path** (deriving the reusable
+"don't ask again" prefix needs a model round-trip; the code itself warns when it
+exceeds 10s); **reminder-injection as the universal steering tool** (plan mode,
+auto mode, todos, tasks and memory each inject hidden per-turn messages with
+their own throttles and mutual suppression — build one arbitrated attachment
+pipeline with priority and a per-turn budget instead); **command surface
+sprawl** (~101 command files, many one-off internal tooling — keep the palette
+small, push the rest into skills); and **plan artifacts keyed by a random word
+slug on a local filesystem path**, which survives nothing about a multi-tenant
+multi-device product.
+
+### 13.4 Hermes — how the agent learns, and why we must measure it
+
+The learning design is genuinely thoughtful and the **governance patterns are
+the real prize**:
+
+- **A DO-NOT-CAPTURE list that is visibly an incident log** — no
+  environment-dependent failures, no negative capability claims (which harden
+  into refusals the agent later cites against itself), no self-resolved transient
+  errors, no one-off task narratives, and never write up a sequence of failed
+  attempts as a validated workflow. *Each of those should have become a test the
+  moment it was learned.*
+- **A strict preference ladder for writes** — patch the item loaded this session,
+  else patch an existing umbrella, else add a typed support file, and only then
+  create a new top-level item, with an explicit ban on names that only make
+  sense for today's task. Without this a self-writing library fragments into
+  hundreds of unfindable single-session entries.
+- **Three-tier library with capture always in the private tier** —
+  vendor/global (read-only, shipped by us) → org (proposed, approved) →
+  user/workspace (private draft). **Nothing is ever born org-visible**;
+  promotion is a separate human act and auto-propose defaults OFF.
+- **Fail-loud name collisions** — when an org item and a personal item share a
+  name, neither silently wins; load-by-bare-name refuses as ambiguous.
+- **Telemetry in a sidecar, never inside authored content** — and for a
+  regulated tenant, extend the field set with `source_conversation_id`, `org_id`,
+  author, approval chain and an explicit retention class **at write time**,
+  because GDPR erasure over free-text learned items cannot be retrofitted.
+- **Full reversibility envelope for autonomous curation** — snapshot before,
+  archive-never-delete as the maximum destructive action, a dry-run producing an
+  identical report, and a per-run before/after diff with a rename map.
+- **Zero use count is absence of evidence, not staleness**; and exempt anything a
+  scheduled job depends on from usage-based aging (the scheduler only bumps
+  usage when a job fires).
+
+**⚠️ The flagship learning feature ships unmeasured.** The evals directory holds
+exactly two harnesses (compaction, readtool); neither touches skills or the
+review loop. Nothing anywhere answers *"does the learned library make the agent
+better."* The entire acceptance bar is a ~4,000-character prompt string —
+unversioned, untestable, un-A/B-able. **We must not build an org learning loop
+we cannot defend with a number in a renewal conversation.**
+
+Two further warnings that apply directly to us: **meter and attribute the
+learning loop per tenant before shipping** (Hermes's review fork silently
+doubled per-turn main-model spend and was invisible to usage analytics because
+it ran with persistence disabled); and **there is no safe automatic path from
+one tenant's learned item into another's context** — even ostensibly anonymized
+procedural knowledge leaks (a workflow naming a specific ERP module, an approval
+chain, a counterparty). Cross-tenant benefit must be a curated, human-authored,
+vendor-owned template library merely *inspired* by aggregate telemetry.
+
+On **community**: split *install* from *load* as the governance boundary (an org
+admin decides which packs are installed; the agent decides per-conversation
+which to load), adopt the **hash-the-declared-set consent pattern** (record a
+hash of what the user saw when granting; an update declaring a different set
+leaves additions ungranted until re-consent on a visible diff), and **apply the
+content scanner to agent-authored items, not just imported ones** — a learned
+item is executable instruction, so injection into the library is injection into
+every future session in that tenant. On **gamification**: build a per-**org**
+capability-adoption map, keep only the "what counts" disclosure, the pure
+read-model derived from existing telemetry, and secret-until-first-signal;
+discard tiers, leaderboards, share cards and any per-user activity score — in a
+Norwegian works-council context, an artifact ranking one employee's activity
+against another's is a concrete labour-relations problem.
+
+### 13.5 Revised priority for Model Plane after pass 2
+
+Pass 1's §7 stands. Pass 2 adds, in order:
+
+1. **The no-throw stream envelope + overflow-detection table** (pi) — small,
+   self-contained, immediately reduces a whole class of streaming failure.
+2. **Tool-presentation intent + `ConversationNodeDefinition`** (DeepSeek) — the
+   prerequisite for the chat redesign in `VEREVON_CHAT_DESIGN.md`.
+3. **Server-side plan-mode enforcement** (avoiding Claude Code's hole) — we
+   already have a capability-policy gate; plan mode should be an allowlist over
+   it, not a prompt.
+4. **Session-as-tree + append-only compaction** (pi) — unlocks branch/fork *and*
+   strengthens the GDPR/audit story.
+5. **The wire-identity tenancy chokepoint** (DeepSeek) — one resolver to audit
+   instead of every handler.
+6. **Learning loop: governance first, feature second** (Hermes) — the three-tier
+   library, sidecar telemetry with retention class, and a measurement harness
+   must exist *before* the learner does.
+
+---
+
+## 14. Sources
+- This repo: `docs/GOAL.md`, `docs/ROADMAP.md`, `docs/gap-analysis.md`,
+  `docs/gap-model.md`, `docs/external-ideas-harvest.md`,
+  `docs/capability-ownership-matrix.md`, `docs/chat-parity-audit.md`,
+  `docs/core-research/*.md`, `MODEL_PLANE_STATUS.md`, `MODEL_PLANE_ROADMAP.md`,
+  plus direct source reads (`rust/services/execution-core/src/{sandbox.rs,
+  executor.rs,runtime_loop/agent.rs}`, `go/services/*`) and git history
+  (`git log` for `apps/Model Plane`, commit `ac2be529` in full).
+- `/Volumes/Lagring/Triodelab/deepseek-harness` — `README.md`, `AGENTS.md`/
+  `CLAUDE.md`, `docs/architecture.md`, `docs/agent-lifecycle.md`,
+  `docs/tool-execution-pipeline.md`, `docs/tool-catalog.md`,
+  `docs/defensive-patterns.md`, `docs/postmortem/*`, `.agents/notes/*`, and
+  direct package source reads.
+- `/Volumes/Lagring/Triodelab/hermes-agent` — `README.md`, `pyproject.toml`,
+  `AGENTS.md`, `docker/SOUL.md`, `docs/security/network-egress-isolation.md`,
+  and direct reads of `agent/*.py`, `tools/*.py`, `plugins/*`.
+- `/Volumes/Lagring/Triodelab/claude-code-fork` — `README.md`,
+  `CODEBASE_ASSESSMENT.md`, and structural analysis only (directory listings,
+  exported symbol names, import scans, line/byte counts) per the binding
+  no-reproduction constraint (§1).

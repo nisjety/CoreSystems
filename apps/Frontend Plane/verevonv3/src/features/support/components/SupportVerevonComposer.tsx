@@ -4,7 +4,7 @@ import { createResource } from '@/shared/lib/create-resource-compat'
 import { bindSupportChatThread, readSupportChatThread, type SupportChatThreadScope } from '@/shared/chat/support-chat-thread'
 import { runAssist, type AssistMessage, type AssistSource } from '@/features/inbox/lib/inbox-ai'
 import type { ModelContextPack } from '@/shared/context-packs/context-pack'
-import { readChatThreadTranscript, setActiveChatThreadId, type ChatThreadTranscriptTurn } from '@/features/chat/lib/chat-thread-history'
+import { readChatThreadTranscript, type ChatThreadTranscriptTurn } from '@/features/chat/lib/chat-thread-history'
 import { getChatThreadTranscript } from '@/shared/api/chat-client'
 import { createDraftReplyProposal, createInternalNoteProposal, createTicketUpdateProposal } from '@/shared/api/inbox-client'
 import { useI18n } from '@/shared/i18n'
@@ -128,7 +128,6 @@ export function SupportVerevonComposer(props: {
     if (!resultThreadId || !matchesScope(currentScope)) return
     bindSupportChatThread(currentScope, resultThreadId)
     setThreadId(resultThreadId)
-    setActiveChatThreadId(resultThreadId)
   }
 
   const ask = async () => {
@@ -282,7 +281,7 @@ export function SupportVerevonComposer(props: {
         </div>
         <Show when={threadId()}>
           {(id) => (
-            <a href="/chat" link onClick={() => setActiveChatThreadId(id())}>
+            <a href={`/chat?thread_id=${encodeURIComponent(id())}`} link>
               {i18n.tr('Åpne i Chat', 'Open in Chat')}<ArrowUpRight class="size-3.5" />
             </a>
           )}

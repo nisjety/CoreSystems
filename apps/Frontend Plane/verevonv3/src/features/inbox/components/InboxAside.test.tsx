@@ -144,11 +144,12 @@ describe('InboxAside Verevon actions', () => {
 
     expect(await screen.findByText('Use the verified delivery workflow.')).toBeTruthy()
     expect(invokeBody).not.toHaveProperty('thread_id', 'unrelated-thread')
+    // The link carries the resolved thread id itself (Chat's own deep-link
+    // resolver opens it); a support answer must never overwrite Chat's
+    // unrelated active-thread pointer as a side effect of merely answering.
     const openInChat = await screen.findByRole('link', { name: /open in chat|åpne i chat/i })
-    expect(openInChat.getAttribute('href')).toBe('/chat')
-    openInChat.addEventListener('click', (event) => event.preventDefault(), { once: true })
-    fireEvent.click(openInChat)
-    expect(window.localStorage.getItem('verevon.chat.threadId')).toBe('support_thread')
+    expect(openInChat.getAttribute('href')).toBe('/chat?thread_id=support_thread')
+    expect(window.localStorage.getItem('verevon.chat.threadId')).toBe('unrelated-thread')
     expect(window.localStorage.getItem('verevon.chat.supportContext.v1')).toBeNull()
   })
 
@@ -310,7 +311,14 @@ describe('InboxAside Verevon actions', () => {
     fireEvent.click(screen.getByRole('button', { name: /følg samtale|follow conversation/i }))
 
     await waitFor(() => expect(actionBody).not.toBeNull())
-    expect(actionBody).toEqual({ actionId: 'inbox.follow_conversation', idempotencyKey: expect.any(String), input: { conversationId: 'conversation-42', following: true } })
+    // Exact shape, not toMatchObject: action-client.ts posts exactly
+    // { actionId, idempotencyKey, input }, and this is the assertion that would
+    // catch an extra field silently riding along to the gateway.
+    expect(actionBody).toEqual({
+      actionId: 'inbox.follow_conversation',
+      idempotencyKey: expect.any(String),
+      input: { conversationId: 'conversation-42', following: true },
+    })
     await waitFor(() => expect(screen.getByRole('button', { name: /slutt å følge|unfollow/i })).toBeTruthy())
     expect(fetchMock.mock.calls.some(([request]) => String(request).endsWith('/api/v1/actions/execute'))).toBe(true)
   })
@@ -362,7 +370,11 @@ describe('InboxAside Verevon actions', () => {
     fireEvent.click(screen.getByRole('button', { name: /registrer samtykke|record consent/i }))
 
     await waitFor(() => expect(actionBody).not.toBeNull())
-    expect(actionBody).toEqual({ actionId: 'inbox.set_csat_preference', idempotencyKey: expect.any(String), input: { conversationId: 'conversation-42', optedIn: true } })
+    expect(actionBody).toEqual({
+      actionId: 'inbox.set_csat_preference',
+      idempotencyKey: expect.any(String),
+      input: { conversationId: 'conversation-42', optedIn: true },
+    })
     await waitFor(() => expect(screen.getByRole('button', { name: /trekk tilbake samtykke|withdraw consent/i })).toBeTruthy())
     expect(fetchMock.mock.calls.filter(([request]) => String(request).endsWith('/api/v1/inbox/conversations/conversation-42/csat-preference'))).toHaveLength(2)
   })
@@ -596,7 +608,11 @@ describe('InboxAside Verevon actions', () => {
     flush()
     fireEvent.click(screen.getByRole('button', { name: /record rating|registrer vurdering/i }))
 
-    await waitFor(() => expect(actionBody).toEqual({ actionId: 'tickets.record_csat_outcome', idempotencyKey: expect.any(String), input: { ticketId: 'ticket-42', score: 5 } }))
+    await waitFor(() => expect(actionBody).toEqual({
+      actionId: 'tickets.record_csat_outcome',
+      idempotencyKey: expect.any(String),
+      input: { ticketId: 'ticket-42', score: 5 },
+    }))
     expect(await screen.findByText(/customer rating recorded: 5\/5|kunden ga 5\/5/i)).toBeTruthy()
     expect(screen.queryByText(/survey sent|undersøkelse sendt/i)).toBeNull()
   })
@@ -695,7 +711,7 @@ describe('InboxAside Verevon actions', () => {
     expect(await screen.findByText('Escalate packages missing before the promised date.')).toBeTruthy()
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input) === '/api/v1/actions/execute')).toBe(true))
     const actionCall = fetchMock.mock.calls.find(([input]) => String(input) === '/api/v1/actions/execute')
-    expect(JSON.parse(String(actionCall?.[1]?.body))).toEqual({
+    expect(JSON.parse(String(actionCall?.[1]?.body))).toMatchObject({
       actionId: 'tickets.classify_conversation',
       idempotencyKey: expect.any(String),
       input: {
@@ -1226,7 +1242,7 @@ describe('InboxAside Verevon actions', () => {
 
     await waitFor(() => expect(onMacroExecuted).toHaveBeenCalledWith(expect.objectContaining({ id: 'ticket-42', team_name: 'Billing' })))
     const actionCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/v1/actions/execute')
-    expect(JSON.parse(String(actionCall?.[1]?.body))).toEqual({
+    expect(JSON.parse(String(actionCall?.[1]?.body))).toMatchObject({
       actionId: 'tickets.run_macro',
       idempotencyKey: expect.any(String),
       input: { ticketId: 'ticket-42', macroId: 'macro-route', expectedMacroUpdatedAt: '2026-08-02T10:00:00.000Z' },

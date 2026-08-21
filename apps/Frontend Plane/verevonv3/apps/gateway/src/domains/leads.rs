@@ -32,12 +32,18 @@ const LEADS_FEATURE: &str = "leads";
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/leads/search", post(search))
-        .route("/api/v1/leads/companies/:orgnr/branches", get(branches))
-        .route("/api/v1/leads/companies/:orgnr/financials", get(financials))
+        .route("/api/v1/leads/companies/{orgnr}/branches", get(branches))
+        .route(
+            "/api/v1/leads/companies/{orgnr}/financials",
+            get(financials),
+        )
         .route("/api/v1/leads/build_list", post(build_list))
         .route("/api/v1/leads/lists", get(list_lists).post(create_list))
-        .route("/api/v1/leads/lists/:id", get(get_list).delete(delete_list))
-        .route("/api/v1/leads/lists/:id/export.csv", get(export_csv))
+        .route(
+            "/api/v1/leads/lists/{id}",
+            get(get_list).delete(delete_list),
+        )
+        .route("/api/v1/leads/lists/{id}/export.csv", get(export_csv))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/attestation"
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/capabilityhealth"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/consumers"
@@ -249,6 +250,51 @@ func main() {
 
 	handler := apphttp.NewHandler(cfg, service)
 	handler.SetSupportPolicyReader(orgCoreClient)
+	if cfg.ControlRunActionDecisionKeyID != "" {
+		ownerGrantDecisionVerifier, err := apphttp.NewOwnerGrantDecisionVerifier(cfg.ControlRunActionDecisionKeyID, cfg.ControlRunActionDecisionPublicKey)
+		if err != nil {
+			log.Fatalf("conversation-core-go: Control owner grant decision verifier: %v", err)
+		}
+		handler.SetOwnerGrantDecisionVerifier(ownerGrantDecisionVerifier)
+		log.Printf("conversation-core-go: Control owner grant decision verifier configured; owner grant issuance remains personal-Space only")
+	}
+	if cfg.ExecutionCoreServiceToken != "" {
+		runActionDecisionVerifier, err := apphttp.NewRunActionDecisionVerifier(cfg.ControlRunActionDecisionKeyID, cfg.ControlRunActionDecisionPublicKey)
+		if err != nil {
+			log.Fatalf("conversation-core-go: Control run action decision verifier: %v", err)
+		}
+		handler.SetRunActionDecisionVerifier(runActionDecisionVerifier)
+		currentAuthorityValidator, err := apphttp.NewControlRunActionAuthorityValidator(cfg.ControlRunActionAuthorityURL, cfg.ControlRunActionAuthorityToken, cfg.AllowInsecureControlRunActionAuthorityLoopback)
+		if err != nil {
+			log.Fatalf("conversation-core-go: Control run action authority validator: %v", err)
+		}
+		handler.SetRunActionAuthorityValidator(currentAuthorityValidator)
+		reservationCoordinator, err := apphttp.NewControlOwnerEffectReservationCoordinator(cfg.ControlOwnerEffectReservationURL, cfg.ControlOwnerEffectReservationToken, cfg.AllowInsecureControlRunActionAuthorityLoopback)
+		if err != nil {
+			log.Fatalf("conversation-core-go: Control owner-effect reservation coordinator: %v", err)
+		}
+		handler.SetOwnerEffectReservationCoordinator(reservationCoordinator)
+		log.Printf("conversation-core-go: Control ticket decision verifier, current-authority validator, and owner-effect reservation coordinator configured; agent ticket effects still require an active exact owner grant")
+	} else {
+		log.Printf("conversation-core-go: agent ticket action route remains fail-closed (no execution authority configured)")
+	}
+	if cfg.OwnerActionHealthReady() {
+		reporter, reporterErr := capabilityhealth.New(capabilityhealth.Config{
+			CapabilityCoreURL: cfg.CapabilityCoreURL,
+			AuthCoreURL:       cfg.CapabilityHealthAuthCoreURL,
+			ServiceID:         cfg.CapabilityHealthServiceID,
+			Credential:        cfg.CapabilityHealthServiceCredential,
+			Interval:          cfg.CapabilityHealthInterval,
+		})
+		if reporterErr != nil {
+			log.Printf("conversation-core-go: owner-action capability health disabled: %v", reporterErr)
+		} else {
+			go reporter.Start(ctx, log.Printf)
+			log.Printf("conversation-core-go: owner-action capability health reporter enabled")
+		}
+	} else {
+		log.Printf("conversation-core-go: owner-action capability health reporter disabled; Control-bound execution lane is incomplete")
+	}
 	delegationVerifier, err := delegation.NewVerifier(delegation.Config{
 		Audience: "conversation-core",
 		Keys:     cfg.DelegationKeys,

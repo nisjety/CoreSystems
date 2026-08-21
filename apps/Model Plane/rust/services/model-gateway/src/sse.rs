@@ -910,11 +910,20 @@ pub async fn invoke_stream_sse(
     if let Some(identity_message) = identity_context_message(&req) {
         messages.insert(0, identity_message);
     }
+    // Authored instructions go first of all — ahead of identity context — so
+    // the platform/org/Space/agent hierarchy is the first thing the model
+    // reads, exactly the way `identity_context_message` primes the grounding
+    // content that follows it. Absent only when every layer is empty (ADR-0003,
+    // `apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`).
+    if let Some(instructions_message) = authored_instructions_message(&state, &req) {
+        messages.insert(0, instructions_message);
+    }
     // Skills: match this turn against the org's skill catalogue (disk-loaded +
     // learned) and inject the top matches as system context so a triggered skill
     // actually steers the model. This is the load-bearing Claude-Code skill
     // behaviour that was previously absent (MatchSkills had no internal caller).
-    let skill_context = fetch_skill_context(&state, &model_bearer, &org_id, &req.content).await;
+    let skill_context =
+        fetch_skill_context(&state, &model_bearer, &org_id, &user_id, &req.content).await;
     // Remember which skills this turn injected, keyed by the request_id the SPA
     // already has. A thumbs-up has to credit the skills that actually shaped the
     // answer, and the client must not be trusted to name them — so the mapping
@@ -1068,6 +1077,9 @@ pub async fn invoke_stream_sse(
     let session_run_id = session_run.run_id.clone();
     let session_run_for_terminal = session_run.clone();
     let session_bearer = model_bearer.clone();
+    // Cloned into the persist task so the assistant message records which
+    // persona this turn answered as (server-stamped by the gateway).
+    let session_agent_name = req.agent_name.clone();
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
     let tool_phase_query = req.content.clone();
     // Provider-bound copy for the title inference: `user_content` already has
@@ -1677,6 +1689,7 @@ pub async fn invoke_stream_sse(
                         &session_thread_id,
                         &assistant_output,
                         &session_bearer,
+                        session_agent_name.as_deref(),
                     )
                     .await
                     {
@@ -2426,6 +2439,7 @@ async fn fetch_skill_context(
     state: &AppState,
     bearer: &VerifiedModelBearer,
     org_id: &str,
+    user_id: &str,
     query: &str,
 ) -> Vec<String> {
     use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest};
@@ -2451,13 +2465,20 @@ async fn fetch_skill_context(
                 .await
             {
                 Ok(resp) => {
+                    let pulled = resp.into_inner().skills;
+                    // Ownership (SKILL-1) rides alongside the match cache: computed
+                    // from the same pull, before `pulled` is consumed below.
+                    state.ownership.replace_org_kind(
+                        org_id,
+                        crate::ownership::KIND_SKILL,
+                        crate::skills::skill_ownership_entries(&pulled),
+                    );
                     // replace_learned, not a bare upsert loop: on a re-pull the
                     // cache must also FORGET skills the operator deleted, or a
                     // removed skill keeps steering answers indefinitely.
                     state.skills.replace_learned(
                         org_id,
-                        resp.into_inner()
-                            .skills
+                        pulled
                             .into_iter()
                             .map(crate::skills::agent_skill_to_skill)
                             .collect(),
@@ -2478,6 +2499,8 @@ async fn fetch_skill_context(
             limit: MAX_INJECTED_SKILLS,
             min_score: 0.0,
         },
+        &state.ownership,
+        user_id,
     ) else {
         return Vec::new();
     };
@@ -2579,6 +2602,7 @@ fn vision_stream(
                     &thread_id,
                     &description,
                     &session_bearer,
+                    None,
                 )
                 .await
                 {
@@ -2785,6 +2809,7 @@ fn image_gen_stream(
                         &thread_id,
                         &assistant_content,
                         &session_bearer,
+                        None,
                     ),
                 )
                 .await
@@ -3045,6 +3070,100 @@ fn temporal_awareness_message() -> ChatMessage {
     }
 }
 
+/// ADR-0003's non-empty check: trims and treats blank as absent, the same
+/// rule every layer of the authored-instruction hierarchy already applies to
+/// its own field.
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Composes ADR-0003's authored-instruction hierarchy — platform (deployment
+/// env config) → org → Space → per-agent persona — into one system message,
+/// replacing `agent_persona_message`'s old mention-only firing with
+/// unconditional firing on every turn that carries at least one non-empty
+/// layer. Each of the org/Space layers is wrapped in prompt-level framing
+/// asking it not to override the layer(s) before it — advisory only, the same
+/// strength as today's per-agent instructions, never a code-enforced boundary
+/// (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`, "Composition and
+/// enforcement"). The agent-specific layer is unchanged from today
+/// (`agent_persona_message`'s own text, including its "you are currently
+/// answering as" framing) — only its firing condition (mention-gated) stays
+/// as-is; it is simply the last section here instead of the sole message.
+///
+/// `None` only when platform, org, Space, and agent are ALL empty —
+/// preserving today's silent-no-message behavior for a deployment/org/Space
+/// that has authored nothing and a turn nobody mentioned.
+fn authored_instructions_message(state: &AppState, req: &InvokeRequest) -> Option<ChatMessage> {
+    let mut sections: Vec<String> = Vec::new();
+
+    if let Some(platform) = non_empty_trimmed(&state.platform_instructions) {
+        sections.push(platform.to_owned());
+    }
+    if let Some(org) = req.org_instructions.as_deref().and_then(non_empty_trimmed) {
+        sections.push(format!(
+            "--- Organization instructions (may add to, but must not override, the platform instructions above) ---\n{org}"
+        ));
+    }
+    if let Some(space) = req
+        .space_instructions
+        .as_deref()
+        .and_then(non_empty_trimmed)
+    {
+        sections.push(format!(
+            "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\n{space}"
+        ));
+    }
+    if let Some(persona) = agent_persona_message(req) {
+        sections.push(persona.content);
+    }
+
+    if sections.is_empty() {
+        return None;
+    }
+    Some(ChatMessage {
+        role: "system".to_owned(),
+        content: sections.join("\n\n"),
+        name: String::new(),
+    })
+}
+
+/// Persona for a turn addressed to a Space agent by `@` mention
+/// (`docs/space-defenition.md`, "Invocation rule"). Absent on every ordinary
+/// Chat turn and on a Space turn nobody mentioned — the room's default
+/// behavior is the plain Verevon voice, not a bound agent's.
+///
+/// Deliberately separate from `identity_context_message`: that message frames
+/// who the *user* is; this frames who is *answering*. Both can be present on
+/// the same turn (a mentioned agent still knows which org and user it's
+/// talking to). Composed into [`authored_instructions_message`] as the final
+/// layer; no longer called directly as the sole system-message source.
+fn agent_persona_message(req: &InvokeRequest) -> Option<ChatMessage> {
+    let agent_name = req
+        .agent_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let mut content = format!(
+        "You are currently answering as {agent_name}, an agent bound to this room. Stay in character as {agent_name} for this reply."
+    );
+    if let Some(instructions) = req
+        .agent_system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        content.push_str(&format!(
+            " {agent_name}'s own instructions, which take precedence over Verevon's default behavior for this turn: {instructions}"
+        ));
+    }
+    Some(ChatMessage {
+        role: "system".to_owned(),
+        content,
+        name: String::new(),
+    })
+}
+
 fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
     let org_name = req
         .org_name
@@ -3135,6 +3254,7 @@ async fn serve_cached_answer(
         &run.thread_id,
         cached,
         session_bearer,
+        None,
     )
     .await
     {
@@ -3323,6 +3443,7 @@ async fn run_infer_fallback(
                 &thread_id,
                 &resp.content,
                 session_bearer,
+                None,
             )
             .await
             {
@@ -4577,6 +4698,46 @@ fn is_confirmed_agent_dispatch_rejection(status: &tonic::Status) -> bool {
     )
 }
 
+/// A `Unavailable` that failed in the CONNECT phase, so the request provably
+/// never left this process.
+///
+/// `Unavailable` on its own is ambiguous — it covers both "never connected"
+/// and "connected, then lost the reply" — which is why
+/// [`is_confirmed_agent_dispatch_rejection`] excludes it wholesale. But the two
+/// have opposite durable consequences: if the connection was never established
+/// then no run can be executing in Execution Core, so leaving the prepared run
+/// open strands it in `running` with no worker to finish it.
+///
+/// The split keys on the errno carried in the transport error's source chain.
+/// `ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, and `EADDRNOTAVAIL` are only
+/// ever returned by `connect(2)` — once a connection is established the kernel
+/// reports a failure as `ECONNRESET`/`EPIPE` instead. Those post-connect kinds,
+/// and a bare `Unavailable` with no source (a server-sent load-shed, which by
+/// definition arrived), are deliberately NOT matched: the request may have been
+/// delivered, so the outcome stays unknown. A read timeout is likewise excluded
+/// — it cannot distinguish a slow accept from a slow reply.
+fn dispatch_never_reached_execution_core(status: &tonic::Status) -> bool {
+    if status.code() != tonic::Code::Unavailable {
+        return false;
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(status);
+    while let Some(error) = source {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+            ) {
+                return true;
+            }
+        }
+        source = std::error::Error::source(error);
+    }
+    false
+}
+
 /// Agentic run stream for the one already-prepared durable Session Core run.
 ///
 /// Execution Core owns agent progression, tool dispatch, approvals, assistant
@@ -4649,7 +4810,7 @@ fn agentic_run_stream(
                     crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
                         &state,
                         &run,
-                        "agent_dispatch_rejected",
+                        crate::session_flow::AgentDispatchFailure::Rejected,
                         &model_bearer,
                     )
                     .await;
@@ -4782,7 +4943,7 @@ fn agentic_run_stream(
                 match crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
                     &state,
                     &run,
-                    "agent_dispatch_rejected",
+                    crate::session_flow::AgentDispatchFailure::Rejected,
                     &model_bearer,
                 )
                 .await
@@ -4812,6 +4973,56 @@ fn agentic_run_stream(
                             code: "session_terminalization_failed".to_owned(),
                             message:
                                 "Unable to record the rejected agent run; it remains retriable."
+                                    .to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    }
+                }
+                return;
+            }
+            // Never connected, so nothing is running anywhere: terminalize the
+            // prepared run exactly as a confirmed rejection does, but tell the
+            // client it is RETRYABLE. The cause is a transport outage (Execution
+            // Core down or restarting), not a verdict on the request, so a fresh
+            // attempt may well succeed — unlike a deterministic rejection, where
+            // retrying reproduces the same refusal.
+            Ok(Ok(Err(status))) if dispatch_never_reached_execution_core(&status) => {
+                tracing::warn!(code = ?status.code(), run_id = %run.run_id, "RunAgent never reached Execution Core; connect phase failed");
+                let terminalized =
+                    crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
+                        &state,
+                        &run,
+                        crate::session_flow::AgentDispatchFailure::Unreachable,
+                        &model_bearer,
+                    )
+                    .await;
+                match terminalized {
+                    Ok(()) => {
+                        let failed = build_stream_envelope(
+                            &request_id,
+                            "RUN_FAILED",
+                            &org_id,
+                            &user_id,
+                            &model,
+                        );
+                        let _ = state
+                            .publisher
+                            .publish(&subjects::run_event_subject(&run.run_id), &failed)
+                            .await;
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "agent_dispatch_unreachable".to_owned(),
+                            message: "The agent runner could not be reached; nothing was started, so the run can be retried.".to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    }
+                    Err(terminal_error) => {
+                        tracing::error!(%terminal_error, run_id = %run.run_id, "undelivered agent dispatch could not be durably terminalized");
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "session_terminalization_failed".to_owned(),
+                            message:
+                                "Unable to record the undelivered agent run; it remains retriable."
                                     .to_owned(),
                             retryable: true,
                         };
@@ -5534,10 +5745,135 @@ fn publish_implicit_dissatisfaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_stream_envelope, build_usage_envelope, classify_agentic_run_outcome,
+        agent_persona_message, authored_instructions_message, build_stream_envelope,
+        build_usage_envelope, classify_agentic_run_outcome, dispatch_never_reached_execution_core,
         is_confirmed_agent_dispatch_rejection, orchestration_event_to_step_update,
         sanitize_follow_up_suggestions, sanitize_thread_title, AgenticRunOutcome,
     };
+    use crate::http_routes::InvokeRequest;
+    use crate::state::AppState;
+
+    fn invoke_request(extra: serde_json::Value) -> InvokeRequest {
+        let mut body = serde_json::json!({
+            "content": "hello",
+            "model": null,
+            "session_key": null,
+            "thread_id": null,
+            "space_append_context": null,
+        });
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        serde_json::from_value(body).expect("valid InvokeRequest fixture")
+    }
+
+    // ── Space agent persona message ─────────────────────────────────────────
+    // `docs/space-defenition.md`, "Invocation rule": a mention invokes with a
+    // persona, never silently — and an ordinary turn must never acquire one.
+
+    #[test]
+    fn no_persona_on_an_ordinary_turn_nobody_mentioned() {
+        let req = invoke_request(serde_json::json!({}));
+        assert!(agent_persona_message(&req).is_none());
+    }
+
+    #[test]
+    fn mentioned_agent_with_no_instructions_still_gets_a_named_persona() {
+        let req = invoke_request(serde_json::json!({ "agent_name": "Driftsassistent" }));
+        let message = agent_persona_message(&req).expect("persona message");
+        assert_eq!(message.role, "system");
+        assert!(message.content.contains("Driftsassistent"));
+    }
+
+    #[test]
+    fn mentioned_agent_instructions_are_carried_verbatim_and_take_precedence() {
+        let req = invoke_request(serde_json::json!({
+            "agent_name": "Driftsassistent",
+            "agent_system_prompt": "Always answer in bullet points.",
+        }));
+        let message = agent_persona_message(&req).expect("persona message");
+        assert!(message.content.contains("Always answer in bullet points."));
+        assert!(message.content.contains("take precedence"));
+    }
+
+    #[test]
+    fn blank_agent_name_is_treated_as_absent() {
+        // A field present but empty must behave exactly like an absent one —
+        // never render a personaless "You are currently answering as ." line.
+        let req = invoke_request(serde_json::json!({ "agent_name": "   " }));
+        assert!(agent_persona_message(&req).is_none());
+    }
+
+    // ── ADR-0003: authored-instruction hierarchy composition ───────────────
+
+    fn state_with_platform_instructions(platform: &str) -> AppState {
+        let mut state = AppState::new();
+        state.platform_instructions = platform.to_owned();
+        state
+    }
+
+    // `AppState::new()` builds lazy gRPC channels and an HTTP client that
+    // require a Tokio runtime context even just to construct — hence
+    // `#[tokio::test]` here rather than the plain `#[test]` every other
+    // function in this module uses, matching `trajectory.rs`'s precedent for
+    // tests that touch `AppState`.
+
+    #[tokio::test]
+    async fn no_authored_instructions_message_when_every_layer_is_empty() {
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(serde_json::json!({}));
+        assert!(authored_instructions_message(&state, &req).is_none());
+    }
+
+    #[tokio::test]
+    async fn platform_only_produces_the_bare_platform_text() {
+        let state = state_with_platform_instructions("Never discuss competitor pricing.");
+        let req = invoke_request(serde_json::json!({}));
+        let message = authored_instructions_message(&state, &req).expect("message");
+        assert_eq!(message.role, "system");
+        assert_eq!(message.content, "Never discuss competitor pricing.");
+    }
+
+    #[tokio::test]
+    async fn org_layer_is_wrapped_in_non_override_framing() {
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(
+            serde_json::json!({ "org_instructions": "Always answer in Norwegian." }),
+        );
+        let message = authored_instructions_message(&state, &req).expect("message");
+        assert!(message.content.contains("Always answer in Norwegian."));
+        assert!(message.content.contains("Organization instructions"));
+        assert!(message.content.contains("must not override"));
+    }
+
+    #[tokio::test]
+    async fn all_four_layers_compose_in_platform_org_space_agent_order() {
+        let state = state_with_platform_instructions("Platform rule.");
+        let req = invoke_request(serde_json::json!({
+            "org_instructions": "Org rule.",
+            "space_instructions": "Space rule.",
+            "agent_name": "Driftsassistent",
+            "agent_system_prompt": "Agent rule.",
+        }));
+        let message = authored_instructions_message(&state, &req).expect("message");
+        let platform_at = message.content.find("Platform rule.").expect("platform");
+        let org_at = message.content.find("Org rule.").expect("org");
+        let space_at = message.content.find("Space rule.").expect("space");
+        let agent_at = message.content.find("Agent rule.").expect("agent");
+        assert!(platform_at < org_at);
+        assert!(org_at < space_at);
+        assert!(space_at < agent_at);
+    }
+
+    #[tokio::test]
+    async fn blank_org_and_space_instructions_are_treated_as_absent() {
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(serde_json::json!({
+            "org_instructions": "   ",
+            "space_instructions": "   ",
+        }));
+        assert!(authored_instructions_message(&state, &req).is_none());
+    }
 
     // ── AI thread-title sanitizer ───────────────────────────────────────────
 
@@ -6107,5 +6443,60 @@ mod tests {
         assert!(!is_confirmed_agent_dispatch_rejection(
             &tonic::Status::deadline_exceeded("timeout")
         ));
+    }
+
+    /// The dangerous direction for `dispatch_never_reached_execution_core` is a
+    /// FALSE POSITIVE: calling a delivered request undelivered terminalizes a
+    /// run that may really be executing. A server-sent `Unavailable` — a real
+    /// load-shed, which by definition arrived — is the closest such trap, and it
+    /// is distinguishable because it carries no transport source chain.
+    #[test]
+    fn a_delivered_unavailable_is_never_mistaken_for_an_undelivered_one() {
+        assert!(
+            !dispatch_never_reached_execution_core(&tonic::Status::unavailable("shedding load")),
+            "a server-sent Unavailable arrived at the server, so it was delivered"
+        );
+        assert!(!dispatch_never_reached_execution_core(
+            &tonic::Status::deadline_exceeded("slow")
+        ));
+        assert!(
+            !dispatch_never_reached_execution_core(&tonic::Status::permission_denied("denied")),
+            "a code-based confirmed rejection is classified by code, not by connect phase"
+        );
+    }
+
+    /// A real `connect(2)` failure against a closed port, which is the only way
+    /// to build the genuine tonic/hyper/io source chain this classifier walks —
+    /// `Status` exposes no constructor for one.
+    #[tokio::test]
+    async fn a_refused_connection_is_recognized_as_undelivered() {
+        use mp_contracts::model_plane::v1::execution_core_client::ExecutionCoreClient;
+
+        // Bind then drop, so the port is known-unused rather than guessed.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind probe port");
+        let addr = listener.local_addr().expect("probe addr");
+        drop(listener);
+
+        let mut client = ExecutionCoreClient::new(
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .expect("endpoint")
+                .connect_lazy(),
+        );
+        let status = client
+            .run_agent(mp_contracts::model_plane::v1::RunAgentRequest::default())
+            .await
+            .expect_err("nothing is listening");
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(
+            dispatch_never_reached_execution_core(&status),
+            "ECONNREFUSED proves the request never left this process: {status:?}"
+        );
+        assert!(
+            !is_confirmed_agent_dispatch_rejection(&status),
+            "still not a code-based rejection — the two classifiers stay distinct"
+        );
     }
 }

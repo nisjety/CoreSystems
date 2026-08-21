@@ -113,6 +113,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::ownership::router(state.clone()))
         .merge(domains::privacy::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
+        .merge(domains::run_watchers::router(state.clone()))
         .merge(domains::search::router(state.clone()))
         .merge(domains::settings::router(state.clone()))
         .merge(domains::shares::router(state.clone()))
@@ -167,11 +168,11 @@ fn request_target_for_log(uri: &axum::http::Uri) -> String {
     }
 
     if uri.path().starts_with("/accept-invitation/") {
-        return "/accept-invitation/:invitationId".to_owned();
+        return "/accept-invitation/{invitationId}".to_owned();
     }
 
     if uri.path().starts_with("/api/v1/orgs/invitations/") {
-        return "/api/v1/orgs/invitations/:invitationId/accept".to_owned();
+        return "/api/v1/orgs/invitations/{invitationId}/accept".to_owned();
     }
 
     uri.path().to_owned()
@@ -244,7 +245,7 @@ mod tests {
             .expect("valid invitation URI");
         assert_eq!(
             super::request_target_for_log(&invitation),
-            "/accept-invitation/:invitationId"
+            "/accept-invitation/{invitationId}"
         );
 
         let invitation_api: Uri = "/api/v1/orgs/invitations/invitation-secret/accept"
@@ -252,7 +253,7 @@ mod tests {
             .expect("valid invitation API URI");
         assert_eq!(
             super::request_target_for_log(&invitation_api),
-            "/api/v1/orgs/invitations/:invitationId/accept"
+            "/api/v1/orgs/invitations/{invitationId}/accept"
         );
 
         let ordinary: Uri = "/api/v1/audit?limit=25".parse().expect("valid test URI");
@@ -1706,6 +1707,164 @@ mod tests {
             body.pointer("/data/orgProjectionSynced")
                 .and_then(Value::as_bool),
             Some(false)
+        );
+
+        // The staleness-bounce guard: a committed completion must end with a
+        // post-commit live session-context read (which re-primes the gateway
+        // cache), on top of the middleware's own authority read — otherwise a
+        // reload right after completion can race a stale re-cache back into
+        // onboarding.
+        let received = user_core.received_requests().await.unwrap();
+        let context_reads = received
+            .iter()
+            .filter(|request| {
+                request.method.as_str() == "GET"
+                    && request.url.path() == "/api/v1/me/session-context"
+            })
+            .count();
+        assert!(
+            context_reads >= 2,
+            "expected a post-completion session-context re-read, saw {context_reads} read(s)"
+        );
+    }
+
+    /// Drive one GET /api/v1/onboarding/lifecycle through the real router and
+    /// return (status, body). `session` is auth-core's get-session answer;
+    /// `onboarding_status` (when Some) is what user-core's session-context
+    /// reports for org-acme, alongside an active org-core organization.
+    async fn lifecycle_probe(
+        session: Value,
+        onboarding_status: Option<&str>,
+    ) -> (StatusCode, Value) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(session))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/organization/get-full-organization"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-acme",
+                "members": [{ "userId": "owner-1", "role": "owner" }]
+            })))
+            .mount(&auth)
+            .await;
+
+        let user_core = MockServer::start().await;
+        if let Some(status) = onboarding_status {
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/api/v1/me/session-context"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "userId": "owner-1",
+                    "orgId": "org-acme",
+                    "role": "owner",
+                    "onboardingStatus": status
+                })))
+                .mount(&user_core)
+                .await;
+        }
+
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/orgs/org-acme"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-acme",
+                "status": "active"
+            })))
+            .mount(&org_core)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.org_core_url = org_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/onboarding/lifecycle")
+                    .header("cookie", "idknuten.sid=session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        (status, body)
+    }
+
+    /// Before an organization exists the lifecycle is CREATED — an honest 200,
+    /// not a 409 the wizard has to guess a meaning for.
+    #[tokio::test]
+    async fn lifecycle_reports_created_before_an_organization_exists() {
+        let (status, body) = lifecycle_probe(
+            json!({
+                "user": { "id": "owner-1", "email": "owner@acme.example", "emailVerified": true }
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.pointer("/data/state").and_then(Value::as_str),
+            Some("CREATED")
+        );
+        assert!(body.pointer("/data/orgId").is_some_and(Value::is_null));
+    }
+
+    /// An active org whose user has not completed onboarding is PROFILE_READY.
+    #[tokio::test]
+    async fn lifecycle_reports_profile_ready_before_completion() {
+        let (status, body) = lifecycle_probe(
+            json!({
+                "user": { "id": "owner-1", "email": "owner@acme.example", "emailVerified": true },
+                "session": { "activeOrganizationId": "org-acme" }
+            }),
+            Some("PROFILE_READY"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.pointer("/data/state").and_then(Value::as_str),
+            Some("PROFILE_READY")
+        );
+        assert_eq!(
+            body.pointer("/data/orgId").and_then(Value::as_str),
+            Some("org-acme")
+        );
+    }
+
+    /// The placeholder regression: once user-core reports COMPLETED, lifecycle
+    /// must say COMPLETED rather than the hardcoded PROFILE_READY that made the
+    /// endpoint untrustworthy.
+    #[tokio::test]
+    async fn lifecycle_reports_completed_after_user_core_commits_completion() {
+        let (status, body) = lifecycle_probe(
+            json!({
+                "user": { "id": "owner-1", "email": "owner@acme.example", "emailVerified": true },
+                "session": { "activeOrganizationId": "org-acme" }
+            }),
+            Some("COMPLETED"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.pointer("/data/state").and_then(Value::as_str),
+            Some("COMPLETED")
+        );
+        assert_eq!(
+            body.pointer("/data/orgId").and_then(Value::as_str),
+            Some("org-acme")
         );
     }
 

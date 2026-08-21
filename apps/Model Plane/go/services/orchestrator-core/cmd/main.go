@@ -110,6 +110,32 @@ func main() {
 	defer c.Close()
 
 	a := activities.NewActivities(logger, clients)
+	executionAuthorizer, aerr := activities.NewControlScheduledRunExecutionAuthorizer(
+		cfg.ControlUserCoreURL,
+		cfg.ControlScheduleExecutionServiceToken,
+		cfg.ControlSpaceDecisionKeyID,
+		cfg.ControlSpaceDecisionPublicKeyBase64,
+		nil,
+	)
+	if aerr != nil {
+		slog.Warn("scheduled-run execution reauthorization unavailable; scheduled runs fail closed", "error", aerr)
+	} else {
+		a.SetScheduledRunExecutionAuthorizer(executionAuthorizer)
+		slog.Info("scheduled-run execution reauthorization configured")
+	}
+	stepAuthorizer, serr := activities.NewControlScheduledStepAuthorizer(
+		cfg.ControlUserCoreURL,
+		cfg.ControlScheduleStepServiceToken,
+		cfg.ControlSpaceDecisionKeyID,
+		cfg.ControlSpaceDecisionPublicKeyBase64,
+		nil,
+	)
+	if serr != nil {
+		slog.Warn("scheduled-step decision unavailable; scheduled Model steps fail closed", "error", serr)
+	} else {
+		a.SetScheduledStepDecisionAuthorizer(stepAuthorizer)
+		slog.Info("scheduled-step decision authorizer configured")
+	}
 	// Durable operator-rating store backing the feedback → skill-promotion loop.
 	// Postgres when DATABASE_URL is configured; otherwise an in-memory store
 	// that is lost on restart and says so, rather than silently pretending.
@@ -123,6 +149,9 @@ func main() {
 	}
 
 	w.RegisterActivity(a.StartRunActivity)
+	w.RegisterActivity(a.StartScheduledRunActivity)
+	w.RegisterActivity(a.AuthorizeScheduledStepActivity)
+	w.RegisterActivity(a.ExecuteScheduledStepActivity)
 	// ExecuteStepLoopActivity stays registered for replay of in-flight runs that
 	// recorded the legacy (DefaultVersion) single-activity step loop; new runs
 	// use the durable per-turn ExecuteStepActivity instead.
@@ -349,6 +378,7 @@ type workflowRegistration struct {
 func registeredWorkflows() []workflowRegistration {
 	return []workflowRegistration{
 		{"InteractiveRunSupervision", workflows.InteractiveRunSupervision},
+		{"ScheduledRunSupervision", workflows.ScheduledRunSupervision},
 		{"DeepTaskWorkflow", workflows.DeepTaskWorkflow},
 		{"MemoryConsolidationWorkflow", workflows.MemoryConsolidationWorkflow},
 		{"SkillPromotionWorkflow", workflows.SkillPromotionWorkflow},

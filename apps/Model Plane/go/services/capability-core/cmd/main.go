@@ -28,9 +28,11 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
+	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
+	"github.com/triodelab/model-plane/services/capability-core/internal/runwatch"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
@@ -162,7 +164,7 @@ func main() {
 	// ListModels, /compact → session CompactNow) and the G7 learning consumer —
 	// one dial site, no duplication. Nil when addrs are unset → both consumers
 	// degrade gracefully.
-	sessionClient, inferenceClient := dialBackends()
+	sessionClient, inferenceClient, runClient := dialBackends()
 
 	// --- §4.3 reconcile event publisher -------------------------------------
 	// capability-core is the registry system-of-record; on a create/update it
@@ -195,6 +197,13 @@ func main() {
 			// workflow dispatcher would strand every cron-fired task exactly the
 			// way the publish-only dispatcher did.
 			startTaskCompletionConsumer(ctx, nc, pool)
+
+			// AUTO-2 run-watch notify consumer: on a terminal run event, notify
+			// every user who registered a watch on that run (see
+			// api.RunWatchersHandler for how a watch gets registered). Needs
+			// notification-core's URL + this service's delegated service token;
+			// guarded independently of the two consumers above.
+			startRunWatchConsumer(ctx, nc, pool)
 		}
 	}
 
@@ -224,6 +233,11 @@ func main() {
 		if scopeStore != nil {
 			ch = ch.WithScopeStore(scopeStore)
 		}
+		if modelActionViewVerifier, viewVerifierErr := modelActionViewVerifierFromEnv(os.Getenv); viewVerifierErr != nil {
+			slog.Warn("run-bound Model owner-action view unavailable; Control public key is required", "error", viewVerifierErr)
+		} else {
+			ch = ch.WithModelActionViewVerifier(modelActionViewVerifier)
+		}
 		ch.Register(protectedMux)
 	}
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
@@ -237,10 +251,35 @@ func main() {
 	// must not sit behind the per-user JWT middleware wrapping protectedMux
 	// below, which a service-to-service caller has no bearer to satisfy.
 	mcpHandler.RegisterInternal(publicMux)
+
+	// MCP DNS revalidator: normalizeMCPRegistration's DNS-address check only
+	// ever runs once, at registration/update time — DNS answers can legitimately
+	// drift afterward even without an attacker. This periodically re-resolves
+	// every enabled MCP server's hostname and quarantines it if DNS now lands
+	// inside a forbidden range. Opt out with MCP_DNS_REVALIDATOR_ENABLED=false;
+	// override the interval with MCP_DNS_REVALIDATION_INTERVAL (Go duration,
+	// e.g. "5m").
+	if os.Getenv("MCP_DNS_REVALIDATOR_ENABLED") != "false" {
+		interval := api.DefaultMCPDNSRevalidationInterval
+		if raw := os.Getenv("MCP_DNS_REVALIDATION_INTERVAL"); raw != "" {
+			if parsed, perr := time.ParseDuration(raw); perr == nil && parsed > 0 {
+				interval = parsed
+			} else {
+				slog.Warn("invalid MCP_DNS_REVALIDATION_INTERVAL; using default",
+					"value", raw, "default", interval)
+			}
+		}
+		go api.NewMCPDNSRevalidator(pool, interval).WithPublisher(recPub).Start(ctx)
+		slog.Info("mcp dns revalidator started", "interval", interval)
+	}
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewMemoryHandler(pool).Register(protectedMux)
+	api.NewMemoryHandler(pool, runClient).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
+	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The
+	// consumer that actually fires the notification is wired below,
+	// independently, once NATS is available (see startRunWatchConsumer).
+	api.NewRunWatchersHandler(pool).Register(protectedMux)
 	cronHandler := api.NewCronHandler(pool)
 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
@@ -393,6 +432,19 @@ func cronDecisionVerifierFromEnv(getenv func(string) string) (*cron.ControlDecis
 	)
 }
 
+// modelActionViewVerifierFromEnv pins the same deployment-distributed Control
+// public key used by other Space decision recipients. It has no fallback: an
+// unsigned view could make an owner-plane effect look model-eligible.
+func modelActionViewVerifierFromEnv(getenv func(string) string) (*api.ControlModelActionViewVerifier, error) {
+	if getenv == nil {
+		return nil, fmt.Errorf("model action view environment reader is required")
+	}
+	return api.NewControlModelActionViewVerifier(
+		getenv("CONTROL_SPACE_DECISION_KEY_ID"),
+		getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64"),
+	)
+}
+
 // startTaskCompletionConsumer closes a task when the run it started finishes.
 //
 // It is the other half of the executor's safety story: buildTaskDispatcher makes
@@ -409,6 +461,47 @@ func startTaskCompletionConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpo
 			slog.Warn("task completion consumer stopped", "error", rerr)
 		}
 	}()
+}
+
+// startRunWatchConsumer wires AUTO-2's durable JetStream consumer: on a
+// terminal run event, notify every user who registered a watch on that run
+// (api.RunWatchersHandler is where a watch gets registered).
+//
+// Needs BOTH NOTIFICATION_CORE_URL and
+// NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN — notifyclient.New reports
+// (nil, false) when either is blank, and that alone disables this consumer
+// (logged), independently of the task-completion and learning-review
+// consumers above. Also needs a JetStream context on the same connection:
+// unlike those two (plain core-NATS nc.Subscribe/QueueSubscribe), this
+// consumer binds a pre-provisioned DURABLE consumer with manual ack (see
+// runwatch's package doc for why), which requires nats-provisioner to have
+// already registered RunWatchDurable on RunEventsStream.
+func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Pool) {
+	notifyClient, enabled := notifyclient.New(
+		os.Getenv("NOTIFICATION_CORE_URL"),
+		os.Getenv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN"),
+		nil,
+	)
+	if !enabled {
+		slog.Info("run-watch notify consumer disabled (NOTIFICATION_CORE_URL/NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN not set)")
+		return
+	}
+	notifier, err := runwatch.NewNotifier(runwatch.NewPostgresSubscriptionStore(pool), notifyClient)
+	if err != nil {
+		slog.Error("run-watch notifier unavailable", "error", err)
+		return
+	}
+	js, err := nc.JetStream()
+	if err != nil {
+		slog.Error("JetStream context unavailable; run-watch notify consumer disabled", "error", err)
+		return
+	}
+	go func() {
+		if rerr := notifier.Run(ctx, js); rerr != nil {
+			slog.Warn("run-watch notify consumer stopped (is it pre-provisioned on "+runwatch.RunEventsStream+"?)", "error", rerr)
+		}
+	}()
+	slog.Info("run-watch notify consumer started", "stream", runwatch.RunEventsStream, "durable", runwatch.RunWatchDurable)
 }
 
 // buildTaskDispatcher returns the task dispatcher plus whether it can actually
@@ -479,6 +572,10 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 		_ = conn.Close()
 		return fallback, false
 	}
+	// Scoped cron fires prepare their deterministic service-owned Session Core
+	// thread before Temporal starts. This is deliberately configured only after
+	// the dispatcher exists; an absent Session Core client leaves those fires
+	// fail-closed in the dispatcher instead of falling back to a generic run.
 	dispatcher.SetScheduledRunSession(sessionClient)
 	slog.Info("task workflow dispatch enabled",
 		"orchestrator_workflow_addr", addr,
@@ -545,14 +642,19 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 // dialBackends dials session-core + inference-core once (guarded on
 // SESSION_CORE_ADDR + INFERENCE_CORE_ADDR; lazy grpc clients shared by the
 // /commands delegation and the learning consumer — one dial site, no
-// duplication). Returns (nil, nil) when the addrs are unset or a dial fails, so
-// callers degrade gracefully.
-func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
+// duplication). Returns (nil, nil, nil) when the addrs are unset or a dial
+// fails, so callers degrade gracefully.
+//
+// The returned RunServiceClient (MEM-2) is built on the same sessConn as the
+// SessionCoreClient — RunService is served on session-core's same tonic
+// multiplexed server (see grpc.rs's single Server::builder()...add_service
+// chain), so it needs no separate dial, env var, or credential.
+func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient) {
 	sessAddr := os.Getenv("SESSION_CORE_ADDR")
 	infAddr := os.Getenv("INFERENCE_CORE_ADDR")
 	if sessAddr == "" || infAddr == "" {
 		slog.Info("backend clients disabled (SESSION_CORE_ADDR/INFERENCE_CORE_ADDR unset)")
-		return nil, nil
+		return nil, nil, nil
 	}
 	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
 
@@ -571,7 +673,7 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
 		).dialOption())
 	if err != nil {
 		slog.Warn("dial session-core failed", "error", err)
-		return nil, nil
+		return nil, nil, nil
 	}
 	infConn, err := grpc.NewClient(infAddr, creds,
 		newBackendCredential(
@@ -583,9 +685,9 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
 	if err != nil {
 		slog.Warn("dial inference-core failed", "error", err)
 		_ = sessConn.Close()
-		return nil, nil
+		return nil, nil, nil
 	}
-	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn)
+	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn), mpv1.NewRunServiceClient(sessConn)
 }
 
 // Auth Core service-principal configuration for capability-core's OWN identity.

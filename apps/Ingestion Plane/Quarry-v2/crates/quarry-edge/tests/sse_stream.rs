@@ -1,13 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use quarry_core::output::DriverKind;
-use quarry_edge::state::AppState;
-use quarry_runtime::driver_registry::DriverRegistry;
-use quarry_runtime::{artifact_store::InMemoryStore, fetch::FetchResponse, Driver, EventSink};
-use quarry_security::preflight::DefaultEngine;
+use quarry_runtime::{fetch::FetchResponse, Driver, EventSink};
 use tokio::sync::mpsc;
 use url::Url;
+
+mod support;
 
 const TEST_BEARER: &str = "sse-stream-dev-token";
 
@@ -41,6 +40,7 @@ impl Driver for StubPageDriver {
             headers: vec![("content-type".to_string(), "text/html".to_string())],
             body: b"<html><body><a href=\"/x\">x</a></body></html>".to_vec(),
             duration_ms: 1,
+            served_by: DriverKind::Static,
         })
     }
 }
@@ -54,52 +54,7 @@ async fn sse_streams_page_fetched_and_artifact_written() {
     let event_sink = EventSink::new(tx);
 
     let static_driver = Arc::new(StubPageDriver);
-    let mut drivers = DriverRegistry::new(DriverKind::Static);
-    drivers.register(static_driver.clone());
-    let state = AppState {
-        readiness: quarry_edge::state::ReadinessState {
-            durable: true,
-            reason: None,
-        },
-        receipts: Arc::new(quarry_runtime::InMemoryStepReceiptStore::new()),
-        grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
-        require_browser_grants: false,
-        driver: static_driver,
-        drivers,
-        http3: None,
-        security: Arc::new(DefaultEngine::new().with_allow_private_hosts(true)),
-        artifacts: Arc::new(InMemoryStore::new()),
-        control_base_url: String::new(),
-        redis: None,
-        cache: None,
-        event_sink,
-        ingest: None,
-        profiles: Arc::new(quarry_browser::session::InMemoryProfileStore::new()),
-        search: None,
-        vector_index: None,
-        searxng_url: None,
-        model_plane_url: None,
-        model_plane_token: None,
-        service_token_provider: None,
-        answer_pipeline: None,
-        local_index: None,
-        policy: quarry_runtime::RunPolicy::default(),
-        scheduler: None,
-        internal_signer: None,
-        page_renderer: None,
-        visual_processor: None,
-        #[cfg(feature = "postgres-queue")]
-        event_history: None,
-        #[cfg(feature = "postgres-queue")]
-        baseline_store: None,
-        #[cfg(feature = "postgres-queue")]
-        queue_pool: None,
-        usage: std::sync::Arc::new(quarry_runtime::NoopUsageMeter),
-        #[cfg(feature = "browser-agent")]
-        agent_driver: Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new()),
-        #[cfg(feature = "browser-agent")]
-        agent_runs: quarry_edge::agent_routes::new_runs(),
-    };
+    let state = support::base_state(static_driver, event_sink);
 
     let app = quarry_edge::routes::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -27,6 +27,10 @@ metrics-exporter-prometheus = { workspace = true }
 chrono = { workspace = true }
 tokio-stream = "0.1"
 
+# ZDR attestation digest. Same crate/version as execution-core, session-core and
+# model-gateway so attestation digests are byte-comparable across services.
+sha2 = "0.10"
+
 # HTTP client for provider calls
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 async-trait = "0.1"

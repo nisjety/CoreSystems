@@ -13,7 +13,9 @@ func TestAuthorizeHTTPPinsTenantAndRequiresWriteScope(t *testing.T) {
 	user := authctx.Principal{OrganizationID: "org-a", ActorID: "user-a", PrincipalType: "user"}
 	writer := authctx.Principal{OrganizationID: "org-a", ActorID: "svc-a", PrincipalType: "service", Scopes: []string{"capability:write"}, RetentionPolicyPresent: true}
 	healthWriter := authctx.Principal{OrganizationID: "org-a", ActorID: "health-a", PrincipalType: "service", Scopes: []string{HealthWriteScope}, RetentionPolicyPresent: true}
-	globalHealthWriter := authctx.Principal{OrganizationID: "ops", ActorID: "health-global", PrincipalType: "service", Scopes: []string{GlobalHealthWriteScope}, RetentionPolicyPresent: true}
+	globalTenantHealthWriter := authctx.Principal{OrganizationID: "global", ActorID: "health-global-tenant", PrincipalType: "service", Scopes: []string{HealthWriteScope}, RetentionPolicyPresent: true}
+	globalHealthWriter := authctx.Principal{OrganizationID: "global", ActorID: ExecutionCoreServiceID, PrincipalType: "service", Scopes: []string{GlobalHealthWriteScope}, RetentionPolicyPresent: true}
+	tenantGlobalHealthWriter := authctx.Principal{OrganizationID: "org-a", ActorID: ExecutionCoreServiceID, PrincipalType: "service", Scopes: []string{GlobalHealthWriteScope}, RetentionPolicyPresent: true}
 
 	tests := []struct {
 		name      string
@@ -30,7 +32,10 @@ func TestAuthorizeHTTPPinsTenantAndRequiresWriteScope(t *testing.T) {
 		{name: "ordinary writer may not attest health", principal: writer, method: http.MethodPost, target: "/api/v1/capabilities/availability", wantErr: true},
 		{name: "user may not attest health", principal: user, method: http.MethodPost, target: "/api/v1/capabilities/availability", wantErr: true},
 		{name: "exact health workload may attest", principal: healthWriter, method: http.MethodPost, target: "/api/v1/capabilities/availability"},
+		{name: "tenant health workload may not claim global organization", principal: globalTenantHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/availability", wantErr: true},
 		{name: "global health workload may enter health route", principal: globalHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/availability"},
+		{name: "global health workload bound to tenant may not enter health route", principal: tenantGlobalHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/availability", wantErr: true},
+		{name: "unrelated global health workload may not enter health route", principal: authctx.Principal{OrganizationID: "global", ActorID: "service:unrelated", PrincipalType: "service", Scopes: []string{GlobalHealthWriteScope}, RetentionPolicyPresent: true}, method: http.MethodPost, target: "/api/v1/capabilities/availability", wantErr: true},
 		{name: "ordinary writer may not cancel Space schedules", principal: writer, method: http.MethodPost, target: "/api/v1/internal/space-deletion/cron", wantErr: true},
 		{name: "exact deletion scope may cancel Space schedules", principal: authctx.Principal{OrganizationID: "org-a", ActorID: "service:control-space-deletion", PrincipalType: "service", Scopes: []string{SpaceDeletionScope}, RetentionPolicyPresent: true}, method: http.MethodPost, target: "/api/v1/internal/space-deletion/cron"},
 		{name: "tenant-agnostic command execution is quarantined", principal: writer, method: http.MethodPost, target: "/api/v1/commands/exec", wantErr: true},

@@ -516,6 +516,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_sandbox_probe_never_attests_the_owner_action_ticket_adapter() {
+        let planned = attestable(ProbeOutcome {
+            sandbox: true,
+            interpreter: true,
+        });
+
+        assert!(
+            !planned
+                .iter()
+                .any(|attestation| attestation.capability_id == crate::ticket_tools::CAPABILITY_ID),
+            "a sandbox probe cannot prove the independent Control and Conversation Core owner-action path"
+        );
+    }
+
     /// capability-core decodes the body with `DisallowUnknownFields`, so the key
     /// set is an exact contract — an extra or renamed field is a 400.
     #[test]

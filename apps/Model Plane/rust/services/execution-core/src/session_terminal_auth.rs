@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 const SESSION_CORE_AUDIENCE: &str = "session-core";
 const TERMINALIZE_SCOPE: &str = "session:terminalize";
 const HEARTBEAT_SCOPE: &str = "session:heartbeat";
+const SCHEDULED_STEP_SCOPE: &str = "session:scheduled-step";
 const REFRESH_SKEW: Duration = Duration::from_secs(30);
 const MAX_TOKEN_TTL_SECONDS: u64 = 3600;
 const MAX_CACHE_ENTRIES: usize = 10_000;
@@ -37,6 +38,7 @@ pub(crate) enum SessionTerminalTokenError {
 enum TerminalScope {
     Terminalize,
     Heartbeat,
+    ScheduledStep,
 }
 
 impl TerminalScope {
@@ -44,6 +46,7 @@ impl TerminalScope {
         match self {
             Self::Terminalize => TERMINALIZE_SCOPE,
             Self::Heartbeat => HEARTBEAT_SCOPE,
+            Self::ScheduledStep => SCHEDULED_STEP_SCOPE,
         }
     }
 
@@ -51,6 +54,7 @@ impl TerminalScope {
         match self {
             Self::Terminalize => "managed-run terminalization",
             Self::Heartbeat => "managed-run heartbeat",
+            Self::ScheduledStep => "scheduled-step claim and receipt",
         }
     }
 }
@@ -90,6 +94,9 @@ pub(crate) trait ManagedRunTokenProvider: Send + Sync {
     async fn terminalize_token(&self, org_id: &str) -> Result<String, SessionTerminalTokenError>;
 
     async fn heartbeat_token(&self, org_id: &str) -> Result<String, SessionTerminalTokenError>;
+
+    async fn scheduled_step_token(&self, org_id: &str)
+        -> Result<String, SessionTerminalTokenError>;
 }
 
 impl fmt::Debug for SessionTerminalTokenProvider {
@@ -162,6 +169,13 @@ impl SessionTerminalTokenProvider {
         org_id: &str,
     ) -> Result<String, SessionTerminalTokenError> {
         self.token(org_id, TerminalScope::Heartbeat).await
+    }
+
+    pub(crate) async fn scheduled_step_token(
+        &self,
+        org_id: &str,
+    ) -> Result<String, SessionTerminalTokenError> {
+        self.token(org_id, TerminalScope::ScheduledStep).await
     }
 
     async fn token(
@@ -289,6 +303,13 @@ impl ManagedRunTokenProvider for SessionTerminalTokenProvider {
     async fn heartbeat_token(&self, org_id: &str) -> Result<String, SessionTerminalTokenError> {
         SessionTerminalTokenProvider::heartbeat_token(self, org_id).await
     }
+
+    async fn scheduled_step_token(
+        &self,
+        org_id: &str,
+    ) -> Result<String, SessionTerminalTokenError> {
+        SessionTerminalTokenProvider::scheduled_step_token(self, org_id).await
+    }
 }
 
 fn cache_key(org_id: &str, scope: TerminalScope) -> Result<CacheKey, SessionTerminalTokenError> {
@@ -341,6 +362,23 @@ mod tests {
             .and(header("x-service-api-key", "execution-secret"))
             .and(body_json(serde_json::json!({
                 "orgId": "org-a",
+                "scopes": ["session:scheduled-step"],
+                "reason": "execution-core scheduled-step claim and receipt"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "scheduled-step-token",
+                "expiresInSeconds": 300,
+                "audience": "session-core"
+            })))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/session-core/internal-token"))
+            .and(header("x-service-id", "execution-core"))
+            .and(header("x-service-api-key", "execution-secret"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-a",
                 "scopes": ["session:heartbeat"],
                 "reason": "execution-core managed-run heartbeat"
             })))
@@ -365,6 +403,10 @@ mod tests {
         assert_eq!(
             provider.heartbeat_token("org-a").await.unwrap(),
             "heartbeat-token"
+        );
+        assert_eq!(
+            provider.scheduled_step_token("org-a").await.unwrap(),
+            "scheduled-step-token"
         );
     }
 

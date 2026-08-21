@@ -29,6 +29,9 @@ const {
   mockGetRun,
   mockListRuns,
   mockListSystemRuns,
+  mockWatchRun,
+  mockUnwatchRun,
+  mockGetRunWatchStatus,
 } = vi.hoisted(() => ({
   mockStreamChat: vi.fn(),
   mockStreamRunEvents: vi.fn(),
@@ -40,6 +43,9 @@ const {
   mockGetRun: vi.fn(),
   mockListRuns: vi.fn(),
   mockListSystemRuns: vi.fn(),
+  mockWatchRun: vi.fn(),
+  mockUnwatchRun: vi.fn(),
+  mockGetRunWatchStatus: vi.fn(),
 }))
 
 vi.mock('@/shared/api/chat-client', async (importOriginal) => {
@@ -64,6 +70,9 @@ vi.mock('@/shared/api/runs-client', () => ({
   getRun: mockGetRun,
   listRuns: mockListRuns,
   listSystemRuns: mockListSystemRuns,
+  watchRun: mockWatchRun,
+  unwatchRun: mockUnwatchRun,
+  getRunWatchStatus: mockGetRunWatchStatus,
 }))
 
 import AgentRunConsole from './AgentRunConsole'
@@ -136,6 +145,9 @@ describe('AgentRunConsole approval decide reconciliation (task_d6420100)', () =>
     mockGetRun.mockReset().mockResolvedValue(null)
     mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
     mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockWatchRun.mockReset().mockResolvedValue({ watching: true })
+    mockUnwatchRun.mockReset().mockResolvedValue(undefined)
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
     mockResumeRun.mockResolvedValue(undefined)
     mockCancelRun.mockResolvedValue(undefined)
   })
@@ -335,6 +347,9 @@ describe('AgentRunConsole proof bundle panel', () => {
     mockGetRun.mockReset().mockResolvedValue(null)
     mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
     mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockWatchRun.mockReset().mockResolvedValue({ watching: true })
+    mockUnwatchRun.mockReset().mockResolvedValue(undefined)
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
   })
 
   it('renders a granted approval with no execution as unproven — neither failed nor succeeded', async () => {
@@ -462,5 +477,79 @@ describe('AgentRunConsole proof bundle panel', () => {
 
     await waitFor(() => expect(screen.getByText(/kunne ikke hente bevispakken/i)).toBeTruthy())
     expect(screen.getByText(/ikke et bevis på at ingenting skjedde/i)).toBeTruthy()
+  })
+})
+
+// ── Run watcher toggle (AUTO-2) ──────────────────────────────────────────────
+// "Notify me when this run finishes" — a standing per-user subscription
+// registered/cancelled through the gateway's `/api/v1/runs/:run_id/watchers`
+// proxy (`runs-client`'s `watchRun`/`unwatchRun`/`getRunWatchStatus`).
+// Distinct from the live event stream, which these tests don't otherwise
+// exercise: `mockGetRun` resolves a real `RunDetail` so `TelemetryPanel` (and
+// the toggle it hosts) actually mounts, same technique the reconciliation
+// suite above uses for its "still-live Resume button" case.
+
+describe('AgentRunConsole run watcher toggle', () => {
+  beforeEach(() => {
+    mockStreamChat.mockReset()
+    mockStreamRunEvents.mockReset()
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockListApprovals.mockReset().mockResolvedValue([])
+    mockDecideApproval.mockReset()
+    mockResumeRun.mockReset().mockResolvedValue(undefined)
+    mockCancelRun.mockReset().mockResolvedValue(undefined)
+    mockGetRun.mockReset().mockResolvedValue(runDetail())
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockWatchRun.mockReset().mockResolvedValue({ watching: true })
+    mockUnwatchRun.mockReset().mockResolvedValue(undefined)
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('loads the initial status and registers a subscription on click', async () => {
+    renderConsole()
+    driveToConnectedRun()
+
+    const toggle = await screen.findByRole('button', { name: /varsle meg/i })
+    await waitFor(() => expect(mockGetRunWatchStatus).toHaveBeenCalledWith('run_1'))
+
+    fireEvent.click(toggle)
+
+    await waitFor(() => expect(mockWatchRun).toHaveBeenCalledWith('run_1'))
+    await waitFor(() => expect(screen.getByRole('button', { name: /varsler/i })).toBeTruthy())
+    expect(mockUnwatchRun).not.toHaveBeenCalled()
+  })
+
+  it('cancels an existing subscription on a second click', async () => {
+    mockGetRunWatchStatus.mockResolvedValue({ watching: true })
+
+    renderConsole()
+    driveToConnectedRun()
+
+    const toggle = await screen.findByRole('button', { name: /varsler/i })
+    fireEvent.click(toggle)
+
+    await waitFor(() => expect(mockUnwatchRun).toHaveBeenCalledWith('run_1'))
+    await waitFor(() => expect(screen.getByRole('button', { name: /varsle meg/i })).toBeTruthy())
+    expect(mockWatchRun).not.toHaveBeenCalled()
+  })
+
+  it('reverts the optimistic state when the watch call fails', async () => {
+    mockWatchRun.mockRejectedValue(new Error('502 Bad Gateway'))
+
+    renderConsole()
+    driveToConnectedRun()
+
+    const toggle = await screen.findByRole('button', { name: /varsle meg/i })
+    fireEvent.click(toggle)
+
+    await waitFor(() => expect(mockWatchRun).toHaveBeenCalled())
+    // A failed registration must not leave the button falsely claiming it
+    // succeeded — it reverts to "Notify me" rather than staying on "Watching".
+    await waitFor(() => expect(screen.getByRole('button', { name: /varsle meg/i })).toBeTruthy())
   })
 })

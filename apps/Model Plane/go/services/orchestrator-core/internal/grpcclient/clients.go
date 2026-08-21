@@ -51,9 +51,9 @@ type Options struct {
 // Each connection gets interceptors bound to ITS OWN plane audience, because a
 // minted token is audience-bound: one shared interceptor could carry only one
 // audience's credential and would present it to every sibling, where the rest
-// reject it. Connections with no audience (sandbox-manager, browser-broker) and
-// execution-core — which requires a user-scoped identity no service token can
-// provide, see the servicecred package doc — get forwarding only.
+// reject it. Connections with no audience (sandbox-manager, browser-broker) get
+// forwarding only. Execution Core receives a service token only for the
+// dedicated scheduled-step method; user-bound methods remain forwarding-only.
 func Dial(ctx context.Context, opts Options) (*Clients, error) {
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = 5 * time.Second
@@ -70,11 +70,17 @@ func Dial(ctx context.Context, opts Options) (*Clients, error) {
 		defer cancel()
 
 		minter := opts.Minters.Get(audience)
+		interceptor := servicecred.UnaryInterceptor(minter, logger)
+		if name == "execution-core" {
+			interceptor = servicecred.UnaryInterceptorForMethods(minter, logger, map[string]struct{}{
+				"/model_plane.v1.ExecutionCore/ExecuteScheduledStep": {},
+			})
+		}
 		dialOpts := []grpc.DialOption{
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			// Proxies the caller's verified credential upstream; mints
 			// orchestrator-core's own when there is none to forward.
-			grpc.WithChainUnaryInterceptor(servicecred.UnaryInterceptor(minter, logger)),
+			grpc.WithChainUnaryInterceptor(interceptor),
 			grpc.WithChainStreamInterceptor(servicecred.StreamInterceptor()),
 		}
 
@@ -90,7 +96,7 @@ func Dial(ctx context.Context, opts Options) (*Clients, error) {
 
 	clients.SessionCore = dial(opts.SessionCoreAddr, "session-core", servicecred.AudienceSessionCore)
 	clients.InferenceCore = dial(opts.InferenceCoreAddr, "inference-core", servicecred.AudienceInferenceCore)
-	clients.ExecutionCore = dial(opts.ExecutionCoreAddr, "execution-core", "")
+	clients.ExecutionCore = dial(opts.ExecutionCoreAddr, "execution-core", servicecred.AudienceExecutionCore)
 	clients.CapabilityCore = dial(opts.CapabilityCoreAddr, "capability-core", servicecred.AudienceCapabilityCore)
 	clients.SandboxManager = dial(opts.SandboxManagerAddr, "sandbox-manager", "")
 	clients.BrowserBroker = dial(opts.BrowserBrokerAddr, "browser-broker", "")

@@ -1144,6 +1144,7 @@ mod tests {
                     headers: vec![],
                     body: body.to_vec(),
                     duration_ms: 1,
+                    served_by: self.kind,
                 }),
                 TestResult::Err(code) => Err(QuarryError::new(code, "simulated transport failure")),
             }

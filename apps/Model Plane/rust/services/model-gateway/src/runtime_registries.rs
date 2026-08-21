@@ -993,8 +993,18 @@ fn endpoint_host_is_forbidden(endpoint: &reqwest::Url) -> bool {
         || normalized == "metadata.google.internal"
 }
 
+/// Address-vetting range table. Kept in parity with capability-core's Go-side
+/// `mcpForbiddenRanges` (`services/capability-core/internal/api/registry_apis.go`)
+/// and Quarry's `quarry_security::heur::resolve_guard` — three independent
+/// implementations (Go registration-time check, this per-dial Rust check, and
+/// Quarry's crawler SSRF guard) that must agree on what counts as a forbidden
+/// destination, or a hostname resolving into a range only one of them blocks
+/// slips through wherever the weakest check runs. Rust's stable `std::net`
+/// predicates don't cover CGNAT, benchmarking, or the IETF protocol-assignment
+/// block, so those need the manual octet/segment checks below.
 fn ip_is_forbidden(address: std::net::IpAddr) -> bool {
     fn ipv4_forbidden(address: std::net::Ipv4Addr) -> bool {
+        let octets = address.octets();
         address.is_private()
             || address.is_loopback()
             || address.is_link_local()
@@ -1002,15 +1012,40 @@ fn ip_is_forbidden(address: std::net::IpAddr) -> bool {
             || address.is_documentation()
             || address.is_unspecified()
             || address.is_multicast()
+            // 0.0.0.0/8 -- "this network" (RFC 791). is_unspecified() only
+            // catches the single 0.0.0.0 address, not the whole /8.
+            || octets[0] == 0
+            // 100.64.0.0/10 -- CGNAT / Shared Address Space (RFC 6598). Real
+            // in cloud/k8s pod networks, so a legitimate-looking DNS answer
+            // can still land inside another tenant's internal address space.
+            || (octets[0] == 100 && (octets[1] & 0xc0) == 0x40)
+            // 192.0.0.0/24 -- IETF protocol assignments (RFC 6890).
+            || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+            // 198.18.0.0/15 -- benchmarking (RFC 2544).
+            || (octets[0] == 198 && (octets[1] & 0xfe) == 18)
+            // 240.0.0.0/4 -- reserved / future use (Class E).
+            || (octets[0] & 0xf0) == 0xf0
     }
 
     fn ipv6_forbidden(address: std::net::Ipv6Addr) -> bool {
+        let segments = address.segments();
         address.is_loopback()
             || address.is_unspecified()
             || address.is_multicast()
             || address.to_ipv4_mapped().is_some_and(ipv4_forbidden)
-            || (address.segments()[0] & 0xfe00) == 0xfc00
-            || (address.segments()[0] & 0xffc0) == 0xfe80
+            || (segments[0] & 0xfe00) == 0xfc00
+            || (segments[0] & 0xffc0) == 0xfe80
+            // 64:ff9b::/96 -- NAT64 well-known prefix (RFC 6052).
+            || (segments[0] == 0x0064
+                && segments[1] == 0xff9b
+                && segments[2] == 0
+                && segments[3] == 0
+                && segments[4] == 0
+                && segments[5] == 0)
+            // 100::/64 -- discard-only address block (RFC 6666).
+            || (segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0)
+            // 2001:db8::/32 -- documentation (RFC 3849).
+            || (segments[0] == 0x2001 && segments[1] == 0x0db8)
     }
 
     match address {
@@ -1435,6 +1470,39 @@ mod mcp_secure_registration_tests {
             );
         }
         assert!(!ip_is_forbidden("93.184.216.34".parse().expect("IP")));
+    }
+
+    /// Ranges that capability-core's Go-side `mcpForbiddenRanges` blocks but
+    /// Rust's stable `std::net` predicates alone don't cover -- CGNAT and
+    /// benchmarking are real cloud/k8s address spaces, not exotic edge cases.
+    /// Kept in parity with `resolved_private_ranges_are_forbidden` in
+    /// `quarry-security`'s `heur.rs` tests.
+    #[test]
+    fn resolved_cgnat_and_reserved_ranges_are_forbidden() {
+        for address in [
+            "0.1.2.3",           // 0.0.0.0/8, beyond the single unspecified address
+            "100.64.0.1",        // CGNAT / Shared Address Space (RFC 6598)
+            "100.127.255.254",   // top of the CGNAT range
+            "192.0.0.8",         // IETF protocol assignments (RFC 6890)
+            "198.18.0.1",        // benchmarking (RFC 2544)
+            "198.19.255.254",    // top of the benchmarking range
+            "255.0.0.1",         // 240.0.0.0/4 reserved (Class E)
+            "64:ff9b::1",        // NAT64 well-known prefix (RFC 6052)
+            "100::1",            // discard-only address block (RFC 6666)
+            "2001:db8::1",       // documentation (RFC 3849)
+            "::ffff:100.64.0.1", // CGNAT wrapped in an IPv4-mapped IPv6 literal
+        ] {
+            assert!(
+                ip_is_forbidden(address.parse().expect("IP")),
+                "unsafe address accepted: {address}"
+            );
+        }
+        // 100.63.255.255 and 100.128.0.0 are just outside the CGNAT /10 and
+        // must stay reachable -- otherwise the range check is off by one.
+        assert!(!ip_is_forbidden("100.63.255.255".parse().expect("IP")));
+        assert!(!ip_is_forbidden("100.128.0.0".parse().expect("IP")));
+        assert!(!ip_is_forbidden("198.17.255.255".parse().expect("IP")));
+        assert!(!ip_is_forbidden("198.20.0.0".parse().expect("IP")));
     }
 
     #[tokio::test]

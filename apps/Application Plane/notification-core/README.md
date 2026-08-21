@@ -3,7 +3,7 @@
 `notification-core` is the Application Plane's first-party notification intake,
 provider-submission ledger, feed, preference, and channel-policy service.
 
-## Current source contract — 2026-07-13
+## Current source contract — 2026-08-17
 
 The canonical intake is `POST /api/v1/notification-requests`. Requests require:
 
@@ -37,7 +37,27 @@ exist.
 
 Delivery mode is explicit: `disabled` or `novu`. Disabled mode returns readiness
 503 and cannot fabricate provider success. Provider acceptance is `submitted`,
-not `delivered`; no callback/reconciliation path currently advances delivery.
+not `delivered`; only the separately config-gated callback route can advance a
+delivery attempt after an exact provider receipt.
+
+The source now contains the next bounded delivery contract: migration
+`010_delivery_attempts.up.sql` adds a content-free attempt ledger with
+`pending → claimed → sent_unconfirmed → acknowledged | failed | unknown`,
+lease fencing, provider correlation, and an opt-in queue/worker path. Provider
+transport errors become `unknown` and cannot be blindly retried. Callback
+verification requires a fresh HMAC envelope and an external replay store. The
+route returns `503` while `NOTIFICATION_DELIVERY_CALLBACK_SECRET` is empty.
+The server now wires the queue and lease-fenced worker only when
+`NOTIFICATION_DELIVERY_WORKER_ENABLED=true`; configuration rejects that flag
+unless Novu mode and a callback verifier are present. The flag remains false
+in dev. Submission now atomically creates the content-free
+`notification_feed_projection_attempts` obligation. Callback acknowledgement
+propagates the provider receipt into that obligation, and a second
+lease-fenced projector idempotently writes the Activity/Inbox row, including
+callback-before-projection ordering. Disposable Postgres covers two-worker
+lease fencing and idempotent replay; real HA replay, provider-specific
+ZDR/receipt attestation, and candidate deployment proof remain disabled until
+proven together.
 
 For `zdr`, payload content is used transiently for the current provider request
 but is not stored in the notification ledger or feed. Only control metadata and
@@ -53,9 +73,11 @@ contract.
 This source is not deployed. The running July 13 image predates these changes.
 There is no trustworthy signed/revisioned Control membership writer or scoped
 backfill, so secure source intentionally denies legitimate requests rather than
-guessing access. Provider submission and feed projection are not joined by a
-durable outbox; provider callbacks/reconciliation, durable preference sync,
-deep dependency readiness, and a multi-replica replay store are absent.
+guessing access. The provider submission and feed projection are now joined by
+a source-level durable outbox, but the running service remains disabled by
+default; provider callbacks/reconciliation, durable preference sync, deep
+dependency readiness, and a multi-replica replay/candidate proof are absent
+from the deployed service.
 Support automation remains disabled because current workflows do not supply
 authoritative organization/user mapping.
 

@@ -24,27 +24,45 @@ use mp_contracts::model_plane::v1::{
     run_service_server::{RunService, RunServiceServer},
 };
 use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use crate::auth::{
-    authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity,
+    authorize_operation, authorize_owner_row, authorize_run_action_authority_service,
+    authorize_scheduled_step_authority_service, authorize_scheduled_step_service, identity,
+    OwnerIntent, VerifiedIdentity,
 };
 use crate::orchestration_grpc::json_to_struct;
 
+/// `space_membership_revoked` is true when the row has a non-null
+/// `space_id` AND that (space_id, user_id) pair has a row in
+/// `space_membership_revocations` (migration 0032, populated by
+/// `space_membership_nats.rs`). A row with a null `space_id` never matches
+/// the revocation join, so unscoped runs/threads are unaffected.
 async fn authorize_run_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     run_id: &str,
     intent: OwnerIntent,
 ) -> Result<(), Status> {
-    let owner: Option<(String, String)> =
-        sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
-            .bind(run_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("run not found"))?;
+    let owner: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT r.org_id, r.user_id, \
+         EXISTS(SELECT 1 FROM space_membership_revocations rev \
+                WHERE rev.space_ref = r.space_id AND rev.subject_id = r.user_id) \
+         FROM runs r WHERE r.id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id, space_membership_revoked) =
+        owner.ok_or_else(|| Status::not_found("run not found"))?;
+    if space_membership_revoked {
+        return Err(Status::permission_denied(
+            "Space membership required for this run",
+        ));
+    }
     authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
@@ -54,14 +72,73 @@ async fn authorize_thread_owner(
     thread_id: &str,
     intent: OwnerIntent,
 ) -> Result<(), Status> {
-    let owner: Option<(String, String)> =
-        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    let owner: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT t.org_id, t.user_id, \
+         EXISTS(SELECT 1 FROM space_membership_revocations rev \
+                WHERE rev.space_ref = t.space_id AND rev.subject_id = t.user_id) \
+         FROM threads t WHERE t.id = $1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id, space_membership_revoked) =
+        owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    if space_membership_revoked {
+        return Err(Status::permission_denied(
+            "Space membership required for this thread",
+        ));
+    }
     authorize_owner_row(caller, &org_id, &user_id, intent)
+}
+
+/// Seam for `resolve_thread_owner`'s durable lookup, mirroring `memory_grpc.rs`'s
+/// `ThreadOwnership` trait one file over. `resolve_run_owner` (the RPC this
+/// handler is modeled on) queries `self.pool` directly with no injectable seam
+/// and has zero unit-test coverage as a result; this new, security-critical
+/// authorization RPC gets the testable shape instead of perpetuating that gap.
+#[tonic::async_trait]
+trait ThreadOwnerLookup: Send + Sync {
+    async fn owner_matches(
+        &self,
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> Result<bool, Status>;
+}
+
+struct PgThreadOwnerLookup {
+    pool: PgPool,
+}
+
+#[tonic::async_trait]
+impl ThreadOwnerLookup for PgThreadOwnerLookup {
+    async fn owner_matches(
+        &self,
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> Result<bool, Status> {
+        // A revoked Space membership denies even a matching org+user row —
+        // see authorize_run_owner's doc comment above for why: a null
+        // space_id (unscoped thread) never matches the revocation join, so
+        // this only tightens Space-scoped threads.
+        let (authorized,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3 \
+             AND NOT EXISTS(SELECT 1 FROM space_membership_revocations rev \
+                             WHERE rev.space_ref = t.space_id AND rev.subject_id = t.user_id))",
+        )
+        .bind(thread_id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "durable thread ownership lookup failed");
+            Status::unavailable("thread ownership unavailable")
+        })?;
+        Ok(authorized)
+    }
 }
 
 /// Hard cap on `ListRuns.limit` so a hostile or buggy caller cannot ask for an
@@ -104,6 +181,169 @@ struct RunRow {
     updated_at: i64,
     steps_completed: i64,
     checkpoint_index: i64,
+}
+
+/// The deliberately content-free run/thread projection used only by Control's
+/// exact action-authorizer before it issues an owner-targeted effect decision.
+/// A query must satisfy both immutable run context and the currently stored
+/// thread context; a legacy, terminal, service-owned, or partially scoped row
+/// simply does not become an authority source.
+#[derive(sqlx::FromRow)]
+struct RunActionAuthorityRow {
+    run_id: String,
+    org_id: String,
+    subject_id: String,
+    thread_id: String,
+    run_status: String,
+    space_id: Option<String>,
+    recipient_audience_ref: Option<String>,
+    recipient_audience_revision: Option<i64>,
+    recipient_audience_hash: Option<String>,
+    privacy_policy_ref: Option<String>,
+    thread_resource_authorization_ref: Option<String>,
+    authority_revision: Option<i64>,
+}
+
+/// Durable scheduled-run bindings projected for Control's per-step authority
+/// refresh. The metadata is intentionally the only source for schedule/fire
+/// identity: callers cannot turn a valid prepared thread into a different
+/// workload by restating those values.
+#[derive(sqlx::FromRow)]
+struct ScheduledStepAuthorityRow {
+    run_id: String,
+    thread_id: String,
+    org_id: String,
+    space_id: String,
+    run_status: String,
+    metadata: serde_json::Value,
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn scheduled_metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn project_scheduled_step_authority(
+    row: ScheduledStepAuthorityRow,
+    req: &pb::ResolveScheduledStepAuthorityRequest,
+) -> Option<pb::ResolveScheduledStepAuthorityResponse> {
+    if is_terminal(&row.run_status)
+        || row.space_id.trim().is_empty()
+        || row.run_id != req.run_id
+        || row.thread_id != req.thread_id
+        || row.org_id != req.org_id
+        || req.step_id != format!("{}:step:{}", req.run_id, req.step_index)
+        || req.idempotency_key.trim().is_empty()
+        || !valid_sha256_digest(&req.template_digest)
+        || !valid_sha256_digest(&req.policy_digest)
+    {
+        return None;
+    }
+
+    let source = scheduled_metadata_string(&row.metadata, "source")?;
+    let schedule_id = scheduled_metadata_string(&row.metadata, "schedule_id")?;
+    let fire_key = scheduled_metadata_string(&row.metadata, "fire_key")?;
+    let space_id = scheduled_metadata_string(&row.metadata, "space_id")?;
+    let subject_id = scheduled_metadata_string(&row.metadata, "subject_id")?;
+    let template_digest = scheduled_metadata_string(&row.metadata, "template_digest")?;
+    let policy_digest = scheduled_metadata_string(&row.metadata, "policy_digest")?;
+    let idempotency_key = scheduled_metadata_string(&row.metadata, "idempotency_key")?;
+    if source != "scheduled_run"
+        || space_id != row.space_id.trim()
+        || schedule_id != req.schedule_id.trim()
+        || fire_key != req.fire_key.trim()
+        || template_digest != req.template_digest.trim()
+        || policy_digest != req.policy_digest.trim()
+        || idempotency_key != req.idempotency_key.trim()
+    {
+        return None;
+    }
+
+    Some(pb::ResolveScheduledStepAuthorityResponse {
+        resolved: true,
+        run_id: row.run_id,
+        thread_id: row.thread_id,
+        org_id: row.org_id,
+        subject_id,
+        space_id,
+        schedule_id,
+        fire_key,
+        template_digest,
+        policy_digest,
+        step_id: req.step_id.clone(),
+        step_index: req.step_index,
+        idempotency_key,
+        run_status: row.run_status,
+    })
+}
+
+/// Project a query row only when it is safe for Control to use as the durable
+/// context source for a future action decision. This function intentionally
+/// returns `None` rather than a partial projection: the caller must fail
+/// closed and re-resolve current Control facts, not infer missing authority.
+fn project_run_action_authority(
+    row: RunActionAuthorityRow,
+) -> Option<pb::ResolveRunActionAuthorityResponse> {
+    if matches!(
+        row.run_status.as_str(),
+        "completed" | "failed" | "cancelled"
+    ) || row.subject_id.starts_with("service:")
+    {
+        return None;
+    }
+    let space_id = row.space_id?.trim().to_owned();
+    let recipient_audience_ref = row.recipient_audience_ref?.trim().to_owned();
+    let recipient_audience_hash = row.recipient_audience_hash?.trim().to_owned();
+    let privacy_policy_ref = row.privacy_policy_ref?.trim().to_owned();
+    let thread_resource_authorization_ref =
+        row.thread_resource_authorization_ref?.trim().to_owned();
+    let recipient_audience_revision = u64::try_from(row.recipient_audience_revision?).ok()?;
+    let authority_revision = u64::try_from(row.authority_revision?).ok()?;
+    if space_id.is_empty()
+        || recipient_audience_ref.is_empty()
+        || recipient_audience_hash.is_empty()
+        || privacy_policy_ref.is_empty()
+        || thread_resource_authorization_ref.is_empty()
+        || recipient_audience_revision == 0
+        || authority_revision == 0
+    {
+        return None;
+    }
+    Some(pb::ResolveRunActionAuthorityResponse {
+        resolved: true,
+        run_id: row.run_id,
+        org_id: row.org_id,
+        subject_id: row.subject_id,
+        thread_id: row.thread_id,
+        space_id,
+        recipient_audience_ref,
+        recipient_audience_revision,
+        recipient_audience_hash,
+        privacy_policy_ref,
+        thread_resource_authorization_ref,
+        authority_revision,
+        run_status: row.run_status,
+    })
+}
+
+fn unresolved_run_action_authority() -> pb::ResolveRunActionAuthorityResponse {
+    pb::ResolveRunActionAuthorityResponse {
+        resolved: false,
+        ..Default::default()
+    }
 }
 
 /// Column projection shared by `GetRun` and `ListRuns`. `steps_completed` is the
@@ -177,12 +417,27 @@ fn is_terminal(status: &str) -> bool {
 
 pub struct RunServiceImpl {
     pool: PgPool,
+    thread_owner_lookup: Arc<dyn ThreadOwnerLookup>,
 }
 
 impl RunServiceImpl {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            thread_owner_lookup: Arc::new(PgThreadOwnerLookup { pool: pool.clone() }),
+            pool,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_thread_owner_lookup_for_test(
+        pool: PgPool,
+        thread_owner_lookup: Arc<dyn ThreadOwnerLookup>,
+    ) -> Self {
+        Self {
+            pool,
+            thread_owner_lookup,
+        }
     }
 
     /// Convenience for `grpc.rs` so the wiring mirrors how the other services in
@@ -222,6 +477,115 @@ impl RunService for RunServiceImpl {
         }
         .await;
         record_metrics("get_run", started, result.is_ok());
+        result
+    }
+
+    async fn get_scheduled_step_context(
+        &self,
+        request: Request<pb::GetScheduledStepContextRequest>,
+    ) -> Result<Response<pb::ScheduledStepContext>, Status> {
+        let caller = identity(&request)?;
+        authorize_operation(&caller, crate::auth::SCHEDULED_STEP_SCOPE)?;
+        authorize_scheduled_step_service(&caller)?;
+        let req = request.into_inner();
+        if req.run_id.trim().is_empty()
+            || req.thread_id.trim().is_empty()
+            || req.org_id.trim().is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "scheduled-step context bindings are required",
+            ));
+        }
+        caller.authorize_org(&req.org_id)?;
+        let row: Option<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT r.id, r.thread_id, r.org_id, r.goal, r.status
+             FROM runs r
+             JOIN threads t ON t.id = r.thread_id
+             WHERE r.id = $1 AND r.thread_id = $2 AND r.org_id = $3
+               AND r.user_id = $4 AND COALESCE(t.space_id, '') <> ''
+               AND COALESCE(r.metadata->>'source', '') = 'scheduled_run'",
+        )
+        .bind(&req.run_id)
+        .bind(&req.thread_id)
+        .bind(&req.org_id)
+        .bind(crate::auth::system_run_owners()[0])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+        let Some((run_id, thread_id, org_id, goal, status)) = row else {
+            return Err(Status::not_found("scheduled run context not found"));
+        };
+        Ok(Response::new(pb::ScheduledStepContext {
+            run_id,
+            thread_id,
+            org_id,
+            goal,
+            status,
+        }))
+    }
+
+    async fn resolve_scheduled_step_authority(
+        &self,
+        request: Request<pb::ResolveScheduledStepAuthorityRequest>,
+    ) -> Result<Response<pb::ResolveScheduledStepAuthorityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveScheduledStepAuthorityResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_scheduled_step_authority_service(&caller)?;
+            let req = request.into_inner();
+            if req.run_id.trim().is_empty()
+                || req.thread_id.trim().is_empty()
+                || req.org_id.trim().is_empty()
+                || req.schedule_id.trim().is_empty()
+                || req.fire_key.trim().is_empty()
+                || req.step_id.trim().is_empty()
+                || req.idempotency_key.trim().is_empty()
+                || !valid_sha256_digest(&req.template_digest)
+                || !valid_sha256_digest(&req.policy_digest)
+            {
+                return Err(Status::invalid_argument(
+                    "scheduled-step authority bindings are required",
+                ));
+            }
+            if req.step_id != format!("{}:step:{}", req.run_id, req.step_index) {
+                return Err(Status::invalid_argument("scheduled step_id is invalid"));
+            }
+            caller.authorize_org(&req.org_id)?;
+
+            // Only a prepared, service-owned scheduled run can answer this
+            // query. The exact metadata comparison below prevents a caller
+            // from reusing a valid thread for another schedule or template.
+            let row: Option<ScheduledStepAuthorityRow> = sqlx::query_as(
+                "SELECT r.id AS run_id, r.thread_id, r.org_id,
+                        COALESCE(t.space_id, '') AS space_id,
+                        r.status AS run_status, r.metadata
+                 FROM runs r
+                 JOIN threads t ON t.id = r.thread_id AND t.org_id = r.org_id
+                 WHERE r.id = $1 AND r.thread_id = $2 AND r.org_id = $3
+                   AND r.user_id = $4
+                   AND COALESCE(r.metadata->>'source', '') = 'scheduled_run'",
+            )
+            .bind(req.run_id.trim())
+            .bind(req.thread_id.trim())
+            .bind(req.org_id.trim())
+            .bind(crate::auth::system_run_owners()[0])
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "scheduled-step authority lookup failed");
+                Status::unavailable("scheduled-step authority unavailable")
+            })?;
+
+            let response = row
+                .and_then(|row| project_scheduled_step_authority(row, &req))
+                .unwrap_or_else(|| pb::ResolveScheduledStepAuthorityResponse {
+                    resolved: false,
+                    ..Default::default()
+                });
+            Ok(Response::new(response))
+        }
+        .await;
+        record_metrics("resolve_scheduled_step_authority", started, result.is_ok());
         result
     }
 
@@ -423,6 +787,94 @@ impl RunService for RunServiceImpl {
         record_metrics("resolve_run_owner", started, result.is_ok());
         result
     }
+
+    async fn resolve_thread_owner(
+        &self,
+        request: Request<pb::ResolveThreadOwnerRequest>,
+    ) -> Result<Response<pb::ResolveThreadOwnerResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveThreadOwnerResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
+            let req = request.into_inner();
+            if req.thread_id.trim().is_empty()
+                || req.org_id.trim().is_empty()
+                || req.user_id.trim().is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "thread_id, org_id, and user_id are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            if !caller.is_service() {
+                caller.authorize_user(&req.user_id)?;
+            }
+            let authorized = self
+                .thread_owner_lookup
+                .owner_matches(req.thread_id.trim(), req.org_id.trim(), req.user_id.trim())
+                .await?;
+            Ok(Response::new(pb::ResolveThreadOwnerResponse { authorized }))
+        }
+        .await;
+        record_metrics("resolve_thread_owner", started, result.is_ok());
+        result
+    }
+
+    async fn resolve_run_action_authority(
+        &self,
+        request: Request<pb::ResolveRunActionAuthorityRequest>,
+    ) -> Result<Response<pb::ResolveRunActionAuthorityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveRunActionAuthorityResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_run_action_authority_service(&caller)?;
+            let req = request.into_inner();
+            if req.run_id.trim().is_empty() || req.org_id.trim().is_empty() {
+                return Err(Status::invalid_argument("run_id and org_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+
+            // `runs` inherits its Space bindings from the owner-bound thread in
+            // its creation transaction. Requiring the two complete projections
+            // to remain equal makes a stale or partial legacy row unavailable
+            // instead of letting a caller choose which context to trust.
+            let row: Option<RunActionAuthorityRow> = sqlx::query_as(
+                "SELECT r.id AS run_id, r.org_id, r.user_id AS subject_id,
+                        r.thread_id, r.status AS run_status,
+                        r.space_id, r.recipient_audience_ref, r.recipient_audience_revision,
+                        r.recipient_audience_hash, r.privacy_policy_ref,
+                        r.resource_authorization_ref AS thread_resource_authorization_ref,
+                        r.authority_revision
+                 FROM runs r
+                 JOIN threads t
+                   ON t.id = r.thread_id AND t.org_id = r.org_id AND t.user_id = r.user_id
+                 WHERE r.id = $1 AND r.org_id = $2
+                   AND r.space_id IS NOT DISTINCT FROM t.space_id
+                   AND r.recipient_audience_ref IS NOT DISTINCT FROM t.recipient_audience_ref
+                   AND r.recipient_audience_revision IS NOT DISTINCT FROM t.recipient_audience_revision
+                   AND r.recipient_audience_hash IS NOT DISTINCT FROM t.recipient_audience_hash
+                   AND r.privacy_policy_ref IS NOT DISTINCT FROM t.privacy_policy_ref
+                   AND r.resource_authorization_ref IS NOT DISTINCT FROM t.resource_authorization_ref
+                   AND r.authority_revision IS NOT DISTINCT FROM t.authority_revision",
+            )
+            .bind(&req.run_id)
+            .bind(&req.org_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "run action authority lookup failed");
+                Status::unavailable("run action authority unavailable")
+            })?;
+
+            let response = row
+                .and_then(project_run_action_authority)
+                .unwrap_or_else(unresolved_run_action_authority);
+            Ok(Response::new(response))
+        }
+        .await;
+        record_metrics("resolve_run_action_authority", started, result.is_ok());
+        result
+    }
 }
 
 /// Clamp a wire `limit` (0 = caller left it unset) into `[1, MAX_LIST_LIMIT]`.
@@ -439,6 +891,7 @@ fn clamp_limit(raw: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn clamp_limit_defaults_when_zero() {
@@ -463,6 +916,111 @@ mod tests {
         assert!(!is_terminal("running"));
         assert!(!is_terminal("queued"));
         assert!(!is_terminal("awaiting_approval"));
+    }
+
+    fn scheduled_step_request() -> pb::ResolveScheduledStepAuthorityRequest {
+        pb::ResolveScheduledStepAuthorityRequest {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            schedule_id: "schedule-1".to_owned(),
+            fire_key: "fire-1".to_owned(),
+            template_digest: format!("sha256:{}", "a".repeat(64)),
+            policy_digest: format!("sha256:{}", "b".repeat(64)),
+            step_id: "run-1:step:0".to_owned(),
+            step_index: 0,
+            idempotency_key: "fire-1:step:0".to_owned(),
+        }
+    }
+
+    fn scheduled_step_row() -> ScheduledStepAuthorityRow {
+        ScheduledStepAuthorityRow {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            space_id: "space-1".to_owned(),
+            run_status: "running".to_owned(),
+            metadata: serde_json::json!({
+                "source": "scheduled_run",
+                "schedule_id": "schedule-1",
+                "fire_key": "fire-1",
+                "space_id": "space-1",
+                "subject_id": "user-1",
+                "template_digest": format!("sha256:{}", "a".repeat(64)),
+                "policy_digest": format!("sha256:{}", "b".repeat(64)),
+                "idempotency_key": "fire-1:step:0",
+            }),
+        }
+    }
+
+    #[test]
+    fn scheduled_step_authority_requires_exact_prepared_metadata() {
+        let request = scheduled_step_request();
+        let response = project_scheduled_step_authority(scheduled_step_row(), &request)
+            .expect("exact prepared metadata must resolve");
+        assert!(response.resolved);
+        assert_eq!(response.subject_id, "user-1");
+        assert_eq!(response.space_id, "space-1");
+    }
+
+    #[test]
+    fn scheduled_step_authority_rejects_retargeted_fire_or_idempotency() {
+        let mut request = scheduled_step_request();
+        request.fire_key = "other-fire".to_owned();
+        assert!(project_scheduled_step_authority(scheduled_step_row(), &request).is_none());
+
+        let mut request = scheduled_step_request();
+        request.idempotency_key = "other-idempotency".to_owned();
+        assert!(project_scheduled_step_authority(scheduled_step_row(), &request).is_none());
+    }
+
+    fn valid_run_action_authority_row() -> RunActionAuthorityRow {
+        RunActionAuthorityRow {
+            run_id: "run_1".to_owned(),
+            org_id: "org_1".to_owned(),
+            subject_id: "user_1".to_owned(),
+            thread_id: "thread_1".to_owned(),
+            run_status: "running".to_owned(),
+            space_id: Some("space_1".to_owned()),
+            recipient_audience_ref: Some("audience_1".to_owned()),
+            recipient_audience_revision: Some(3),
+            recipient_audience_hash: Some("sha256:audience".to_owned()),
+            privacy_policy_ref: Some("privacy_1".to_owned()),
+            thread_resource_authorization_ref: Some("thread-resource_1".to_owned()),
+            authority_revision: Some(7),
+        }
+    }
+
+    #[test]
+    fn run_action_authority_projection_is_content_free_and_complete() {
+        let response = project_run_action_authority(valid_run_action_authority_row())
+            .expect("complete active human run is resolvable");
+        assert!(response.resolved);
+        assert_eq!(response.run_id, "run_1");
+        assert_eq!(response.subject_id, "user_1");
+        assert_eq!(
+            response.thread_resource_authorization_ref,
+            "thread-resource_1"
+        );
+        assert_eq!(response.authority_revision, 7);
+        // The response contract intentionally has no goal, transcript, tool
+        // input, output, approval, or bearer field to accidentally retain.
+        assert_eq!(response.run_status, "running");
+    }
+
+    #[test]
+    fn run_action_authority_projection_fails_closed_for_terminal_system_or_partial_rows() {
+        let mut terminal = valid_run_action_authority_row();
+        terminal.run_status = "completed".to_owned();
+        assert!(project_run_action_authority(terminal).is_none());
+
+        let mut system = valid_run_action_authority_row();
+        system.subject_id = "service:orchestrator-core".to_owned();
+        assert!(project_run_action_authority(system).is_none());
+
+        let mut partial = valid_run_action_authority_row();
+        partial.recipient_audience_revision = Some(0);
+        assert!(project_run_action_authority(partial).is_none());
     }
 
     #[test]
@@ -519,5 +1077,432 @@ mod tests {
         assert_eq!(detail.error, "");
         // Null JSONB metadata maps to no Struct rather than an empty one.
         assert!(detail.metadata.is_none());
+    }
+
+    // -- resolve_thread_owner ------------------------------------------------
+    //
+    // MEM-2: `resolve_thread_owner` is what capability-core's memory
+    // authorization write-path gate calls before persisting a run/thread/
+    // session-scoped `agent_memory` row (see `workplane_apis.go`'s
+    // `authorizeResourceOwner`). It is modeled line-for-line on
+    // `resolve_run_owner` above, which has zero test coverage in this file
+    // today -- this suite exists so the new RPC does not inherit that gap.
+
+    struct FakeThreadOwnerLookup {
+        calls: AtomicUsize,
+        result: Result<bool, ()>,
+    }
+
+    #[tonic::async_trait]
+    impl ThreadOwnerLookup for FakeThreadOwnerLookup {
+        async fn owner_matches(
+            &self,
+            _thread_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+        ) -> Result<bool, Status> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result
+                .map_err(|()| Status::unavailable("thread ownership unavailable"))
+        }
+    }
+
+    fn thread_owner_request_for_test(
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> pb::ResolveThreadOwnerRequest {
+        pb::ResolveThreadOwnerRequest {
+            thread_id: thread_id.to_owned(),
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+        }
+    }
+
+    fn service_with_thread_owner_result(
+        result: Result<bool, ()>,
+    ) -> (RunServiceImpl, Arc<FakeThreadOwnerLookup>) {
+        // A lazily-connected pool never actually dials out: the fake lookup
+        // never touches `self.pool`, so no real database is required. Mirrors
+        // `memory_grpc.rs`'s `guarded_service` test helper.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool");
+        let lookup = Arc::new(FakeThreadOwnerLookup {
+            calls: AtomicUsize::new(0),
+            result,
+        });
+        (
+            RunServiceImpl::new_with_thread_owner_lookup_for_test(pool, lookup.clone()),
+            lookup,
+        )
+    }
+
+    fn identity_request<T>(value: T, identity: VerifiedIdentity) -> Request<T> {
+        let mut request = Request::new(value);
+        request.extensions_mut().insert(identity);
+        request
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_authorized_owner_returns_true() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .expect("authorized owner resolves")
+            .into_inner();
+        assert!(response.authorized);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_non_owner_returns_false_not_error() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(false));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .expect("non-owner still resolves, does not error")
+            .into_inner();
+        assert!(!response.authorized);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_unknown_thread_fails_closed_as_false_not_not_found() {
+        // Same wire shape as "non-owner": the durable lookup collapses "row
+        // missing" and "row belongs to someone else" into the same
+        // `Ok(false)`, exercised identically here. The explicit assertion
+        // that this is `Ok` (never `Status::not_found`) is the point: the
+        // whole reason for the boolean-only contract (per `ResolveRunOwner`'s
+        // proto comment, which this RPC mirrors) is to never disclose
+        // resource existence across tenants.
+        let (service, _lookup) = service_with_thread_owner_result(Ok(false));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-missing", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .expect("unknown thread resolves to false, not an error");
+        assert!(!response.into_inner().authorized);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_cross_user_request_rejected_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-b"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_cross_org_request_rejected_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-b", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_service_caller_with_session_read_may_ask_about_any_user_in_org() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-z"),
+                VerifiedIdentity::service_for_test("org-a", &["session:read"], false),
+            ))
+            .await
+            .expect("service with session:read may ask about any user in its org")
+            .into_inner();
+        assert!(response.authorized);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_service_caller_missing_scope_rejected_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-z"),
+                VerifiedIdentity::service_for_test("org-a", &["memory:read"], false),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_db_failure_fails_closed_never_authorized() {
+        let (service, lookup) = service_with_thread_owner_result(Err(()));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_rejects_empty_fields() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    // -- Space membership revocation (real Postgres) -------------------------
+    //
+    // authorize_run_owner and PgThreadOwnerLookup::owner_matches's own SQL is
+    // the thing under test here, not a fake — every test above bypasses it
+    // via ThreadOwnerLookup's fake, and authorize_run_owner has no injectable
+    // seam at all. Migration 0032's revocation join can only be proven
+    // correct against a real database.
+    //
+    // #[ignore]d so plain `cargo test` (no DB) skips these; run with a DB:
+    //   DATABASE_URL=… cargo test --bin session-core -- --ignored space_membership_revocation
+
+    async fn migrated_test_pool() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Some(pool)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_membership_revocation_denies_a_run_owner_who_still_matches_org_and_user() {
+        let Some(pool) = migrated_test_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = std::process::id();
+        let (run_id, thread_id, org_id, user_id, space_ref) = (
+            format!("smr-run-{sfx}"),
+            format!("smr-thread-{sfx}"),
+            format!("smr-org-{sfx}"),
+            format!("smr-user-{sfx}"),
+            format!("smr-space-{sfx}"),
+        );
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3) ON CONFLICT (id) DO NOTHING")
+            .bind(&thread_id)
+            .bind(&org_id)
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .expect("seed parent thread");
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash) \
+             VALUES ($1, $2, 'g', $3, $4, $5, 'decision-1', 'audience-1', 'policy-1', 'resource-1', 1, 1, 'audience-hash-1') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&space_ref)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+
+        let caller = VerifiedIdentity::user_for_test(&org_id, &user_id);
+
+        // Before any revocation: org_id+user_id match and no revocation row
+        // exists, so this must still authorize.
+        authorize_run_owner(&pool, &caller, &run_id, OwnerIntent::Read)
+            .await
+            .expect("no revocation yet: run owner must be authorized");
+
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3) \
+             ON CONFLICT (space_ref, subject_id) DO UPDATE SET revoked_at = NOW()",
+        )
+        .bind(&space_ref)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed revocation");
+
+        let error = authorize_run_owner(&pool, &caller, &run_id, OwnerIntent::Read)
+            .await
+            .expect_err("a revoked Space membership must deny even a matching org+user run");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        // A rejoin clears the revocation row (mirrors space_membership_nats.rs's
+        // apply_membership_change on an active=true event) — authorization
+        // must be restored, not permanently stuck denied.
+        sqlx::query(
+            "DELETE FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2",
+        )
+        .bind(&space_ref)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("clear revocation on rejoin");
+        authorize_run_owner(&pool, &caller, &run_id, OwnerIntent::Read)
+            .await
+            .expect("a cleared revocation must restore authorization, not deny forever");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_membership_revocation_never_affects_an_unscoped_run_or_thread() {
+        let Some(pool) = migrated_test_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = std::process::id();
+        let (run_id, thread_id, org_id, user_id) = (
+            format!("smr-unscoped-run-{sfx}"),
+            format!("smr-unscoped-thread-{sfx}"),
+            format!("smr-unscoped-org-{sfx}"),
+            format!("smr-unscoped-user-{sfx}"),
+        );
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3) ON CONFLICT (id) DO NOTHING")
+            .bind(&thread_id)
+            .bind(&org_id)
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .expect("seed unscoped thread");
+        sqlx::query("INSERT INTO runs (id, thread_id, goal, org_id, user_id) VALUES ($1, $2, 'g', $3, $4) ON CONFLICT (id) DO NOTHING")
+            .bind(&run_id)
+            .bind(&thread_id)
+            .bind(&org_id)
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .expect("seed unscoped run");
+
+        let caller = VerifiedIdentity::user_for_test(&org_id, &user_id);
+        // A revocation naming this exact user under a space_ref this run/
+        // thread never used must not leak into an unscoped (space_id IS
+        // NULL) row's authorization — NULL never equals a non-null revoked
+        // space_ref, and this row has no space_ref at all to match.
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ('some-other-space', $1, $2)",
+        )
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed unrelated revocation");
+
+        authorize_run_owner(&pool, &caller, &run_id, OwnerIntent::Read)
+            .await
+            .expect("unscoped run must be unaffected by any Space revocation");
+        authorize_thread_owner(&pool, &caller, &thread_id, OwnerIntent::Read)
+            .await
+            .expect("unscoped thread must be unaffected by any Space revocation");
+
+        let lookup = PgThreadOwnerLookup { pool: pool.clone() };
+        let authorized = lookup
+            .owner_matches(&thread_id, &org_id, &user_id)
+            .await
+            .expect("owner_matches must not error for an unscoped thread");
+        assert!(authorized, "unscoped thread ownership must still match");
+
+        let _ = sqlx::query(
+            "DELETE FROM space_membership_revocations WHERE space_ref = 'some-other-space' AND org_id = $1",
+        )
+        .bind(&org_id)
+        .execute(&pool)
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_membership_revocation_denies_pg_thread_owner_lookup() {
+        let Some(pool) = migrated_test_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = std::process::id();
+        let (thread_id, org_id, user_id, space_ref) = (
+            format!("smr-lookup-thread-{sfx}"),
+            format!("smr-lookup-org-{sfx}"),
+            format!("smr-lookup-user-{sfx}"),
+            format!("smr-lookup-space-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash) \
+             VALUES ($1, $1, $2, $3, $4, 'decision-1', 'audience-1', 'policy-1', 'resource-1', 1, 1, 'audience-hash-1') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&space_ref)
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+
+        let lookup = PgThreadOwnerLookup { pool: pool.clone() };
+        assert!(
+            lookup
+                .owner_matches(&thread_id, &org_id, &user_id)
+                .await
+                .expect("no revocation yet"),
+            "org+user match with no revocation must authorize"
+        );
+
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&space_ref)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed revocation");
+
+        assert!(
+            !lookup
+                .owner_matches(&thread_id, &org_id, &user_id)
+                .await
+                .expect("query must still succeed, just return false"),
+            "a revoked Space membership must deny even a matching org+user thread"
+        );
+
+        let _ = sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1")
+            .bind(&space_ref)
+            .execute(&pool)
+            .await;
     }
 }

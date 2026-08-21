@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail } from "./runs_pbjs";
+import { CancelRunRequest, CancelRunResponse, GetRunRequest, GetScheduledStepContextRequest, ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail, ScheduledStepContext } from "./runs_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -24,6 +24,20 @@ export const RunService = {
       name: "GetRun",
       I: GetRunRequest,
       O: RunDetail,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Get the minimal goal/status context for one service-owned scheduled step.
+     * This is deliberately narrower than GetRun: Execution Core uses its
+     * dedicated session:scheduled-step credential and cannot read arbitrary run
+     * transcripts or human-owned run metadata.
+     *
+     * @generated from rpc model_plane.v1.RunService.GetScheduledStepContext
+     */
+    getScheduledStepContext: {
+      name: "GetScheduledStepContext",
+      I: GetScheduledStepContextRequest,
+      O: ScheduledStepContext,
       kind: MethodKind.Unary,
     },
     /**
@@ -77,6 +91,20 @@ export const RunService = {
       name: "ResolveRunOwner",
       I: ResolveRunOwnerRequest,
       O: ResolveRunOwnerResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * ResolveRunActionAuthority returns the non-secret, immutable run/thread
+     * bindings Control needs before issuing one target-owner action decision.
+     * It is restricted to Control's exact action-authorizer service identity;
+     * it is not a general run-inspection or user-impersonation API.
+     *
+     * @generated from rpc model_plane.v1.RunService.ResolveRunActionAuthority
+     */
+    resolveRunActionAuthority: {
+      name: "ResolveRunActionAuthority",
+      I: ResolveRunActionAuthorityRequest,
+      O: ResolveRunActionAuthorityResponse,
       kind: MethodKind.Unary,
     },
   }

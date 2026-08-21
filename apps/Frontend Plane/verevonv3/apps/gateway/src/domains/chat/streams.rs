@@ -47,6 +47,27 @@ pub(super) async fn stream_chat(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message).into_response();
     }
+    // Must run before `inject_personal_thread_context`, which is the call
+    // that removes the Space reference fields this one still needs to read.
+    if let Err((status, body)) = crate::domains::spaces::inject_mentioned_space_agent_persona(
+        &state,
+        &user,
+        &org_id,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
+    // ADR-0003 — same ordering requirement as the mention persona above: this
+    // only peeks at `space_ref` for the Space layer, so it must run before
+    // `inject_personal_thread_context` consumes it.
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_authored_instructions(&state, &user, &org_id, &mut outbound_body)
+            .await
+    {
+        return (status, body).into_response();
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,

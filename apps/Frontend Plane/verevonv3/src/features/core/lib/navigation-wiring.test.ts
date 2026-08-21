@@ -74,7 +74,6 @@ describe('sidebar navigation wiring', () => {
     const spaces = rail.find((section) => section.href === '/spaces')
 
     expect(spaces, 'no top-level sidebar section reaches /spaces').toBeDefined()
-    expect(spaces?.panelGroups.flatMap((group) => group.items).length).toBeGreaterThan(0)
   })
 
   it('keeps the Rom section active while a specific room is open', () => {

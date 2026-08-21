@@ -178,33 +178,41 @@ export default function OnboardingPage() {
     },
   )
 
-  createEffect(() => {
-    if (typeof window === 'undefined') return
-    window.clearTimeout(introTimer)
-    introTimer = undefined
+  createEffect(
+    () => ({ step: state.step, introPlayed: state.introPlayed }),
+    ({ step, introPlayed }) => {
+      if (typeof window === 'undefined') return
+      window.clearTimeout(introTimer)
+      introTimer = undefined
 
-    if (state.step !== 'post-signin') return
-    introTimer = window.setTimeout(advanceFromIntro, state.introPlayed ? 600 : 3000)
-  })
+      if (step !== 'post-signin') return
+      introTimer = window.setTimeout(advanceFromIntro, introPlayed ? 600 : 3000)
+    },
+  )
 
   // On reaching the organization step, infer the org from the website crawl and
   // pre-search Enhetsregisteret once, so verified matches appear without the
   // user re-typing what the crawl already discovered.
-  createEffect(() => {
-    if (state.step !== 'organization') return
-    if (untrack(orgAutoInferred)) return
-    if (untrack(() => Boolean(state.organization.orgNumber || state.organization.id))) return
-    if (untrack(() => searchResults().length > 0)) return
+  createEffect(
+    () => ({ step: state.step, website: state.website }),
+    // The effect function is untracked, so the peeks below stay one-shot reads
+    // exactly as the untrack() wrappers made them under the single-arg form.
+    ({ step, website }) => untrack(() => {
+      if (step !== 'organization') return
+      if (orgAutoInferred()) return
+      if (Boolean(state.organization.orgNumber || state.organization.id)) return
+      if (searchResults().length > 0) return
 
-    const inferred = inferOrganizationQuery(state.website)
-    if (!inferred) return
+      const inferred = inferOrganizationQuery(website)
+      if (!inferred) return
 
-    setOrgAutoInferred(true)
-    if (!untrack(() => state.organization.name.trim())) {
-      setState((s) => { s.organization.name = inferred })
-    }
-    void autoInferOrganizationFromWebsite(inferred)
-  })
+      setOrgAutoInferred(true)
+      if (!state.organization.name.trim()) {
+        setState((s) => { s.organization.name = inferred })
+      }
+      void autoInferOrganizationFromWebsite(inferred)
+    }),
+  )
 
   onCleanup(() => {
     if (typeof window === 'undefined') return
@@ -315,60 +323,81 @@ export default function OnboardingPage() {
       : `${window.location.origin}/onboarding?checkout=success`,
   )
 
-  createEffect(() => {
-    const recommendation = recommendationQuery.data
-    if (!recommendation) return
-    const sources = sourceSummary()
-    const locale = untrack(currentRecommendationLocale)
-    setState((s) => { s.recommendation = {
-      ...recommendation,
-      connectedSourceCount: sources.connectedSourceCount,
+  createEffect(
+    () => {
+      const recommendation = recommendationQuery.data
+      if (!recommendation) return undefined
+      return {
+        recommendation,
+        sources: sourceSummary(),
+        contextHash: recommendationContextHash(),
+      }
+    },
+    (computed) => untrack(() => {
+      if (!computed) return
+      const { recommendation, sources, contextHash } = computed
+      const locale = currentRecommendationLocale()
+      setState((s) => { s.recommendation = {
+        ...recommendation,
+        connectedSourceCount: sources.connectedSourceCount,
+        contextHash,
+        locale,
+        sourceCount: sources.totalSourceCount,
+      } })
+      if (!state.plan) setState((s) => { s.plan = recommendation.planId })
+    }),
+  )
+
+  createEffect(
+    () => ({
+      recommendation: activeRecommendation(),
+      targetLanguage: currentRecommendationLocale(),
+    }),
+    ({ recommendation, targetLanguage }) => {
+      if (!recommendation || hasRecommendationLocale(recommendation, targetLanguage)) return
+
+      const key = `${recommendation.contextHash ?? 'current'}:${recommendation.generatedAt}:${targetLanguage}`
+      if (untrack(() => translatingRecommendationKey()) === key) return
+      setTranslatingRecommendationKey(key)
+
+      void actions
+        .translatePlanRecommendation({
+          recommendation: recommendationText(recommendation),
+          sourceLanguage: recommendation.locale,
+          targetLanguage,
+        })
+        .then((translation) => {
+          setState((s) => { s.recommendation = ((current) => {
+            if (!current || current.contextHash !== recommendation.contextHash) return current
+            return withRecommendationTranslation(current, targetLanguage, translation)
+          })(s.recommendation) })
+        })
+        .catch(() => undefined)
+    },
+  )
+
+  createEffect(
+    () => ({
+      recommendation: state.recommendation,
       contextHash: recommendationContextHash(),
-      locale,
-      sourceCount: sources.totalSourceCount,
-    } })
-    if (!untrack(() => state.plan)) setState((s) => { s.plan = recommendation.planId })
-  })
+    }),
+    ({ recommendation, contextHash }) => {
+      if (!recommendation || recommendation.contextHash === contextHash) return
 
-  createEffect(() => {
-    const recommendation = activeRecommendation()
-    const targetLanguage = currentRecommendationLocale()
-    if (!recommendation || hasRecommendationLocale(recommendation, targetLanguage)) return
-
-    const key = `${recommendation.contextHash ?? 'current'}:${recommendation.generatedAt}:${targetLanguage}`
-    if (translatingRecommendationKey() === key) return
-    setTranslatingRecommendationKey(key)
-
-    void actions
-      .translatePlanRecommendation({
-        recommendation: recommendationText(recommendation),
-        sourceLanguage: recommendation.locale,
-        targetLanguage,
+      flush(() => {
+        if (untrack(() => state.plan) === recommendation.planId) setState((s) => { s.plan = undefined })
+        setState((s) => { s.recommendation = undefined })
       })
-      .then((translation) => {
-        setState((s) => { s.recommendation = ((current) => {
-          if (!current || current.contextHash !== recommendation.contextHash) return current
-          return withRecommendationTranslation(current, targetLanguage, translation)
-        })(s.recommendation) })
-      })
-      .catch(() => undefined)
-  })
+    },
+  )
 
-  createEffect(() => {
-    const recommendation = state.recommendation
-    if (!recommendation || recommendation.contextHash === recommendationContextHash()) return
-
-    flush(() => {
-      if (state.plan === recommendation.planId) setState((s) => { s.plan = undefined })
-      setState((s) => { s.recommendation = undefined })
-    })
-  })
-
-  createEffect(() => {
-    const reason = recommendationQuery.error
-    if (state.step !== 'paywall' || !reason) return
-    setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke beregne en anbefaling.', en: 'Could not compute a recommendation.' }))
-  })
+  createEffect(
+    () => ({ reason: recommendationQuery.error, step: state.step }),
+    ({ reason, step }) => {
+      if (step !== 'paywall' || !reason) return
+      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke beregne en anbefaling.', en: 'Could not compute a recommendation.' }))
+    },
+  )
 
   function advanceFromIntro() {
     setState((s) => { s.introPlayed = true })

@@ -47,11 +47,9 @@ describe('ScopedUserServiceGrpcClient startup', () => {
       USER_CORE_GRPC_CLIENT_CREDENTIAL_FILE: credentialFile,
     };
     const stopAfterPathCapture = new Error('fixture path captured');
-    const load = jest
-      .spyOn(protoLoader, 'loadSync')
-      .mockImplementation(() => {
-        throw stopAfterPathCapture;
-      });
+    const load = jest.spyOn(protoLoader, 'loadSync').mockImplementation(() => {
+      throw stopAfterPathCapture;
+    });
     const client = new ScopedUserServiceGrpcClient(new ConfigService());
 
     try {

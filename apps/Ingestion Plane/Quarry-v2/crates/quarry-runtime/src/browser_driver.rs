@@ -200,9 +200,20 @@ impl BrowserDriverAdapter {
         let response = FetchResponse {
             status: 200,
             final_url: url.clone(),
-            headers: vec![],
+            // A DOM snapshot is UTF-8 by construction (CDP hands it over
+            // as a JSON string), but this response used to carry no
+            // headers at all — leaving the pipeline's charset decode with
+            // nothing but a sniff, which can mis-guess a legacy encoding
+            // and mojibake the whole page. Declare what we know. If a
+            // backend ever returned non-UTF-8 bytes anyway, decode()'s
+            // sanity check falls through to sniffing regardless.
+            headers: vec![(
+                "content-type".to_string(),
+                "text/html; charset=utf-8".to_string(),
+            )],
             body: body_bytes.to_vec(),
             duration_ms: start.elapsed().as_millis() as u64,
+            served_by: DriverKind::Browser,
         };
 
         if let Err(e) = self.inner.release(session).await {
@@ -323,6 +334,27 @@ mod tests {
         let resp = adapter.fetch(&url).await.unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"<html>hello</html>".to_vec());
+    }
+
+    #[tokio::test]
+    async fn fetch_declares_the_snapshot_charset() {
+        // The DOM snapshot is UTF-8 by construction. Without this header
+        // the pipeline can only charset-sniff the body, and a sniff that
+        // mis-guesses a legacy encoding mojibakes every non-ASCII char
+        // on the page (observed live: titles with "på" → "pÃ¥").
+        let mock = Arc::new(MockBrowserDriver::new(
+            "<html><title>p\u{e5} norsk</title></html>".as_bytes(),
+        ));
+        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let adapter = BrowserDriverAdapter::new(mock, pool);
+        let url = Url::parse("https://example.com/page").unwrap();
+        let resp = adapter.fetch(&url).await.unwrap();
+        let ct = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ct, Some("text/html; charset=utf-8"));
     }
 
     #[tokio::test]

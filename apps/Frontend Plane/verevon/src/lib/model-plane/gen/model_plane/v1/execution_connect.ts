@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { ExecuteStepRequest, ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RunAgentRequest, RunAgentResponse } from "./execution_pbjs";
+import { ExecuteScheduledStepRequest, ExecuteScheduledStepResponse, ExecuteStepRequest, ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RunAgentRequest, RunAgentResponse } from "./execution_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { CancelRunRequest, CancelRunResponse } from "./runs_pbjs";
 
@@ -77,6 +77,20 @@ export const ExecutionCore = {
       name: "RunAgent",
       I: RunAgentRequest,
       O: RunAgentResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Execute one service-owned scheduled turn. This is intentionally separate
+     * from ExecuteStep: the latter is user-delegated and must never be widened
+     * to make Temporal work. The lane remains disabled until Session Core's
+     * current-run claim/receipt and Control's per-step decision are deployed.
+     *
+     * @generated from rpc model_plane.v1.ExecutionCore.ExecuteScheduledStep
+     */
+    executeScheduledStep: {
+      name: "ExecuteScheduledStep",
+      I: ExecuteScheduledStepRequest,
+      O: ExecuteScheduledStepResponse,
       kind: MethodKind.Unary,
     },
   }

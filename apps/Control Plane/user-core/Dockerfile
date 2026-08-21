@@ -20,6 +20,18 @@ WORKDIR /build
 
 # Dep layer — only invalidated when go.mod/go.sum changes
 COPY go.mod go.sum ./
+
+# go.mod carries `replace github.com/triodelab/model-plane/gen/go =>
+# "../../Model Plane/go/gen"`, and a `replace` is resolved on the FILESYSTEM, not
+# through the module proxy. The build context is ./user-core, so without this the
+# sibling module simply is not there and `go mod download` fails — which is not a
+# network problem, so the surrounding retry loop just fails five times slowly.
+#
+# WORKDIR is /build, so Go resolves that relative path to /Model Plane/go/gen.
+# The named context is supplied by `additional_contexts` in Control's compose;
+# this must land BEFORE `go mod download` reads go.mod.
+COPY --from=model-plane-go-gen [".", "/Model Plane/go/gen/"]
+
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \

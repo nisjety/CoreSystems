@@ -1,6 +1,8 @@
 import { createEffect, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
+import { useI18n } from '@/shared/i18n'
+
 /**
  * The Space cockpit shell: the six tabs the adoption plan specifies
  * (`docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md`, "Space home").
@@ -41,47 +43,67 @@ export type SpaceTabId = 'chat' | 'arbeid' | 'kunnskap' | 'aktivitet' | 'agent' 
 
 interface SpaceTabDefinition {
   readonly id: SpaceTabId
-  readonly label: string
+  readonly labelNo: string
+  readonly labelEn: string
   /** What this tab answers, per the plan's six questions. */
-  readonly purpose: string
+  readonly purposeNo: string
+  readonly purposeEn: string
   /**
    * Which plane must publish a Space projection before this tab can show
    * anything. Named in the unavailable state so the gap is attributable rather
-   * than mysterious.
+   * than mysterious. Plane names are not translated — they are the system's
+   * own proper nouns, same as everywhere else this codebase names a plane.
    */
   readonly owner: string
 }
 
 const SPACE_TABS: readonly SpaceTabDefinition[] = [
-  { id: 'chat', label: 'Samtaler', purpose: 'Alle tråder i rommet.', owner: 'Model Plane' },
+  {
+    id: 'chat',
+    labelNo: 'Samtaler',
+    labelEn: 'Chat',
+    purposeNo: 'Alle tråder i rommet.',
+    purposeEn: 'All threads in the Space.',
+    owner: 'Model Plane',
+  },
   {
     id: 'arbeid',
-    label: 'Arbeid',
-    purpose: 'Arbeid i kø eller under kjøring, planer, overvåkinger og gjenforsøk.',
+    labelNo: 'Arbeid',
+    labelEn: 'Work',
+    purposeNo: 'Arbeid i kø eller under kjøring, planer, overvåkinger og gjenforsøk.',
+    purposeEn: 'Work queued or running, plans, monitors, and retries.',
     owner: 'Model Plane',
   },
   {
     id: 'kunnskap',
-    label: 'Kunnskap',
-    purpose: 'Dokumenter, kilder, filer og minne som gjelder her.',
+    labelNo: 'Kunnskap',
+    labelEn: 'Knowledge',
+    purposeNo: 'Dokumenter, kilder, filer og minne som gjelder her.',
+    purposeEn: 'Documents, sources, files, and memory relevant here.',
     owner: 'Data Plane',
   },
   {
     id: 'aktivitet',
-    label: 'Aktivitet',
-    purpose: 'Hva som har skjedd, hva det kostet, og beviset for det.',
+    labelNo: 'Aktivitet',
+    labelEn: 'Activity',
+    purposeNo: 'Hva som har skjedd, hva det kostet, og beviset for det.',
+    purposeEn: 'What happened, what it cost, and the proof of it.',
     owner: 'Model Plane',
   },
   {
     id: 'agent',
-    label: 'Agent',
-    purpose: 'Aktiv modell, ferdigheter og hvilke handlinger som er tillatt her.',
+    labelNo: 'Agent',
+    labelEn: 'Agent',
+    purposeNo: 'Aktiv modell, ferdigheter og hvilke handlinger som er tillatt her.',
+    purposeEn: 'The active model, its skills, and which actions are permitted here.',
     owner: 'Model Plane',
   },
   {
     id: 'medlemmer',
-    label: 'Medlemmer',
-    purpose: 'Hvem som ser og styrer rommet, og med hvilken rolle.',
+    labelNo: 'Medlemmer',
+    labelEn: 'Members',
+    purposeNo: 'Hvem som ser og styrer rommet, og med hvilken rolle.',
+    purposeEn: 'Who can see and manage the Space, and with what role.',
     owner: 'Control Plane',
   },
 ]
@@ -111,6 +133,7 @@ export interface SpaceCockpitProps {
 }
 
 export function SpaceCockpit(props: SpaceCockpitProps) {
+  const i18n = useI18n()
   const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_TAB)
   const tabButtons: Partial<Record<SpaceTabId, HTMLButtonElement>> = {}
 
@@ -153,7 +176,12 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
 
   return (
     <div class="verevon-space-cockpit">
-      <div class="verevon-space-tabs" role="tablist" aria-label="Romvisninger" onKeyDown={onKeyDown}>
+      <div
+        class="verevon-space-tabs"
+        role="tablist"
+        aria-label={i18n.tr('Romvisninger', 'Space views')}
+        onKeyDown={onKeyDown}
+      >
         <For each={SPACE_TABS}>
           {(tab) => (
             <button
@@ -167,7 +195,7 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
               onClick={() => select(tab.id)}
               ref={(element) => { tabButtons[tab.id] = element }}
             >
-              {tab.label}
+              {i18n.tr(tab.labelNo, tab.labelEn)}
             </button>
           )}
         </For>
@@ -189,10 +217,12 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
                 when={content()}
                 fallback={
                   <div class="verevon-space-panel-unavailable">
-                    <p class="verevon-space-panel-purpose">{tab.purpose}</p>
+                    <p class="verevon-space-panel-purpose">{i18n.tr(tab.purposeNo, tab.purposeEn)}</p>
                     <p class="verevon-space-panel-reason">
-                      {tab.owner} har ikke publisert en romprojeksjon for denne fanen ennå, så det
-                      finnes ingenting å vise her. Dette er en manglende kobling, ikke et tomt rom.
+                      {i18n.tr(
+                        `${tab.owner} har ikke publisert en romprojeksjon for denne fanen ennå, så det finnes ingenting å vise her. Dette er en manglende kobling, ikke et tomt rom.`,
+                        `${tab.owner} has not published a Space projection for this tab yet, so there is nothing to show here. This is a missing connection, not an empty Space.`,
+                      )}
                     </p>
                   </div>
                 }

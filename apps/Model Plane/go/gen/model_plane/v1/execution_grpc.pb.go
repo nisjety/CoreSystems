@@ -19,11 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ExecutionCore_ExecuteStep_FullMethodName = "/model_plane.v1.ExecutionCore/ExecuteStep"
-	ExecutionCore_ResumeRun_FullMethodName   = "/model_plane.v1.ExecutionCore/ResumeRun"
-	ExecutionCore_CancelRun_FullMethodName   = "/model_plane.v1.ExecutionCore/CancelRun"
-	ExecutionCore_PauseRun_FullMethodName    = "/model_plane.v1.ExecutionCore/PauseRun"
-	ExecutionCore_RunAgent_FullMethodName    = "/model_plane.v1.ExecutionCore/RunAgent"
+	ExecutionCore_ExecuteStep_FullMethodName          = "/model_plane.v1.ExecutionCore/ExecuteStep"
+	ExecutionCore_ResumeRun_FullMethodName            = "/model_plane.v1.ExecutionCore/ResumeRun"
+	ExecutionCore_CancelRun_FullMethodName            = "/model_plane.v1.ExecutionCore/CancelRun"
+	ExecutionCore_PauseRun_FullMethodName             = "/model_plane.v1.ExecutionCore/PauseRun"
+	ExecutionCore_RunAgent_FullMethodName             = "/model_plane.v1.ExecutionCore/RunAgent"
+	ExecutionCore_ExecuteScheduledStep_FullMethodName = "/model_plane.v1.ExecutionCore/ExecuteScheduledStep"
 )
 
 // ExecutionCoreClient is the client API for ExecutionCore service.
@@ -52,6 +53,11 @@ type ExecutionCoreClient interface {
 	// gateway after StartRun so a chat turn produces a durable answer instead of
 	// stalling in `'queued'`.
 	RunAgent(ctx context.Context, in *RunAgentRequest, opts ...grpc.CallOption) (*RunAgentResponse, error)
+	// Execute one service-owned scheduled turn. This is intentionally separate
+	// from ExecuteStep: the latter is user-delegated and must never be widened
+	// to make Temporal work. The lane remains disabled until Session Core's
+	// current-run claim/receipt and Control's per-step decision are deployed.
+	ExecuteScheduledStep(ctx context.Context, in *ExecuteScheduledStepRequest, opts ...grpc.CallOption) (*ExecuteScheduledStepResponse, error)
 }
 
 type executionCoreClient struct {
@@ -112,6 +118,16 @@ func (c *executionCoreClient) RunAgent(ctx context.Context, in *RunAgentRequest,
 	return out, nil
 }
 
+func (c *executionCoreClient) ExecuteScheduledStep(ctx context.Context, in *ExecuteScheduledStepRequest, opts ...grpc.CallOption) (*ExecuteScheduledStepResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExecuteScheduledStepResponse)
+	err := c.cc.Invoke(ctx, ExecutionCore_ExecuteScheduledStep_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutionCoreServer is the server API for ExecutionCore service.
 // All implementations must embed UnimplementedExecutionCoreServer
 // for forward compatibility.
@@ -138,6 +154,11 @@ type ExecutionCoreServer interface {
 	// gateway after StartRun so a chat turn produces a durable answer instead of
 	// stalling in `'queued'`.
 	RunAgent(context.Context, *RunAgentRequest) (*RunAgentResponse, error)
+	// Execute one service-owned scheduled turn. This is intentionally separate
+	// from ExecuteStep: the latter is user-delegated and must never be widened
+	// to make Temporal work. The lane remains disabled until Session Core's
+	// current-run claim/receipt and Control's per-step decision are deployed.
+	ExecuteScheduledStep(context.Context, *ExecuteScheduledStepRequest) (*ExecuteScheduledStepResponse, error)
 	mustEmbedUnimplementedExecutionCoreServer()
 }
 
@@ -162,6 +183,9 @@ func (UnimplementedExecutionCoreServer) PauseRun(context.Context, *PauseRunReque
 }
 func (UnimplementedExecutionCoreServer) RunAgent(context.Context, *RunAgentRequest) (*RunAgentResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RunAgent not implemented")
+}
+func (UnimplementedExecutionCoreServer) ExecuteScheduledStep(context.Context, *ExecuteScheduledStepRequest) (*ExecuteScheduledStepResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecuteScheduledStep not implemented")
 }
 func (UnimplementedExecutionCoreServer) mustEmbedUnimplementedExecutionCoreServer() {}
 func (UnimplementedExecutionCoreServer) testEmbeddedByValue()                       {}
@@ -274,6 +298,24 @@ func _ExecutionCore_RunAgent_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutionCore_ExecuteScheduledStep_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecuteScheduledStepRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutionCoreServer).ExecuteScheduledStep(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutionCore_ExecuteScheduledStep_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutionCoreServer).ExecuteScheduledStep(ctx, req.(*ExecuteScheduledStepRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutionCore_ServiceDesc is the grpc.ServiceDesc for ExecutionCore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -300,6 +342,10 @@ var ExecutionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RunAgent",
 			Handler:    _ExecutionCore_RunAgent_Handler,
+		},
+		{
+			MethodName: "ExecuteScheduledStep",
+			Handler:    _ExecutionCore_ExecuteScheduledStep_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

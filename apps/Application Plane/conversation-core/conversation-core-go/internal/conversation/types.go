@@ -3,6 +3,8 @@ package conversation
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -94,6 +96,10 @@ var (
 	// message but conversation-core cannot prove the final outcome. Callers must
 	// surface reconciliation-required state and must not blindly retry it.
 	ErrDeliveryUnknown = errors.New("outbound reply delivery outcome is unknown")
+	// ErrTicketOperationIntentUnavailable is returned when the private
+	// owner-effect route is running against a repository that has not adopted
+	// the durable pending/reserved/unknown intent ledger.
+	ErrTicketOperationIntentUnavailable = errors.New("ticket operation intent store unavailable")
 )
 
 const (
@@ -166,6 +172,20 @@ type TicketOperationOutboxStore interface {
 	ReleaseTicketOperationOutbox(ctx context.Context, eventID, workerID, reason string, retryAt time.Time) error
 }
 
+// AgentTicketOperationIntentStore is the owner-side half of the
+// owner-effect-reservation protocol. It deliberately stores only immutable
+// commitments and opaque references before Control commits a reservation;
+// ticket content remains absent until the final owner transaction succeeds.
+// Keeping this as a narrow optional interface lets legacy human repository
+// test doubles remain useful while the private agent route fails closed when
+// the durable intent implementation is not present.
+type AgentTicketOperationIntentStore interface {
+	BeginAgentTicketOperationIntent(ctx context.Context, input TicketOperationIntentInput) (*TicketOperationReceipt, error)
+	BindAgentTicketOperationReservation(ctx context.Context, input TicketOperationReservationInput) (*TicketOperationReceipt, error)
+	MarkAgentTicketOperationUnknown(ctx context.Context, input TicketOperationOutcomeInput) error
+	MarkAgentTicketOperationCancelled(ctx context.Context, input TicketOperationOutcomeInput) error
+}
+
 type Repository interface {
 	ListInboxes(ctx context.Context, orgID string) ([]Inbox, error)
 	ListConversations(ctx context.Context, filter ListFilter) ([]ConversationSummary, error)
@@ -223,7 +243,13 @@ type Repository interface {
 	// it persists the exact idempotency/request binding, ticket, audit event,
 	// and transactional-outbox event together before returning a receipt.
 	CreateTicketOperation(ctx context.Context, input CreateTicketInput) (*TicketOperationReceipt, error)
+	// ResolveAgentTicketActionGrant returns only the current opaque owner grant
+	// identifier for the exact agent authorization tuple. It does not authorize
+	// an effect: CreateTicketOperation performs the decisive locked recheck.
+	ResolveAgentTicketActionGrant(ctx context.Context, input CreateTicketInput) (string, error)
 	GetTicketOperation(ctx context.Context, orgID, actorUserID, idempotencyKey string) (*TicketOperationReceipt, error)
+	CreateAgentTicketActionGrant(ctx context.Context, input CreateAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error)
+	RevokeAgentTicketActionGrant(ctx context.Context, input RevokeAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error)
 	UpdateTicket(ctx context.Context, input UpdateTicketInput) (*Ticket, error)
 	LinkTicketResource(ctx context.Context, input LinkTicketResourceInput) (*TicketLinkedResource, error)
 	RecordTicketClassification(ctx context.Context, input TicketClassificationInput, payload map[string]any) (*TicketClassification, error)
@@ -1110,6 +1136,145 @@ type CreateTicketInput struct {
 	IdempotencyKey string
 	OperationID    string
 	RequestSHA256  string
+	// AgentActionAuthorization is populated only by the private owner-action
+	// ingress after it has verified a Control decision. The repository consumes
+	// it in the same transaction as the durable ticket effect; public human
+	// ticket creation has no such field and does not enter this path.
+	AgentActionAuthorization *AgentTicketActionAuthorization
+}
+
+// TicketOperationIntentInput contains no ticket content. Its commitments are
+// the exact facts that must remain stable across Control reservation, owner
+// finalization, retry, and reconciliation.
+type TicketOperationIntentInput struct {
+	OperationID      string
+	OrgID            string
+	IdempotencyKey   string
+	ActionID         string
+	ActorUserID      string
+	ConversationID   string
+	RequestSHA256    string
+	ActionSchemaHash string
+	PayloadDigest    string
+	DecisionRef      string
+	GrantRef         string
+}
+
+type TicketOperationReservationInput struct {
+	TicketOperationIntentInput
+	ControlReservationID string
+}
+
+type TicketOperationOutcomeInput struct {
+	OrgID                string
+	OperationID          string
+	IdempotencyKey       string
+	ControlReservationID string
+	TerminalReason       string
+}
+
+// AgentTicketActionAuthorization is the non-secret subset of a verified
+// Control target decision that Conversation Core needs to intersect with its
+// own current conversation grant. It is deliberately not a bearer and does
+// not name a target resource permission by itself.
+type AgentTicketActionAuthorization struct {
+	DecisionRef               string
+	SpaceRef                  string
+	SubjectID                 string
+	RecipientAudienceRef      string
+	RecipientAudienceHash     string
+	RecipientAudienceRevision int64
+	PrivacyPolicyRef          string
+	AuthorityRevision         int64
+	// These three values are populated only after the private HTTP boundary
+	// obtains a committed Control owner-effect receipt. The repository still
+	// rechecks the matching local grant under lock before it creates a ticket.
+	// They are non-secret durable evidence, never a Control bearer.
+	ControlReservationID string
+	GrantRef             string
+	ActionSchemaHash     string
+	PayloadDigest        string
+}
+
+// AgentTicketActionGrant is Conversation Core's owner-resource permission for
+// the currently disabled Model ticket action. It contains only identifiers and
+// authorization-version facts, never a Control bearer or conversation content.
+type AgentTicketActionGrant struct {
+	ID                        string     `json:"id"`
+	OrgID                     string     `json:"org_id"`
+	ConversationID            string     `json:"conversation_id"`
+	ActionID                  string     `json:"action_id"`
+	SpaceRef                  string     `json:"space_ref"`
+	SubjectID                 string     `json:"subject_id"`
+	RecipientAudienceRef      string     `json:"recipient_audience_ref"`
+	RecipientAudienceHash     string     `json:"recipient_audience_hash"`
+	RecipientAudienceRevision int64      `json:"recipient_audience_revision"`
+	PrivacyPolicyRef          string     `json:"privacy_policy_ref"`
+	AuthorityRevision         int64      `json:"authority_revision"`
+	CreatedByUserID           string     `json:"created_by_user_id"`
+	CreatedAt                 time.Time  `json:"created_at"`
+	RevokedAt                 *time.Time `json:"revoked_at,omitempty"`
+	RevokedByUserID           string     `json:"revoked_by_user_id,omitempty"`
+}
+
+type CreateAgentTicketActionGrantInput struct {
+	OrgID                     string
+	ConversationID            string
+	ActionID                  string
+	SpaceRef                  string
+	SubjectID                 string
+	RecipientAudienceRef      string
+	RecipientAudienceHash     string
+	RecipientAudienceRevision int64
+	PrivacyPolicyRef          string
+	AuthorityRevision         int64
+	CreatedByUserID           string
+	IdempotencyKey            string
+	RequestSHA256             string
+	ControlDecisionRef        string
+}
+
+type RevokeAgentTicketActionGrantInput struct {
+	OrgID              string
+	ConversationID     string
+	GrantID            string
+	SpaceRef           string
+	SubjectID          string
+	RevokedByUserID    string
+	IdempotencyKey     string
+	RequestSHA256      string
+	ControlDecisionRef string
+}
+
+// AgentTicketActionGrantReceipt is the durable result of an owner grant
+// operation. Replayed means the same actor/key/request was already committed;
+// it does not suggest a second grant or revoke was attempted.
+type AgentTicketActionGrantReceipt struct {
+	Grant        *AgentTicketActionGrant `json:"grant"`
+	AuditEventID string                  `json:"audit_event_id"`
+	Status       string                  `json:"status"`
+	Replayed     bool                    `json:"replayed"`
+}
+
+// Validate rejects incomplete or oversized authorization facts before they can
+// reach the repository. The Control signature is verified at the HTTP
+// boundary; this validation protects the separate owner-side transaction from
+// accepting a partial conversion of that signed contract.
+func (a AgentTicketActionAuthorization) Validate() error {
+	for name, value := range map[string]string{
+		"decision_ref": a.DecisionRef, "space_ref": a.SpaceRef,
+		"subject_id": a.SubjectID, "recipient_audience_ref": a.RecipientAudienceRef,
+		"recipient_audience_hash": a.RecipientAudienceHash,
+		"privacy_policy_ref":      a.PrivacyPolicyRef,
+	} {
+		if strings.TrimSpace(value) == "" || len(strings.TrimSpace(value)) > 200 {
+			return fmt.Errorf("%w: agent ticket authorization %s is invalid", ErrInvalidInput, name)
+		}
+	}
+	if a.RecipientAudienceRevision <= 0 || a.AuthorityRevision <= 0 {
+		return fmt.Errorf("%w: agent ticket authorization revisions are invalid", ErrInvalidInput)
+	}
+	return nil
 }
 
 // TicketOperationReceipt is the durable result of the owner-plane
@@ -1117,11 +1282,13 @@ type CreateTicketInput struct {
 // new write and exposes stable owner identifiers rather than gateway-derived
 // run/audit strings.
 type TicketOperationReceipt struct {
-	OperationID  string  `json:"operation_id"`
-	AuditEventID string  `json:"audit_event_id"`
-	Status       string  `json:"status"`
-	Ticket       *Ticket `json:"ticket"`
-	Replayed     bool    `json:"replayed"`
+	OperationID          string  `json:"operation_id"`
+	AuditEventID         string  `json:"audit_event_id,omitempty"`
+	Status               string  `json:"status"`
+	ControlReservationID string  `json:"control_reservation_id,omitempty"`
+	TerminalReason       string  `json:"terminal_reason,omitempty"`
+	Ticket               *Ticket `json:"ticket,omitempty"`
+	Replayed             bool    `json:"replayed"`
 }
 
 type UpdateTicketInput struct {

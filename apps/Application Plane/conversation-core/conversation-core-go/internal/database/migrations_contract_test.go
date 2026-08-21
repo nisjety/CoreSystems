@@ -130,3 +130,30 @@ func TestTicketOperationOutboxDeliveryMigrationIsLeasedAndRetryable(t *testing.T
 		}
 	}
 }
+
+func TestAgentTicketGrantMigrationIsExactAndContentFree(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("migrations", "030_conversation_agent_action_grants.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(contents))
+	for _, required := range []string{
+		"conversation_agent_action_grants", "conversation_id text not null references conversations",
+		"action_id text not null check (action_id = 'tickets.create')",
+		"space_ref text not null", "subject_id text not null", "recipient_audience_ref text not null",
+		"recipient_audience_hash text not null", "recipient_audience_revision bigint not null",
+		"privacy_policy_ref text not null", "authority_revision bigint not null", "created_by_user_id text not null",
+		"created_idempotency_key text not null", "create_request_sha256 text not null", "created_audit_event_id text not null",
+		"revoked_at timestamptz", "revoked_idempotency_key text not null", "revocation_request_sha256 text not null", "revoked_audit_event_id text not null",
+		"where revoked_at is null",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"control_decision_token", "body_text", "body_html", "payload json", "message_content"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("agent ticket grant stores forbidden bearer/content %q", forbidden)
+		}
+	}
+}

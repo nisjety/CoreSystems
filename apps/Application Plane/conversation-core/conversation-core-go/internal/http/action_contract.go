@@ -14,21 +14,40 @@ import (
 // authorization immediately before the effect. The BFF may only surface an
 // entry after intersecting this contract with the caller's current authority.
 type OwnerActionContract struct {
-	ActionID                string          `json:"action_id"`
-	ContractVersion         string          `json:"contract_version"`
-	OwnerPlane              string          `json:"owner_plane"`
-	EligibleActorTypes      []string        `json:"eligible_actor_types"`
-	RequiredServiceIdentity string          `json:"required_service_identity"`
-	RequiredDelegation      string          `json:"required_delegation"`
-	Risk                    string          `json:"risk"`
-	RequiresApproval        bool            `json:"requires_approval"`
-	Reversible              bool            `json:"reversible"`
-	Idempotency             string          `json:"idempotency"`
-	ReceiptContract         string          `json:"receipt_contract"`
-	HTTPMethod              string          `json:"http_method"`
-	Path                    string          `json:"path"`
-	InputSchema             json.RawMessage `json:"input_schema"`
-	SchemaSHA256            string          `json:"schema_sha256"`
+	ActionID                string             `json:"action_id"`
+	ContractVersion         string             `json:"contract_version"`
+	OwnerPlane              string             `json:"owner_plane"`
+	EligibleActorTypes      []string           `json:"eligible_actor_types"`
+	ActorRequirements       []ActorRequirement `json:"actor_requirements"`
+	RequiredServiceIdentity string             `json:"required_service_identity"`
+	RequiredDelegation      string             `json:"required_delegation"`
+	Risk                    string             `json:"risk"`
+	RequiresApproval        bool               `json:"requires_approval"`
+	Reversible              bool               `json:"reversible"`
+	Idempotency             string             `json:"idempotency"`
+	ReceiptContract         string             `json:"receipt_contract"`
+	HTTPMethod              string             `json:"http_method"`
+	Path                    string             `json:"path"`
+	InputSchema             json.RawMessage    `json:"input_schema"`
+	SchemaSHA256            string             `json:"schema_sha256"`
+}
+
+// ActorRequirement describes an actor-specific owner route without making the
+// route eligible. Consumers must use EligibleActorTypes for availability; a
+// requirement with Availability "not_enabled" is implementation planning and
+// a fail-closed contract test, never a capability grant.
+//
+// The base fields on OwnerActionContract preserve the currently callable human
+// contract while the owner can publish the different constraints a future
+// workload path will have. Human and Model execution must not be collapsed to
+// one service identity or one delegation class.
+type ActorRequirement struct {
+	ActorType               string `json:"actor_type"`
+	Availability            string `json:"availability"`
+	RequiredServiceIdentity string `json:"required_service_identity"`
+	RequiredDelegation      string `json:"required_delegation"`
+	HTTPMethod              string `json:"http_method"`
+	Path                    string `json:"path"`
 }
 
 type ownerActionContractCatalog struct {
@@ -54,10 +73,32 @@ func ticketCreateActionContract() OwnerActionContract {
 	schema := append(json.RawMessage(nil), ticketCreateInputSchema...)
 	digest := canonicalSchemaSHA256(schema)
 	return OwnerActionContract{
-		ActionID:                "tickets.create",
-		ContractVersion:         "tickets.create/v1",
-		OwnerPlane:              "application",
-		EligibleActorTypes:      []string{"human"},
+		ActionID:           "tickets.create",
+		ContractVersion:    "tickets.create/v1",
+		OwnerPlane:         "application",
+		EligibleActorTypes: []string{"human"},
+		ActorRequirements: []ActorRequirement{
+			{
+				ActorType:               "human",
+				Availability:            "available",
+				RequiredServiceIdentity: "verevon-gateway",
+				RequiredDelegation:      "verified_user_org_role",
+				HTTPMethod:              http.MethodPost,
+				Path:                    "/api/v1/tickets",
+			},
+			{
+				// This advertises the required independent boundary without
+				// enabling the Model. The private route does not exist until it
+				// verifies a Control target-action decision and rechecks the
+				// Conversation resource immediately before the owner effect.
+				ActorType:               "model",
+				Availability:            "not_enabled",
+				RequiredServiceIdentity: "execution-core",
+				RequiredDelegation:      "control_target_action_decision",
+				HTTPMethod:              http.MethodPost,
+				Path:                    "/internal/v1/agent-ticket-operations",
+			},
+		},
 		RequiredServiceIdentity: "verevon-gateway",
 		RequiredDelegation:      "verified_user_org_role",
 		Risk:                    "medium",

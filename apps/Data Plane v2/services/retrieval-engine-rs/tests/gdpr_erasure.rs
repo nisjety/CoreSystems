@@ -7,6 +7,7 @@
 //   - every org B row is untouched
 //   - a second purge of the already-purged org A is a no-op (idempotency)
 
+mod common;
 use sqlx::PgPool;
 
 use retrieval_engine::gdpr::purge_organization_data;
@@ -97,10 +98,36 @@ async fn setup_schema(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("create context_pins");
+
+    // The erasure path bumps the org's cache version to invalidate cached
+    // retrieval results. Without this table the bump degrades to a no-op and
+    // reports success, so the fixture would hide exactly the regression the
+    // assertions below are here to catch.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS org_versions (
+            org_id     TEXT        PRIMARY KEY,
+            version    BIGINT      NOT NULL DEFAULT 1,
+            bumped_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )",
+    )
+    .execute(pool)
+    .await
+    .expect("create org_versions");
+
+    // The cache-version bump runs inside an org-scoped transaction, which
+    // adopts the `dataplane_app` RLS role. Without the role the bump fails and
+    // degrades to a no-op that reports success — so this must follow the
+    // CREATE TABLEs above. See `common::grant_rls_runtime_role`.
+    common::grant_rls_runtime_role(pool).await;
 }
 
 async fn cleanup(pool: &PgPool) {
     for org in [ORG_A, ORG_B] {
+        sqlx::query("DELETE FROM org_versions WHERE org_id = $1")
+            .bind(org)
+            .execute(pool)
+            .await
+            .ok();
         sqlx::query("DELETE FROM retrieval_runs WHERE org_id = $1")
             .bind(org)
             .execute(pool)
@@ -224,6 +251,14 @@ async fn purge_removes_only_the_targeted_org() {
     assert_eq!(summary.agent_retrieval_configs, 1);
     assert_eq!(summary.context_pins, 1);
 
+    // The cached copy must be invalidated too: cached retrieval results are
+    // keyed on the org's version, so bumping it makes every entry the org had
+    // unreachable. Before this was wired, an erased org's previously cached
+    // answers stayed retrievable after its rows were gone.
+    let first_version = summary
+        .cache_version_after
+        .expect("erasure must bump the org cache version, not silently skip it");
+
     // Org A is fully gone, including the candidate row cascaded from its
     // purged retrieval_runs row.
     assert_eq!(count_org_rows(&pool, ORG_A).await, 0);
@@ -247,6 +282,16 @@ async fn purge_removes_only_the_targeted_org() {
         .await
         .expect("second purge of already-purged org is a no-op, not an error");
     assert_eq!(second_summary.total(), 0);
+
+    // A redelivered erasure still bumps: it costs one write and guarantees that
+    // anything cached between the two deliveries is invalidated as well.
+    let second_version = second_summary
+        .cache_version_after
+        .expect("a redelivered erasure must still bump the cache version");
+    assert!(
+        second_version > first_version,
+        "cache version must advance on every erasure ({second_version} must exceed {first_version})"
+    );
 
     cleanup(&pool).await;
 }

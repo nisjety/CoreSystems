@@ -11,15 +11,15 @@
 
 Make a Space feel like a **shared room with a visible working pulse**, not a
 settings page and not an agent command centre. The visual character is a warm,
-high-contrast desk surface: one focused canvas, a quiet room rail, and a
-compact right-hand pulse. It borrows Buzz's central idea — humans and agents
+high-contrast desk surface: one focused canvas, the existing product room
+sidebar, and a compact right-hand pulse. It borrows Buzz's central idea — humans and agents
 are first-class participants in the same room — while taking the useful part
 of Grok's interaction model: a named agent should be understandable at a
 glance and must visibly ask for a human when it cannot safely proceed.
 
 The supplied reference images reinforce the same composition:
 
-- a **persistent, scannable left rail** for rooms and people;
+- the **existing, persistent Core Sidebar** for rooms and conversations;
 - a **large central conversation/work canvas** that earns most of the screen;
 - a **compact contextual surface** rather than a permanently noisy dashboard;
 - soft containers, hairline borders, and status that communicates with text
@@ -48,14 +48,17 @@ are used as implementation requirements.
 ### The screen architecture
 
 ```text
-┌ Room rail ──────────┬ Main canvas ────────────────────────┬ Room pulse ──────┐
-│ space switcher      │ breadcrumb / room title / members   │ agent is working │
-│ room facts          │ view strip: Chat · Work · …         │ active work      │
-│ conversation list   │                                     │ needs attention  │
-│                      │ selected view                       │ recent movement  │
-│                      │                                     │                  │
-│                      │ contextual composer / next action   │                  │
+┌ Core Room sidebar ──┬ Main canvas ────────────────────────┬ Room pulse ──────┐
+│ search rooms/chats  │ room title / member access           │ agent is working │
+│ organization room*  │ view strip: Chat · Work · …          │ active work      │
+│ team rooms*         │                                     │ needs attention  │
+│ personal rooms      │ selected view                        │ recent movement  │
+│ conversations       │ fresh-start / contextual composer    │                  │
 └──────────────────────┴─────────────────────────────────────┴──────────────────┘
+
+`*` These groups appear only after the server publishes them in the
+actor-filtered Space index. The present gateway publishes Personal Space only;
+the client must not invent an organization or team room from an org id.
 ```
 
 At narrow widths the right pulse moves below the canvas and the room rail
@@ -72,9 +75,10 @@ without a large-screen layout.
    `Activity`, `Agent`, and `Members` remain deep-linkable. A view with no
    published projection is an honest, designed placeholder that explains what
    it will contain; it must never masquerade as empty data.
-3. **Make conversation the centre of gravity.** The Chat view offers the
-   existing, Space-scoped chat entry point and a short thread list. It does
-   not reimplement the chat composer or duplicate chat state.
+3. **Make conversation the centre of gravity.** A fresh room gets a calm,
+   Grok-inspired starting point and a Slack-like room composer that links to
+   the existing, Space-scoped Chat entry point. It does not reimplement the
+   chat composer or duplicate chat state.
 4. **Use a human-readable activity grammar.** The pulse and Activity view
    use the existing verb / object / outcome rendering. Running and
    approval-waiting work is surfaced above completed work; rows link to their
@@ -101,14 +105,44 @@ without a large-screen layout.
 
 ### First implementation scope and explicit non-goals
 
-**In scope:** mount and polish the existing cockpit; add a room rail, a
-conversation-forward Chat view, an Activity view, a truthful Agent view, a
-membership view, responsive layout, and focused behavior tests.
+**In scope:** mount and polish the existing cockpit; use the existing Core
+Sidebar as the sole room navigator; add a conversation-forward Chat view, an
+Activity view, a truthful Agent view, a membership view, responsive layout,
+and focused behavior tests.
 
 **Out of scope:** a new API endpoint, new Space membership actions, a real
 member roster, a new agent runtime, task teaching, a computer takeover,
 cross-plane delivery receipts, or simulated data. Those need their own
 owner-plane projections and contracts before they belong here.
+
+### Organization and team Space model — required backend contract
+
+The intended product model follows Slack's workspace / channel mental model
+and Teams' private-team visibility model:
+
+1. **Organization room.** Registering an organization must idempotently create
+   one durable organization `room` Space. Every active organization user is a
+   member; users leaving the organization are removed through the same
+   revisioned membership workflow. Agent/service identities may be added as
+   Space members, but they are not inferred from an action catalog.
+2. **Team and external Spaces.** An authorized user can create a separate
+   Space for a team, project, or approved external collaboration. Only the
+   explicitly connected humans and service identities can see its index entry,
+   roster, or conversations. External access requires its own cross-org
+   identity and privacy contract; it is not a browser-side invite list.
+3. **Truthful frontend projections.** The gateway must publish an
+   actor-filtered Space index across organization, team, and personal scopes;
+   a sanitized `roster` projection (`human`/`agent`, display identity, role,
+   availability, and revision); and shared-chat routing that uses the shared
+   Space decision path. These responses must never include bearer tokens,
+   decisions, recipient audiences, or service authority.
+
+Today the gateway provides only a personal-Space index, the signed-in human's
+current membership fact, and Space-scoped threads. The UI therefore shows
+only confirmed access and deliberately says that the people-and-bots roster is
+not published yet. The automatic organization room, team/external creation,
+membership sync, roster, and shared-chat flows are required product work — not
+something this frontend can safely simulate.
 
 ---
 

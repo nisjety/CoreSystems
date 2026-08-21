@@ -175,6 +175,10 @@ mod tests {
             tools: Vec::new(),
             org_name: None,
             user_name: None,
+            agent_name: None,
+            agent_system_prompt: None,
+            org_instructions: None,
+            space_instructions: None,
         }
     }
 

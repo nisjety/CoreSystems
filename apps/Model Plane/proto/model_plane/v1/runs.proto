@@ -13,6 +13,12 @@ service RunService {
   // Get a run by ID.
   rpc GetRun(GetRunRequest) returns (RunDetail);
 
+  // Get the minimal goal/status context for one service-owned scheduled step.
+  // This is deliberately narrower than GetRun: Execution Core uses its
+  // dedicated session:scheduled-step credential and cannot read arbitrary run
+  // transcripts or human-owned run metadata.
+  rpc GetScheduledStepContext(GetScheduledStepContextRequest) returns (ScheduledStepContext);
+
   // List runs for a thread.
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
 
@@ -33,11 +39,48 @@ service RunService {
   // execution mutations. Returns only a boolean to avoid disclosing another
   // tenant's run metadata.
   rpc ResolveRunOwner(ResolveRunOwnerRequest) returns (ResolveRunOwnerResponse);
+
+  // ResolveThreadOwner — authoritative tenant/user ownership check for a
+  // thread, mirroring ResolveRunOwner exactly. Also used to authorize
+  // capability-core's memory scope='session' rows: session and thread are
+  // the same underlying resource in this codebase (see agent_memory's writer
+  // in dreaming.rs, which stores a thread_id under scope='thread'), so
+  // scope='session' calls this RPC with the same thread_id too. Returns only
+  // a boolean to avoid disclosing another tenant's thread metadata.
+  rpc ResolveThreadOwner(ResolveThreadOwnerRequest) returns (ResolveThreadOwnerResponse);
+
+  // ResolveRunActionAuthority returns the non-secret, immutable run/thread
+  // bindings Control needs before issuing one target-owner action decision.
+  // It is restricted to Control's exact action-authorizer service identity;
+  // it is not a general run-inspection or user-impersonation API.
+  rpc ResolveRunActionAuthority(ResolveRunActionAuthorityRequest) returns (ResolveRunActionAuthorityResponse);
+
+  // ResolveScheduledStepAuthority returns the exact active prepared scheduled
+  // run binding for Control's per-step decision. It is narrower than ordinary
+  // run inspection: the caller supplies only immutable identifiers/digests,
+  // while Session Core derives the human subject and Space from the durable
+  // scheduled-run record. No goal, transcript, tool, credential, or decision
+  // bearer crosses this boundary.
+  rpc ResolveScheduledStepAuthority(ResolveScheduledStepAuthorityRequest) returns (ResolveScheduledStepAuthorityResponse);
 }
 
 message GetRunRequest {
   // Run identifier (ULID).
   string run_id = 1;
+}
+
+message GetScheduledStepContextRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+}
+
+message ScheduledStepContext {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  string goal = 4;
+  string status = 5;
 }
 
 message ListRunsRequest {
@@ -98,6 +141,78 @@ message ResolveRunOwnerRequest {
 
 message ResolveRunOwnerResponse {
   bool authorized = 1;
+}
+
+message ResolveThreadOwnerRequest {
+  string thread_id = 1;
+  string org_id = 2;
+  string user_id = 3;
+}
+
+message ResolveThreadOwnerResponse {
+  bool authorized = 1;
+}
+
+// ResolveRunActionAuthorityRequest is intentionally limited to the run and
+// tenant. Subject, Space, audience, resource, and privacy values are derived
+// only from the durable run/thread rows; callers cannot restate them.
+message ResolveRunActionAuthorityRequest {
+  string run_id = 1;
+  string org_id = 2;
+}
+
+// ResolveRunActionAuthorityResponse carries no transcript, goal, model output,
+// tool input, or decision bearer. Control must re-resolve current membership,
+// entitlement, privacy, recipient audience, and owner-resource authorization
+// before it issues an effect decision. `resolved=false` has no authority and
+// all other fields are empty/default.
+message ResolveRunActionAuthorityResponse {
+  bool resolved = 1;
+  string run_id = 2;
+  string org_id = 3;
+  string subject_id = 4;
+  string thread_id = 5;
+  string space_id = 6;
+  string recipient_audience_ref = 7;
+  uint64 recipient_audience_revision = 8;
+  string recipient_audience_hash = 9;
+  string privacy_policy_ref = 10;
+  // This is the thread's original resource binding, not authority for a
+  // Conversation Core ticket/case resource. The target owner still checks its
+  // own current resource ACL immediately before the effect.
+  string thread_resource_authorization_ref = 11;
+  uint64 authority_revision = 12;
+  string run_status = 13;
+}
+
+message ResolveScheduledStepAuthorityRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  string schedule_id = 4;
+  string fire_key = 5;
+  string template_digest = 6;
+  string policy_digest = 7;
+  string step_id = 8;
+  uint32 step_index = 9;
+  string idempotency_key = 10;
+}
+
+message ResolveScheduledStepAuthorityResponse {
+  bool resolved = 1;
+  string run_id = 2;
+  string thread_id = 3;
+  string org_id = 4;
+  string subject_id = 5;
+  string space_id = 6;
+  string schedule_id = 7;
+  string fire_key = 8;
+  string template_digest = 9;
+  string policy_digest = 10;
+  string step_id = 11;
+  uint32 step_index = 12;
+  string idempotency_key = 13;
+  string run_status = 14;
 }
 
 // RunDetail — full run metadata.

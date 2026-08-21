@@ -25,7 +25,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(documents::list_documents).post(documents::create_document),
         )
         .route(
-            "/api/v1/knowledge/documents/:id",
+            "/api/v1/knowledge/documents/{id}",
             get(documents::get_document),
         )
         // Knowledge workspace: the rich aggregated payload the SPA renders (sources,
@@ -51,11 +51,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(sync::list_sharepoint_sites),
         )
         .route(
-            "/api/v1/knowledge/sharepoint/sites/:site_id/drives",
+            "/api/v1/knowledge/sharepoint/sites/{site_id}/drives",
             get(sync::list_sharepoint_drives),
         )
         .route(
-            "/api/v1/knowledge/sharepoint/drives/:drive_id/children",
+            "/api/v1/knowledge/sharepoint/drives/{drive_id}/children",
             get(sync::list_sharepoint_folders),
         )
         // Retrieval
@@ -64,7 +64,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(retrieval::search_knowledge),
         )
         .route(
-            "/api/v1/knowledge/retrieval/:trace_id",
+            "/api/v1/knowledge/retrieval/{trace_id}",
             get(retrieval::get_retrieval_trace),
         )
         .route(
@@ -93,11 +93,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(operating_map::generate_operating_map),
         )
         .route(
-            "/api/v1/knowledge/operating-map/runs/:run_id/events",
+            "/api/v1/knowledge/operating-map/runs/{run_id}/events",
             get(operating_map::operating_map_run_events),
         )
         .route(
-            "/api/v1/knowledge/operating-map/proposals/:proposal_id/review",
+            "/api/v1/knowledge/operating-map/proposals/{proposal_id}/review",
             post(operating_map::review_operating_map_proposal),
         )
         // Wiki — canonical knowledge namespace. Static "by-path" must come
@@ -107,30 +107,33 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(wiki::wiki_page_by_path),
         )
         .route("/api/v1/knowledge/wiki/pages", get(wiki::list_wiki_pages))
-        .route("/api/v1/knowledge/wiki/pages/:id", get(wiki::get_wiki_page))
         .route(
-            "/api/v1/knowledge/wiki/pages/:id/versions",
+            "/api/v1/knowledge/wiki/pages/{id}",
+            get(wiki::get_wiki_page),
+        )
+        .route(
+            "/api/v1/knowledge/wiki/pages/{id}/versions",
             get(wiki::wiki_page_versions),
         )
         .route(
-            "/api/v1/knowledge/wiki/pages/:id/diff",
+            "/api/v1/knowledge/wiki/pages/{id}/diff",
             get(wiki::wiki_page_diff),
         )
         .route(
-            "/api/v1/knowledge/wiki/pages/:id/backlinks",
+            "/api/v1/knowledge/wiki/pages/{id}/backlinks",
             get(wiki::wiki_page_backlinks),
         )
         // Legacy aliases kept for existing callers.
         .route("/api/v1/wiki/pages/by-path", get(wiki::wiki_page_by_path))
         .route("/api/v1/wiki/pages", get(wiki::list_wiki_pages))
-        .route("/api/v1/wiki/pages/:id", get(wiki::get_wiki_page))
+        .route("/api/v1/wiki/pages/{id}", get(wiki::get_wiki_page))
         .route(
-            "/api/v1/wiki/pages/:id/versions",
+            "/api/v1/wiki/pages/{id}/versions",
             get(wiki::wiki_page_versions),
         )
-        .route("/api/v1/wiki/pages/:id/diff", get(wiki::wiki_page_diff))
+        .route("/api/v1/wiki/pages/{id}/diff", get(wiki::wiki_page_diff))
         .route(
-            "/api/v1/wiki/pages/:id/backlinks",
+            "/api/v1/wiki/pages/{id}/backlinks",
             get(wiki::wiki_page_backlinks),
         )
         // Imports
@@ -143,11 +146,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(imports::import_source),
         )
         .route(
-            "/api/v1/knowledge/imports/:id",
+            "/api/v1/knowledge/imports/{id}",
             get(imports::get_import_job),
         )
         .route(
-            "/api/v1/knowledge/imports/:id/events",
+            "/api/v1/knowledge/imports/{id}/events",
             get(imports::import_job_events),
         )
         // Quarry
@@ -171,14 +174,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/knowledge/crawl", post(quarry::start_crawl))
         .route("/api/v1/knowledge/crawl/jobs", get(quarry::list_crawl_jobs))
         .route(
-            "/api/v1/knowledge/runs/:id/events",
+            "/api/v1/knowledge/runs/{id}/events",
             get(quarry::crawl_run_events),
         )
         // Crawl 0-pages fix — durable crawl event stream keyed off the
         // handoff job_id (the normalized handoff's `eventStream` points
         // here). The edge emits real SSE; this forwards it verbatim.
         .route(
-            "/api/v1/knowledge/jobs/:id/events",
+            "/api/v1/knowledge/jobs/{id}/events",
             get(quarry::crawl_job_events),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))

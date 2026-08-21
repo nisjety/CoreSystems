@@ -70,7 +70,7 @@ fn human_owner_action_catalog(payload: &Value) -> Option<Value> {
     let verified: Vec<Value> = actions
         .iter()
         .filter(|action| owner_contract_is_human_executable(action))
-        .cloned()
+        .filter_map(human_contract_projection)
         .collect();
     if verified.is_empty() {
         return None;
@@ -80,6 +80,23 @@ fn human_owner_action_catalog(payload: &Value) -> Option<Value> {
         "actorType": "human",
         "actions": verified,
     }))
+}
+
+// The browser is never a transport for a planned workload operation. Owner
+// contracts may describe disabled actor paths for release review, but the
+// human projection strips every non-human actor and rewrites eligibility rather
+// than trusting the source object to be presentation-safe.
+fn human_contract_projection(action: &Value) -> Option<Value> {
+    let mut projected = action.as_object()?.clone();
+    projected.insert("eligible_actor_types".to_owned(), json!(["human"]));
+    if let Some(requirements) = projected.get_mut("actor_requirements") {
+        let requirements = requirements.as_array_mut()?;
+        requirements.retain(|requirement| {
+            requirement.get("actor_type").and_then(Value::as_str) == Some("human")
+                && requirement.get("availability").and_then(Value::as_str) == Some("available")
+        });
+    }
+    Some(Value::Object(projected))
 }
 
 fn owner_contract_is_human_executable(action: &Value) -> bool {
@@ -1913,6 +1930,56 @@ mod tests {
     }
 
     #[test]
+    fn owner_catalog_does_not_expose_a_disabled_model_transport_to_the_browser() {
+        let schema = json!({"type": "object"});
+        let digest = canonical_schema_sha256(&schema).expect("schema digest");
+        let payload = json!({
+            "data": {
+                "catalog_version": "conversation-core/v1",
+                "actions": [{
+                    "action_id": "tickets.create",
+                    "owner_plane": "application",
+                    "eligible_actor_types": ["human"],
+                    "actor_requirements": [
+                        {
+                            "actor_type": "human",
+                            "availability": "available",
+                            "required_service_identity": "verevon-gateway",
+                            "required_delegation": "verified_user_org_role",
+                            "http_method": "POST",
+                            "path": "/api/v1/tickets"
+                        },
+                        {
+                            "actor_type": "model",
+                            "availability": "not_enabled",
+                            "required_service_identity": "execution-core",
+                            "required_delegation": "control_target_action_decision",
+                            "http_method": "POST",
+                            "path": "/internal/v1/agent-ticket-operations"
+                        }
+                    ],
+                    "required_service_identity": "verevon-gateway",
+                    "required_delegation": "verified_user_org_role",
+                    "idempotency": "caller_supplied",
+                    "receipt_contract": "durable_owner_receipt",
+                    "schema_sha256": digest,
+                    "input_schema": schema
+                }]
+            }
+        });
+
+        let catalog = human_owner_action_catalog(&payload).expect("valid catalog");
+        let action = &catalog["actions"][0];
+        assert_eq!(action["eligible_actor_types"], json!(["human"]));
+        assert_eq!(
+            action["actor_requirements"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(action["actor_requirements"][0]["actor_type"], "human");
+        assert!(!catalog.to_string().contains("agent-ticket-operations"));
+    }
+
+    #[test]
     fn owner_catalog_fails_closed_when_the_contract_is_incomplete() {
         let payload = json!({
             "data": {
@@ -2075,5 +2142,79 @@ mod tests {
             ticket_id_from_ticket_action_response(&response),
             "ticket_456"
         );
+    }
+
+    #[tokio::test]
+    async fn ticket_create_body_strips_sensitive_and_control_only_fields_before_conversation_upstream(
+    ) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let conversation_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/tickets"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {
+                    "operation": {
+                        "operation_id": "op_1",
+                        "audit_event_id": "audit_1",
+                        "status": "completed"
+                    },
+                    "ticket": { "id": "ticket_1", "conversation_id": "conv_1" }
+                }
+            })))
+            .mount(&conversation_core)
+            .await;
+
+        let mut state = crate::tests::test_state(false);
+        state.conversation_core_url = conversation_core.uri();
+        let user = crate::middleware::AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "Proof User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("owner".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "owner".to_owned(),
+            }),
+        };
+
+        let input = json!({
+            "conversationId": "conv_1",
+            "workType": "customer_case",
+            "priority": "high",
+            "controlDecisionToken": "forged-control-dec",
+            "space_decision_token": "forged-space-token",
+            "payloadDigest": "forged-digest",
+            "space_ref": "room-1",
+            "decision": "forged-decision",
+        });
+
+        let response = dispatch_ticket_create(&state, &user, &input, "idem-proof-1").await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let received = conversation_core
+            .received_requests()
+            .await
+            .expect("Conversation Core request");
+        let request = received
+            .first()
+            .expect("a Conversation Core ticket create request");
+        let outbound: Value = serde_json::from_slice(&request.body).expect("request JSON body");
+
+        assert_eq!(outbound["conversation_id"], "conv_1");
+        assert_eq!(outbound["idempotency_key"], "idem-proof-1");
+        assert_eq!(outbound["work_type"], "customer_case");
+        assert_eq!(outbound["priority"], "high");
+        assert!(outbound.get("controlDecisionToken").is_none());
+        assert!(outbound.get("space_decision_token").is_none());
+        assert!(outbound.get("payloadDigest").is_none());
+        assert!(outbound.get("space_ref").is_none());
+        assert!(outbound.get("decision").is_none());
     }
 }

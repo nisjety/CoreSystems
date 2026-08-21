@@ -156,6 +156,10 @@ type EffectPolicy struct {
 	ThreadCreateEntitled        bool   `json:"thread_create_entitled"`
 	RetrievalReadEntitled       bool   `json:"retrieval_read_entitled"`
 	ImportWriteEntitled         bool   `json:"import_write_entitled"`
+	// AgentActionEntitled is a separate, deny-by-default floor for a Model run
+	// to request a target-specific owner action. It does not authorize an
+	// owner-plane resource; that owner rechecks its resource at effect time.
+	AgentActionEntitled bool `json:"agent_action_entitled"`
 	// ScheduleFireEntitled is deliberately separate from thread creation. A
 	// recurring effect must be explicitly allowed at *each* fire; a schedule
 	// cannot inherit an old chat/creation entitlement.
@@ -180,6 +184,139 @@ func (p EffectPolicy) Validate() error {
 // to a resolver only as one component of effective access: callers must still
 // intersect recipient, policy, and owner-resource authorization before an
 // effect. The database result is deliberately not a signed access decision.
+// RosterMember is one participant of a Space as shown to another participant.
+//
+// `SubjectType` distinguishes a person from a service/agent identity, so the UI
+// can say which is which instead of implying every row is a colleague.
+// `DisplayName` may be empty — a membership can exist before its user
+// projection does, and an empty name is more honest than substituting the
+// opaque id as though it were one.
+type RosterMember struct {
+	SubjectType string `json:"subject_type"`
+	SubjectID   string `json:"subject_id"`
+	Role        string `json:"role"`
+	Revision    int64  `json:"revision"`
+	DisplayName string `json:"display_name"`
+}
+
+// SpaceIndexEntry is one Space a subject may see, with the role they hold in
+// it. Deliberately narrow: an index answers "which rooms are mine and what am
+// I in them", and anything more — audiences, policies, decisions — belongs to
+// the per-Space reads that check authority again for that specific use.
+type SpaceIndexEntry struct {
+	SpaceRef string `json:"space_ref"`
+	OrgID    string `json:"org_id"`
+	Kind     Kind   `json:"kind"`
+	Role     string `json:"role"`
+}
+
+// MemberGrant is one subject's place in a Space. `service` covers agent and
+// workload identities, which the product model allows as Space members but
+// never infers — an identity is a member because it was granted, not because
+// it appeared in an action catalog.
+type MemberGrant struct {
+	SubjectType string `json:"subject_type"`
+	SubjectID   string `json:"subject_id"`
+	Role        string `json:"role"`
+}
+
+// MembershipReplacement declares the complete intended membership of a Space.
+//
+// Declarative rather than add/remove, because the caller that knows the answer
+// is the one holding the source roster (an organization's active users). An
+// incremental API would make the two drift the moment a single call is lost;
+// a full set converges on every call.
+//
+// Absence therefore means revocation. That is the point, and it is also the
+// sharp edge — see Repository.ReplaceMemberships for the one subject it
+// refuses to revoke.
+type MembershipReplacement struct {
+	SpaceRef string        `json:"space_ref"`
+	Members  []MemberGrant `json:"members"`
+	// Which subject kinds this replacement speaks for. Convergence deactivates
+	// undeclared members ONLY within these kinds.
+	//
+	// Absent means "this is the entire roster", which is what a caller that owns
+	// every subject kind wants. But the organization-roster sync is not such a
+	// caller: org-core knows people and nothing else, so an unscoped replacement
+	// from it revokes every agent bound to the room as a side effect of a human
+	// roster converging. That is the same shape as the owner-demotion bug fixed
+	// above — a declarative sync from a source that only knows part of the
+	// truth, applied as if it knew all of it.
+	//
+	// Callers that manage one kind must say so: `["user"]`.
+	ManagedSubjectTypes []string `json:"managed_subject_types,omitempty"`
+}
+
+// managedSubjectTypeSet resolves the kinds this replacement may deactivate.
+// Nil means every kind.
+func (m MembershipReplacement) managedSubjectTypeSet() map[string]struct{} {
+	if len(m.ManagedSubjectTypes) == 0 {
+		return nil
+	}
+	managed := make(map[string]struct{}, len(m.ManagedSubjectTypes))
+	for _, subjectType := range m.ManagedSubjectTypes {
+		managed[strings.TrimSpace(subjectType)] = struct{}{}
+	}
+	return managed
+}
+
+const maxSpaceMembers = 5000
+
+func (m MembershipReplacement) Validate() error {
+	if strings.TrimSpace(m.SpaceRef) == "" {
+		return fmt.Errorf("Space reference is required")
+	}
+	if len(m.Members) > maxSpaceMembers {
+		return fmt.Errorf("Space membership exceeds %d subjects", maxSpaceMembers)
+	}
+	seen := make(map[string]struct{}, len(m.Members))
+	for _, member := range m.Members {
+		subjectType := strings.TrimSpace(member.SubjectType)
+		subjectID := strings.TrimSpace(member.SubjectID)
+		role := strings.TrimSpace(member.Role)
+		if subjectType != "user" && subjectType != "service" {
+			return fmt.Errorf("unknown Space member subject type %q", member.SubjectType)
+		}
+		if subjectID == "" {
+			return fmt.Errorf("Space member subject id is required")
+		}
+		switch role {
+		case "viewer", "editor", "manager", "owner":
+		default:
+			return fmt.Errorf("unknown Space member role %q", member.Role)
+		}
+		key := subjectType + "\x00" + subjectID
+		if _, duplicate := seen[key]; duplicate {
+			// Two rows for one subject would make the resulting role depend on
+			// iteration order, so the caller must resolve it rather than us.
+			return fmt.Errorf("duplicate Space member %s:%s", subjectType, subjectID)
+		}
+		seen[key] = struct{}{}
+	}
+	managed := m.managedSubjectTypeSet()
+	for _, subjectType := range m.ManagedSubjectTypes {
+		if trimmed := strings.TrimSpace(subjectType); trimmed != "user" && trimmed != "service" {
+			return fmt.Errorf("unknown managed subject type %q", subjectType)
+		}
+	}
+	if managed != nil {
+		// Declaring a member of a kind you do not manage would insert a row that
+		// the very same call refuses to converge, so the roster would drift by
+		// design. Rejecting it keeps the scope honest.
+		for _, member := range m.Members {
+			subjectType := strings.TrimSpace(member.SubjectType)
+			if _, ok := managed[subjectType]; !ok {
+				return fmt.Errorf(
+					"member subject type %q is outside the declared managed scope",
+					subjectType,
+				)
+			}
+		}
+	}
+	return nil
+}
+
 type CurrentMembership struct {
 	SpaceRef  string            `json:"space_ref"`
 	OrgID     string            `json:"org_id"`

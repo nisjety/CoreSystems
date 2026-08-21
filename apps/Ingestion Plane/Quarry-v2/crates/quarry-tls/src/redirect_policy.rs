@@ -226,8 +226,15 @@ mod tests {
 
     #[test]
     fn test_ipv6_public_allowed() {
+        // Was 2001:db8::1 (RFC 3849 documentation range) as a "some real
+        // IPv6 address" stand-in -- resolve_guard now correctly blocks
+        // documentation ranges too (they're never real destinations), so
+        // this needs an address that's actually public. Google Public DNS,
+        // same swap already made for the RFC 5737/documentation literals in
+        // quarry-runtime's dns_guard.rs/fetch.rs tests.
         let policy = QuarryRedirectPolicy::new();
-        assert!(!policy.is_private_ip("2001:db8::1".parse().unwrap()));
+        assert!(!policy.is_private_ip("2606:4700:4700::1111".parse().unwrap()));
+        assert!(!policy.is_private_ip("2001:4860:4860::8888".parse().unwrap()));
     }
 
     #[test]

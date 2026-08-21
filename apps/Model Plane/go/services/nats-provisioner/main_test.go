@@ -21,14 +21,32 @@ func TestTopologySpecsCoverRuntimeBindings(t *testing.T) {
 		}
 	}
 	bindings := consumerBindings()
-	if len(bindings) != 2 {
-		t.Fatalf("consumer count = %d, want 2", len(bindings))
+	if len(bindings) != 3 {
+		t.Fatalf("consumer count = %d, want 3", len(bindings))
 	}
 	if bindings[0].config.AckPolicy != nats.AckExplicitPolicy || bindings[0].config.AckWait != 30*time.Second {
 		t.Fatalf("tool completion consumer must retry explicit work: %+v", bindings[0].config)
 	}
 	if bindings[1].config.AckPolicy != nats.AckNonePolicy {
 		t.Fatalf("orchestration bridge must use at-most-once fan-out: %+v", bindings[1].config)
+	}
+	// AUTO-2 run-watch notify consumer: its side effect is an outbound
+	// cross-plane HTTP call to notification-core, so — unlike the
+	// at-most-once orchestration bridge above — a failure must be retried,
+	// not silently dropped, and a fresh deployment should not have to replay
+	// 48h of run history to find watchers that could not have existed yet.
+	runWatch := bindings[2]
+	if runWatch.stream != "MODEL_PLANE_RUN_EVENTS" || runWatch.config.Durable != "capability-core-run-watch-notify" {
+		t.Fatalf("run-watch binding = %+v, want MODEL_PLANE_RUN_EVENTS/capability-core-run-watch-notify", runWatch)
+	}
+	if runWatch.config.AckPolicy != nats.AckExplicitPolicy || runWatch.config.MaxDeliver <= 0 {
+		t.Fatalf("run-watch notify consumer must retry a failed delegated notification: %+v", runWatch.config)
+	}
+	if runWatch.config.DeliverPolicy != nats.DeliverNewPolicy {
+		t.Fatalf("run-watch notify consumer should not replay run history on first boot: %+v", runWatch.config)
+	}
+	if runWatch.config.FilterSubject != "mp.v1.run.*.event" {
+		t.Fatalf("run-watch notify consumer filter = %q, want mp.v1.run.*.event", runWatch.config.FilterSubject)
 	}
 }
 

@@ -197,6 +197,7 @@ mod tests {
                     headers: vec![],
                     body: body.to_vec(),
                     duration_ms: 1,
+                    served_by: self.kind,
                 }),
                 StubOutcome::Err(code) => Err(QuarryError::new(code, "simulated failure")),
             }
@@ -227,6 +228,10 @@ mod tests {
         let resp = driver.fetch(&url).await.unwrap();
 
         assert_eq!(resp.body, b"h2");
+        // served_by passes through the wrapper untouched — the fallback
+        // (Tls) served, so the response says Tls even though the primary
+        // stub was Static-kinded.
+        assert_eq!(resp.served_by, DriverKind::Tls);
         assert_eq!(primary.calls.load(Ordering::Relaxed), 1);
         assert_eq!(fallback.calls.load(Ordering::Relaxed), 1);
     }

@@ -19,15 +19,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         // Static routes before param routes to avoid shadowing
         .route("/api/v1/notifications/preferences", get(get_preferences))
         .route(
-            "/api/v1/notifications/preferences/:event_type/:channel",
+            "/api/v1/notifications/preferences/{event_type}/{channel}",
             put(update_preference),
         )
         .route("/api/v1/notifications/unread/count", get(unread_count))
         .route("/api/v1/notifications/mark-all-read", post(mark_all_read))
         // Param routes after statics
         .route("/api/v1/notifications", get(list_notifications))
-        .route("/api/v1/notifications/:id/read", post(mark_read))
-        .route("/api/v1/notifications/:id", delete(delete_notification))
+        .route("/api/v1/notifications/{id}/read", post(mark_read))
+        .route("/api/v1/notifications/{id}", delete(delete_notification))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 

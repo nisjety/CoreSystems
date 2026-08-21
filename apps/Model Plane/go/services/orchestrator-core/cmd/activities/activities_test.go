@@ -151,6 +151,25 @@ func TestExecuteStepActivity_NilClients_ReturnsPendingStep(t *testing.T) {
 	assert.False(t, step.NeedsApproval)
 }
 
+type scheduledStepAuthorizerStub struct{}
+
+func (scheduledStepAuthorizerStub) AuthorizeScheduledStep(context.Context, activities.ScheduledStepExecutionIntent) (string, error) {
+	return "control-step-decision", nil
+}
+
+func TestExecuteScheduledStepActivityFailsClosedWithoutExecutionLane(t *testing.T) {
+	a := activities.NewActivities(newDiscardLogger(), nil)
+	intent := activities.ScheduledStepExecutionIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", RunID: "run-1", ThreadID: "thread-1",
+		ScheduleID: "schedule-1", FireKey: "fire-1", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		StepID: "step-1", PolicyDigest: "sha256:" + strings.Repeat("b", 64), IdempotencyKey: "idem-1",
+	}
+	a.SetScheduledStepDecisionAuthorizer(scheduledStepAuthorizerStub{})
+	_, err := a.ExecuteScheduledStepActivity(context.Background(), intent)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "execution-core scheduled-step lane is unavailable")
+}
+
 // ── CompleteRunActivity ─────────────────────────────────────────────────────
 
 func TestCompleteRunActivity_PublishesRunCompletedEnvelope(t *testing.T) {

@@ -12,7 +12,10 @@ use model_gateway::{
     http_routes::build_router,
     state::{AppState, DynPublisher},
 };
+use mp_contracts::model_plane::v1 as mpv1;
 use mp_contracts::model_plane::v1::{
+    execution_core_client::ExecutionCoreClient,
+    execution_core_server::{ExecutionCore, ExecutionCoreServer},
     inference_core_client::InferenceCoreClient,
     inference_core_server::{InferenceCore, InferenceCoreServer},
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
@@ -38,10 +41,10 @@ use mp_contracts::model_plane::v1::{
     ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse,
     SaveCheckpointRequest, SaveCheckpointResponse, SessionMessage, SpeechVoiceInfo,
     StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse,
-    StreamVideoGenerationContentRequest, StreamVideoGenerationContentResponse,
-    SynthesizeSpeechRequest, SynthesizeSpeechResponse, TerminalOutcome, TranscribeSpeechRequest,
-    TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse, TranslationDetection,
-    TranslationLanguageInfo,
+    StartScheduledRunRequest, StreamVideoGenerationContentRequest,
+    StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
+    TerminalOutcome, TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest,
+    TranslateTextResponse, TranslationDetection, TranslationLanguageInfo,
 };
 use mp_events::publisher::InMemoryPublisher;
 use std::pin::Pin;
@@ -881,6 +884,15 @@ impl SessionCore for MockSessionCore {
         ))
     }
 
+    async fn start_scheduled_run(
+        &self,
+        _: TReq<StartScheduledRunRequest>,
+    ) -> Result<Response<StartRunResponse>, Status> {
+        Err(Status::unimplemented(
+            "scheduled StartRun is not part of the gateway test path",
+        ))
+    }
+
     async fn complete_step(
         &self,
         _: TReq<CompleteStepRequest>,
@@ -957,6 +969,7 @@ impl SessionCore for MockSessionCore {
             .map(|(role, _, content)| SessionMessage {
                 role: role.clone(),
                 content: content.clone(),
+                agent_name: String::new(),
             })
             .collect();
         Ok(Response::new(ListConversationResponse { messages }))
@@ -1031,6 +1044,25 @@ impl SessionCore for MockSessionCore {
     {
         Err(Status::unimplemented(
             "prepare_scheduled_run_thread not needed in this test",
+        ))
+    }
+
+    async fn claim_scheduled_step(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::ClaimScheduledStepRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::ClaimScheduledStepResponse>, Status> {
+        Err(Status::unimplemented(
+            "claim_scheduled_step not needed in this test",
+        ))
+    }
+
+    async fn record_scheduled_step_receipt(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::RecordScheduledStepReceiptRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::RecordScheduledStepReceiptResponse>, Status>
+    {
+        Err(Status::unimplemented(
+            "record_scheduled_step_receipt not needed in this test",
         ))
     }
 
@@ -1223,6 +1255,109 @@ impl ManagedRunLifecycle for MockManagedRunLifecycle {
             already_terminal: false,
         }))
     }
+}
+
+/// A mock Execution Core whose `RunAgent` answers `PermissionDenied` — one of
+/// the codes `is_confirmed_agent_dispatch_rejection` treats as a CONFIRMED
+/// pre-dispatch rejection. Every other method is unreachable on the agentic
+/// chat path, so they stub out.
+struct RejectingExecutionCore;
+
+#[tonic::async_trait]
+impl ExecutionCore for RejectingExecutionCore {
+    async fn run_agent(
+        &self,
+        _: TReq<mpv1::RunAgentRequest>,
+    ) -> Result<Response<mpv1::RunAgentResponse>, Status> {
+        Err(Status::permission_denied(
+            "run agent refused before it began",
+        ))
+    }
+
+    async fn execute_step(
+        &self,
+        _: TReq<mpv1::ExecuteStepRequest>,
+    ) -> Result<Response<mpv1::ExecuteStepResponse>, Status> {
+        Err(Status::unimplemented("execute_step not needed in test"))
+    }
+
+    async fn resume_run(
+        &self,
+        _: TReq<mpv1::ResumeRunRequest>,
+    ) -> Result<Response<mpv1::ResumeRunResponse>, Status> {
+        Err(Status::unimplemented("resume_run not needed in test"))
+    }
+
+    async fn cancel_run(
+        &self,
+        _: TReq<mpv1::CancelRunRequest>,
+    ) -> Result<Response<mpv1::CancelRunResponse>, Status> {
+        Err(Status::unimplemented("cancel_run not needed in test"))
+    }
+
+    async fn pause_run(
+        &self,
+        _: TReq<mpv1::PauseRunRequest>,
+    ) -> Result<Response<mpv1::PauseRunResponse>, Status> {
+        Err(Status::unimplemented("pause_run not needed in test"))
+    }
+
+    async fn execute_scheduled_step(
+        &self,
+        _: TReq<mpv1::ExecuteScheduledStepRequest>,
+    ) -> Result<Response<mpv1::ExecuteScheduledStepResponse>, Status> {
+        Err(Status::unimplemented(
+            "execute_scheduled_step not needed in test",
+        ))
+    }
+}
+
+/// A listener that completes the TCP accept and then drops the socket without
+/// ever speaking gRPC. The client's connection is therefore ESTABLISHED before
+/// it dies, so the resulting transport error carries no connect-phase errno and
+/// `dispatch_never_reached_execution_core` cannot prove non-delivery. The
+/// accept loop keeps running for the lifetime of the test so a retry cannot
+/// fall back to `ECONNREFUSED` and be classified as undelivered after all.
+async fn spawn_connection_dropping_execution_mock() -> ExecutionCoreClient<tonic::transport::Channel>
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((socket, _)) => {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        drop(socket);
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    ExecutionCoreClient::new(
+        Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect_lazy(),
+    )
+}
+
+async fn spawn_rejecting_execution_mock() -> ExecutionCoreClient<tonic::transport::Channel> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(ExecutionCoreServer::new(RejectingExecutionCore))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let ch = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    ExecutionCoreClient::new(ch)
 }
 
 async fn spawn_mock<S: InferenceCore>(svc: S) -> InferenceCoreClient<tonic::transport::Channel> {
@@ -2476,13 +2611,22 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("event: connected"), "{body}");
     assert!(body.contains("event: error"), "{body}");
-    // `rejected`, not `unavailable`: the dispatch fails while CONSTRUCTING the
-    // authenticated RunAgent request, which is a deterministic local
-    // credential/metadata failure and therefore a confirmed pre-dispatch
-    // rejection rather than an ambiguous remote outage. The two codes are
-    // deliberately distinct — `unavailable` means the run may still be running
-    // somewhere and stays retriable, `rejected` means nothing was dispatched.
-    assert!(body.contains("agent_dispatch_rejected"), "{body}");
+    // `unreachable`: `make_state` leaves `execution_client` pointing at the
+    // unbound default address, so RunAgent fails in the CONNECT phase with
+    // `ECONNREFUSED`. `dispatch_never_reached_execution_core` can prove from
+    // that errno that the request never left the gateway, so the prepared run
+    // is terminalized (nothing is running to finish it) while still being
+    // reported retryable — the runner being down is a transport outage, not a
+    // verdict on the request. The other two arms have their own tests:
+    // `..._terminalizes_on_confirmed_dispatch_rejection` (deterministic
+    // refusal, NOT retryable) and `..._leaves_an_ambiguous_dispatch_alone`
+    // (connection broken after it was established, so non-delivery is
+    // unprovable and the run must not be touched).
+    assert!(body.contains("agent_dispatch_unreachable"), "{body}");
+    assert!(
+        !body.contains("agent_dispatch_unavailable"),
+        "a provably undelivered dispatch must not be reported as an unknown outcome: {body}"
+    );
     assert!(
         !body.contains("event: done"),
         "a failed RunAgent dispatch must not be reported as a completed agent run: {body}"
@@ -2505,10 +2649,149 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
     );
     let prepared_thread_id = prepared_thread_id(&session_handles);
     assert_single_user_message_on_prepared_thread(&session_handles, &prepared_thread_id);
-    // The mirror image of the `unavailable` contract. A confirmed pre-dispatch
-    // rejection means nothing is running anywhere, so leaving the prepared run
-    // open would strand it in `running` forever with no worker to finish it.
-    // `unavailable` is the case that must NOT be terminalized.
+    // Nothing was delivered, so nothing is running: the prepared run must be
+    // closed rather than stranded in `running` with no worker to finish it.
+    let receipts = session_handles.terminal_outcome_captures.lock().unwrap();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "a provably undelivered dispatch must close the prepared run, not strand it"
+    );
+    let (authorization, receipt) = &receipts[0];
+    assert_eq!(
+        authorization, "Bearer gateway-terminalizer-token",
+        "terminalization must use the scoped workload token, not a user bearer"
+    );
+    assert_eq!(
+        receipt.run_id,
+        format!("managed-run-for-{prepared_thread_id}")
+    );
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed as i32);
+    assert_eq!(
+        receipt.source,
+        ManagedRunSource::GatewayAgentDispatchRejected as i32,
+        "the gateway's dispatch is the producer that failed either way"
+    );
+    // The durable half of the split: same source and outcome as a refused
+    // dispatch, distinguished only by this code, so an operator reading the
+    // receipt can tell a transient runner outage (retry the run) from a request
+    // the runner deliberately refused (fix the request).
+    assert_eq!(
+        receipt.failure_code, "dispatch_unreachable",
+        "an undelivered dispatch must not be recorded as a refusal"
+    );
+}
+
+/// The ambiguous arm: a connection that is ESTABLISHED and then broken, rather
+/// than refused outright. The failure carries no connect-phase errno, so
+/// non-delivery is unprovable — Execution Core may have accepted the run before
+/// the link died — and the prepared run must therefore be left exactly as it
+/// is. Terminalizing here would mark a possibly-live run failed.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_agentic_leaves_an_ambiguous_dispatch_alone() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    state.execution_client = spawn_connection_dropping_execution_mock().await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: connected"), "{body}");
+    assert!(body.contains("agent_dispatch_unavailable"), "{body}");
+    assert!(
+        !body.contains("agent_dispatch_unreachable"),
+        "a broken established connection does not prove the request was undelivered: {body}"
+    );
+    assert!(
+        !body.contains("agent_dispatch_rejected"),
+        "an ambiguous transport outcome is not a confirmed rejection: {body}"
+    );
+    assert!(
+        !body.contains("event: done"),
+        "an ambiguous dispatch must not be reported as a completed agent run: {body}"
+    );
+
+    assert!(
+        session_handles
+            .terminal_outcome_captures
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "an unprovable dispatch outcome must leave the prepared run alone, not terminalize it"
+    );
+}
+
+/// The `rejected` half of the dispatch contract, which
+/// `invoke_stream_agentic_reuses_the_prepared_session_run` cannot reach: a
+/// mock Execution Core that answers `PermissionDenied` is a CONFIRMED
+/// pre-dispatch rejection (`is_confirmed_agent_dispatch_rejection`), so
+/// nothing is running anywhere. Leaving the prepared run open would strand it
+/// in `running` forever with no worker to finish it, so it must be
+/// terminalized — with the scoped workload token, naming the producer that
+/// actually failed.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_agentic_terminalizes_on_confirmed_dispatch_rejection() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    state.execution_client = spawn_rejecting_execution_mock().await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: connected"), "{body}");
+    assert!(body.contains("agent_dispatch_rejected"), "{body}");
+    assert!(
+        !body.contains("agent_dispatch_unavailable"),
+        "a confirmed rejection must not be reported as an ambiguous outage: {body}"
+    );
+    assert!(
+        !body.contains("event: done"),
+        "a rejected RunAgent dispatch must not be reported as a completed agent run: {body}"
+    );
+
+    let prepared_thread_id = prepared_thread_id(&session_handles);
     let receipts = session_handles.terminal_outcome_captures.lock().unwrap();
     assert_eq!(
         receipts.len(),

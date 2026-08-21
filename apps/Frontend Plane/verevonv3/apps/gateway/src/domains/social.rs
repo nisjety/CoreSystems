@@ -30,7 +30,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/social/accounts", get(list_accounts))
         .route("/api/v1/social/adapters", get(list_adapters))
         .route("/api/v1/social/approvals", get(list_approvals))
-        .route("/api/v1/social/approvals/:id/decide", post(decide_approval))
+        .route(
+            "/api/v1/social/approvals/{id}/decide",
+            post(decide_approval),
+        )
         .route(
             "/api/v1/social/campaigns",
             get(list_campaigns).post(create_campaign),
@@ -47,12 +50,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/social/drafts/from-inbox",
             post(create_draft_from_inbox),
         )
-        .route("/api/v1/social/posts/:id/schedule", post(schedule_post))
-        .route("/api/v1/social/posts/:id/publish", post(publish_post))
+        .route("/api/v1/social/posts/{id}/schedule", post(schedule_post))
+        .route("/api/v1/social/posts/{id}/publish", post(publish_post))
         .route("/api/v1/social/metrics", get(list_metrics))
         .route("/api/v1/social/catalogs", get(list_catalogs))
         .route(
-            "/api/v1/social/catalogs/:id/products",
+            "/api/v1/social/catalogs/{id}/products",
             get(list_catalog_products),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))

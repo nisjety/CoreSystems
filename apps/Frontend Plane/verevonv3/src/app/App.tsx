@@ -13,6 +13,8 @@ const TicketingPage = lazy(() => import('@/features/tickets/components/Ticketing
 const SupportPage = lazy(() => import('@/features/support/components/SupportPage'))
 const AgentsPage = lazy(() => import('@/features/agents/components/AgentsPage'))
 const AgentRunConsole = lazy(() => import('@/features/agents/components/AgentRunConsole'))
+const AgentInstallationsPage = lazy(() => import('@/features/agents/components/AgentInstallationsPage'))
+const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
 const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDashboardPage'))
 const OpsQualityPage = lazy(() => import('@/features/quality/components/OpsQualityPage'))
 const SocialCalendarPage = lazy(() => import('@/features/social/components/SocialCalendarPage'))
@@ -197,6 +199,8 @@ export const Router = createRouter({
         { path: '/insights/external_analytics', component: () => <InsightsPage section="external_analytics" /> },
         { path: '/insights/experiments', component: () => <InsightsPage section="experiments" /> },
         { path: '/agents', component: AgentsPage },
+        { path: '/agents/installations', component: AgentInstallationsPage },
+        { path: '/agents/chief-core', component: ChiefCoreRoutingPage },
         { path: '/agents/runs', component: AgentRunConsole },
         { path: '/agents/cost', component: CostDashboardPage },
         { path: '/agents/quality', component: OpsQualityPage },

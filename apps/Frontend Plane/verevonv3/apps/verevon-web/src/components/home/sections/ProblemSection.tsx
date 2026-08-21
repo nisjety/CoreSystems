@@ -3,7 +3,7 @@
 import Image from "next/image";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import type { KeyboardEvent } from "react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { ArrowButton } from "@/components/ui/ArrowButton";
@@ -11,6 +11,12 @@ import { Eyebrow } from "@/components/ui/SectionHeading";
 import { Reveal } from "@/components/home/sections/Reveal";
 import { SignalPathLayer } from "@/components/home/sections/SignalPathLayer";
 import { cn } from "@/lib/utils";
+import {
+	controlProblemShots,
+	scatteredProblemShots,
+	waitingProblemShots,
+	type ProblemVideoShot,
+} from "@/components/home/sections/problemVideoSequences";
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -23,8 +29,8 @@ type IndexCard = {
 	kicker: string;
 	label: string;
 	title: string;
-	/** Hover-preview loop. When set, the card plays this on hover instead of showing a still image; the same file is the linked page's hero. */
-	video?: string;
+	/** Silent hover-preview sequence; each shot advances only after the previous one ends. */
+	videos: ProblemVideoShot[];
 };
 
 type GalaxyImage = {
@@ -128,7 +134,7 @@ function GalaxyThumb({ image }: { image: GalaxyImage }) {
 	);
 }
 
-// The 3 index cards below the credo — each one points into a later section
+// Three problem cards below the credo — each one points into a later section
 // (or a dedicated page, like /trust or /produkt/svartid) instead of
 // restating the thesis, so this section stays a single, uncluttered move:
 // state the problem, then hand off.
@@ -175,9 +181,8 @@ function GalaxyThumb({ image }: { image: GalaxyImage }) {
 // already in use as this card's still). The escalator was dropped — a
 // moving staircase has a top and a bottom, so it reads as progress toward a
 // destination, not delay; that's closer to card 03's "a system acting
-// without your input" than to card 01. The other four share near-identical
-// prompt language (same grade, same "nothing resolves" instruction), so they
-// were crossfaded into one loop rather than picked between. It plays on
+// without your input" than to card 01. The five selected clips now play as
+// one ordered sequence, advancing only when each shot ends. It plays on
 // hover (card click still just switches tabs, as before); the CTA now
 // navigates to /produkt/svartid, which uses the same file as its hero.
 // (First cut of that page argued source-traceability, because "kilde"
@@ -191,27 +196,27 @@ const cards: IndexCard[] = [
 		body: "Det er å finne kilden, sjekke reglene, formulere svaret og gjøre neste steg riktig. Et svar uten synlig kilde er ren gjetning med god selvtillit.",
 		href: "/produkt/svartid",
 		label: "Se tidsbesparelsen",
-		image: "/verevon-mood/conveyor-belt-single-suitcase.jpg",
-		imagePosition: "38% 62%",
-		video: "/verevon-vibe/problem-delay-loop.mp4",
+		image: "/verevon-vibe/problem-waiting/waiting-room-ai-poster.jpg",
+		videos: waitingProblemShots,
 	},
 	{
 		kicker: "02",
 		title: "Ett spørsmål. Flere systemer. Ingen har hele bildet",
 		body: "AI kan formulere et svar, men arbeidet krever også søk, dokumenter, interne regler, historikk, vurdering og systemhandlinger før neste steg kan tas. Kunnskap hjelper ingen før den er koblet til arbeidet.",
-		href: "/trust",
-		label: "Se godkjenningsmodellen",
-		image: "/verevon-mood/monitor-wall-lone-operator.jpg",
-		imagePosition: "center 55%",
+		href: "/plattform/felles-kontekst",
+		label: "Se felles kontekst",
+		image: "/verevon-vibe/problem-scattered/archive-catalog-6549263-poster.jpg",
+		videos: scatteredProblemShots,
 	},
 	{
 		kicker: "03",
 		title: "Automatisering krever kontroll",
 		body: "Automatisering som sender selv, er en risiko ingen har bedt om. Når AI bruker verktøy eller endrer noe, må dere kunne se hvor svaret kommer fra, følge stegene og godkjenne før neste handling.",
-		href: "#flyt",
-		label: "Se arbeidsflyten",
-		image: "/verevon-mood/aerospace-hand-pressure-gauge.jpg",
-		imagePosition: "68% 38%",
+		href: "/plattform/kontrollert-arbeid",
+		label: "Se kontrollert arbeid",
+		image: "/verevon-vibe/problem-control/autonomous-car-ai-poster.jpg",
+		imagePosition: "center",
+		videos: controlProblemShots,
 	},
 ];
 
@@ -270,7 +275,7 @@ function ProblemLine({ line, lineIndex }: { line: string[]; lineIndex: number })
  * (Wolverine's "portfolio" device: photos threaded through big statement
  * type, not confined to the margins) and does not participate in the fade.
  * Reduced motion skips the animation and shows the finished, fully legible
- * state. The supporting paragraph and the 3 index cards follow in normal
+ * state. The supporting paragraph and the three problem cards follow in normal
  * flow — the whole job here is to land the thesis, then hand off into the
  * rest of the page.
  */
@@ -278,8 +283,13 @@ export function ProblemSection() {
 	const sectionRef = useRef<HTMLDivElement>(null);
 	const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 	const videoRefs = useRef<Array<HTMLVideoElement | null>>([]);
+	const playingCardIndex = useRef<number | null>(null);
+	const advancedShotKey = useRef<string | null>(null);
 	const [activeIndex, setActiveIndex] = useState(0);
 	const [previousIndex, setPreviousIndex] = useState<number | null>(null);
+	const [sequenceIndices, setSequenceIndices] = useState<number[]>(() =>
+		cards.map(() => 0),
+	);
 	const shouldReduceMotion = useReducedMotion() ?? false;
 
 	function selectTab(index: number, moveFocus = false) {
@@ -321,18 +331,25 @@ export function ProblemSection() {
 	}
 
 	function playCardVideo(index: number) {
-		if (shouldReduceMotion) {
+		if (shouldReduceMotion || cards[index].videos.length === 0) {
 			return;
 		}
 
+		playingCardIndex.current = index;
+		advancedShotKey.current = null;
 		videoRefs.current[index]?.play().catch(() => {
 			// Autoplay can be rejected before the user has interacted with the
 			// page at all; the poster stays visible either way, so there's
-			// nothing to recover from here.
-		});
+				// nothing to recover from here.
+			});
 	}
 
 	function pauseCardVideo(index: number) {
+		if (playingCardIndex.current === index) {
+			playingCardIndex.current = null;
+		}
+		advancedShotKey.current = null;
+
 		const video = videoRefs.current[index];
 
 		if (!video) {
@@ -341,7 +358,64 @@ export function ProblemSection() {
 
 		video.pause();
 		video.currentTime = 0;
+		setSequenceIndices((current) =>
+			current.map((sequenceIndex, cardIndex) =>
+				cardIndex === index ? 0 : sequenceIndex,
+			),
+		);
 	}
+
+	function advanceCardVideo(index: number) {
+		const sequenceLength = cards[index].videos.length;
+		const shotKey = `${index}-${sequenceIndices[index]}`;
+
+		if (
+			sequenceLength < 2 ||
+			playingCardIndex.current !== index ||
+			advancedShotKey.current === shotKey
+		) {
+			return;
+		}
+
+		advancedShotKey.current = shotKey;
+		setSequenceIndices((current) =>
+			current.map((sequenceIndex, cardIndex) =>
+				cardIndex === index
+					? (sequenceIndex + 1) % sequenceLength
+					: sequenceIndex,
+			),
+		);
+	}
+
+	function handleCardVideoTimeUpdate(
+		index: number,
+		video: HTMLVideoElement,
+	) {
+		const shot = cards[index].videos[sequenceIndices[index]];
+
+		if (video.currentTime >= shot.duration) {
+			advanceCardVideo(index);
+		}
+	}
+
+	useEffect(() => {
+		const index = playingCardIndex.current;
+
+		if (index === null) {
+			return;
+		}
+
+		const video = videoRefs.current[index];
+
+		if (!video) {
+			return;
+		}
+
+		video.load();
+		video.play().catch(() => {
+			// Keep the still poster if playback is unavailable in this browser.
+		});
+	}, [sequenceIndices]);
 
 	useLayoutEffect(() => {
 		const section = sectionRef.current;
@@ -592,24 +666,27 @@ export function ProblemSection() {
 									role={isActive ? "tabpanel" : "button"}
 									tabIndex={isActive ? undefined : 0}
 								>
-									{card.video ? (
-										<video
-											className="absolute inset-0 size-full object-cover"
-											loop
-											muted
-											playsInline
-											poster={card.image}
-											preload="metadata"
-											ref={(element) => {
-												videoRefs.current[index] = element;
-											}}
-											style={{
-												objectPosition: card.imagePosition ?? "center",
-											}}
-										>
-											<source src={card.video} type="video/mp4" />
-										</video>
-									) : (
+					{card.videos.length > 0 ? (
+						<video
+								className="absolute inset-0 size-full object-cover"
+								muted
+								onEnded={() => advanceCardVideo(index)}
+								onTimeUpdate={(event) =>
+									handleCardVideoTimeUpdate(index, event.currentTarget)
+								}
+								playsInline
+								poster={card.image}
+								preload="metadata"
+								ref={(element) => {
+									videoRefs.current[index] = element;
+								}}
+								src={card.videos[sequenceIndices[index]].src}
+								style={{
+									objectPosition: card.imagePosition ?? "center",
+								}}
+							>
+							</video>
+					) : (
 										<Image
 											alt=""
 											className="object-cover"

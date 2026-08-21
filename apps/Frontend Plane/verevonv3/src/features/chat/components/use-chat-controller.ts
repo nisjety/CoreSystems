@@ -691,7 +691,26 @@ export function useChatController() {
         const linkedThread = readThreadDeepLink(window.location.search)
         if (linkedThread) setActiveChatThreadId(linkedThread)
         const storedThread = linkedThread ?? readActiveChatThreadId()
-        if (storedThread) await loadThread(storedThread)
+        if (storedThread) {
+          if (linkedThread || isTemporaryThread(storedThread)) {
+            await loadThread(storedThread)
+          } else {
+            // A stored pointer is only trusted as far as Chat's own listing: the
+            // server list excludes Space-scoped records (they live in the room's
+            // timeline), so a pointer left behind by the old routing must be
+            // released rather than resurrected into Chat's history. `null` means
+            // the listing itself was unavailable — a transient outage must not
+            // blank the chat, so the pointer loads as before.
+            const listed = await listChatThreads().catch(() => null)
+            if (!listed || listed.some((thread) => thread.threadId === storedThread)) {
+              await loadThread(storedThread)
+            } else {
+              clearActiveChatThreadId()
+              removeChatThreadHistoryItem(storedThread)
+              removeChatThreadTranscript(storedThread)
+            }
+          }
+        }
 
         try {
           const available = await listModels()

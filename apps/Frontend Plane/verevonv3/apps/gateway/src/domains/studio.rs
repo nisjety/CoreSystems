@@ -41,11 +41,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_projects).post(create_project),
         )
         .route(
-            "/api/v1/studio/projects/:id",
+            "/api/v1/studio/projects/{id}",
             get(get_project).put(update_project),
         )
         .route(
-            "/api/v1/studio/projects/:id/export/social-draft",
+            "/api/v1/studio/projects/{id}/export/social-draft",
             post(export_social_draft),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))

@@ -25,18 +25,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/tickets", get(list_tickets).post(create_ticket))
         .route(
-            "/api/v1/tickets/conversations/:id/classifications",
+            "/api/v1/tickets/conversations/{id}/classifications",
             post(classify_conversation),
         )
         .route("/api/v1/tickets/csat-scorecard", get(get_csat_scorecard))
-        .route("/api/v1/tickets/:id/activity", get(list_ticket_activity))
+        .route("/api/v1/tickets/{id}/activity", get(list_ticket_activity))
         .route(
-            "/api/v1/tickets/:id/csat-outcome",
+            "/api/v1/tickets/{id}/csat-outcome",
             get(get_ticket_csat_outcome),
         )
-        .route("/api/v1/tickets/:id", get(get_ticket).patch(patch_ticket))
+        .route("/api/v1/tickets/{id}", get(get_ticket).patch(patch_ticket))
         .route(
-            "/api/v1/tickets/:id/support-recurrence-candidates",
+            "/api/v1/tickets/{id}/support-recurrence-candidates",
             get(get_support_recurrence_candidates),
         )
         .route(
@@ -44,13 +44,13 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_incidents).post(create_incident),
         )
         .route(
-            "/api/v1/incidents/:id",
+            "/api/v1/incidents/{id}",
             get(get_incident).patch(patch_incident),
         )
-        .route("/api/v1/incidents/:id/tickets", post(link_incident_ticket))
+        .route("/api/v1/incidents/{id}/tickets", post(link_incident_ticket))
         .route("/api/v1/problems", get(list_problems).post(create_problem))
         .route(
-            "/api/v1/problems/:id",
+            "/api/v1/problems/{id}",
             get(get_problem).patch(patch_problem),
         )
         .route(
@@ -58,36 +58,36 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_ticket_teams).post(create_ticket_team),
         )
         .route(
-            "/api/v1/ticket-teams/:id",
+            "/api/v1/ticket-teams/{id}",
             axum::routing::patch(patch_ticket_team),
         )
-        .route("/api/v1/tickets/:id/links", post(link_ticket_resource))
+        .route("/api/v1/tickets/{id}/links", post(link_ticket_resource))
         .route(
-            "/api/v1/tickets/:id/macros/:macro_id/run",
+            "/api/v1/tickets/{id}/macros/{macro_id}/run",
             post(run_ticket_macro),
         )
         .route(
-            "/api/v1/tickets/:id/checklists",
+            "/api/v1/tickets/{id}/checklists",
             post(create_ticket_checklist),
         )
         .route(
-            "/api/v1/tickets/:id/checklists/:checklist_id/items/:item_id",
+            "/api/v1/tickets/{id}/checklists/{checklist_id}/items/{item_id}",
             axum::routing::patch(patch_ticket_checklist_item),
         )
         .route(
-            "/api/v1/tickets/:id/side-conversations",
+            "/api/v1/tickets/{id}/side-conversations",
             post(create_ticket_side_conversation),
         )
         .route(
-            "/api/v1/tickets/:id/side-conversations/:side_conversation_id",
+            "/api/v1/tickets/{id}/side-conversations/{side_conversation_id}",
             axum::routing::patch(patch_ticket_side_conversation),
         )
         .route(
-            "/api/v1/tickets/:id/side-conversations/:side_conversation_id/messages",
+            "/api/v1/tickets/{id}/side-conversations/{side_conversation_id}/messages",
             post(add_ticket_side_conversation_message),
         )
         .route(
-            "/api/v1/tickets/:id/chat-handoff",
+            "/api/v1/tickets/{id}/chat-handoff",
             post(record_ticket_chat_handoff),
         )
         .route(
@@ -95,7 +95,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_ticket_views).post(create_ticket_view),
         )
         .route(
-            "/api/v1/ticket-views/:id",
+            "/api/v1/ticket-views/{id}",
             axum::routing::patch(patch_ticket_view),
         )
         .route(
@@ -103,7 +103,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_ticket_macros).post(create_ticket_macro),
         )
         .route(
-            "/api/v1/ticket-macros/:id",
+            "/api/v1/ticket-macros/{id}",
             axum::routing::patch(patch_ticket_macro),
         )
         .route(
@@ -111,7 +111,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_ticket_automation_rules).post(create_ticket_automation_rule),
         )
         .route(
-            "/api/v1/ticket-automation-rules/:id",
+            "/api/v1/ticket-automation-rules/{id}",
             axum::routing::patch(patch_ticket_automation_rule),
         )
         .route(
@@ -119,7 +119,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_sla_policies).post(create_sla_policy),
         )
         .route(
-            "/api/v1/sla-policies/:id",
+            "/api/v1/sla-policies/{id}",
             axum::routing::patch(patch_sla_policy),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))

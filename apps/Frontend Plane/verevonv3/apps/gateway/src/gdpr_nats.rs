@@ -41,9 +41,14 @@
 //!     connection.
 //!
 //! PROVISIONING: the durable consumer ([`DURABLE_NAME`] on [`STREAM_NAME`],
-//! filtering [`SUBJECT`]) is created by audit-core's
-//! `internal/provisioner/provisioner.go` (`orgErasureConsumerConfigs`), and the
-//! identity's permission block lives in `apps/Control Plane/control-shared-nats.conf`.
+//! filtering [`SUBJECT`]) is created at deployment by audit-core's
+//! `ProvisionControlSharedRuntime` (`internal/provisioner/provisioner.go`);
+//! the wanted shape is declared once in `orgErasureConsumerConfigs`, which
+//! `cmd/nats-consumer-migrate` can also converge one durable at a time. Being
+//! in that map alone does NOT create the consumer — the runtime sequence needs
+//! its own `ensureFixedConsumer` call, and the gap between the two is exactly
+//! how this consumer once shipped unprovisioned. The identity's permission
+//! block lives in `apps/Control Plane/control-shared-nats.conf`.
 //! If either is missing, [`run_once`] fails at `get_consumer_from_stream` and
 //! [`run_supervised`] retries forever without making progress — which is why
 //! both are part of this change rather than a follow-up.

@@ -79,29 +79,77 @@ func (h *SkillsHandler) Register(mux *http.ServeMux) {
 }
 
 type skillRow struct {
-	ID                  string    `json:"id"`
-	OrgID               string    `json:"org_id"`
-	Name                string    `json:"name"`
-	Description         string    `json:"description"`
-	Content             string    `json:"content"`
-	TriggerKeywords     []string  `json:"trigger_keywords"`
-	TriggerFilePatterns []string  `json:"trigger_file_patterns"`
-	ToolRestrictions    []string  `json:"tool_restrictions"`
-	Enabled             bool      `json:"enabled"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ID                  string   `json:"id"`
+	OrgID               string   `json:"org_id"`
+	Name                string   `json:"name"`
+	Description         string   `json:"description"`
+	Content             string   `json:"content"`
+	TriggerKeywords     []string `json:"trigger_keywords"`
+	TriggerFilePatterns []string `json:"trigger_file_patterns"`
+	ToolRestrictions    []string `json:"tool_restrictions"`
+	Enabled             bool     `json:"enabled"`
+	// Ownership/sharing (SKILL-1): "org" (default, visible to the whole org)
+	// or "user" (private to OwnerUserID until explicitly shared). Mirrors
+	// mcp_servers' scope + owner + explicit-share shape.
+	Scope       string    `json:"scope"`
+	OwnerUserID string    `json:"owner_user_id,omitempty"`
+	SharedWith  []string  `json:"shared_with,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func validSkillScope(value string) bool {
+	return value == "org" || value == "user"
+}
+
+// normalizeSkillShares validates and cleans a caller-supplied grantee list:
+// trims whitespace, drops blanks and the owner themselves, de-dups, and
+// rejects anything that isn't a well-formed identifier. This is the
+// authoritative sharing validator for skills — unlike mcp_servers (whose
+// real enforcement lives in model-gateway's OwnershipStore), capability-core
+// is the sole write path for agent_skills, so it owns this outright.
+func normalizeSkillShares(ownerUserID string, grantees []string) ([]string, error) {
+	if len(grantees) > 64 {
+		return nil, errors.New("too many skill grantees")
+	}
+	seen := make(map[string]struct{}, len(grantees))
+	clean := make([]string, 0, len(grantees))
+	for _, grantee := range grantees {
+		grantee = strings.TrimSpace(grantee)
+		if grantee == "" || grantee == ownerUserID {
+			continue
+		}
+		if !mcpIdentifier.MatchString(grantee) {
+			return nil, errors.New("invalid skill sharing metadata")
+		}
+		if _, exists := seen[grantee]; exists {
+			continue
+		}
+		seen[grantee] = struct{}{}
+		clean = append(clean, grantee)
+	}
+	return clean, nil
 }
 
 func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		orgID := verifiedOrganizationID(r)
+		callerID := verifiedActorID(r)
+		isAdmin := verifiedIsAdmin(r)
+		// Visibility (SKILL-1): org-scoped skills, the caller's own, ones
+		// explicitly shared with the caller, and — for governance — any
+		// shared (never private) skill an admin didn't create themselves.
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, content,
 			       trigger_keywords, trigger_file_patterns, tool_restrictions,
-			       enabled, created_at, updated_at
-			FROM agent_skills WHERE org_id = $1 ORDER BY name
-		`, orgID)
+			       enabled, scope, owner_user_id, shared_with, created_at, updated_at
+			FROM agent_skills
+			WHERE org_id = $1
+			  AND (scope = 'org' OR owner_user_id = $2 OR shared_with ? $2
+			       OR ($3 AND jsonb_array_length(shared_with) > 0))
+			ORDER BY name
+		`, orgID, callerID, isAdmin)
 		if err != nil {
 			slog.Error("list skills failed", "error", err)
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
@@ -113,7 +161,8 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			var s skillRow
 			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
 				&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
-				&s.Enabled, &s.CreatedAt, &s.UpdatedAt); err != nil {
+				&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+				&s.CreatedAt, &s.UpdatedAt); err != nil {
 				jsonErr(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -138,15 +187,37 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		if s.ToolRestrictions == nil {
 			s.ToolRestrictions = []string{}
 		}
+		s.Scope = strings.ToLower(strings.TrimSpace(s.Scope))
+		if s.Scope == "" {
+			s.Scope = "org"
+		}
+		if !validSkillScope(s.Scope) {
+			jsonErr(w, "invalid skill scope", http.StatusUnprocessableEntity)
+			return
+		}
+		if s.Scope == "org" && !verifiedIsAdmin(r) {
+			jsonErr(w, "only an admin can create an org-wide skill", http.StatusForbidden)
+			return
+		}
+		// Ownership is bound to the authenticated caller server-side, never
+		// to whatever owner_user_id the client happened to send.
+		if s.Scope == "user" {
+			s.OwnerUserID = verifiedActorID(r)
+		} else {
+			s.OwnerUserID = ""
+		}
+		s.SharedWith = []string{}
 		kw, _ := json.Marshal(s.TriggerKeywords)
 		fp, _ := json.Marshal(s.TriggerFilePatterns)
 		tr, _ := json.Marshal(s.ToolRestrictions)
+		sw, _ := json.Marshal(s.SharedWith)
 		_, err := h.pool.Exec(r.Context(), `
 			INSERT INTO agent_skills (id, org_id, name, description, content,
 			    trigger_keywords, trigger_file_patterns, tool_restrictions,
-			    enabled, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-		`, s.ID, s.OrgID, s.Name, s.Description, s.Content, kw, fp, tr, s.Enabled, now, now)
+			    enabled, scope, owner_user_id, shared_with, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		`, s.ID, s.OrgID, s.Name, s.Description, s.Content, kw, fp, tr, s.Enabled,
+			s.Scope, s.OwnerUserID, sw, now, now)
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -163,15 +234,20 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
+	callerID := verifiedActorID(r)
+	isAdmin := verifiedIsAdmin(r)
 	var s skillRow
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, content,
 		       trigger_keywords, trigger_file_patterns, tool_restrictions,
-		       enabled, created_at, updated_at
-		FROM agent_skills WHERE id = $1 AND org_id = $2
-	`, id, verifiedOrganizationID(r)).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
+		       enabled, scope, owner_user_id, shared_with, created_at, updated_at
+		FROM agent_skills
+		WHERE id = $1 AND org_id = $2
+		  AND (scope = 'org' OR owner_user_id = $3 OR shared_with ? $3
+		       OR ($4 AND jsonb_array_length(shared_with) > 0))
+	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
 		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
-		&s.Enabled, &s.CreatedAt, &s.UpdatedAt)
+		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
@@ -181,20 +257,57 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 
 func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string) {
 	var update struct {
-		Enabled     *bool  `json:"enabled"`
-		Description string `json:"description"`
-		Content     string `json:"content"`
+		Enabled     *bool     `json:"enabled"`
+		Description string    `json:"description"`
+		Content     string    `json:"content"`
+		SharedWith  *[]string `json:"shared_with"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if update.Enabled == nil && update.Description == "" && update.Content == "" {
+	if update.Enabled == nil && update.Description == "" && update.Content == "" && update.SharedWith == nil {
 		jsonErr(w, "at least one skill field is required", http.StatusBadRequest)
 		return
 	}
 	now := time.Now().UTC()
 	orgID := verifiedOrganizationID(r)
+	var sharedJSON any
+	if update.SharedWith != nil {
+		var scope, ownerUserID string
+		if err := h.pool.QueryRow(r.Context(), `
+			SELECT scope, owner_user_id FROM agent_skills WHERE id=$1 AND org_id=$2
+		`, id, orgID).Scan(&scope, &ownerUserID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				jsonErr(w, "skill not found", http.StatusNotFound)
+			} else {
+				slog.Error("read skill sharing config failed", "error", err)
+				jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			}
+			return
+		}
+		if scope != "user" {
+			jsonErr(w, "only a user-owned skill can be shared", http.StatusUnprocessableEntity)
+			return
+		}
+		// A user-owned resource may only be shared by its durable owner.
+		callerID := verifiedActorID(r)
+		if ownerUserID == "" || callerID != ownerUserID {
+			jsonErr(w, "only the skill owner may change sharing", http.StatusForbidden)
+			return
+		}
+		clean, err := normalizeSkillShares(ownerUserID, *update.SharedWith)
+		if err != nil {
+			jsonErr(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		payload, err := json.Marshal(clean)
+		if err != nil {
+			jsonErr(w, "invalid skill sharing configuration", http.StatusUnprocessableEntity)
+			return
+		}
+		sharedJSON = payload
+	}
 	var enabled any
 	if update.Enabled != nil {
 		enabled = *update.Enabled
@@ -202,9 +315,10 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	result, err := h.pool.Exec(r.Context(), `
 		UPDATE agent_skills
 		SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
-			content=COALESCE(NULLIF($3, ''), content), updated_at=$4
-		WHERE id=$5 AND org_id=$6
-	`, enabled, update.Description, update.Content, now, id, orgID)
+			content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
+			updated_at=$5
+		WHERE id=$6 AND org_id=$7
+	`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID)
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}

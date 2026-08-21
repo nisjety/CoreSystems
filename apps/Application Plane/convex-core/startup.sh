@@ -91,6 +91,10 @@ set_convex_env "AUTH_SERVER_URL" "${AUTH_SERVER_URL:-http://auth-core:3011}"
 # "not configured" — leaving each new Space pending_registration forever.
 set_convex_env "CONTROL_SPACE_REGISTRATION_URL" "${CONTROL_SPACE_REGISTRATION_URL:-http://user-core:3012/api/v1/internal/spaces/register}"
 set_convex_env "APPLICATION_SPACE_LIFECYCLE_TOKEN" "${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}"
+# Organization room membership sync reads org-core's roster and declares it to
+# Control. Both must reach the deployment, not just this container.
+set_convex_env "APPLICATION_ORG_CORE_SERVICE_TOKEN" "${APPLICATION_ORG_CORE_SERVICE_TOKEN:-}"
+set_convex_env "CONTROL_SPACE_MEMBERSHIP_BASE_URL" "${CONTROL_SPACE_MEMBERSHIP_BASE_URL:-http://user-core:3012/api/v1/internal/spaces}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.

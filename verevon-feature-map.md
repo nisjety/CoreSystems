@@ -6,14 +6,14 @@
 > end-to-end flows, fix bugs, and continue implementation. This is not an
 > instruction to release Verevon externally.
 
-> **Current execution ledger — 2026-08-14.** For current status and ordered
+> **Current execution ledger — 2026-08-15.** For current status and ordered
 > execution across this audit, `VEREVON.md`, the AI-first audit, Vision,
 > Roadmap, and Support delivery record, use
-> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-14).
+> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-15).
 > This feature map retains detailed and dated evidence; the ledger resolves any
 > conflicting current-status claim.
 
-> **Feature-map correction — 2026-08-14.** The map now distinguishes a typed
+> **Feature-map correction — 2026-08-15.** The map now distinguishes a typed
 > UI registry, a reachable gateway route, an owner-plane effect, and a verified
 > outcome. They are not interchangeable. In particular, human and agent paths
 > should share a versioned owner contract only where the actor is eligible;
@@ -22,7 +22,7 @@
 > Space/Action Catalog program, including the coverage gaps in this map, is
 > tracked in [the 2026-08-14 ledger](verevon-roadmap.md#current-execution-ledger--2026-08-14).
 
-> **Local checkpoint — 2026-08-14.** A full dev-stack launcher pass is green,
+> **Local checkpoint — 2026-08-15.** A full dev-stack launcher pass is green,
 > and an owner-approved scheduled-run preparation slice now binds a Control
 > decision, a Capability Core recheck, Session Core's deterministic
 > service-owned thread, and Orchestrator handoff. It is a foundation for the

@@ -60,6 +60,10 @@ describe('SupportPage navigation', () => {
     const railTabs = screen.getByRole('tablist', { name: /outbound context|utgående kontekst/i })
     fireEvent.click(within(railTabs).getByRole('tab', { name: 'Verevon' }))
     flush()
+    // OutboundVerevonRail's empty-state copy is identical on both branches:
+    // i18n.tr('Velg en kvittering før Verevon får utgående kontekst.',
+    //         'Select a receipt before Verevon receives outbound context.')
+    // so match both locales exactly rather than main's looser variant list.
     expect(screen.getByText(/select a receipt before verevon receives outbound context|velg en kvittering før verevon får utgående kontekst/i)).toBeTruthy()
   })
 

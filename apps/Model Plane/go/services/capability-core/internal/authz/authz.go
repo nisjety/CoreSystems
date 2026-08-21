@@ -13,6 +13,12 @@ import (
 )
 
 const (
+	// Auth Core namespaces workload identities in the signed service_id/sub
+	// claim. Downstream gates must compare this exact value rather than the
+	// deployment-name suffix, which would accept an ambiguous principal.
+	ExecutionCoreServiceID    = "service:execution-core"
+	ConversationCoreServiceID = "service:conversation-core"
+
 	ReadScope  = "capability:read"
 	WriteScope = "capability:write"
 	// GlobalWriteScope is reserved for workload identities that maintain the
@@ -26,6 +32,14 @@ const (
 	// that attests process-wide execution-dispatch capability health. It never
 	// grants catalog mutation and tenant health reporters cannot use it.
 	GlobalHealthWriteScope = "capability:health:global:write"
+	// ModelActionViewScope permits Execution Core to exchange a fresh,
+	// Control-signed run view for a server-owned model tool definition. It is
+	// presentation-only and is never an owner-effect or catalog-write scope.
+	ModelActionViewScope = "capability:model-action:view"
+	// OwnerActionHealthWriteScope is held only by Conversation Core's dedicated
+	// owner-action readiness reporter. It cannot mutate the normal catalog or
+	// attest any capability other than the ticket adapter.
+	OwnerActionHealthWriteScope = "capability:owner-action:health:write"
 	// SpaceDeletionScope is held only by the Control-coordinated deletion
 	// workload. It permits the narrow internal cancellation adapter below; it
 	// is intentionally not interchangeable with general capability writes.
@@ -64,7 +78,23 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 	if request.URL.Path == "/api/v1/capabilities/availability" {
 		if request.Method == http.MethodPost &&
 			principal.PrincipalType == "service" &&
-			(principal.HasScope(HealthWriteScope) || principal.HasScope(GlobalHealthWriteScope)) {
+			((principal.HasScope(GlobalHealthWriteScope) && principal.ActorID == ExecutionCoreServiceID && principal.OrganizationID == "global") ||
+				(principal.HasScope(HealthWriteScope) && principal.OrganizationID != "global")) {
+			return nil
+		}
+		return errDenied
+	}
+	if request.URL.Path == "/api/v1/internal/model-actions/run-view" {
+		if request.Method == http.MethodPost && principal.PrincipalType == "service" &&
+			principal.ActorID == ExecutionCoreServiceID && principal.HasScope(ModelActionViewScope) {
+			return nil
+		}
+		return errDenied
+	}
+	if request.URL.Path == "/api/v1/capabilities/owner-actions/health" {
+		if request.Method == http.MethodPost && principal.PrincipalType == "service" &&
+			principal.ActorID == ConversationCoreServiceID && principal.OrganizationID == "global" &&
+			principal.HasScope(OwnerActionHealthWriteScope) {
 			return nil
 		}
 		return errDenied

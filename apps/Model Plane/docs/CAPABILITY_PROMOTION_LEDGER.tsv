@@ -1,0 +1,29 @@
+capability_id	state	source_revision	candidate_ref	live_evidence_ref	rollback_ref	expires_at	reviewer	notes
+cap.agent.spawn	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.browser.open	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.command.sandbox	source_only	working-tree	-	-	-	-	-	Dev health was observed; candidate/live/rollback evidence is absent.
+cap.command.shell	source_only	working-tree	-	-	-	-	-	Dev health was observed as approval_required; candidate/live/rollback evidence is absent.
+cap.retrieval.query	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.apache_tika	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.apis_guru_openapi_directory	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.common_crawl_lab	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.disposable_email_domains	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.gotenberg	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.misp_opencti	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.nominatim_osm	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.nvd_vulnerability_data	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.opensanctions_yente	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.quarry_url_reputation_feeds	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.stirling_pdf	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.tesseract_ocr	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.self_owned.wikimedia_wikidata_dumps	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.http	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.information.read	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.provider.execute	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.provider.read	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.shipping.book	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.shipping.read	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.shipping.track	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.social.publish	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.social.read	source_only	working-tree	-	-	-	-	-	No immutable candidate or live owner evidence.
+cap.tool.ticket.create	source_only	working-tree	-	-	-	-	-	Owner-action health, Control verifier, Conversation receipt, and candidate evidence are absent; Model advertisement must remain empty.

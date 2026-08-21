@@ -26,7 +26,7 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from google.protobuf import struct_pb2 as google_dot_protobuf_dot_struct__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19model_plane/v1/runs.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/protobuf/struct.proto\"&\n\rGetRunRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\"\x8b\x01\n\x0fListRunsRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12#\n\rstatus_filter\x18\x02 \x01(\tR\x0cstatusFilter\x12 \n\x0c\x61\x66ter_run_id\x18\x03 \x01(\tR\nafterRunId\x12\x14\n\x05limit\x18\x04 \x01(\rR\x05limit\"\\\n\x10ListRunsResponse\x12-\n\x04runs\x18\x01 \x03(\x0b\x32\x19.model_plane.v1.RunDetailR\x04runs\x12\x19\n\x08has_more\x18\x02 \x01(\x08R\x07hasMore\"\x8b\x01\n\x15ListSystemRunsRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12#\n\rstatus_filter\x18\x02 \x01(\tR\x0cstatusFilter\x12 \n\x0c\x61\x66ter_run_id\x18\x03 \x01(\tR\nafterRunId\x12\x14\n\x05limit\x18\x04 \x01(\rR\x05limit\"A\n\x10\x43\x61ncelRunRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x16\n\x06reason\x18\x02 \x01(\tR\x06reason\"1\n\x11\x43\x61ncelRunResponse\x12\x1c\n\tcancelled\x18\x01 \x01(\x08R\tcancelled\"_\n\x16ResolveRunOwnerRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x03 \x01(\tR\x06userId\"9\n\x17ResolveRunOwnerResponse\x12\x1e\n\nauthorized\x18\x01 \x01(\x08R\nauthorized\"\xbe\x04\n\tRunDetail\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\"\n\rparent_run_id\x18\x03 \x01(\tR\x0bparentRunId\x12\x19\n\x08\x61gent_id\x18\x04 \x01(\tR\x07\x61gentId\x12\x16\n\x06status\x18\x05 \x01(\tR\x06status\x12\x12\n\x04mode\x18\x06 \x01(\tR\x04mode\x12\x12\n\x04goal\x18\x07 \x01(\tR\x04goal\x12!\n\x0c\x66inal_output\x18\x08 \x01(\tR\x0b\x66inalOutput\x12\x14\n\x05\x65rror\x18\t \x01(\tR\x05\x65rror\x12)\n\x10\x63heckpoint_index\x18\n \x01(\rR\x0f\x63heckpointIndex\x12\'\n\x0fsteps_completed\x18\x0b \x01(\rR\x0estepsCompleted\x12!\n\x0cinput_tokens\x18\x0c \x01(\rR\x0binputTokens\x12#\n\routput_tokens\x18\r \x01(\rR\x0coutputTokens\x12\x39\n\ncreated_at\x18\x0e \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x39\n\nupdated_at\x18\x0f \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x33\n\x08metadata\x18\x10 \x01(\x0b\x32\x17.google.protobuf.StructR\x08metadata2\xb0\x03\n\nRunService\x12\x42\n\x06GetRun\x12\x1d.model_plane.v1.GetRunRequest\x1a\x19.model_plane.v1.RunDetail\x12M\n\x08ListRuns\x12\x1f.model_plane.v1.ListRunsRequest\x1a .model_plane.v1.ListRunsResponse\x12P\n\tCancelRun\x12 .model_plane.v1.CancelRunRequest\x1a!.model_plane.v1.CancelRunResponse\x12Y\n\x0eListSystemRuns\x12%.model_plane.v1.ListSystemRunsRequest\x1a .model_plane.v1.ListRunsResponse\x12\x62\n\x0fResolveRunOwner\x12&.model_plane.v1.ResolveRunOwnerRequest\x1a\'.model_plane.v1.ResolveRunOwnerResponseB\xb1\x01\n\x12\x63om.model_plane.v1B\tRunsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19model_plane/v1/runs.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/protobuf/struct.proto\"&\n\rGetRunRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\"k\n\x1eGetScheduledStepContextRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\"\x8d\x01\n\x14ScheduledStepContext\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x12\n\x04goal\x18\x04 \x01(\tR\x04goal\x12\x16\n\x06status\x18\x05 \x01(\tR\x06status\"\x8b\x01\n\x0fListRunsRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12#\n\rstatus_filter\x18\x02 \x01(\tR\x0cstatusFilter\x12 \n\x0c\x61\x66ter_run_id\x18\x03 \x01(\tR\nafterRunId\x12\x14\n\x05limit\x18\x04 \x01(\rR\x05limit\"\\\n\x10ListRunsResponse\x12-\n\x04runs\x18\x01 \x03(\x0b\x32\x19.model_plane.v1.RunDetailR\x04runs\x12\x19\n\x08has_more\x18\x02 \x01(\x08R\x07hasMore\"\x8b\x01\n\x15ListSystemRunsRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12#\n\rstatus_filter\x18\x02 \x01(\tR\x0cstatusFilter\x12 \n\x0c\x61\x66ter_run_id\x18\x03 \x01(\tR\nafterRunId\x12\x14\n\x05limit\x18\x04 \x01(\rR\x05limit\"A\n\x10\x43\x61ncelRunRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x16\n\x06reason\x18\x02 \x01(\tR\x06reason\"1\n\x11\x43\x61ncelRunResponse\x12\x1c\n\tcancelled\x18\x01 \x01(\x08R\tcancelled\"_\n\x16ResolveRunOwnerRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x03 \x01(\tR\x06userId\"9\n\x17ResolveRunOwnerResponse\x12\x1e\n\nauthorized\x18\x01 \x01(\x08R\nauthorized\"P\n ResolveRunActionAuthorityRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\"\xb9\x04\n!ResolveRunActionAuthorityResponse\x12\x1a\n\x08resolved\x18\x01 \x01(\x08R\x08resolved\x12\x15\n\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x1d\n\nsubject_id\x18\x04 \x01(\tR\tsubjectId\x12\x1b\n\tthread_id\x18\x05 \x01(\tR\x08threadId\x12\x19\n\x08space_id\x18\x06 \x01(\tR\x07spaceId\x12\x34\n\x16recipient_audience_ref\x18\x07 \x01(\tR\x14recipientAudienceRef\x12>\n\x1brecipient_audience_revision\x18\x08 \x01(\x04R\x19recipientAudienceRevision\x12\x36\n\x17recipient_audience_hash\x18\t \x01(\tR\x15recipientAudienceHash\x12,\n\x12privacy_policy_ref\x18\n \x01(\tR\x10privacyPolicyRef\x12I\n!thread_resource_authorization_ref\x18\x0b \x01(\tR\x1ethreadResourceAuthorizationRef\x12-\n\x12\x61uthority_revision\x18\x0c \x01(\x04R\x11\x61uthorityRevision\x12\x1d\n\nrun_status\x18\r \x01(\tR\trunStatus\"\xbe\x04\n\tRunDetail\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\"\n\rparent_run_id\x18\x03 \x01(\tR\x0bparentRunId\x12\x19\n\x08\x61gent_id\x18\x04 \x01(\tR\x07\x61gentId\x12\x16\n\x06status\x18\x05 \x01(\tR\x06status\x12\x12\n\x04mode\x18\x06 \x01(\tR\x04mode\x12\x12\n\x04goal\x18\x07 \x01(\tR\x04goal\x12!\n\x0c\x66inal_output\x18\x08 \x01(\tR\x0b\x66inalOutput\x12\x14\n\x05\x65rror\x18\t \x01(\tR\x05\x65rror\x12)\n\x10\x63heckpoint_index\x18\n \x01(\rR\x0f\x63heckpointIndex\x12\'\n\x0fsteps_completed\x18\x0b \x01(\rR\x0estepsCompleted\x12!\n\x0cinput_tokens\x18\x0c \x01(\rR\x0binputTokens\x12#\n\routput_tokens\x18\r \x01(\rR\x0coutputTokens\x12\x39\n\ncreated_at\x18\x0e \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x39\n\nupdated_at\x18\x0f \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x33\n\x08metadata\x18\x10 \x01(\x0b\x32\x17.google.protobuf.StructR\x08metadata2\xa4\x05\n\nRunService\x12\x42\n\x06GetRun\x12\x1d.model_plane.v1.GetRunRequest\x1a\x19.model_plane.v1.RunDetail\x12o\n\x17GetScheduledStepContext\x12..model_plane.v1.GetScheduledStepContextRequest\x1a$.model_plane.v1.ScheduledStepContext\x12M\n\x08ListRuns\x12\x1f.model_plane.v1.ListRunsRequest\x1a .model_plane.v1.ListRunsResponse\x12P\n\tCancelRun\x12 .model_plane.v1.CancelRunRequest\x1a!.model_plane.v1.CancelRunResponse\x12Y\n\x0eListSystemRuns\x12%.model_plane.v1.ListSystemRunsRequest\x1a .model_plane.v1.ListRunsResponse\x12\x62\n\x0fResolveRunOwner\x12&.model_plane.v1.ResolveRunOwnerRequest\x1a\'.model_plane.v1.ResolveRunOwnerResponse\x12\x80\x01\n\x19ResolveRunActionAuthority\x12\x30.model_plane.v1.ResolveRunActionAuthorityRequest\x1a\x31.model_plane.v1.ResolveRunActionAuthorityResponseB\xb1\x01\n\x12\x63om.model_plane.v1B\tRunsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,22 +36,30 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\022com.model_plane.v1B\tRunsProtoP\001Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\242\002\003MXX\252\002\rModelPlane.V1\312\002\rModelPlane\\V1\342\002\031ModelPlane\\V1\\GPBMetadata\352\002\016ModelPlane::V1'
   _globals['_GETRUNREQUEST']._serialized_start=108
   _globals['_GETRUNREQUEST']._serialized_end=146
-  _globals['_LISTRUNSREQUEST']._serialized_start=149
-  _globals['_LISTRUNSREQUEST']._serialized_end=288
-  _globals['_LISTRUNSRESPONSE']._serialized_start=290
-  _globals['_LISTRUNSRESPONSE']._serialized_end=382
-  _globals['_LISTSYSTEMRUNSREQUEST']._serialized_start=385
-  _globals['_LISTSYSTEMRUNSREQUEST']._serialized_end=524
-  _globals['_CANCELRUNREQUEST']._serialized_start=526
-  _globals['_CANCELRUNREQUEST']._serialized_end=591
-  _globals['_CANCELRUNRESPONSE']._serialized_start=593
-  _globals['_CANCELRUNRESPONSE']._serialized_end=642
-  _globals['_RESOLVERUNOWNERREQUEST']._serialized_start=644
-  _globals['_RESOLVERUNOWNERREQUEST']._serialized_end=739
-  _globals['_RESOLVERUNOWNERRESPONSE']._serialized_start=741
-  _globals['_RESOLVERUNOWNERRESPONSE']._serialized_end=798
-  _globals['_RUNDETAIL']._serialized_start=801
-  _globals['_RUNDETAIL']._serialized_end=1375
-  _globals['_RUNSERVICE']._serialized_start=1378
-  _globals['_RUNSERVICE']._serialized_end=1810
+  _globals['_GETSCHEDULEDSTEPCONTEXTREQUEST']._serialized_start=148
+  _globals['_GETSCHEDULEDSTEPCONTEXTREQUEST']._serialized_end=255
+  _globals['_SCHEDULEDSTEPCONTEXT']._serialized_start=258
+  _globals['_SCHEDULEDSTEPCONTEXT']._serialized_end=399
+  _globals['_LISTRUNSREQUEST']._serialized_start=402
+  _globals['_LISTRUNSREQUEST']._serialized_end=541
+  _globals['_LISTRUNSRESPONSE']._serialized_start=543
+  _globals['_LISTRUNSRESPONSE']._serialized_end=635
+  _globals['_LISTSYSTEMRUNSREQUEST']._serialized_start=638
+  _globals['_LISTSYSTEMRUNSREQUEST']._serialized_end=777
+  _globals['_CANCELRUNREQUEST']._serialized_start=779
+  _globals['_CANCELRUNREQUEST']._serialized_end=844
+  _globals['_CANCELRUNRESPONSE']._serialized_start=846
+  _globals['_CANCELRUNRESPONSE']._serialized_end=895
+  _globals['_RESOLVERUNOWNERREQUEST']._serialized_start=897
+  _globals['_RESOLVERUNOWNERREQUEST']._serialized_end=992
+  _globals['_RESOLVERUNOWNERRESPONSE']._serialized_start=994
+  _globals['_RESOLVERUNOWNERRESPONSE']._serialized_end=1051
+  _globals['_RESOLVERUNACTIONAUTHORITYREQUEST']._serialized_start=1053
+  _globals['_RESOLVERUNACTIONAUTHORITYREQUEST']._serialized_end=1133
+  _globals['_RESOLVERUNACTIONAUTHORITYRESPONSE']._serialized_start=1136
+  _globals['_RESOLVERUNACTIONAUTHORITYRESPONSE']._serialized_end=1705
+  _globals['_RUNDETAIL']._serialized_start=1708
+  _globals['_RUNDETAIL']._serialized_end=2282
+  _globals['_RUNSERVICE']._serialized_start=2285
+  _globals['_RUNSERVICE']._serialized_end=2961
 # @@protoc_insertion_point(module_scope)

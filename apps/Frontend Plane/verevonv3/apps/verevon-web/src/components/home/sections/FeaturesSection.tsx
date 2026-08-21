@@ -11,7 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { ArrowLeft, ArrowRight, Hand } from "lucide-react";
+import { ArrowLeft, ArrowRight, Hand, MousePointerClick } from "lucide-react";
 import {
 	ModuleWorkflowCard,
 	moduleCards,
@@ -147,7 +147,7 @@ export function FeaturesSection() {
 		});
 	}, [getCards, getLastStartIndex]);
 
-	const handleViewportPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+	const handleViewportPointerMove = (event: React.PointerEvent<HTMLElement>) => {
 		setIsCursorVisible(true);
 		if (cursorRef.current) {
 			cursorRef.current.style.transform = `translate3d(${event.clientX}px, ${event.clientY}px, 0)`;
@@ -165,9 +165,9 @@ export function FeaturesSection() {
 			return;
 		}
 
-		const viewport = viewportRef.current;
-		if (!viewport) return;
-		const rect = viewport.getBoundingClientRect();
+		const section = sectionRef.current;
+		if (!section) return;
+		const rect = section.getBoundingClientRect();
 		setCursorMode(event.clientX - rect.left < rect.width / 2 ? "nav-left" : "nav-right");
 	};
 
@@ -202,7 +202,7 @@ export function FeaturesSection() {
 		carousel.scrollLeft = dragScrollLeftRef.current - distance;
 	};
 
-	const handleDragEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+	const handleDragEnd = (event: React.PointerEvent<HTMLElement>) => {
 		if (!isDraggingRef.current) return;
 
 		isDraggingRef.current = false;
@@ -228,9 +228,9 @@ export function FeaturesSection() {
 			return;
 		}
 
-		const viewport = viewportRef.current;
-		if (viewport) {
-			const rect = viewport.getBoundingClientRect();
+		const section = sectionRef.current;
+		if (section) {
+			const rect = section.getBoundingClientRect();
 			setCursorMode(event.clientX - rect.left < rect.width / 2 ? "nav-left" : "nav-right");
 		}
 	};
@@ -244,7 +244,7 @@ export function FeaturesSection() {
 		);
 	};
 
-	const handleViewportClick = (event: React.MouseEvent<HTMLDivElement>) => {
+	const handleViewportClick = (event: React.MouseEvent<HTMLElement>) => {
 		if (hasDraggedRef.current) {
 			event.preventDefault();
 			event.stopPropagation();
@@ -421,8 +421,17 @@ export function FeaturesSection() {
 	return (
 		<section
 			aria-labelledby="features-title"
-			className="relative isolate overflow-x-clip bg-background py-[clamp(96px,13vh,180px)] text-verevon-j-text"
+			className="relative isolate cursor-none overflow-x-clip bg-background py-[clamp(96px,13vh,180px)] text-verevon-j-text"
 			id="features"
+			onClickCapture={handleViewportClick}
+			onPointerEnter={() => setIsCursorVisible(true)}
+			onPointerLeave={(event) => {
+				if (!isDraggingRef.current) {
+					setIsCursorVisible(false);
+				}
+				handleDragEnd(event);
+			}}
+			onPointerMove={handleViewportPointerMove}
 			ref={sectionRef}
 		>
 			<div
@@ -434,7 +443,7 @@ export function FeaturesSection() {
 				className="absolute inset-0 bg-[radial-gradient(circle_at_74%_32%,rgba(238,122,80,0.075),transparent_29%),radial-gradient(circle_at_12%_74%,rgba(41,64,74,0.05),transparent_30%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.8))]"
 			/>
 
-			<div className="relative z-10 mx-auto w-full max-w-[1600px] px-[var(--verevon-page-pad)]">
+			<div className="relative z-10 w-full px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
 				<header
 					className="mx-auto mb-[clamp(48px,8vh,104px)] max-w-[760px] text-center md:invisible"
 					data-features-intro=""
@@ -452,25 +461,14 @@ export function FeaturesSection() {
 					</p>
 				</header>
 
-				<div className="[perspective:1400px]">
+				<div className="mx-auto w-full max-w-[1680px] [perspective:1400px]">
 					<div
-						className="relative left-1/2 w-[calc(100%+2*var(--verevon-page-pad))] -translate-x-1/2 cursor-none max-w-[1360px]"
-						onPointerEnter={() => setIsCursorVisible(true)}
-						onPointerLeave={(event) => {
-							if (!isDraggingRef.current) {
-								setIsCursorVisible(false);
-							}
-							handleDragEnd(event);
-						}}
-						onPointerMove={handleViewportPointerMove}
+						className="relative w-full cursor-none"
 						ref={viewportRef}
 					>
-						<div className="relative mx-auto w-full max-w-[1180px]">
-						<div
-							className="relative w-full"
-						>
+						<div className="relative w-full">
 							<div
-								className="relative flex w-full snap-x snap-mandatory gap-x-[clamp(12.4px,1.2875vw,22.66px)] overflow-x-auto overscroll-x-contain pb-4 pt-2 [--feature-card-width:clamp(250px,22vw,280px)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden touch-pan-x"
+								className="relative flex w-full snap-x snap-mandatory gap-x-[var(--feature-card-gap)] overflow-x-auto overscroll-x-contain pb-4 pt-2 [--feature-card-gap:clamp(20px,2vw,36px)] [--feature-card-width:clamp(250px,22vw,280px)] lg:[--feature-card-width:calc((100%_-_3*var(--feature-card-gap))/4)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden touch-pan-x"
 								aria-label="Verevon-modulene"
 								data-features-cards-stage=""
 								ref={carouselRef}
@@ -494,7 +492,7 @@ export function FeaturesSection() {
 								))}
 							</div>
 						</div>
-					</div>
+						</div>
 
 							<button
 								aria-label="Forrige plattformkort"
@@ -517,7 +515,6 @@ export function FeaturesSection() {
 
 					</div>
 				</div>
-			</div>
 
 			{isMounted
 				? createPortal(
@@ -536,8 +533,8 @@ export function FeaturesSection() {
 									<ArrowRight className="size-6" />
 								) : null}
 								{cursorMode === "select" ? (
-									<ArrowRight className="size-6 -rotate-45" />
-								) : null}
+									<MousePointerClick className="size-6" />
+									) : null}
 								{cursorMode === "drag" ? (
 									<Hand className="size-6" />
 								) : null}

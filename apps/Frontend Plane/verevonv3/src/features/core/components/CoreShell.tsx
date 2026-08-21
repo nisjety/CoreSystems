@@ -244,7 +244,8 @@ function isOrgStyleName(name: string): boolean {
 }
 
 function defaultSidebarExpandedForRoute(route: ReturnType<typeof routeFromPath>) {
-  return route === '/support' ||
+  return route === '/spaces' ||
+    route === '/support' ||
     route === '/social' ||
     route.startsWith('/studio') ||
     route.startsWith('/social') ||

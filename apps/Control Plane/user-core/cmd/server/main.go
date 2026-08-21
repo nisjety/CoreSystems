@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof" // registers /debug/pprof handlers on the default ServeMux
@@ -379,6 +380,31 @@ func main() {
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
 	httpServer.SetSpaceRepository(spaces.NewRepository(db))
 	httpServer.SetAuthInternalCredential(serviceCredential)
+	// Owner-action issuance is intentionally unavailable until this Control
+	// service has its distinct, least-privilege Session Core credential. Do not
+	// substitute a gateway, execution, or broad Model token here.
+	runActionTransport, transportErr := sessionRunActionAuthorityTransportFromEnvironment()
+	var runActionAuthority *clients.SessionRunActionAuthorityClient
+	var runActionAuthorityErr error
+	if transportErr != nil {
+		runActionAuthorityErr = transportErr
+	} else {
+		runActionAuthority, runActionAuthorityErr = clients.NewSessionRunActionAuthorityClient(
+			os.Getenv("SESSION_CORE_RUN_AUTHORITY_ADDR"),
+			os.Getenv("CONTROL_SESSION_CORE_RUN_AUTHORITY_BEARER"),
+			runActionTransport,
+		)
+	}
+	if runActionAuthorityErr != nil {
+		log.Printf("⚠️  Run action authority client disabled: %v", runActionAuthorityErr)
+	} else if runActionAuthority != nil {
+		httpServer.SetRunActionAuthorityResolver(runActionAuthority)
+		httpServer.SetScheduledStepAuthorityResolver(runActionAuthority)
+		defer runActionAuthority.Close()
+		log.Println("✅ Control-to-Session Core run action authority client configured")
+	} else {
+		log.Println("ℹ️  Run action authority client not configured — agent owner actions remain fail-closed")
+	}
 
 	// Prometheus /metrics on a dedicated port (default 9091), scraped by the
 	// Control-Plane Prometheus (Phase 6 B13).
@@ -442,4 +468,20 @@ func main() {
 	}
 
 	log.Println("Shutdown complete")
+}
+
+func sessionRunActionAuthorityTransportFromEnvironment() (clients.SessionRunActionAuthorityTransport, error) {
+	allowInsecureLoopback := false
+	if raw := strings.TrimSpace(os.Getenv("CONTROL_ALLOW_INSECURE_SESSION_RUN_AUTHORITY_LOOPBACK")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return clients.SessionRunActionAuthorityTransport{}, fmt.Errorf("CONTROL_ALLOW_INSECURE_SESSION_RUN_AUTHORITY_LOOPBACK must be true or false")
+		}
+		allowInsecureLoopback = parsed
+	}
+	return clients.SessionRunActionAuthorityTransport{
+		TLSCAFile:             strings.TrimSpace(os.Getenv("SESSION_CORE_RUN_AUTHORITY_TLS_CA_FILE")),
+		TLSServerName:         strings.TrimSpace(os.Getenv("SESSION_CORE_RUN_AUTHORITY_TLS_SERVER_NAME")),
+		AllowInsecureLoopback: allowInsecureLoopback,
+	}, nil
 }

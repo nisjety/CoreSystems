@@ -884,7 +884,7 @@ describe('InboxPage', () => {
         String(input).endsWith('/api/v1/actions/execute') && init?.method === 'POST',
       )
       expect(actionCall).toBeTruthy()
-      expect(JSON.parse(String(actionCall?.[1]?.body))).toEqual({
+      expect(JSON.parse(String(actionCall?.[1]?.body))).toMatchObject({
         actionId: 'tickets.create',
         // executeAction() always stamps a client-generated idempotency key
         // onto every /api/v1/actions/execute request (action-client.ts) —

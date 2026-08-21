@@ -265,6 +265,11 @@ fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
         azure_anthropic_endpoint: None,
         azure_anthropic_api_key: None,
         azure_anthropic_deployments: vec![],
+        azure_cohere_endpoint: None,
+        azure_cohere_api_key: None,
+        azure_cohere_api_version: "2024-05-01-preview".to_owned(),
+        azure_cohere_deployment: "cohere-command-a-plus".to_owned(),
+        azure_cohere_region: None,
         max_retries_per_provider: 1,
         cache_ttl_secs: 60,
         verevon_intent_enabled: false,
@@ -273,7 +278,15 @@ fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
         session_core_url: None,
         router_policy_refresh_secs: 60,
         azure_openai_region: None,
-        azure_openai_zdr_confirmed: false,
+        azure_anthropic_region: None,
+        azure_openai_zdr: None,
+        azure_anthropic_zdr: None,
+        azure_openai_deployment_type: None,
+        allow_global_deployment: false,
+        // These fixtures configure no region, so the Azure provider classifies as
+        // Global. The residency gate has its own tests; opt in here so these keep
+        // testing model routing rather than dying on the gate.
+        allow_global_residency_providers: true,
         allow_non_eu_embedding: false,
     };
 
@@ -307,6 +320,11 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
             "claude-haiku-4-5".to_owned(),
             "claude-opus-4-8".to_owned(),
         ],
+        azure_cohere_endpoint: None,
+        azure_cohere_api_key: None,
+        azure_cohere_api_version: "2024-05-01-preview".to_owned(),
+        azure_cohere_deployment: "cohere-command-a-plus".to_owned(),
+        azure_cohere_region: None,
         max_retries_per_provider: 1,
         cache_ttl_secs: 60,
         verevon_intent_enabled: false,
@@ -315,7 +333,15 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
         session_core_url: None,
         router_policy_refresh_secs: 60,
         azure_openai_region: None,
-        azure_openai_zdr_confirmed: false,
+        azure_anthropic_region: None,
+        azure_openai_zdr: None,
+        azure_anthropic_zdr: None,
+        azure_openai_deployment_type: None,
+        allow_global_deployment: false,
+        // These fixtures configure no region, so the Azure provider classifies as
+        // Global. The residency gate has its own tests; opt in here so these keep
+        // testing model routing rather than dying on the gate.
+        allow_global_residency_providers: true,
         allow_non_eu_embedding: false,
     };
 
@@ -337,4 +363,61 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
     let chat = chain.list_models("", "azure-openai");
     let router = chat.iter().find(|m| m.id == "model-router").unwrap();
     assert!(router.cheap);
+}
+
+#[test]
+fn cohere_registers_alongside_azure_openai_without_stealing_its_traffic() {
+    // "cohere"/"azure-cohere" is Command A Plus (the live successor to the
+    // retired "Command R+" name) fronted through Azure AI Foundry's unified
+    // inference route. It must coexist with azure-openai — same
+    // ModelFamily::OpenAiCompatible family — without either one absorbing the
+    // other's models. See `provider_serves_model`'s exclusive_catalog gate.
+    let cfg = InferenceConfig {
+        provider_order: vec!["azure".to_owned(), "cohere".to_owned()],
+        anthropic_api_key: None,
+        openai_api_base: None,
+        openai_api_key: None,
+        azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
+        azure_openai_api_key: Some("test-key".to_owned()),
+        azure_openai_api_version: "2025-01-01-preview".to_owned(),
+        openai_chat_models: vec![],
+        openai_embedding_models: vec![],
+        azure_openai_chat_deployments: vec!["gpt-4o-mini".to_owned()],
+        azure_openai_embedding_deployments: vec![],
+        azure_anthropic_endpoint: None,
+        azure_anthropic_api_key: None,
+        azure_anthropic_deployments: vec![],
+        azure_cohere_endpoint: Some("https://core-ai-rg.services.ai.azure.com/models".to_owned()),
+        azure_cohere_api_key: Some("cohere-key".to_owned()),
+        azure_cohere_api_version: "2024-05-01-preview".to_owned(),
+        azure_cohere_deployment: "cohere-command-a-plus".to_owned(),
+        azure_cohere_region: None,
+        max_retries_per_provider: 1,
+        cache_ttl_secs: 60,
+        verevon_intent_enabled: false,
+        cost_core_url: None,
+        verevon_intent_budget_usd: 50.0,
+        session_core_url: None,
+        router_policy_refresh_secs: 60,
+        azure_openai_region: None,
+        azure_anthropic_region: None,
+        azure_openai_zdr: None,
+        azure_anthropic_zdr: None,
+        azure_openai_deployment_type: None,
+        allow_global_deployment: false,
+        allow_global_residency_providers: true,
+        allow_non_eu_embedding: false,
+    };
+
+    let chain = FallbackChain::from_config(&cfg);
+    assert_eq!(chain.provider_count(), 2);
+
+    let cohere_models = chain.list_models("", "cohere");
+    assert_eq!(cohere_models.len(), 1);
+    assert_eq!(cohere_models[0].id, "cohere-command-a-plus");
+
+    // Azure OpenAI keeps serving its own catalog untouched.
+    let azure_models = chain.list_models("", "azure-openai");
+    assert_eq!(azure_models.len(), 1);
+    assert_eq!(azure_models[0].id, "gpt-4o-mini");
 }

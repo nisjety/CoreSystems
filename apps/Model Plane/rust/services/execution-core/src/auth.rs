@@ -73,6 +73,8 @@ struct Claims {
     principal_type: Option<String>,
     #[serde(default)]
     service_id: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
     zdr: bool,
 }
 
@@ -83,6 +85,45 @@ pub struct AuthenticatedUser {
     pub org_id: String,
     pub user_id: String,
     pub zdr: bool,
+}
+
+/// Verified service identity for the dedicated scheduled-step ingress.
+///
+/// This is intentionally a separate type from [`AuthenticatedUser`]. A
+/// service credential can authorize only the explicitly allowlisted
+/// service-owned RPC; it is never accepted by the user-bound ExecuteStep or
+/// RunAgent paths.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedService {
+    pub org_id: String,
+    pub service_id: String,
+    scopes: Arc<[String]>,
+    pub zdr: bool,
+}
+
+impl AuthenticatedService {
+    #[cfg(test)]
+    pub(crate) fn for_test(org_id: &str, service_id: &str, scopes: &[&str], zdr: bool) -> Self {
+        Self {
+            org_id: org_id.to_owned(),
+            service_id: service_id.to_owned(),
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            zdr,
+        }
+    }
+
+    #[must_use]
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|candidate| candidate == scope)
+    }
+
+    #[allow(clippy::result_large_err)]
+    pub fn authorize_org(&self, org_id: &str) -> Result<(), Status> {
+        if org_id.trim().is_empty() || org_id != self.org_id {
+            return Err(Status::permission_denied("service tenant access denied"));
+        }
+        Ok(())
+    }
 }
 
 /// Opaque, independently verified `aud=data-plane` credential. It is bound to
@@ -329,6 +370,18 @@ impl JwtVerifier {
         self.verify_user_token(token, &self.audience).await
     }
 
+    /// Verify the service credential used only by the scheduled-step lane.
+    /// The caller is still checked for the exact service principal and scope
+    /// by the RPC handler; this method only establishes the signed identity.
+    #[allow(clippy::result_large_err)]
+    pub async fn authenticate_scheduled_step<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<AuthenticatedService, Status> {
+        let token = extract_bearer(request)?;
+        self.verify_service_token(token, &self.audience).await
+    }
+
     /// Verify a separately delegated inference credential and bind it to the
     /// already authenticated Execution Core caller. Missing, malformed, or
     /// wrong-audience credentials fail closed before a run is dispatched.
@@ -441,6 +494,38 @@ impl JwtVerifier {
         validate_user_claims(claims)
     }
 
+    async fn verify_service_token(
+        &self,
+        token: &str,
+        audience: &str,
+    ) -> Result<AuthenticatedService, Status> {
+        let header = decode_header(token)
+            .map_err(|_| Status::unauthenticated("invalid service credential"))?;
+        if header.alg != Algorithm::RS256 {
+            return Err(Status::unauthenticated("invalid service credential"));
+        }
+        let kid = header
+            .kid
+            .filter(|kid| !kid.trim().is_empty())
+            .ok_or_else(|| Status::unauthenticated("invalid service credential"))?;
+        let jwk = self.jwk_for(&kid).await?;
+        let key = DecodingKey::from_jwk(&jwk).map_err(|error| {
+            error!(%error, "Auth Core JWKS contains an unusable signing key");
+            Status::unavailable("authentication verification unavailable")
+        })?;
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
+        validation.set_issuer(&[self.issuer.as_ref()]);
+        validation.set_audience(&[audience]);
+        validation.validate_exp = true;
+        validation.validate_nbf = true;
+        validation.leeway = self.leeway_secs;
+        let claims = decode::<Claims>(token, &key, &validation)
+            .map_err(|_| Status::unauthenticated("invalid service credential"))?
+            .claims;
+        validate_service_claims(claims)
+    }
+
     async fn jwk_for(&self, kid: &str) -> Result<jsonwebtoken::jwk::Jwk, Status> {
         let observed_revision = {
             let cache = self.cache.read().await;
@@ -536,6 +621,33 @@ fn validate_user_claims(claims: Claims) -> Result<AuthenticatedUser, Status> {
     Ok(AuthenticatedUser {
         org_id: claims.org_id,
         user_id: claims.user_id,
+        zdr: claims.zdr,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_service_claims(claims: Claims) -> Result<AuthenticatedService, Status> {
+    let service_id = claims.service_id.as_deref().unwrap_or_default();
+    if claims.principal_type.as_deref() != Some("service")
+        || claims.sub.trim().is_empty()
+        || claims.sub != service_id
+        || !service_id.starts_with("service:")
+        || claims.user_id.trim() != claims.user_id
+        || !claims.user_id.is_empty()
+        || claims.org_id.trim().is_empty()
+        || claims.org_id.trim() != claims.org_id
+        || claims.scopes.len() > 64
+        || claims
+            .scopes
+            .iter()
+            .any(|scope| scope.is_empty() || scope.len() > 128 || scope.trim() != scope)
+    {
+        return Err(Status::unauthenticated("invalid service credential"));
+    }
+    Ok(AuthenticatedService {
+        org_id: claims.org_id,
+        service_id: service_id.to_owned(),
+        scopes: claims.scopes.into(),
         zdr: claims.zdr,
     })
 }
@@ -1053,6 +1165,37 @@ mod tests {
                 "field {field} must be rejected"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn scheduled_step_auth_accepts_only_signed_service_identity() {
+        let verifier = verifier("key-scheduled-step").await;
+        let mut service = claims();
+        service["sub"] = json!("service:orchestrator-core");
+        service["user_id"] = json!("");
+        service["principal_type"] = json!("service");
+        service["service_id"] = json!("service:orchestrator-core");
+        service["scopes"] = json!(["model:schedule:step"]);
+        let token = sign(&service, "key-scheduled-step");
+        let identity = verifier
+            .authenticate_scheduled_step(&authenticated_request(&token))
+            .await
+            .expect("signed service identity");
+        assert_eq!(identity.service_id, "service:orchestrator-core");
+        assert_eq!(identity.org_id, "org-1");
+        assert!(identity.has_scope("model:schedule:step"));
+
+        let mut user = claims();
+        user["scopes"] = json!(["model:schedule:step"]);
+        let user_token = sign(&user, "key-scheduled-step");
+        assert_eq!(
+            verifier
+                .authenticate_scheduled_step(&authenticated_request(&user_token))
+                .await
+                .expect_err("user credential must not enter service lane")
+                .code(),
+            tonic::Code::Unauthenticated
+        );
     }
 
     #[tokio::test]

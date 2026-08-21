@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 )
 
@@ -26,21 +28,36 @@ import (
 // MemoryHandler handles CRUD for agent_memory.
 type MemoryHandler struct {
 	pool registryDatabase
+	// runs is Session Core's RunService client (MEM-2), used to authorize
+	// run/thread/session-scoped memory writes before they persist. nil-able:
+	// resource-scoped memory writes fail closed to 403/503 when unset or
+	// unreachable rather than being silently allowed. Workspace has no
+	// ownership contract anywhere in Model Plane and stays quarantined
+	// regardless of this client's presence — see authorizeResourceOwner.
+	runs mpv1.RunServiceClient
 }
 
 // NewMemoryHandler constructs the handler.
-func NewMemoryHandler(pool *pgxpool.Pool) *MemoryHandler {
-	return &MemoryHandler{pool: pool}
+func NewMemoryHandler(pool *pgxpool.Pool, runs mpv1.RunServiceClient) *MemoryHandler {
+	return &MemoryHandler{pool: pool, runs: runs}
 }
 
-// memoryScopePrecedence returns only the scopes this endpoint can authorize
-// with the supplied resource context. Run/thread/workspace require ownership
-// contracts that capability-core does not have, so they are never implied.
-func memoryScopePrecedence(sessionID string) []string {
-	if sessionID != "" {
-		return []string{"session", "user", "org", "global"}
+// memoryScopePrecedence returns the scopes this endpoint can authorize with
+// the supplied resource context, narrowest first: run > thread > session >
+// user > org > global. Workspace has no ownership contract anywhere in Model
+// Plane (see authorizeResourceOwner) and is never implied here.
+func memoryScopePrecedence(sessionID, threadID, runID string) []string {
+	precedence := make([]string, 0, 6)
+	if runID != "" {
+		precedence = append(precedence, "run")
 	}
-	return []string{"user", "org", "global"}
+	if threadID != "" {
+		precedence = append(precedence, "thread")
+	}
+	if sessionID != "" {
+		precedence = append(precedence, "session")
+	}
+	return append(precedence, "user", "org", "global")
 }
 
 // memoryVisibilitySQL is a defense-in-depth row filter applied to every read
@@ -72,14 +89,80 @@ func memoryScopeRequiresResourceAuthorization(scope string) bool {
 	}
 }
 
-func memoryEntryMatchesResolution(entry memoryEntry, sessionID string) bool {
+func memoryEntryMatchesResolution(entry memoryEntry, sessionID, threadID, runID string) bool {
 	switch entry.Scope {
 	case "user", "org", "global":
 		return entry.SessionID == nil
 	case "session":
 		return sessionID != "" && entry.SessionID != nil && *entry.SessionID == sessionID
+	case "thread":
+		return threadID != "" && entry.SessionID != nil && *entry.SessionID == threadID
+	case "run":
+		return runID != "" && entry.SessionID != nil && *entry.SessionID == runID
 	default:
 		return false
+	}
+}
+
+// resourceAuthDecision is a three-state outcome, not a bool, because "denied"
+// and "couldn't ask" are different operator-facing conditions that must map
+// to different HTTP statuses (403 vs 503): collapsing them into a single
+// false would report a session-core outage as a permission problem, hiding
+// an infra issue behind a misleading authorization error.
+type resourceAuthDecision int
+
+const (
+	// resourceAuthDenied: the authority was reached (or is not configured)
+	// and the actor does not own the resource, or the scope is unsupported.
+	resourceAuthDenied resourceAuthDecision = iota
+	// resourceAuthAllowed: the authority affirmatively confirmed ownership.
+	resourceAuthAllowed
+	// resourceAuthUnavailable: the authority could not be asked at all — a
+	// nil client (session-core dial disabled/unreachable at startup) or a
+	// transport/RPC error talking to it. Never conflated with "denied".
+	resourceAuthUnavailable
+)
+
+// authorizeResourceOwner asks Session Core (via RunService) whether actorID
+// owns resourceID for the given run/thread/session scope, before an INSERT is
+// allowed to persist it. Reads never call this: memoryVisibilitySQL's
+// owner=actor filter already pins every private-scope row to the actor who
+// passed this exact check at write time, so re-verifying on every read would
+// add a round trip for no additional safety (the same defense-in-depth
+// pattern this handler already uses for scope='user'). Fails closed on every
+// path other than an explicit `authorized: true` from a reachable authority.
+func (h *MemoryHandler) authorizeResourceOwner(ctx context.Context, scope, resourceID, orgID, actorID string) resourceAuthDecision {
+	if h.runs == nil {
+		// The dependency capability-core needs to answer this question is not
+		// configured/reachable at all — that is an availability problem, not
+		// a "no" answer, so it must not read back as an ordinary 403.
+		return resourceAuthUnavailable
+	}
+	switch scope {
+	case "run":
+		resp, err := h.runs.ResolveRunOwner(ctx, &mpv1.ResolveRunOwnerRequest{
+			RunId: resourceID, OrgId: orgID, UserId: actorID,
+		})
+		if err != nil {
+			return resourceAuthUnavailable
+		}
+		if resp.GetAuthorized() {
+			return resourceAuthAllowed
+		}
+		return resourceAuthDenied
+	case "thread", "session":
+		resp, err := h.runs.ResolveThreadOwner(ctx, &mpv1.ResolveThreadOwnerRequest{
+			ThreadId: resourceID, OrgId: orgID, UserId: actorID,
+		})
+		if err != nil {
+			return resourceAuthUnavailable
+		}
+		if resp.GetAuthorized() {
+			return resourceAuthAllowed
+		}
+		return resourceAuthDenied
+	default:
+		return resourceAuthDenied
 	}
 }
 
@@ -228,7 +311,49 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "invalid memory scope", http.StatusBadRequest)
 			return
 		}
-		if e.SessionID != nil || memoryScopeRequiresResourceAuthorization(e.Scope) {
+		switch {
+		case e.Scope == "workspace":
+			// No ownership concept exists for workspace anywhere in Model
+			// Plane (MEM-2 investigation: session-core's workspace_id is a
+			// content-selection hint only, and capability-core's own
+			// ScopeKindWorkspace is rejected at capability-invocation time —
+			// there is no table, owner column, or RPC anywhere that resolves
+			// "who owns workspace X"). Building a check here would mean
+			// fabricating an authorization concept that doesn't exist in the
+			// data model, so this stays quarantined exactly as before,
+			// unconditionally, pending a separate ticket that first decides
+			// what workspace ownership even means in Model Plane.
+			jsonErr(w, "workspace-scoped memory writes require an ownership model that does not exist yet", http.StatusServiceUnavailable)
+			return
+		case memoryScopeRequiresResourceAuthorization(e.Scope):
+			// run, thread, session (MEM-2): authorize against Session Core's
+			// RunService before the INSERT below is allowed to run. The
+			// caller's session_id field carries the resource id — a run_id
+			// for scope=run, a thread_id for scope IN (thread, session): see
+			// agent_memory's own writer (session-core's dreaming.rs) for the
+			// precedent of storing a thread_id in this same column under
+			// scope='thread'.
+			resourceID := ""
+			if e.SessionID != nil {
+				resourceID = strings.TrimSpace(*e.SessionID)
+			}
+			if resourceID == "" {
+				jsonErr(w, "session_id is required for run/thread/session scoped memory", http.StatusBadRequest)
+				return
+			}
+			switch h.authorizeResourceOwner(r.Context(), e.Scope, resourceID, orgID, actorID) {
+			case resourceAuthAllowed:
+				// fall through to the insert below.
+			case resourceAuthUnavailable:
+				jsonErr(w, "session core ownership authority unavailable", http.StatusServiceUnavailable)
+				return
+			default:
+				jsonErr(w, "resource ownership check failed or denied", http.StatusForbidden)
+				return
+			}
+		case e.SessionID != nil:
+			// user/org/global writes must never carry a caller-supplied
+			// resource binding — unchanged quarantine from before MEM-2.
 			jsonErr(w, "resource-scoped memory writes require Session Core authorization", http.StatusServiceUnavailable)
 			return
 		}
@@ -354,10 +479,11 @@ func (h *MemoryHandler) delete(w http.ResponseWriter, r *http.Request, id string
 }
 
 // resolve returns memories merged across all scopes with precedence.
-// Narrower scopes (run > thread > workspace > user > org > global) override
-// broader ones when keys collide.
+// Narrower scopes (run > thread > session > user > org > global) override
+// broader ones when keys collide. workspace has no ownership contract
+// anywhere in Model Plane (MEM-2) and is never selectable here.
 //
-// Query params: org_id (required), key (optional filter), session_id, run_id, thread_id, workspace_id, user_id.
+// Query params: org_id (required), key (optional filter), session_id, run_id, thread_id, workspace_id (rejected, 501), user_id.
 func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 	orgID, actorID, ok := verifiedMemoryIdentity(w, r)
 	if !ok {
@@ -369,41 +495,56 @@ func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	keyFilter := q.Get("key")
-	for _, unsupported := range []string{"run_id", "thread_id", "workspace_id"} {
-		if strings.TrimSpace(q.Get(unsupported)) != "" {
-			jsonErr(w, "resource-scoped memory resolution is not implemented", http.StatusNotImplemented)
-			return
-		}
+	if strings.TrimSpace(q.Get("workspace_id")) != "" {
+		// No ownership concept exists for workspace anywhere in Model Plane
+		// (see the write-path gate's comment in listOrCreate for the full
+		// rationale) — stays quarantined, distinctly from the now-supported
+		// run_id/thread_id selectors below.
+		jsonErr(w, "workspace-scoped memory resolution requires an ownership model that does not exist yet", http.StatusNotImplemented)
+		return
 	}
 	sessionID := strings.TrimSpace(q.Get("session_id"))
+	threadID := strings.TrimSpace(q.Get("thread_id"))
+	runID := strings.TrimSpace(q.Get("run_id"))
 
-	query := `
+	// Build the scope clause list: the tenant-shared base clause plus one
+	// clause per resource selector actually supplied, OR'd together. This is
+	// read-only: memoryVisibilitySQL's owner=actor filter already restricts
+	// every private-scope row (including run/thread) to rows owned by the
+	// verified actor, so no additional Session Core round trip is needed
+	// here — the write path already verified ownership before the row could
+	// exist with owner=actorID (see authorizeResourceOwner).
+	clauses := []string{"(scope IN ('user','org','global') AND session_id IS NULL)"}
+	queryArgs := []any{orgID, actorID}
+	nextArg := 3
+	if sessionID != "" {
+		clauses = append(clauses, fmt.Sprintf("(scope='session' AND session_id=$%d)", nextArg))
+		queryArgs = append(queryArgs, sessionID)
+		nextArg++
+	}
+	if threadID != "" {
+		clauses = append(clauses, fmt.Sprintf("(scope='thread' AND session_id=$%d)", nextArg))
+		queryArgs = append(queryArgs, threadID)
+		nextArg++
+	}
+	if runID != "" {
+		clauses = append(clauses, fmt.Sprintf("(scope='run' AND session_id=$%d)", nextArg))
+		queryArgs = append(queryArgs, runID)
+		nextArg++
+	}
+	keyArg, limitArg := nextArg, nextArg+1
+	queryArgs = append(queryArgs, keyFilter, maxMemoryResolveRows+1)
+	query := fmt.Sprintf(`
 		SELECT id, org_id, session_id, scope, key, content, kind, confidence,
 		       owner, source_links, review_state, classification, expires_at,
 		       created_at, updated_at
 		FROM agent_memory
-		WHERE org_id=$1 AND ` + memoryVisibilitySQL("$2") + `
-		  AND (scope IN ('user','org','global') AND session_id IS NULL)
-		  AND ($3='' OR key=$3)
+		WHERE org_id=$1 AND %s
+		  AND (%s)
+		  AND ($%d='' OR key=$%d)
 		ORDER BY created_at DESC
-		LIMIT $4
-	`
-	queryArgs := []any{orgID, actorID, keyFilter, maxMemoryResolveRows + 1}
-	if sessionID != "" {
-		query = `
-			SELECT id, org_id, session_id, scope, key, content, kind, confidence,
-			       owner, source_links, review_state, classification, expires_at,
-			       created_at, updated_at
-			FROM agent_memory
-			WHERE org_id=$1 AND ` + memoryVisibilitySQL("$2") + `
-			  AND ((scope IN ('user','org','global') AND session_id IS NULL)
-			       OR (scope='session' AND session_id=$3))
-			  AND ($4='' OR key=$4)
-			ORDER BY created_at DESC
-			LIMIT $5
-		`
-		queryArgs = []any{orgID, actorID, sessionID, keyFilter, maxMemoryResolveRows + 1}
-	}
+		LIMIT $%d
+	`, memoryVisibilitySQL("$2"), strings.Join(clauses, " OR "), keyArg, keyArg, limitArg)
 	rows, err := h.pool.Query(r.Context(), query, queryArgs...)
 	if err != nil {
 		jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
@@ -438,7 +579,7 @@ func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 		if keyFilter != "" && e.Key != keyFilter {
 			continue
 		}
-		if !memoryEntryMatchesResolution(e, sessionID) {
+		if !memoryEntryMatchesResolution(e, sessionID, threadID, runID) {
 			continue
 		}
 		scopeEntries[e.Scope] = append(scopeEntries[e.Scope], e)
@@ -449,7 +590,7 @@ func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Merge with precedence: narrower scope wins when keys collide.
-	precedence := memoryScopePrecedence(sessionID)
+	precedence := memoryScopePrecedence(sessionID, threadID, runID)
 	seen := make(map[string]bool)
 	var resolved []memoryEntry
 	for _, scope := range precedence {

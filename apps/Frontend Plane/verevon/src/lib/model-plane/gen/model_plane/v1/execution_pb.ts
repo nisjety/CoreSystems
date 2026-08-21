@@ -14,7 +14,135 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/execution.proto.
  */
 export const file_model_plane_v1_execution: GenFile = /*@__PURE__*/
-  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9leGVjdXRpb24ucHJvdG8SDm1vZGVsX3BsYW5lLnYxItABCg9SdW5BZ2VudFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIMCgRnb2FsGAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEg0KBW1vZGVsGAYgASgJEgwKBG1vZGUYByABKAkSEgoKbWF4X3JvdW5kcxgIIAEoDRILCgN6ZHIYCSABKAgSLQoFdG9vbHMYCiADKAsyHi5tb2RlbF9wbGFuZS52MS5Ub29sRGVmaW5pdGlvbiJjChBSdW5BZ2VudFJlc3BvbnNlEg4KBnN0YXR1cxgBIAEoCRIUCgxmaW5hbF9vdXRwdXQYAiABKAkSFwoPcm91bmRzX2V4ZWN1dGVkGAMgASgNEhAKCGdyb3VuZGVkGAQgASgIIrkBChJFeGVjdXRlU3RlcFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg8KB3N0ZXBfaWQYAiABKAkSEQoJdG9vbF9uYW1lGAMgASgJEhIKCnRvb2xfaW5wdXQYBCABKAkSFwoPcGVybWlzc2lvbl9tb2RlGAUgASgJEhQKDGhvb2tfY29udGV4dBgGIAEoCRIOCgZvcmdfaWQYByABKAkSDwoHdXNlcl9pZBgIIAEoCRILCgN6ZHIYCSABKAgicwoTRXhlY3V0ZVN0ZXBSZXNwb25zZRIPCgdzdGVwX2lkGAEgASgJEg4KBnN0YXR1cxgCIAEoCRIOCgZvdXRwdXQYAyABKAkSDQoFZXJyb3IYBCABKAkSHAoUY29tcGFjdGlvbl90cmlnZ2VyZWQYBSABKAgiXgoQUmVzdW1lUnVuUmVxdWVzdBIOCgZydW5faWQYASABKAkSFQoNY2hlY2twb2ludF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEwoLYXBwcm92YWxfaWQYBCABKAkiOAoRUmVzdW1lUnVuUmVzcG9uc2USDwoHcmVzdW1lZBgBIAEoCBISCgpzdGVwX2luZGV4GAIgASgNIjEKD1BhdXNlUnVuUmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJIiIKEFBhdXNlUnVuUmVzcG9uc2USDgoGcGF1c2VkGAEgASgIMqkDCg1FeGVjdXRpb25Db3JlElYKC0V4ZWN1dGVTdGVwEiIubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVN0ZXBSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVN0ZXBSZXNwb25zZRJQCglSZXN1bWVSdW4SIC5tb2RlbF9wbGFuZS52MS5SZXN1bWVSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuUmVzdW1lUnVuUmVzcG9uc2USUAoJQ2FuY2VsUnVuEiAubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVxdWVzdBohLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1blJlc3BvbnNlEk0KCFBhdXNlUnVuEh8ubW9kZWxfcGxhbmUudjEuUGF1c2VSdW5SZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuUGF1c2VSdW5SZXNwb25zZRJNCghSdW5BZ2VudBIfLm1vZGVsX3BsYW5lLnYxLlJ1bkFnZW50UmVxdWVzdBogLm1vZGVsX3BsYW5lLnYxLlJ1bkFnZW50UmVzcG9uc2VCtgEKEmNvbS5tb2RlbF9wbGFuZS52MUIORXhlY3V0aW9uUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_model_plane_v1_runs, file_model_plane_v1_inference]);
+  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9leGVjdXRpb24ucHJvdG8SDm1vZGVsX3BsYW5lLnYxIqsCChtFeGVjdXRlU2NoZWR1bGVkU3RlcFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEAoIc3BhY2VfaWQYBCABKAkSEgoKc3ViamVjdF9pZBgFIAEoCRITCgtzY2hlZHVsZV9pZBgGIAEoCRIQCghmaXJlX2tleRgHIAEoCRIXCg90ZW1wbGF0ZV9kaWdlc3QYCCABKAkSDwoHc3RlcF9pZBgJIAEoCRISCgpzdGVwX2luZGV4GAogASgNEhUKDXBvbGljeV9kaWdlc3QYCyABKAkSFwoPaWRlbXBvdGVuY3lfa2V5GAwgASgJEh4KFmNvbnRyb2xfZGVjaXNpb25fdG9rZW4YDSABKAkiiwEKHEV4ZWN1dGVTY2hlZHVsZWRTdGVwUmVzcG9uc2USDwoHc3RlcF9pZBgBIAEoCRIOCgZzdGF0dXMYAiABKAkSEgoKcmVjZWlwdF9pZBgDIAEoCRIOCgZvdXRwdXQYBCABKAkSDQoFZXJyb3IYBSABKAkSFwoPdW5rbm93bl9vdXRjb21lGAYgASgIItABCg9SdW5BZ2VudFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIMCgRnb2FsGAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEg0KBW1vZGVsGAYgASgJEgwKBG1vZGUYByABKAkSEgoKbWF4X3JvdW5kcxgIIAEoDRILCgN6ZHIYCSABKAgSLQoFdG9vbHMYCiADKAsyHi5tb2RlbF9wbGFuZS52MS5Ub29sRGVmaW5pdGlvbiJjChBSdW5BZ2VudFJlc3BvbnNlEg4KBnN0YXR1cxgBIAEoCRIUCgxmaW5hbF9vdXRwdXQYAiABKAkSFwoPcm91bmRzX2V4ZWN1dGVkGAMgASgNEhAKCGdyb3VuZGVkGAQgASgIIrkBChJFeGVjdXRlU3RlcFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg8KB3N0ZXBfaWQYAiABKAkSEQoJdG9vbF9uYW1lGAMgASgJEhIKCnRvb2xfaW5wdXQYBCABKAkSFwoPcGVybWlzc2lvbl9tb2RlGAUgASgJEhQKDGhvb2tfY29udGV4dBgGIAEoCRIOCgZvcmdfaWQYByABKAkSDwoHdXNlcl9pZBgIIAEoCRILCgN6ZHIYCSABKAgicwoTRXhlY3V0ZVN0ZXBSZXNwb25zZRIPCgdzdGVwX2lkGAEgASgJEg4KBnN0YXR1cxgCIAEoCRIOCgZvdXRwdXQYAyABKAkSDQoFZXJyb3IYBCABKAkSHAoUY29tcGFjdGlvbl90cmlnZ2VyZWQYBSABKAgiXgoQUmVzdW1lUnVuUmVxdWVzdBIOCgZydW5faWQYASABKAkSFQoNY2hlY2twb2ludF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEwoLYXBwcm92YWxfaWQYBCABKAkiOAoRUmVzdW1lUnVuUmVzcG9uc2USDwoHcmVzdW1lZBgBIAEoCBISCgpzdGVwX2luZGV4GAIgASgNIjEKD1BhdXNlUnVuUmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJIiIKEFBhdXNlUnVuUmVzcG9uc2USDgoGcGF1c2VkGAEgASgIMpwECg1FeGVjdXRpb25Db3JlElYKC0V4ZWN1dGVTdGVwEiIubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVN0ZXBSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVN0ZXBSZXNwb25zZRJQCglSZXN1bWVSdW4SIC5tb2RlbF9wbGFuZS52MS5SZXN1bWVSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuUmVzdW1lUnVuUmVzcG9uc2USUAoJQ2FuY2VsUnVuEiAubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVxdWVzdBohLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1blJlc3BvbnNlEk0KCFBhdXNlUnVuEh8ubW9kZWxfcGxhbmUudjEuUGF1c2VSdW5SZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuUGF1c2VSdW5SZXNwb25zZRJNCghSdW5BZ2VudBIfLm1vZGVsX3BsYW5lLnYxLlJ1bkFnZW50UmVxdWVzdBogLm1vZGVsX3BsYW5lLnYxLlJ1bkFnZW50UmVzcG9uc2UScQoURXhlY3V0ZVNjaGVkdWxlZFN0ZXASKy5tb2RlbF9wbGFuZS52MS5FeGVjdXRlU2NoZWR1bGVkU3RlcFJlcXVlc3QaLC5tb2RlbF9wbGFuZS52MS5FeGVjdXRlU2NoZWR1bGVkU3RlcFJlc3BvbnNlQrYBChJjb20ubW9kZWxfcGxhbmUudjFCDkV4ZWN1dGlvblByb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_model_plane_v1_runs, file_model_plane_v1_inference]);
+
+/**
+ * ExecuteScheduledStepRequest contains only non-secret, immutable bindings.
+ * The Control decision is carried as direct-hop metadata by the eventual
+ * implementation, never in Temporal input, events, checkpoints, or tool
+ * payloads. Keeping the request content-free prevents a caller from selecting
+ * a goal, tool, credential, or user identity at the execution boundary.
+ *
+ * @generated from message model_plane.v1.ExecuteScheduledStepRequest
+ */
+export type ExecuteScheduledStepRequest = Message<"model_plane.v1.ExecuteScheduledStepRequest"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string thread_id = 2;
+   */
+  threadId: string;
+
+  /**
+   * @generated from field: string org_id = 3;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string space_id = 4;
+   */
+  spaceId: string;
+
+  /**
+   * @generated from field: string subject_id = 5;
+   */
+  subjectId: string;
+
+  /**
+   * @generated from field: string schedule_id = 6;
+   */
+  scheduleId: string;
+
+  /**
+   * @generated from field: string fire_key = 7;
+   */
+  fireKey: string;
+
+  /**
+   * @generated from field: string template_digest = 8;
+   */
+  templateDigest: string;
+
+  /**
+   * @generated from field: string step_id = 9;
+   */
+  stepId: string;
+
+  /**
+   * @generated from field: uint32 step_index = 10;
+   */
+  stepIndex: number;
+
+  /**
+   * @generated from field: string policy_digest = 11;
+   */
+  policyDigest: string;
+
+  /**
+   * @generated from field: string idempotency_key = 12;
+   */
+  idempotencyKey: string;
+
+  /**
+   * Ephemeral direct-hop Control decision. It must never be persisted in
+   * Temporal history, Session metadata, events, checkpoints, or tool output.
+   *
+   * @generated from field: string control_decision_token = 13;
+   */
+  controlDecisionToken: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ExecuteScheduledStepRequest.
+ * Use `create(ExecuteScheduledStepRequestSchema)` to create a new message.
+ */
+export const ExecuteScheduledStepRequestSchema: GenMessage<ExecuteScheduledStepRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_execution, 0);
+
+/**
+ * @generated from message model_plane.v1.ExecuteScheduledStepResponse
+ */
+export type ExecuteScheduledStepResponse = Message<"model_plane.v1.ExecuteScheduledStepResponse"> & {
+  /**
+   * @generated from field: string step_id = 1;
+   */
+  stepId: string;
+
+  /**
+   * @generated from field: string status = 2;
+   */
+  status: string;
+
+  /**
+   * @generated from field: string receipt_id = 3;
+   */
+  receiptId: string;
+
+  /**
+   * @generated from field: string output = 4;
+   */
+  output: string;
+
+  /**
+   * @generated from field: string error = 5;
+   */
+  error: string;
+
+  /**
+   * @generated from field: bool unknown_outcome = 6;
+   */
+  unknownOutcome: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.ExecuteScheduledStepResponse.
+ * Use `create(ExecuteScheduledStepResponseSchema)` to create a new message.
+ */
+export const ExecuteScheduledStepResponseSchema: GenMessage<ExecuteScheduledStepResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_execution, 1);
 
 /**
  * RunAgentRequest — drive one agent run from goal to terminal answer.
@@ -110,7 +238,7 @@ export type RunAgentRequest = Message<"model_plane.v1.RunAgentRequest"> & {
  * Use `create(RunAgentRequestSchema)` to create a new message.
  */
 export const RunAgentRequestSchema: GenMessage<RunAgentRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 0);
+  messageDesc(file_model_plane_v1_execution, 2);
 
 /**
  * RunAgentResponse — terminal outcome of a driven agent run.
@@ -156,7 +284,7 @@ export type RunAgentResponse = Message<"model_plane.v1.RunAgentResponse"> & {
  * Use `create(RunAgentResponseSchema)` to create a new message.
  */
 export const RunAgentResponseSchema: GenMessage<RunAgentResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 1);
+  messageDesc(file_model_plane_v1_execution, 3);
 
 /**
  * ExecuteStepRequest — request to execute one step in the agent loop.
@@ -236,7 +364,7 @@ export type ExecuteStepRequest = Message<"model_plane.v1.ExecuteStepRequest"> & 
  * Use `create(ExecuteStepRequestSchema)` to create a new message.
  */
 export const ExecuteStepRequestSchema: GenMessage<ExecuteStepRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 2);
+  messageDesc(file_model_plane_v1_execution, 4);
 
 /**
  * ExecuteStepResponse — result of a single step execution.
@@ -285,7 +413,7 @@ export type ExecuteStepResponse = Message<"model_plane.v1.ExecuteStepResponse"> 
  * Use `create(ExecuteStepResponseSchema)` to create a new message.
  */
 export const ExecuteStepResponseSchema: GenMessage<ExecuteStepResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 3);
+  messageDesc(file_model_plane_v1_execution, 5);
 
 /**
  * ResumeRunRequest — resume a paused or checkpointed run.
@@ -329,7 +457,7 @@ export type ResumeRunRequest = Message<"model_plane.v1.ResumeRunRequest"> & {
  * Use `create(ResumeRunRequestSchema)` to create a new message.
  */
 export const ResumeRunRequestSchema: GenMessage<ResumeRunRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 4);
+  messageDesc(file_model_plane_v1_execution, 6);
 
 /**
  * ResumeRunResponse — acknowledgement that the run has been resumed.
@@ -357,7 +485,7 @@ export type ResumeRunResponse = Message<"model_plane.v1.ResumeRunResponse"> & {
  * Use `create(ResumeRunResponseSchema)` to create a new message.
  */
 export const ResumeRunResponseSchema: GenMessage<ResumeRunResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 5);
+  messageDesc(file_model_plane_v1_execution, 7);
 
 /**
  * PauseRunRequest — pause an active run (Phase 2 B5).
@@ -385,7 +513,7 @@ export type PauseRunRequest = Message<"model_plane.v1.PauseRunRequest"> & {
  * Use `create(PauseRunRequestSchema)` to create a new message.
  */
 export const PauseRunRequestSchema: GenMessage<PauseRunRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 6);
+  messageDesc(file_model_plane_v1_execution, 8);
 
 /**
  * PauseRunResponse — acknowledgement that the run has been paused.
@@ -406,7 +534,7 @@ export type PauseRunResponse = Message<"model_plane.v1.PauseRunResponse"> & {
  * Use `create(PauseRunResponseSchema)` to create a new message.
  */
 export const PauseRunResponseSchema: GenMessage<PauseRunResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 7);
+  messageDesc(file_model_plane_v1_execution, 9);
 
 /**
  * ExecutionCore — runtime loop ownership for agent execution.
@@ -472,6 +600,19 @@ export const ExecutionCore: GenService<{
     methodKind: "unary";
     input: typeof RunAgentRequestSchema;
     output: typeof RunAgentResponseSchema;
+  },
+  /**
+   * Execute one service-owned scheduled turn. This is intentionally separate
+   * from ExecuteStep: the latter is user-delegated and must never be widened
+   * to make Temporal work. The lane remains disabled until Session Core's
+   * current-run claim/receipt and Control's per-step decision are deployed.
+   *
+   * @generated from rpc model_plane.v1.ExecutionCore.ExecuteScheduledStep
+   */
+  executeScheduledStep: {
+    methodKind: "unary";
+    input: typeof ExecuteScheduledStepRequestSchema;
+    output: typeof ExecuteScheduledStepResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_model_plane_v1_execution, 0);

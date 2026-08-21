@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/channels"
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/config"
@@ -20,12 +22,14 @@ import (
 // Handler is the unified Gin handler for notification-core. It owns the
 // dispatch path plus the feed, preferences, and channels paths.
 type Handler struct {
-	cfg           *config.Config
-	notifications *notification.Service
-	feed          *feed.Service
-	preferences   *preferences.Service
-	channels      *channels.Service
-	recipients    RecipientAuthorizer
+	cfg                *config.Config
+	notifications      *notification.Service
+	deliveryVerifier   *notification.DeliveryCallbackVerifier
+	deliveryReconciler notification.DeliveryReceiptReconciler
+	feed               *feed.Service
+	preferences        *preferences.Service
+	channels           *channels.Service
+	recipients         RecipientAuthorizer
 }
 
 type RecipientAuthorizer interface {
@@ -34,22 +38,66 @@ type RecipientAuthorizer interface {
 
 // HandlerDeps groups the new services so NewHandler stays append-only.
 type HandlerDeps struct {
-	Notifications *notification.Service
-	Feed          *feed.Service
-	Preferences   *preferences.Service
-	Channels      *channels.Service
-	Recipients    RecipientAuthorizer
+	Notifications      *notification.Service
+	DeliveryVerifier   *notification.DeliveryCallbackVerifier
+	DeliveryReconciler notification.DeliveryReceiptReconciler
+	Feed               *feed.Service
+	Preferences        *preferences.Service
+	Channels           *channels.Service
+	Recipients         RecipientAuthorizer
 }
 
 func NewHandler(cfg *config.Config, deps HandlerDeps) *Handler {
 	return &Handler{
-		cfg:           cfg,
-		notifications: deps.Notifications,
-		feed:          deps.Feed,
-		preferences:   deps.Preferences,
-		channels:      deps.Channels,
-		recipients:    deps.Recipients,
+		cfg:                cfg,
+		notifications:      deps.Notifications,
+		deliveryVerifier:   deps.DeliveryVerifier,
+		deliveryReconciler: deps.DeliveryReconciler,
+		feed:               deps.Feed,
+		preferences:        deps.Preferences,
+		channels:           deps.Channels,
+		recipients:         deps.Recipients,
 	}
+}
+
+// ReconcileNotificationDeliveryCallback is provider-facing and intentionally
+// independent of delegated browser/service ingress. Authenticity is proven by
+// the configured HMAC verifier and replay store; the owner ledger then exact-
+// matches attempt and provider request IDs before acknowledging delivery.
+func (h *Handler) ReconcileNotificationDeliveryCallback(c *gin.Context) {
+	if h.deliveryVerifier == nil || h.deliveryReconciler == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "delivery callback reconciliation unavailable"})
+		return
+	}
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid callback body"})
+		return
+	}
+	timestamp, err := strconv.ParseInt(strings.TrimSpace(c.GetHeader("X-Delivery-Timestamp")), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid callback signature"})
+		return
+	}
+	event, err := h.deliveryVerifier.Verify(
+		c.Request.Context(),
+		timestamp,
+		c.GetHeader("X-Delivery-Nonce"),
+		c.GetHeader("X-Delivery-Signature"),
+		body,
+	)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid callback signature"})
+		return
+	}
+	attempt, err := h.deliveryReconciler.MarkDeliveryAcknowledged(
+		c.Request.Context(), event.AttemptID, event.ProviderRequestID, event.ReceiptDigest, time.Now().UTC(),
+	)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "delivery receipt reconciliation unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"attempt_id": attempt.ID, "status": attempt.Status}})
 }
 
 // ── Health ────────────────────────────────────────────────────────────────
@@ -118,6 +166,7 @@ func (h *Handler) CreateNotificationRequest(c *gin.Context) {
 			return
 		}
 	case "support-worker":
+	case "capability-core":
 	default:
 		c.JSON(http.StatusForbidden, gin.H{"error": "caller is not authorized to create notifications"})
 		return
@@ -158,6 +207,10 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"ticket.triaged":  {},
 			"sla.warning":     {},
 			"sla.breach":      {},
+		},
+		"capability-core": {
+			"modelplane.run_completed": {},
+			"modelplane.run_failed":    {},
 		},
 	}
 	_, ok := allowed[serviceID][notificationType]

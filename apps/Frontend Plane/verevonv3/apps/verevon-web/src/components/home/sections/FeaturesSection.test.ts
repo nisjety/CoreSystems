@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { moduleCards, workflowCards } from "./FeatureWorkflowCards";
+import { moduleCards, workflowCards } from "./feature-workflow-cards";
 
 describe("features module cards", () => {
 	it("keeps the four-step workflow sequence for the pinned section", () => {

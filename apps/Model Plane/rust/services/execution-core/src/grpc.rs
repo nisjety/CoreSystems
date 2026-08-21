@@ -7,21 +7,25 @@ use mp_contracts::model_plane::v1::{
     self as pb,
     browser_broker_client::BrowserBrokerClient,
     execution_core_server::{ExecutionCore, ExecutionCoreServer},
+    inference_core_client::InferenceCoreClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     run_service_client::RunServiceClient,
     session_core_client::SessionCoreClient,
 };
 use mp_ids::new_ulid;
+use sha2::{Digest, Sha256};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::auth::{
-    delegated_session_bearer, AuthenticatedUser, DelegatedBrowserBearer, DelegatedSessionBearer,
-    JwtVerifier,
+    delegated_session_bearer, AuthenticatedService, AuthenticatedUser, DelegatedBrowserBearer,
+    DelegatedSessionBearer, JwtVerifier,
 };
 use crate::http_health::Readiness;
 use crate::runtime_loop;
+use crate::scheduled_inference_auth::ScheduledInferenceTokenProvider;
+use crate::scheduled_step_decision::ScheduledStepDecisionVerifier;
 use crate::session_terminal_auth::{ManagedRunTokenProvider, SessionTerminalTokenProvider};
 use crate::state::{RunSnapshot, RunStatus, StateStore};
 
@@ -34,6 +38,8 @@ pub(crate) struct ExecutionService {
     ownership: Arc<dyn RunOwnershipResolver>,
     capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
     terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
+    scheduled_step_decision_verifier: Option<ScheduledStepDecisionVerifier>,
+    scheduled_inference_tokens: Option<Arc<ScheduledInferenceTokenProvider>>,
 }
 
 #[tonic::async_trait]
@@ -89,6 +95,52 @@ impl ExecutionService {
         capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
         terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
     ) -> Self {
+        Self::new_with_scheduled_step_verifier(
+            state,
+            auth,
+            session_channel,
+            inference_channel,
+            browser_channel,
+            capability_policy,
+            terminal_tokens,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_scheduled_step_verifier(
+        state: StateStore,
+        auth: JwtVerifier,
+        session_channel: tonic::transport::Channel,
+        inference_channel: tonic::transport::Channel,
+        browser_channel: tonic::transport::Channel,
+        capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
+        terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
+        scheduled_step_decision_verifier: Option<ScheduledStepDecisionVerifier>,
+    ) -> Self {
+        Self::new_with_scheduled_step_runtime(
+            state,
+            auth,
+            session_channel,
+            inference_channel,
+            browser_channel,
+            capability_policy,
+            terminal_tokens,
+            scheduled_step_decision_verifier,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_scheduled_step_runtime(
+        state: StateStore,
+        auth: JwtVerifier,
+        session_channel: tonic::transport::Channel,
+        inference_channel: tonic::transport::Channel,
+        browser_channel: tonic::transport::Channel,
+        capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
+        terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
+        scheduled_step_decision_verifier: Option<ScheduledStepDecisionVerifier>,
+        scheduled_inference_tokens: Option<Arc<ScheduledInferenceTokenProvider>>,
+    ) -> Self {
         let ownership = Arc::new(SessionCoreRunOwnershipResolver {
             channel: session_channel.clone(),
         });
@@ -101,6 +153,8 @@ impl ExecutionService {
             ownership,
             capability_policy,
             terminal_tokens,
+            scheduled_step_decision_verifier,
+            scheduled_inference_tokens,
         }
     }
 
@@ -168,6 +222,300 @@ impl ExecutionService {
         )
         .await
     }
+
+    /// Run the bounded, service-owned scheduled inference lane. Session Core
+    /// is the idempotency authority: a step is claimed before inference and a
+    /// metadata-only receipt is recorded after it. A transport-ambiguous
+    /// provider response is explicitly `unknown_outcome`, never a blind retry.
+    async fn execute_scheduled_step_runtime(
+        &self,
+        req: pb::ExecuteScheduledStepRequest,
+    ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
+        let inference_tokens = self.scheduled_inference_tokens.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "scheduled-step inference service credential is not configured",
+            )
+        })?;
+        let session_bearer = self
+            .terminal_tokens
+            .scheduled_step_token(&req.org_id)
+            .await
+            .map_err(|error| {
+                warn!(%error, "scheduled-step Session credential unavailable");
+                Status::unavailable("scheduled-step Session credential unavailable")
+            })?;
+        // Mint the effect credential before claiming the step.  A missing
+        // service credential must not leave a durable `claimed` receipt that
+        // no worker can ever complete.
+        let inference_bearer = inference_tokens.token(&req.org_id).await.map_err(|error| {
+            warn!(%error, "scheduled-step inference credential unavailable");
+            Status::unavailable("scheduled-step inference credential unavailable")
+        })?;
+
+        let claim = self
+            .session_client()
+            .claim_scheduled_step(authenticated_session_request(
+                pb::ClaimScheduledStepRequest {
+                    run_id: req.run_id.clone(),
+                    thread_id: req.thread_id.clone(),
+                    org_id: req.org_id.clone(),
+                    space_id: req.space_id.clone(),
+                    schedule_id: req.schedule_id.clone(),
+                    fire_key: req.fire_key.clone(),
+                    template_digest: req.template_digest.clone(),
+                    step_id: req.step_id.clone(),
+                    step_index: req.step_index,
+                    policy_digest: req.policy_digest.clone(),
+                    idempotency_key: req.idempotency_key.clone(),
+                },
+                &session_bearer,
+            )?)
+            .await
+            .map_err(|error| {
+                warn!(code = ?error.code(), "scheduled-step Session claim failed");
+                if matches!(
+                    error.code(),
+                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                ) {
+                    Status::unavailable("scheduled-step Session claim unavailable")
+                } else {
+                    error
+                }
+            })?
+            .into_inner();
+
+        if !claim.claimed {
+            if claim.status == "claimed" {
+                return Err(Status::aborted(
+                    "scheduled step is already claimed; reconcile its receipt before retrying",
+                ));
+            }
+            return Ok(Response::new(pb::ExecuteScheduledStepResponse {
+                step_id: req.step_id,
+                status: claim.status.clone(),
+                receipt_id: claim.receipt_id,
+                output: String::new(),
+                error: String::new(),
+                unknown_outcome: claim.status == "unknown_outcome",
+            }));
+        }
+
+        let run = match RunServiceClient::new(self.session_channel.clone())
+            .get_scheduled_step_context(authenticated_session_request(
+                pb::GetScheduledStepContextRequest {
+                    run_id: req.run_id.clone(),
+                    thread_id: req.thread_id.clone(),
+                    org_id: req.org_id.clone(),
+                },
+                &session_bearer,
+            )?)
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                warn!(code = ?error.code(), "scheduled-step run lookup failed");
+                // The claim was durably accepted but the owner metadata could
+                // not be read. Preserve that uncertainty for reconciliation;
+                // never leave a silent `claimed` row that a retry could repeat.
+                let _ = self
+                    .record_scheduled_step_receipt(
+                        &req,
+                        &session_bearer,
+                        &claim.receipt_id,
+                        "unknown_outcome",
+                        "",
+                        "run_lookup_unknown",
+                        true,
+                    )
+                    .await;
+                return Err(Status::unavailable("scheduled-step run lookup unavailable"));
+            }
+        };
+        if run.thread_id != req.thread_id || matches!(run.status.as_str(), "cancelled" | "failed") {
+            let error_code = if run.status == "cancelled" {
+                "run_cancelled"
+            } else {
+                "run_not_executable"
+            };
+            let receipt = self
+                .record_scheduled_step_receipt(
+                    &req,
+                    &session_bearer,
+                    &claim.receipt_id,
+                    "failed",
+                    "",
+                    error_code,
+                    false,
+                )
+                .await?;
+            return Ok(Response::new(pb::ExecuteScheduledStepResponse {
+                step_id: req.step_id,
+                status: receipt.status,
+                receipt_id: receipt.receipt_id,
+                output: String::new(),
+                error: error_code.to_owned(),
+                unknown_outcome: false,
+            }));
+        }
+        if run.goal.trim().is_empty() {
+            let receipt = self
+                .record_scheduled_step_receipt(
+                    &req,
+                    &session_bearer,
+                    &claim.receipt_id,
+                    "failed",
+                    "",
+                    "missing_scheduled_goal",
+                    false,
+                )
+                .await?;
+            return Ok(Response::new(pb::ExecuteScheduledStepResponse {
+                step_id: req.step_id,
+                status: receipt.status,
+                receipt_id: receipt.receipt_id,
+                output: String::new(),
+                error: "missing_scheduled_goal".to_owned(),
+                unknown_outcome: false,
+            }));
+        }
+
+        let inference_request = scheduled_inference_request(&req, &run.goal);
+        let inference_result = match tokio::time::timeout(
+            Duration::from_secs(60),
+            InferenceCoreClient::new(self.inference_channel.clone()).infer(
+                authenticated_inference_request(inference_request, &inference_bearer)?,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Status::deadline_exceeded(
+                "scheduled-step inference outcome is unknown",
+            )),
+        };
+        match inference_result {
+            Ok(response) => {
+                let output = response.into_inner().content;
+                let output_digest = format!("sha256:{:x}", Sha256::digest(output.as_bytes()));
+                let receipt = self
+                    .record_scheduled_step_receipt(
+                        &req,
+                        &session_bearer,
+                        &claim.receipt_id,
+                        "completed",
+                        &output_digest,
+                        "",
+                        false,
+                    )
+                    .await?;
+                Ok(Response::new(pb::ExecuteScheduledStepResponse {
+                    step_id: req.step_id,
+                    status: receipt.status,
+                    receipt_id: receipt.receipt_id,
+                    output,
+                    error: String::new(),
+                    unknown_outcome: false,
+                }))
+            }
+            Err(error) => {
+                let (status, error_code, unknown) = scheduled_step_failure_status(error.code());
+                let receipt = self
+                    .record_scheduled_step_receipt(
+                        &req,
+                        &session_bearer,
+                        &claim.receipt_id,
+                        status,
+                        "",
+                        error_code,
+                        unknown,
+                    )
+                    .await?;
+                Ok(Response::new(pb::ExecuteScheduledStepResponse {
+                    step_id: req.step_id,
+                    status: receipt.status,
+                    receipt_id: receipt.receipt_id,
+                    output: String::new(),
+                    error: error_code.to_owned(),
+                    unknown_outcome: unknown,
+                }))
+            }
+        }
+    }
+
+    async fn record_scheduled_step_receipt(
+        &self,
+        req: &pb::ExecuteScheduledStepRequest,
+        bearer: &str,
+        receipt_id: &str,
+        status: &str,
+        output_digest: &str,
+        error_code: &str,
+        unknown_outcome: bool,
+    ) -> Result<pb::RecordScheduledStepReceiptResponse, Status> {
+        self.session_client()
+            .record_scheduled_step_receipt(authenticated_session_request(
+                pb::RecordScheduledStepReceiptRequest {
+                    run_id: req.run_id.clone(),
+                    step_id: req.step_id.clone(),
+                    org_id: req.org_id.clone(),
+                    idempotency_key: req.idempotency_key.clone(),
+                    receipt_id: receipt_id.to_owned(),
+                    status: status.to_owned(),
+                    output_digest: output_digest.to_owned(),
+                    error_code: error_code.to_owned(),
+                    unknown_outcome,
+                },
+                bearer,
+            )?)
+            .await
+            .map(|response| response.into_inner())
+            .map_err(|error| {
+                warn!(code = ?error.code(), "scheduled-step receipt persistence failed");
+                Status::unavailable("scheduled-step receipt persistence unavailable")
+            })
+    }
+}
+
+fn scheduled_inference_request(
+    req: &pb::ExecuteScheduledStepRequest,
+    goal: &str,
+) -> pb::InferRequest {
+    pb::InferRequest {
+        // Keep provider correlation in the same tenant/run/step namespace as
+        // the Session receipt. A bare step id can collide across runs or
+        // tenants, which makes an ambiguous provider response impossible to
+        // reconcile safely.
+        request_id: format!("scheduled:{}:{}", req.org_id, req.idempotency_key),
+        org_id: req.org_id.clone(),
+        model: "verevon-balance".to_owned(),
+        messages: vec![
+            pb::ChatMessage {
+                role: "system".to_owned(),
+                content:
+                    "Execute one bounded scheduled step. Do not call tools or external effects."
+                        .to_owned(),
+                name: String::new(),
+            },
+            pb::ChatMessage {
+                role: "user".to_owned(),
+                content: goal.to_owned(),
+                name: String::new(),
+            },
+        ],
+        temperature: 0.2,
+        max_tokens: 1024,
+        tool_choice: "none".to_owned(),
+        ..Default::default()
+    }
+}
+
+fn scheduled_step_failure_status(code: tonic::Code) -> (&'static str, &'static str, bool) {
+    match code {
+        tonic::Code::Unavailable | tonic::Code::DeadlineExceeded | tonic::Code::Cancelled => {
+            ("unknown_outcome", "inference_outcome_unknown", true)
+        }
+        _ => ("failed", "inference_failed", false),
+    }
 }
 
 #[allow(clippy::result_large_err)]
@@ -207,6 +555,18 @@ fn authenticated_session_request<T>(value: T, bearer: &str) -> Result<Request<T>
     let authorization = format!("Bearer {bearer}")
         .parse()
         .map_err(|_| Status::internal("verified session credential is not forwardable"))?;
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    Ok(request)
+}
+
+#[allow(clippy::result_large_err)]
+fn authenticated_inference_request<T>(value: T, bearer: &str) -> Result<Request<T>, Status> {
+    let mut request = Request::new(value);
+    let authorization = format!("Bearer {bearer}")
+        .parse()
+        .map_err(|_| Status::internal("verified inference credential is not forwardable"))?;
     request
         .metadata_mut()
         .insert("authorization", authorization);
@@ -300,6 +660,99 @@ fn resume_durable_approval_continuation(
     ))
 }
 
+/// `ExecuteStep` is an authenticated integration primitive, not an alternate
+/// owner-effect entrypoint. Reserved actions enter only through the agent loop
+/// after a run-bound server-resolved catalog decision, and a future delivery
+/// worker will need a distinct, durable continuation capability to execute an
+/// approved descriptor. Keeping them out of this RPC prevents a caller from
+/// naming a tool directly to bypass either control.
+fn reject_direct_owner_action(tool_name: &str) -> Result<(), Status> {
+    if crate::permission::requires_durable_owner_approval(tool_name) {
+        return Err(Status::permission_denied(
+            "reserved owner actions cannot be invoked through ExecuteStep",
+        ));
+    }
+    Ok(())
+}
+
+/// The internal one-step RPC has no safe default permission posture. Agentic
+/// requests normalize their own mode to `ask`, but a direct caller must be
+/// explicit so an absent or malformed field cannot silently become `auto`.
+fn validate_direct_permission_mode(permission_mode: &str) -> Result<(), Status> {
+    match permission_mode {
+        "auto" | "ask" | "deny" => Ok(()),
+        _ => Err(Status::invalid_argument(
+            "permission_mode must be one of auto, ask, or deny",
+        )),
+    }
+}
+
+/// Validate the public shape of the scheduled-step lane before it is wired to
+/// any authority or execution adapter. This keeps malformed Temporal activity
+/// input from becoming an implicit wildcard when the lane is enabled later.
+#[allow(clippy::result_large_err)]
+fn validate_scheduled_step_bindings(req: &pb::ExecuteScheduledStepRequest) -> Result<(), Status> {
+    fn identifier(value: &str) -> bool {
+        !value.is_empty()
+            && value.len() <= 256
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+            })
+    }
+    fn digest(value: &str) -> bool {
+        value.len() == 71
+            && value.starts_with("sha256:")
+            && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    if !identifier(&req.run_id)
+        || !identifier(&req.thread_id)
+        || !identifier(&req.org_id)
+        || !identifier(&req.space_id)
+        || !identifier(&req.subject_id)
+        || !identifier(&req.schedule_id)
+        || !identifier(&req.fire_key)
+        || !identifier(&req.step_id)
+        || !identifier(&req.idempotency_key)
+        || !digest(&req.template_digest)
+        || !digest(&req.policy_digest)
+        || req.control_decision_token.trim().is_empty()
+        || req.control_decision_token.len() > 16_384
+    {
+        return Err(Status::invalid_argument(
+            "scheduled-step bindings are invalid",
+        ));
+    }
+    Ok(())
+}
+
+const SCHEDULED_STEP_SERVICE_ID: &str = "service:orchestrator-core";
+const SCHEDULED_STEP_SCOPE: &str = "model:schedule:step";
+
+#[allow(clippy::result_large_err)]
+fn authorize_scheduled_step_service(
+    caller: &AuthenticatedService,
+    org_id: &str,
+) -> Result<(), Status> {
+    if caller.service_id != SCHEDULED_STEP_SERVICE_ID {
+        return Err(Status::permission_denied(
+            "scheduled-step service principal is not authorized",
+        ));
+    }
+    caller.authorize_org(org_id)?;
+    if !caller.has_scope(SCHEDULED_STEP_SCOPE) {
+        return Err(Status::permission_denied(
+            "scheduled-step service scope is required",
+        ));
+    }
+    if caller.zdr {
+        return Err(Status::failed_precondition(
+            "scheduled-step execution requires persistent service retention",
+        ));
+    }
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl ExecutionCore for ExecutionService {
     // single-step RPC: gate → execute → HITL → persist is one linear flow
@@ -338,6 +791,8 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
+        reject_direct_owner_action(&req.tool_name)?;
+        validate_direct_permission_mode(&req.permission_mode)?;
         enforce_persistence_free_execution(&caller, req.zdr, "tool execution")?;
         // Resolve the opaque JSON grant id with BrowserBroker only after the
         // signed caller and durable run owner are authorized. The resulting
@@ -657,6 +1112,31 @@ impl ExecutionCore for ExecutionService {
         .await?;
         Ok(Response::new(response))
     }
+
+    async fn execute_scheduled_step(
+        &self,
+        request: Request<pb::ExecuteScheduledStepRequest>,
+    ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
+        let caller = self.auth.authenticate_scheduled_step(&request).await?;
+        // Deliberately fail closed until the complete service-owned lane is
+        // deployed: Control step decisions, Session current-run claim/receipt,
+        // and a service-principal verifier are all required before any model
+        // or provider work can be reached. In particular, do not fall back to
+        // ExecuteStep or manufacture a user identity from this request.
+        let req = request.into_inner();
+        validate_scheduled_step_bindings(&req)?;
+        authorize_scheduled_step_service(&caller, &req.org_id)?;
+        let verifier = self
+            .scheduled_step_decision_verifier
+            .as_ref()
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    "scheduled-step Control decision verifier is not configured",
+                )
+            })?;
+        verifier.verify(&req, chrono::Utc::now())?;
+        self.execute_scheduled_step_runtime(req).await
+    }
 }
 
 struct ReadinessGuard(Readiness);
@@ -705,6 +1185,20 @@ pub async fn serve(
     )?);
     let terminal_tokens: Arc<dyn ManagedRunTokenProvider> =
         Arc::new(SessionTerminalTokenProvider::from_env()?);
+    let scheduled_step_decision_verifier = match ScheduledStepDecisionVerifier::from_env() {
+        Ok(verifier) => Some(verifier),
+        Err(error) => {
+            warn!(%error, "scheduled-step Control decision verifier unavailable; lane remains disabled");
+            None
+        }
+    };
+    let scheduled_inference_tokens = match ScheduledInferenceTokenProvider::from_env() {
+        Ok(provider) => Some(Arc::new(provider)),
+        Err(error) => {
+            warn!(%error, "scheduled-step inference credential unavailable; lane remains disabled");
+            None
+        }
+    };
 
     serve_with_listener(
         state,
@@ -716,6 +1210,8 @@ pub async fn serve(
         browser_url,
         capability_policy,
         terminal_tokens,
+        scheduled_step_decision_verifier,
+        scheduled_inference_tokens,
     )
     .await
 }
@@ -730,6 +1226,8 @@ async fn serve_with_listener(
     browser_url: String,
     capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
     terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
+    scheduled_step_decision_verifier: Option<ScheduledStepDecisionVerifier>,
+    scheduled_inference_tokens: Option<Arc<ScheduledInferenceTokenProvider>>,
 ) -> anyhow::Result<()> {
     let session_channel = tonic::transport::Endpoint::from_shared(session_url)?.connect_lazy();
     let inference_channel = tonic::transport::Endpoint::from_shared(inference_url)?.connect_lazy();
@@ -740,15 +1238,19 @@ async fn serve_with_listener(
     info!("gRPC listening on :9093");
 
     tonic::transport::Server::builder()
-        .add_service(ExecutionCoreServer::new(ExecutionService::new(
-            state,
-            auth,
-            session_channel,
-            inference_channel,
-            browser_channel,
-            capability_policy,
-            terminal_tokens,
-        )))
+        .add_service(ExecutionCoreServer::new(
+            ExecutionService::new_with_scheduled_step_runtime(
+                state,
+                auth,
+                session_channel,
+                inference_channel,
+                browser_channel,
+                capability_policy,
+                terminal_tokens,
+                scheduled_step_decision_verifier,
+                scheduled_inference_tokens,
+            ),
+        ))
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await?;
 
@@ -796,6 +1298,13 @@ mod auth_tests {
             _org_id: &str,
         ) -> Result<String, SessionTerminalTokenError> {
             Ok("test-heartbeat-service-token".to_owned())
+        }
+
+        async fn scheduled_step_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, SessionTerminalTokenError> {
+            Ok("test-scheduled-step-service-token".to_owned())
         }
     }
 
@@ -968,6 +1477,122 @@ mod auth_tests {
     }
 
     #[test]
+    fn direct_execute_step_refuses_reserved_owner_actions_and_ambiguous_modes() {
+        let error = reject_direct_owner_action(crate::ticket_tools::TOOL_NAME)
+            .expect_err("a public direct-step RPC cannot execute an owner action");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            reject_direct_owner_action("  tickets.create  ")
+                .expect_err("whitespace does not turn a reserved action into a direct tool")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        reject_direct_owner_action("shell").expect("ordinary tools keep the direct API");
+
+        for mode in ["", "execute", "unknown"] {
+            assert_eq!(
+                validate_direct_permission_mode(mode)
+                    .expect_err("direct calls need an explicit supported mode")
+                    .code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+        for mode in ["auto", "ask", "deny"] {
+            validate_direct_permission_mode(mode).expect("recognized permission mode");
+        }
+    }
+
+    #[test]
+    fn scheduled_step_contract_rejects_wildcards_and_requires_digests() {
+        let valid_digest = format!("sha256:{}", "a".repeat(64));
+        let valid = pb::ExecuteScheduledStepRequest {
+            run_id: "run_01".to_owned(),
+            thread_id: "thread_01".to_owned(),
+            org_id: "org_01".to_owned(),
+            space_id: "space_01".to_owned(),
+            subject_id: "user_01".to_owned(),
+            schedule_id: "schedule_01".to_owned(),
+            fire_key: "fire_01".to_owned(),
+            template_digest: valid_digest.clone(),
+            step_id: "step_01".to_owned(),
+            step_index: 0,
+            policy_digest: valid_digest,
+            idempotency_key: "idem_01".to_owned(),
+            control_decision_token: "scheduled-step-decision".to_owned(),
+        };
+        validate_scheduled_step_bindings(&valid).expect("canonical bindings are accepted");
+
+        let mut forged = valid.clone();
+        forged.org_id = "*".to_owned();
+        assert_eq!(
+            validate_scheduled_step_bindings(&forged)
+                .expect_err("wildcard tenant must not become an authority selector")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let mut missing_digest = valid;
+        missing_digest.template_digest.clear();
+        assert_eq!(
+            validate_scheduled_step_bindings(&missing_digest)
+                .expect_err("scheduled work must bind an immutable template")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn scheduled_step_service_gate_is_exact_and_non_zdr() {
+        let valid = AuthenticatedService::for_test(
+            "org_01",
+            SCHEDULED_STEP_SERVICE_ID,
+            &[SCHEDULED_STEP_SCOPE],
+            false,
+        );
+        authorize_scheduled_step_service(&valid, "org_01")
+            .expect("exact scheduled-step service is accepted");
+
+        for (service_id, scopes, org_id, zdr, expected) in [
+            (
+                "service:other",
+                vec![SCHEDULED_STEP_SCOPE],
+                "org_01",
+                false,
+                tonic::Code::PermissionDenied,
+            ),
+            (
+                SCHEDULED_STEP_SERVICE_ID,
+                vec!["session:write"],
+                "org_01",
+                false,
+                tonic::Code::PermissionDenied,
+            ),
+            (
+                SCHEDULED_STEP_SERVICE_ID,
+                vec![SCHEDULED_STEP_SCOPE],
+                "org_02",
+                false,
+                tonic::Code::PermissionDenied,
+            ),
+            (
+                SCHEDULED_STEP_SERVICE_ID,
+                vec![SCHEDULED_STEP_SCOPE],
+                "org_01",
+                true,
+                tonic::Code::FailedPrecondition,
+            ),
+        ] {
+            let caller = AuthenticatedService::for_test("org_01", service_id, &scopes, zdr);
+            assert_eq!(
+                authorize_scheduled_step_service(&caller, org_id)
+                    .expect_err("scheduled-step service gate must fail closed")
+                    .code(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn signed_zdr_blocks_execution_dispatch_and_durable_run_control() {
         let caller = AuthenticatedUser::for_test_with_zdr("org-owner", "user-owner", true);
         for operation in ["tool execution", "run control"] {
@@ -975,6 +1600,35 @@ mod auth_tests {
                 .expect_err("signed ZDR must dominate a caller-controlled request flag");
             assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         }
+    }
+
+    #[test]
+    fn scheduled_step_runtime_is_tool_free_and_bounded_to_unknown_on_transport_loss() {
+        let request = pb::ExecuteScheduledStepRequest {
+            org_id: "org-1".to_owned(),
+            step_id: "run-1:step:0".to_owned(),
+            idempotency_key: "run-1:step:0".to_owned(),
+            ..Default::default()
+        };
+        let inference = scheduled_inference_request(&request, "send the daily summary");
+        assert!(inference.tools.is_empty());
+        assert_eq!(inference.tool_choice, "none");
+        assert_eq!(inference.zdr, false);
+        assert_eq!(inference.request_id, "scheduled:org-1:run-1:step:0");
+        assert_eq!(inference.messages[1].content, "send the daily summary");
+
+        assert_eq!(
+            scheduled_step_failure_status(tonic::Code::DeadlineExceeded),
+            ("unknown_outcome", "inference_outcome_unknown", true)
+        );
+        assert_eq!(
+            scheduled_step_failure_status(tonic::Code::Unavailable),
+            ("unknown_outcome", "inference_outcome_unknown", true)
+        );
+        assert_eq!(
+            scheduled_step_failure_status(tonic::Code::InvalidArgument),
+            ("failed", "inference_failed", false)
+        );
     }
 
     #[tokio::test]
@@ -1034,6 +1688,8 @@ mod auth_tests {
             "http://127.0.0.1:1".to_owned(),
             Arc::new(AllowCapabilityPolicy),
             Arc::new(StaticTerminalTokens),
+            None,
+            None,
         ));
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {

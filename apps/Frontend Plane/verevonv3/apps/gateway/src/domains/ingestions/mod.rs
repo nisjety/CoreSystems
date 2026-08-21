@@ -40,7 +40,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(sources::list_sources).post(sources::create_source),
         )
         .route(
-            "/api/ingestions/sources/:id",
+            "/api/ingestions/sources/{id}",
             delete(sources::delete_source),
         )
         .route("/api/ingestions/profiles", get(profiles::list_profiles))

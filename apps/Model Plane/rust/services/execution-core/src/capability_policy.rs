@@ -13,6 +13,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use mp_contracts::model_plane::v1::{
     capability_core_client::CapabilityCoreClient, EvaluatePolicyRequest, EvaluatePolicyResponse,
 };
+use reqwest::{Client, Url};
 use serde::Deserialize;
 use tonic::transport::Channel;
 use tonic::{Request, Status};
@@ -69,6 +70,17 @@ pub trait CapabilityPolicy: Send + Sync {
             .await
             .map(CapabilityEvaluation::unverified)
     }
+
+    /// Returns only server-resolved, run-bound tool definitions. The default
+    /// deliberately exposes no owner-plane action: test/local policies cannot
+    /// accidentally invent one by omitting this method.
+    async fn resolve_server_tool_definitions(
+        &self,
+        _run_id: &str,
+        _org_id: &str,
+    ) -> Result<Vec<mp_contracts::model_plane::v1::ToolDefinition>, Status> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Clone)]
@@ -76,6 +88,7 @@ pub struct GrpcCapabilityPolicy {
     channel: Channel,
     tokens: TokenSource,
     decision_verifier: DecisionEvidenceVerifier,
+    model_action_view: Option<ServerResolvedModelActionViewClient>,
 }
 
 impl std::fmt::Debug for GrpcCapabilityPolicy {
@@ -101,6 +114,7 @@ impl GrpcCapabilityPolicy {
             channel,
             tokens: TokenSource::Service(Arc::new(ServiceTokenProvider::from_env()?)),
             decision_verifier: DecisionEvidenceVerifier::from_env()?,
+            model_action_view: ServerResolvedModelActionViewClient::from_env()?,
         })
     }
 
@@ -111,6 +125,7 @@ impl GrpcCapabilityPolicy {
             channel,
             tokens: TokenSource::Static(Arc::from(bearer)),
             decision_verifier: DecisionEvidenceVerifier::disabled_for_test(),
+            model_action_view: None,
         }
     }
 }
@@ -153,6 +168,181 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
                 || self.decision_verifier.is_configured(),
             ..evaluation
         })
+    }
+
+    async fn resolve_server_tool_definitions(
+        &self,
+        run_id: &str,
+        org_id: &str,
+    ) -> Result<Vec<mp_contracts::model_plane::v1::ToolDefinition>, Status> {
+        let Some(client) = &self.model_action_view else {
+            return Ok(Vec::new());
+        };
+        let TokenSource::Service(tokens) = &self.tokens else {
+            return Ok(Vec::new());
+        };
+        client.resolve(tokens, run_id, org_id).await
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ServerResolvedModelActionViewClient {
+    ticket_client: crate::ticket_tools::AgentTicketActionClient,
+    capability_core_url: Url,
+    http: Client,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ModelActionViewRequest<'a> {
+    run_id: &'a str,
+    control_view_token: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelActionViewEnvelope {
+    data: ModelActionViewData,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelActionViewData {
+    run_id: String,
+    actions: Vec<ModelActionViewTool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelActionViewTool {
+    name: String,
+    description: String,
+    parameters_json: String,
+    action_schema_hash: String,
+    requires_approval: bool,
+}
+
+impl ServerResolvedModelActionViewClient {
+    fn from_env() -> anyhow::Result<Option<Self>> {
+        let capability_core_url = std::env::var("CAPABILITY_CORE_HTTP_URL")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty());
+        let ticket_client =
+            crate::ticket_tools::AgentTicketActionClient::from_env().map_err(anyhow::Error::msg)?;
+        // CAPABILITY_CORE_HTTP_URL also enables Execution Core's unrelated
+        // sandbox-health reporter. Its presence alone must not make startup
+        // depend on the optional owner-action configuration. Conversely, a fully
+        // wired effect adapter without this endpoint simply remains unoffered.
+        let (Some(capability_core_url), Some(ticket_client)) = (capability_core_url, ticket_client)
+        else {
+            return Ok(None);
+        };
+        if !ticket_client.model_action_view_is_configured() {
+            return Ok(None);
+        }
+        let capability_core_url = Url::parse(&capability_core_url)
+            .map_err(|_| anyhow::anyhow!("CAPABILITY_CORE_HTTP_URL is invalid"))?;
+        if !matches!(capability_core_url.scheme(), "http" | "https")
+            || capability_core_url.host_str().is_none()
+            || !capability_core_url.username().is_empty()
+            || capability_core_url.password().is_some()
+            || capability_core_url.query().is_some()
+            || capability_core_url.fragment().is_some()
+        {
+            anyhow::bail!("CAPABILITY_CORE_HTTP_URL must be an absolute http(s) service URL without credentials, query, or fragment")
+        }
+        Ok(Some(Self {
+            ticket_client,
+            capability_core_url,
+            http: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(5))
+                .build()?,
+        }))
+    }
+
+    async fn resolve(
+        &self,
+        tokens: &ServiceTokenProvider,
+        run_id: &str,
+        org_id: &str,
+    ) -> Result<Vec<mp_contracts::model_plane::v1::ToolDefinition>, Status> {
+        if run_id.trim().is_empty() || org_id.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "run and tenant are required for server-resolved model actions",
+            ));
+        }
+        let control_view_token = self
+            .ticket_client
+            .request_model_action_view(run_id, org_id)
+            .await
+            .map_err(|_| Status::unavailable("Control model action view unavailable"))?;
+        let bearer = tokens
+            .token_with_scopes(
+                org_id,
+                &["capability:model-action:view"],
+                "resolve a Control-authorized run-bound model action view",
+            )
+            .await
+            .map_err(|_| Status::unavailable("model action view credential unavailable"))?;
+        let endpoint = self
+            .capability_core_url
+            .join("/api/v1/internal/model-actions/run-view")
+            .map_err(|_| Status::internal("model action view endpoint is invalid"))?;
+        let response = self
+            .http
+            .post(endpoint)
+            .bearer_auth(bearer)
+            .json(&ModelActionViewRequest {
+                run_id,
+                control_view_token: &control_view_token,
+            })
+            .send()
+            .await
+            .map_err(|_| Status::unavailable("model action view unavailable"))?;
+        if !response.status().is_success() {
+            return Err(Status::permission_denied("model action view denied"));
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|_| Status::unavailable("model action view unavailable"))?;
+        if body.len() > 32 << 10 {
+            return Err(Status::permission_denied(
+                "model action view response is oversized",
+            ));
+        }
+        let response = serde_json::from_slice::<ModelActionViewEnvelope>(&body)
+            .map_err(|_| Status::permission_denied("model action view response is invalid"))?;
+        if response.data.run_id != run_id || response.data.actions.len() > 1 {
+            return Err(Status::permission_denied(
+                "model action view response is not run-bound",
+            ));
+        }
+        response
+            .data
+            .actions
+            .into_iter()
+            .map(|tool| {
+                if tool.name != crate::ticket_tools::TOOL_NAME
+                    || tool.description.trim().is_empty()
+                    || tool.parameters_json
+                        != crate::ticket_tools::TICKET_CREATE_MODEL_PARAMETERS_JSON
+                    || tool.action_schema_hash != crate::ticket_tools::TICKET_CREATE_SCHEMA_SHA256
+                    || !tool.requires_approval
+                {
+                    return Err(Status::permission_denied(
+                        "model action view returned an invalid tool definition",
+                    ));
+                }
+                Ok(mp_contracts::model_plane::v1::ToolDefinition {
+                    name: tool.name,
+                    description: tool.description,
+                    parameters_json: tool.parameters_json,
+                })
+            })
+            .collect()
     }
 }
 
@@ -229,11 +419,24 @@ struct DecisionEvidenceVerifier {
 
 impl DecisionEvidenceVerifier {
     fn from_env() -> anyhow::Result<Self> {
-        let raw = std::env::var("EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY").map_err(|_| {
-            anyhow::anyhow!("EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY is required")
-        })?;
+        let raw = std::env::var("EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        Self::from_raw(raw.as_deref())
+    }
+
+    fn from_raw(raw: Option<&str>) -> anyhow::Result<Self> {
+        // Development compose intentionally leaves decision evidence
+        // unconfigured; the policy response remains usable but carries no
+        // cryptographic evidence. The production overlay makes this variable
+        // mandatory, so an explicitly supplied malformed key must still fail
+        // closed rather than silently disabling verification.
+        let Some(raw) = raw else {
+            return Ok(Self { key: None });
+        };
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(raw.trim())
+            .decode(raw)
             .map_err(|_| anyhow::anyhow!("capability decision public key is not valid base64"))?;
         let bytes: [u8; 32] = bytes
             .try_into()
@@ -561,6 +764,10 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "publish_social_post" => "cap.tool.social.publish",
         "list_provider_actions" => "cap.tool.provider.read",
         "execute_provider_action" => "cap.tool.provider.execute",
+        // A Conversation Core ticket is a model-proposed effect, never a
+        // generic service call. The executor's dedicated adapter obtains a
+        // current Control target-action decision and the owner verifies it.
+        "tickets.create" => crate::ticket_tools::CAPABILITY_ID,
         // Dynamic MCP tools require a durable registry-owned binding. Do not
         // synthesize one from an untrusted model-facing name.
         _ => return None,
@@ -621,6 +828,17 @@ mod tests {
     }
 
     #[test]
+    fn absent_capability_decision_key_is_allowed_only_for_dev_mode() {
+        let verifier = DecisionEvidenceVerifier::from_raw(None).expect("missing key is dev mode");
+        assert!(!verifier.is_configured());
+        assert!(DecisionEvidenceVerifier::from_raw(Some("not-base64")).is_err());
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let valid = base64::engine::general_purpose::STANDARD
+            .encode(signing_key.verifying_key().to_bytes());
+        assert!(DecisionEvidenceVerifier::from_raw(Some(&valid)).is_ok());
+    }
+
+    #[test]
     fn decision_evidence_verifies_and_binds_the_dispatch_tuple() {
         let signing_key = SigningKey::from_bytes(&[7; 32]);
         let verifier = DecisionEvidenceVerifier {
@@ -662,6 +880,10 @@ mod tests {
         assert_eq!(
             trusted_capability_id("book_shipment").as_deref(),
             Some("cap.tool.shipping.book")
+        );
+        assert_eq!(
+            trusted_capability_id("tickets.create").as_deref(),
+            Some(crate::ticket_tools::CAPABILITY_ID)
         );
         // The two execution tools must never collapse onto one capability: the
         // sandboxed interpreter is governed as low-risk, arbitrary shell is not.

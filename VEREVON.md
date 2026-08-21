@@ -6,13 +6,13 @@
 > relevant end-to-end flow has been verified. It does not mean Verevon has been
 > released to external customers.
 
-> **Current execution ledger — 2026-08-14.** For the current reconciled status
+> **Current execution ledger — 2026-08-15.** For the current reconciled status
 > and ordered implementation work across the six Verevon documents, use
-> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-14).
+> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-15).
 > The dated material below remains evidence and historical context; it is not
 > a newer status assertion when it conflicts with that ledger.
 
-> **Scope-and-operations update — 2026-08-14.** Verevon's next product
+> **Scope-and-operations update — 2026-08-15.** Verevon's next product
 > contract is a first-class **Space**: one person, room, project, or case has
 > one explicit collaboration authority context, agent context, work projection,
 > activity history, and presence across supported surfaces. This is an active
@@ -22,7 +22,7 @@
 > the intersection of current Space authority, active recipient audience, and
 > the owner plane's current resource decision.
 
-> **Local implementation checkpoint — 2026-08-14.** Commit `fa2d1eff` adds a
+> **Local implementation checkpoint — 2026-08-15.** Commit `fa2d1eff` adds a
 > source/test-backed owner-approved scheduled-run preparation contract across
 > Control, Capability Core, Session Core, and Orchestrator. Control issues a
 > short-lived, single-fire decision; Capability Core verifies it and passes its
@@ -34,7 +34,7 @@
 > Session → Temporal → receipt, revocation, ZDR, and rollback evidence remain
 > open in the roadmap's R/S gates.
 
-> **Quarry web/browser checkpoint — 2026-08-14.** Verevon's agent web
+> **Quarry web/browser checkpoint — 2026-08-15.** Verevon's agent web
 > capability is Quarry-native; Firecrawl is neither a runtime dependency nor
 > an execution fallback. Model Plane plans and replans, BrowserBroker issues
 > exact grants, and Quarry acquires pages, executes or rejects browser actions,

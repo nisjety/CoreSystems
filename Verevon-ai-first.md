@@ -6,14 +6,14 @@
 > migrations/configuration, verify the real flow, fix bugs, and continue. This
 > document does not require an external production deployment at this stage.
 
-> **Current execution ledger — 2026-08-14.** The reconciled current execution
+> **Current execution ledger — 2026-08-15.** The reconciled current execution
 > state for this audit, `VEREVON.md`, the Feature Map, Vision, Roadmap, and
 > Support delivery record lives in
-> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-14).
+> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-15).
 > Historical audit claims below remain evidence; the ledger wins if a dated
 > status claim conflicts with it.
 
-> **Current architecture correction — 2026-08-14.** “Every UI is an API” is
+> **Current architecture correction — 2026-08-15.** “Every UI is an API” is
 > the product direction, not evidence that every V3 registry entry is currently
 > executable by both a person and an agent. The browser registry is typed UX
 > metadata; owner-plane dispatch, authorization, and durable effect receipts
@@ -23,14 +23,14 @@
 > business effect. See [the current roadmap](verevon-roadmap.md#current-execution-ledger--2026-08-14)
 > and the [QM comparison/adoption plan](apps/Frontend%20Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md).
 
-> **Scheduled-run checkpoint — 2026-08-14.** The local stack launcher now
+> **Scheduled-run checkpoint — 2026-08-15.** The local stack launcher now
 > completes a dev-only build/start pass, and `fa2d1eff` adds the narrow
 > Control → Capability Core → Session Core → Orchestrator contract for one
 > owner-approved schedule fire. It is source/test-backed preparation only;
 > customer-visible scheduled execution, provider effects, revocation drills,
 > candidate artifacts, and rollback remain open.
 
-> **Quarry web/browser checkpoint — 2026-08-14.** Agent web work is executed
+> **Quarry web/browser checkpoint — 2026-08-15.** Agent web work is executed
 > by Quarry, not Firecrawl. The local Chromium driver is now promoted only
 > when it is constructed with Quarry's DNS-pinned per-session egress proxy;
 > adversarial proof covers redirects, iframes, XHR/fetch, image subresources,

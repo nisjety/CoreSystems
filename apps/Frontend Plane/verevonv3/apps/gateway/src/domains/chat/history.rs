@@ -119,7 +119,22 @@ pub(super) async fn list_threads(
         Ok(sessions) => sessions,
         Err(response) => return response,
     };
-    Json(ok(ThreadsResponse { sessions })).into_response()
+    Json(ok(ThreadsResponse {
+        sessions: chat_history_sessions(sessions),
+    }))
+    .into_response()
+}
+
+/// Space-scoped conversations are the room's shared record and render in the
+/// room's own timeline; Chat's history lists only Verevon's own, unscoped
+/// conversations. Filtered at the LISTING and not in `read_durable_threads`:
+/// that read also authorizes transcript fetches, which is exactly how the
+/// room timeline reads its posts' content.
+fn chat_history_sessions(sessions: Vec<ChatThreadSummary>) -> Vec<ChatThreadSummary> {
+    sessions
+        .into_iter()
+        .filter(|session| session.space_ref.trim().is_empty())
+        .collect()
 }
 
 pub(super) async fn get_thread_transcript(
@@ -451,6 +466,10 @@ struct CanonicalMessage {
     role: String,
     #[serde(default)]
     content: String,
+    /// The persona this turn answered as, when it had one — session-core's
+    /// at-the-time record, surfaced for per-turn attribution in the room.
+    #[serde(default)]
+    agent_name: String,
 }
 
 async fn read_canonical_transcript(
@@ -511,11 +530,15 @@ fn canonical_messages_to_transcript(
         .into_iter()
         .enumerate()
         .map(|(index, message)| {
-            json!({
+            let mut turn = json!({
                 "id": format!("canonical-{}", index + 1),
                 "role": message.role,
                 "content": message.content,
-            })
+            });
+            if !message.agent_name.trim().is_empty() {
+                turn["agentName"] = json!(message.agent_name);
+            }
+            turn
         })
         .collect();
     Some(ChatThreadTranscript {
@@ -610,10 +633,49 @@ fn bad_request(message: &'static str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_messages_to_transcript, durable_to_summary, enforce_support_thread_policy,
-        strip_support_thread_capabilities, CanonicalMessage, DurableThreadSummary,
+        canonical_messages_to_transcript, chat_history_sessions, durable_to_summary,
+        enforce_support_thread_policy, strip_support_thread_capabilities, CanonicalMessage,
+        DurableThreadSummary,
     };
     use serde_json::{json, Value};
+
+    #[test]
+    fn chat_history_excludes_space_scoped_conversations() {
+        let now = "2026-08-16T12:00:00Z";
+        let space_thread = durable_to_summary(
+            DurableThreadSummary {
+                thread_id: "thread_room".to_owned(),
+                title: "@Statusagent hva er din rolle?".to_owned(),
+                preview: String::new(),
+                updated_at: now.to_owned(),
+                created_at: now.to_owned(),
+                pinned: false,
+                space_id: "space_room_1".to_owned(),
+            },
+            now,
+        )
+        .expect("valid record");
+        let chat_thread = durable_to_summary(
+            DurableThreadSummary {
+                thread_id: "thread_chat".to_owned(),
+                title: "hvem er aquatiq".to_owned(),
+                preview: String::new(),
+                updated_at: now.to_owned(),
+                created_at: now.to_owned(),
+                pinned: false,
+                space_id: String::new(),
+            },
+            now,
+        )
+        .expect("valid record");
+
+        let sessions = chat_history_sessions(vec![space_thread, chat_thread]);
+
+        // The room's shared record belongs to the room's timeline; Chat's own
+        // history must list only Verevon's unscoped conversations.
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].thread_id, "thread_chat");
+    }
 
     #[test]
     fn durable_thread_presentation_is_returned_without_a_gateway_override() {
@@ -687,10 +749,12 @@ mod tests {
                 CanonicalMessage {
                     role: "user".into(),
                     content: "Question".into(),
+                    agent_name: String::new(),
                 },
                 CanonicalMessage {
                     role: "assistant".into(),
                     content: "Answer".into(),
+                    agent_name: "Statusagent".into(),
                 },
             ],
         )
@@ -699,6 +763,10 @@ mod tests {
         assert_eq!(transcript.thread_id, "thread-1");
         assert_eq!(transcript.turns[0]["role"], "user");
         assert_eq!(transcript.turns[1]["content"], "Answer");
+        // Per-turn persona attribution passes through; a turn without one
+        // carries no agentName key at all rather than an empty string.
+        assert_eq!(transcript.turns[1]["agentName"], "Statusagent");
+        assert!(transcript.turns[0].get("agentName").is_none());
         assert!(transcript.task_steps.is_none());
         assert!(canonical_messages_to_transcript("thread-1", Vec::new()).is_none());
     }

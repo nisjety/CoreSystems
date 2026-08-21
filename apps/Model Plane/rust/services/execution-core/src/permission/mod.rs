@@ -43,6 +43,18 @@ pub fn evaluate_call(
     tool_name: &str,
     tool_input: &str,
 ) -> PermissionDecision {
+    // Owner-plane effects are never auto-approved. A server-resolved catalog
+    // view can make this tool visible, but it cannot downgrade the durable
+    // human-approval requirement selected by the owner plane. `Deny` remains
+    // the stricter caller posture; otherwise the runtime must pause before an
+    // adapter can make any Control/owner-plane request.
+    if requires_durable_owner_approval(tool_name) {
+        return if mode == PermissionMode::Deny {
+            PermissionDecision::Deny
+        } else {
+            PermissionDecision::AwaitApproval
+        };
+    }
     match mode {
         PermissionMode::Deny => PermissionDecision::Deny,
         // `ask` posture (deployed_agent profile) gates risky/destructive tools
@@ -53,6 +65,15 @@ pub fn evaluate_call(
         }
         _ => PermissionDecision::Allow,
     }
+}
+
+/// True only for owner-plane actions that must obtain a durable, bound human
+/// approval before their adapter may execute. Trim intentionally closes the
+/// whitespace variant at every ingress; aliases still have no capability or
+/// executor binding and fail closed separately.
+#[must_use]
+pub fn requires_durable_owner_approval(tool_name: &str) -> bool {
+    tool_name.trim() == crate::ticket_tools::TOOL_NAME
 }
 
 /// Tool name for the provider-action bridge (`integration_tools`). Its risk is
@@ -195,6 +216,30 @@ mod tests {
         assert_eq!(
             evaluate(PermissionMode::Auto, "delete_account"),
             PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn reserved_owner_action_never_auto_executes() {
+        for mode in [
+            PermissionMode::Auto,
+            PermissionMode::from_wire(""),
+            PermissionMode::from_wire("malformed"),
+        ] {
+            assert_eq!(
+                evaluate_call(mode, crate::ticket_tools::TOOL_NAME, r#"{}"#),
+                PermissionDecision::AwaitApproval,
+                "a caller-selected permission mode must not bypass owner approval"
+            );
+        }
+        assert_eq!(
+            evaluate_call(
+                PermissionMode::Deny,
+                crate::ticket_tools::TOOL_NAME,
+                r#"{}"#
+            ),
+            PermissionDecision::Deny,
+            "a caller's explicit deny posture remains more restrictive"
         );
     }
 

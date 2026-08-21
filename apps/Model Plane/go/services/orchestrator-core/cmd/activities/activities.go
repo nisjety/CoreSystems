@@ -18,6 +18,7 @@ import (
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/feedback"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/grpcclient"
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/servicecred"
+	"go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -37,7 +38,11 @@ type StepResult struct {
 	Output        string
 	NeedsApproval bool
 	Completed     bool
-	Metadata      map[string]string
+	// UnknownOutcome is terminal for the scheduled lane. The provider may
+	// have accepted the request, so the workflow must reconcile the durable
+	// receipt instead of dispatching another step or blindly retrying.
+	UnknownOutcome bool
+	Metadata       map[string]string
 }
 type StepLoopInput struct {
 	RunID    string
@@ -68,6 +73,107 @@ type StepInput struct {
 	OrgID     string
 	UserID    string
 	StepIndex int
+}
+
+// ExecuteScheduledStepActivity is the dedicated service-owned scheduled turn
+// boundary. The Control decision is minted inside this activity and exists only
+// in the direct RPC request; it is never part of Temporal input/history. The
+// Execution Core lane remains disabled by default until it can verify the
+// service caller, claim Session Core's receipt, and reconcile unknown outcomes.
+func (a *Activities) ExecuteScheduledStepActivity(
+	ctx context.Context,
+	intent ScheduledStepExecutionIntent,
+) (StepResult, error) {
+	if a.scheduledStepAuthorizer == nil {
+		return StepResult{}, errors.New("Control scheduled-step authority is not configured")
+	}
+	if a.clients == nil || a.clients.ExecutionCore == nil {
+		return StepResult{}, errors.New("execution-core scheduled-step lane is unavailable")
+	}
+	decisionToken, err := a.AuthorizeScheduledStepActivity(ctx, intent)
+	if err != nil {
+		return StepResult{}, fmt.Errorf("authorize scheduled step: %w", err)
+	}
+	resp, err := mpv1.NewExecutionCoreClient(a.clients.ExecutionCore).ExecuteScheduledStep(ctx, &mpv1.ExecuteScheduledStepRequest{
+		RunId:                intent.RunID,
+		ThreadId:             intent.ThreadID,
+		OrgId:                intent.OrgID,
+		SpaceId:              intent.SpaceRef,
+		SubjectId:            intent.SubjectID,
+		ScheduleId:           intent.ScheduleID,
+		FireKey:              intent.FireKey,
+		TemplateDigest:       intent.TemplateDigest,
+		StepId:               intent.StepID,
+		StepIndex:            intent.StepIndex,
+		PolicyDigest:         intent.PolicyDigest,
+		IdempotencyKey:       intent.IdempotencyKey,
+		ControlDecisionToken: decisionToken,
+	})
+	if err != nil {
+		return StepResult{}, err
+	}
+	if resp == nil {
+		return StepResult{}, temporal.NewNonRetryableApplicationError(
+			"scheduled-step execution returned no response or receipt; the run must not advance",
+			"ScheduledStepInvalidResponse",
+			nil,
+		)
+	}
+	if resp.UnknownOutcome || resp.Status == "unknown_outcome" {
+		return StepResult{
+				StepIndex:      int(intent.StepIndex),
+				ToolName:       "scheduled-step",
+				UnknownOutcome: true,
+				Metadata: map[string]string{
+					"receipt_id":      resp.ReceiptId,
+					"unknown_outcome": "true",
+				},
+			}, temporal.NewNonRetryableApplicationError(
+				"scheduled-step provider outcome is unknown; reconcile its durable receipt before retrying",
+				"ScheduledStepUnknownOutcome",
+				nil,
+			)
+	}
+	if resp.Status == "failed" {
+		return StepResult{
+				StepIndex: int(intent.StepIndex),
+				ToolName:  "scheduled-step",
+				Metadata: map[string]string{
+					"receipt_id": resp.ReceiptId,
+					"error_code": resp.Error,
+				},
+			}, temporal.NewNonRetryableApplicationError(
+				"scheduled-step execution failed; the run must not advance to another step",
+				"ScheduledStepFailed",
+				nil,
+			)
+	}
+	if resp.Status != "completed" && resp.Status != "awaiting_approval" {
+		return StepResult{
+				StepIndex: int(intent.StepIndex),
+				ToolName:  "scheduled-step",
+				Metadata: map[string]string{
+					"receipt_id": resp.ReceiptId,
+					"error_code": "invalid_status",
+					"status":     resp.Status,
+				},
+			}, temporal.NewNonRetryableApplicationError(
+				"scheduled-step execution returned an unrecognized status; the run must not advance",
+				"ScheduledStepInvalidResponse",
+				nil,
+			)
+	}
+	return StepResult{
+		StepIndex:     int(intent.StepIndex),
+		ToolName:      "scheduled-step",
+		Output:        resp.Output,
+		Completed:     resp.Status == "completed",
+		NeedsApproval: resp.Status == "awaiting_approval",
+		Metadata: map[string]string{
+			"receipt_id":      resp.ReceiptId,
+			"unknown_outcome": fmt.Sprintf("%t", resp.UnknownOutcome),
+		},
+	}, nil
 }
 
 // Retention is a run's Zero Data Retention posture as it travels from the
@@ -179,10 +285,12 @@ type PromotionGateOutput struct {
 // ── Struct + constructor ─────────────────────────────────────────────────────
 
 type Activities struct {
-	logger        *slog.Logger
-	clients       *grpcclient.Clients
-	publisher     *natsx.Publisher
-	feedbackStore feedback.Store
+	logger                          *slog.Logger
+	clients                         *grpcclient.Clients
+	publisher                       *natsx.Publisher
+	feedbackStore                   feedback.Store
+	scheduledRunExecutionAuthorizer ScheduledRunExecutionAuthorizer
+	scheduledStepAuthorizer         ScheduledStepDecisionAuthorizer
 }
 
 func NewActivities(logger *slog.Logger, clients *grpcclient.Clients) *Activities {
@@ -195,6 +303,33 @@ func (a *Activities) SetPublisher(p *natsx.Publisher) { a.publisher = p }
 // SetFeedbackStore wires the durable operator-rating store that backs the
 // feedback → skill-promotion loop.
 func (a *Activities) SetFeedbackStore(f feedback.Store) { a.feedbackStore = f }
+
+// SetScheduledRunExecutionAuthorizer installs the only effect-time authority
+// source for prepared cron runs. Leaving it unset intentionally makes that
+// lane fail closed while ordinary interactive runs remain unaffected.
+func (a *Activities) SetScheduledRunExecutionAuthorizer(authorizer ScheduledRunExecutionAuthorizer) {
+	a.scheduledRunExecutionAuthorizer = authorizer
+}
+
+// SetScheduledStepDecisionAuthorizer installs the per-turn Control decision
+// source. Leaving it unset keeps the scheduled-step lane unavailable.
+func (a *Activities) SetScheduledStepDecisionAuthorizer(authorizer ScheduledStepDecisionAuthorizer) {
+	a.scheduledStepAuthorizer = authorizer
+}
+
+// AuthorizeScheduledStepActivity obtains a fresh Control decision for exactly
+// one deterministic turn. It is intentionally a separate activity from
+// scheduled-run creation so Temporal retries cannot reuse a preparation or
+// run-start bearer.
+func (a *Activities) AuthorizeScheduledStepActivity(
+	ctx context.Context,
+	intent ScheduledStepExecutionIntent,
+) (string, error) {
+	if a.scheduledStepAuthorizer == nil {
+		return "", errors.New("Control scheduled-step authority is not configured")
+	}
+	return a.scheduledStepAuthorizer.AuthorizeScheduledStep(ctx, intent)
+}
 
 // RecordFeedback persists one operator rating. Called by the
 // `mp.v1.feedback.rated` subscriber, not by Temporal — the rating must land
@@ -377,6 +512,55 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 		owner = userID
 	}
 	return RunMetadata{RunID: resp.RunId, ThreadID: threadID, OrgID: orgID, UserID: owner, StartedAt: time.Now().UTC()}, nil
+}
+
+// StartScheduledRunActivity starts only the deterministic run whose thread was
+// prepared by Capability Core for one Control-authorized schedule fire. Unlike
+// the legacy StartRunActivity it never falls back on an unavailable Session
+// Core: without that exact durable receipt the workflow must retry/fail rather
+// than execute a service task with no authoritative run record.
+func (a *Activities) StartScheduledRunActivity(
+	ctx context.Context,
+	runID, threadID, orgID, spaceRef, subjectID, scheduleID, fireKey, templateDigest, idempotencyKey, goal, mode string,
+) (RunMetadata, error) {
+	fallback := RunMetadata{
+		RunID: runID, ThreadID: threadID, OrgID: orgID,
+		UserID: SystemActorID, StartedAt: time.Now().UTC(),
+	}
+	if a.clients == nil || a.clients.SessionCore == nil {
+		return fallback, errors.New("session-core unavailable for prepared scheduled run")
+	}
+	if a.scheduledRunExecutionAuthorizer == nil {
+		return fallback, errors.New("Control scheduled-run execution authority is not configured")
+	}
+	controlExecutionToken, err := a.scheduledRunExecutionAuthorizer.AuthorizeScheduledRunExecution(ctx, ScheduledRunExecutionIntent{
+		OrgID: orgID, SpaceRef: spaceRef, SubjectID: subjectID, ThreadID: threadID,
+		ScheduleID: scheduleID, FireKey: fireKey, RunID: runID,
+		TemplateDigest: templateDigest, IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		return fallback, fmt.Errorf("reauthorize prepared scheduled run %s: %w", runID, err)
+	}
+	resp, err := mpv1.NewSessionCoreClient(a.clients.SessionCore).StartScheduledRun(ctx, &mpv1.StartScheduledRunRequest{
+		ThreadId:                      threadID,
+		RunId:                         runID,
+		OrgId:                         orgID,
+		ScheduleId:                    scheduleID,
+		FireKey:                       fireKey,
+		Goal:                          goal,
+		Mode:                          mode,
+		ControlExecutionDecisionToken: controlExecutionToken,
+		HumanSubjectId:                subjectID,
+		TemplateDigest:                templateDigest,
+		IdempotencyKey:                idempotencyKey,
+	})
+	if err != nil {
+		return fallback, fmt.Errorf("start prepared scheduled run %s: %w", runID, err)
+	}
+	if resp.GetRunId() != runID || resp.GetOwnerId() != SystemActorID {
+		return fallback, fmt.Errorf("prepared scheduled run %s received mismatched Session Core receipt", runID)
+	}
+	return fallback, nil
 }
 
 // ── Activity 2: ExecuteStepLoopActivity + ExecuteStepActivity ────────────────

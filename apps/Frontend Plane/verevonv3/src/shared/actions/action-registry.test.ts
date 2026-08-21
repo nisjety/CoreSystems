@@ -25,6 +25,10 @@ describe('action registry', () => {
     // Capability Core binds a governed operation to the agent runtime, so no
     // registry action -- knowledge.recrawl_source included -- is exposed yet.
     expect(pack.availableActions).toEqual([])
+    // Kept explicit so loosening the allowlist cannot silently expose either a
+    // side-effecting crawl or an irreversible, approval-gated publish.
+    expect(pack.availableActions).not.toContain('knowledge.recrawl_source')
+    expect(pack.availableActions).not.toContain('social.publish_post')
     expect(pack.redactionPolicy).toBe('ids-and-summaries-only')
   })
 

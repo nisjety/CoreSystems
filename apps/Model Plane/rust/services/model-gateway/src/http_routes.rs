@@ -324,6 +324,16 @@ fn proxy_routes() -> Router<AppState> {
                 .patch(patch_plugin_proxy)
                 .delete(delete_plugin_proxy),
         )
+        // Run watchers (AUTO-2): "notify me when this run finishes". Backed
+        // by capability-core's run_watch_subscriptions; org_id/user_id are
+        // never in this proxy's control, only the verified capability bearer
+        // capability-core's own principal derives them from.
+        .route(
+            "/v1/runs/:run_id/watchers",
+            get(get_run_watchers_proxy)
+                .post(create_run_watcher_proxy)
+                .delete(delete_run_watcher_proxy),
+        )
 }
 
 /// `/v1/ai/*` modality routes (chat, embeddings, images, speech, translate,
@@ -2706,8 +2716,7 @@ async fn mcp_oauth_start(
         ));
     }
 
-    let http = reqwest::Client::new();
-    let resource_metadata = crate::mcp_oauth::discover_protected_resource(&http, &body.url)
+    let resource_metadata = crate::mcp_oauth::discover_protected_resource(&body.url)
         .await
         .map_err(|e| {
             warn!(error = %e, "mcp oauth: protected-resource discovery failed");
@@ -2743,7 +2752,6 @@ async fn start_oauth_connection(
     scope: String,
     resource_metadata: crate::mcp_oauth::ProtectedResourceMetadata,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let http = reqwest::Client::new();
     let Some(authorization_server) = resource_metadata.authorization_servers.first() else {
         return Err((
             StatusCode::BAD_GATEWAY,
@@ -2751,7 +2759,6 @@ async fn start_oauth_connection(
         ));
     };
     let auth_server_metadata = crate::mcp_oauth::discover_authorization_server(
-        &http,
         authorization_server,
     )
     .await
@@ -2774,16 +2781,15 @@ async fn start_oauth_connection(
         "{}/api/v1/mcp/servers/oauth/callback",
         state.verevon_public_origin.trim_end_matches('/')
     );
-    let registration =
-        crate::mcp_oauth::register_client(&http, registration_endpoint, &redirect_uri)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "mcp oauth: dynamic client registration failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": "dynamic client registration was rejected" })),
-                )
-            })?;
+    let registration = crate::mcp_oauth::register_client(registration_endpoint, &redirect_uri)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "mcp oauth: dynamic client registration failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "dynamic client registration was rejected" })),
+            )
+        })?;
 
     let pkce = crate::mcp_oauth::generate_pkce();
     let state_value = crate::mcp_oauth::generate_state();
@@ -2868,8 +2874,7 @@ async fn mcp_connect(
         ));
     }
 
-    let http = reqwest::Client::new();
-    match crate::mcp_oauth::discover_protected_resource(&http, &url).await {
+    match crate::mcp_oauth::discover_protected_resource(&url).await {
         Ok(resource_metadata) => {
             start_oauth_connection(
                 &state,
@@ -2951,9 +2956,7 @@ async fn mcp_oauth_callback(
         return fail("organization mismatch between start and callback");
     }
 
-    let http = reqwest::Client::new();
     let tokens = match crate::mcp_oauth::exchange_code(
-        &http,
         &pending.token_endpoint,
         &pending.client_id,
         &code,
@@ -4962,6 +4965,64 @@ async fn delete_skill_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "DELETE", None).await
 }
 
+/// `GET /v1/runs/:run_id/watchers` — the caller's own watch status on this
+/// run. capability-core derives org_id/user_id from the forwarded
+/// capability bearer alone; no query/body identity to inject here.
+async fn get_run_watchers_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("runs/{run_id}/watchers"),
+        "GET",
+        None,
+    )
+    .await
+}
+
+/// `POST /v1/runs/:run_id/watchers` — register "notify me" for this run.
+/// No request body: the recipient is always the calling user, never
+/// caller-supplied.
+async fn create_run_watcher_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("runs/{run_id}/watchers"),
+        "POST",
+        None,
+    )
+    .await
+}
+
+/// `DELETE /v1/runs/:run_id/watchers` — cancel the caller's own watch.
+async fn delete_run_watcher_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("runs/{run_id}/watchers"),
+        "DELETE",
+        None,
+    )
+    .await
+}
+
 async fn list_plugins_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
@@ -5807,6 +5868,33 @@ pub struct InvokeRequest {
     /// `org_name`. Used to tell the model who "I"/"me"/"my" refers to.
     #[serde(default)]
     pub user_name: Option<String>,
+    /// Present only when this turn was addressed to a Space agent by `@`
+    /// mention. Stamped by the BFF gateway after it re-resolved the mention
+    /// against Control's live Space membership and the Application binding —
+    /// same provenance/trust notes as `org_name`: the raw browser cannot reach
+    /// this endpoint directly, and a mention that failed that check never
+    /// reaches here at all. Framing text only; a Space agent is not a security
+    /// boundary and this field grants nothing by itself
+    /// (`docs/space-defenition.md`, "Security model").
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    /// The mentioned agent's own instructions, resolved server-side from its
+    /// definition. Never sent by, or shown to, the browser — the mention UI
+    /// only ever carries the agent's `subject_id` ref.
+    #[serde(default)]
+    pub agent_system_prompt: Option<String>,
+    /// ADR-0003 — the org layer of the authored-instruction hierarchy,
+    /// resolved server-side (Convex `organizations.instructions`) by the BFF
+    /// gateway on every turn with a verified org. Same provenance/trust notes
+    /// as `org_name`: never client-suppliable, framing text only.
+    #[serde(default)]
+    pub org_instructions: Option<String>,
+    /// ADR-0003 — the Space layer of the authored-instruction hierarchy,
+    /// resolved server-side (Convex `spaces.instructions`) by the BFF gateway
+    /// when the turn carries a Space reference. Same provenance/trust notes
+    /// as `agent_name`.
+    #[serde(default)]
+    pub space_instructions: Option<String>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
@@ -6089,6 +6177,10 @@ async fn create_document(
 struct ThreadMessage {
     role: String,
     content: String,
+    /// The persona this turn answered as, when it had one. Identity history
+    /// from session-core's record — never an authority claim.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    agent_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -6583,6 +6675,7 @@ async fn list_thread_messages(
         .map(|m| ThreadMessage {
             role: m.role,
             content: m.content,
+            agent_name: m.agent_name,
         })
         .collect();
 
@@ -7062,6 +7155,7 @@ async fn invoke(
             &session_run.thread_id,
             &infer_resp.content,
             &model_bearer,
+            req.agent_name.as_deref(),
         )
         .await
         {
@@ -7684,7 +7778,8 @@ mod run_owner_publish_tests {
         run_service_client::RunServiceClient,
         run_service_server::{RunService, RunServiceServer},
         CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse,
-        ListSystemRunsRequest, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail,
+        ListSystemRunsRequest, ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse,
+        ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail,
     };
     use mp_events::publisher::InMemoryPublisher;
     use std::sync::Arc;
@@ -7746,6 +7841,47 @@ mod run_owner_publish_tests {
                     && request.org_id == "org-owner"
                     && request.user_id == "user-owner",
             }))
+        }
+
+        async fn resolve_thread_owner(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::ResolveThreadOwnerRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::ResolveThreadOwnerResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "resolve_thread_owner not needed in gateway test",
+            ))
+        }
+
+        async fn resolve_run_action_authority(
+            &self,
+            _: TonicRequest<ResolveRunActionAuthorityRequest>,
+        ) -> Result<TonicResponse<ResolveRunActionAuthorityResponse>, Status> {
+            Err(Status::unimplemented(
+                "run action authority not needed in route test",
+            ))
+        }
+
+        async fn get_scheduled_step_context(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::GetScheduledStepContextRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::ScheduledStepContext>, Status>
+        {
+            Err(Status::unimplemented(
+                "scheduled step context not needed in route test",
+            ))
+        }
+
+        async fn resolve_scheduled_step_authority(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::ResolveScheduledStepAuthorityRequest>,
+        ) -> Result<
+            TonicResponse<mp_contracts::model_plane::v1::ResolveScheduledStepAuthorityResponse>,
+            Status,
+        > {
+            Err(Status::unimplemented(
+                "scheduled step authority not needed in route test",
+            ))
         }
     }
 

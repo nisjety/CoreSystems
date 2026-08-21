@@ -100,16 +100,34 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "spaces:policy:write"
 	case strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/legal-hold"):
 		return "spaces:policy:write"
+	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/roster"):
+		return "spaces:resolve"
+	case method == http.MethodGet && (path == "/api/v1/internal/spaces" || path == "/api/v1/internal/spaces/"):
+		return "spaces:resolve"
+	case method == http.MethodPut && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/memberships"):
+		return "spaces:membership:write"
 	case path == "/api/v1/internal/spaces/recipient-audiences":
 		return "spaces:audience:publish"
 	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/membership"):
 		return "spaces:resolve"
-	case path == "/api/v1/internal/spaces/personal-thread-decision" || path == "/api/v1/internal/spaces/thread-decision" || path == "/api/v1/internal/spaces/thread-append-decision" || path == "/api/v1/internal/spaces/personal-retrieval-decision" || path == "/api/v1/internal/spaces/personal-import-decision" || path == "/api/v1/internal/spaces/schedule-create-decision":
+	case path == "/api/v1/internal/spaces/personal-thread-decision" || path == "/api/v1/internal/spaces/thread-decision" || path == "/api/v1/internal/spaces/thread-append-decision" || path == "/api/v1/internal/spaces/personal-retrieval-decision" || path == "/api/v1/internal/spaces/personal-import-decision" || path == "/api/v1/internal/spaces/schedule-create-decision" || path == "/api/v1/internal/spaces/owner-grant-decision":
 		return "spaces:issue"
 	case path == "/api/v1/internal/spaces/import-execution-decision":
 		return "spaces:import:reauthorize"
-	case path == "/api/v1/internal/spaces/schedule-fire-decision":
+	case path == "/api/v1/internal/spaces/schedule-fire-decision" || path == "/api/v1/internal/spaces/scheduled-run-decision":
 		return "spaces:schedule:reauthorize"
+	case path == "/api/v1/internal/spaces/scheduled-run-execution-decision":
+		return "spaces:schedule:execute"
+	case path == "/api/v1/internal/spaces/scheduled-step-decision":
+		return "spaces:schedule:step"
+	case path == "/api/v1/internal/spaces/model-action-view":
+		return "spaces:agent-action:view"
+	case path == "/api/v1/internal/spaces/run-action-decision":
+		return "spaces:agent-action:reauthorize"
+	case path == "/api/v1/internal/spaces/run-action-authority-check":
+		return "spaces:agent-action:current-authority"
+	case strings.HasPrefix(path, "/api/v1/internal/spaces/owner-effect-reservations"):
+		return "spaces:agent-action:reservation"
 	case path == "/api/v1/internal/spaces/effect-policy":
 		return "spaces:policy:write"
 	case strings.HasPrefix(path, "/api/v1/internal/authz/"):

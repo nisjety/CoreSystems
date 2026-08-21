@@ -106,6 +106,10 @@ apps/Control Plane/org-core/org-core
 apps/Control Plane/org-core/server
 apps/Control Plane/user-core/user-core
 apps/Control Plane/user-core/server
+# Caught unstaged during the 2026-08-20 branch consolidation: `go build ./...`
+# with no -o drops the binary next to main.go, named after its directory, so it
+# lands outside the `**/bin/` rules above and looks like an ordinary new file.
+apps/Model Plane/go/services/nats-provisioner/nats-provisioner
 
 # ──────────────────────────────────────────────────────────────────────
 # Claude Code agent worktrees — isolated git worktrees (full nested
