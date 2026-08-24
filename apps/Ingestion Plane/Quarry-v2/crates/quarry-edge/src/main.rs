@@ -46,6 +46,8 @@ mod schedule_routes;
 mod search_routes;
 mod source_registrar;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod telemetry;
 
 #[tokio::main]

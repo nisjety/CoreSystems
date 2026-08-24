@@ -21,5 +21,7 @@ pub mod schedule_routes;
 pub mod search_routes;
 pub mod source_registrar;
 pub mod state;
+#[cfg(test)]
+pub mod test_support;
 
 pub use experiments::{Assignments, Experiment, ExperimentRegistry};
