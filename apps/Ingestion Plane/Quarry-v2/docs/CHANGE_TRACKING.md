@@ -106,15 +106,24 @@ Payload mirrors the HTTP response from `/v1/change/check`.
 - `baseline_omits_optional_fields_when_none`
 - `change_record_roundtrips_through_json`
 
-## Pending wiring
+## Wiring status (updated)
 
-- **Persistence layer** — `PostgresBaselineStore` with
-  `SaveBaseline / LoadBaseline / CompareSnapshot / CreateDiffRecord /
-  ScheduleRefreshRun / PromoteTrackedResultToSnapshot` methods. Cycle
-  27.
-- **Edge routes** — `/v1/change/check`, `/v1/change/latest`,
-  `/v1/change/history`. Cycle 27.
-- **Webhook emission** wiring through the existing webhook delivery
-  pipeline in Go control. Cycle 27.
-- **Diff computation** — markdown / HTML / JSON-patch generators
-  invoked by `compare_snapshot`. Cycle 28.
+Wired on `agent/quarry-parity-rust`:
+
+- **Persistence layer** — `PostgresBaselineStore` in
+  `quarry-runtime/src/postgres_baseline_store.rs` implements
+  save/load/compare/diff-record plus snapshot promotion and refresh
+  scheduling, with migrations.
+- **Edge routes** — `/v1/change/check`, `/v1/change/latest`, and
+  `/v1/change/history` live in `quarry-edge/src/change_routes.rs`.
+- **Webhook emission** — signed change webhooks are emitted from the
+  edge (`quarry-edge/src/change_webhook.rs`): `POST
+  /v1/webhooks/change?org_id=<org>` with `org_id` required in both the
+  body and query param, matching the Go receiver in quarry-control's
+  `internal/resources/change_webhook.go`.
+
+Still pending:
+
+- **Diff computation** — dedicated markdown / HTML / JSON-patch
+generators invoked by `compare_snapshot` remain future work; diffs are
+currently stored as raw artifact bytes.

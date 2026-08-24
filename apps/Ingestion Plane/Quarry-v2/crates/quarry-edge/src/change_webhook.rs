@@ -162,6 +162,24 @@ mod tests {
         );
     }
 
+    /// Control's receiver REQUIRES body.org_id == query org_id. The body is
+    /// the full ChangeRecord whose `org_id` is a non-skipped field, so this
+    /// holds by construction — pinned here so a future serde skip cannot
+    /// silently break the cross-plane handshake.
+    #[test]
+    fn webhook_body_carries_org_id_matching_query() {
+        let record = changed_record();
+        assert_eq!(record.org_id, "org_a");
+        let body = change_webhook_payload(&record).unwrap();
+        assert_eq!(body["org_id"], serde_json::json!("org_a"));
+        let signer = crate::internal_auth::InternalSigner::new("0123456789abcdef0123456789abcdef")
+            .expect("valid secret");
+        let (path_q, bytes, _) = sign_change_webhook(&signer, "org_a", &body).unwrap();
+        assert!(path_q.starts_with("/v1/webhooks/change?org_id=org_a"));
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded["org_id"], serde_json::json!("org_a"));
+    }
+
     #[test]
     fn signing_rejects_empty_org_fail_closed() {
         let signer = crate::internal_auth::InternalSigner::new("0123456789abcdef0123456789abcdef")
