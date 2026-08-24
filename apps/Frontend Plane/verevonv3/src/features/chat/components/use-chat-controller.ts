@@ -905,6 +905,8 @@ export function useChatController() {
           zdr: options.zdr,
           regenerated: options.regenerated,
           editResubmit: options.editResubmit,
+          // Opt-in only: set just when the user picked a tiered catalog model.
+          minPrivacyTier: options.minPrivacyTier,
         },
         {
           onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel, runId }) => {
@@ -1162,6 +1164,9 @@ export function useChatController() {
       tools: payload.tools,
       actions,
       zdr: payload.zdr,
+      // Carried only when the selected catalog model attests a tier; the wire
+      // body omits it otherwise (see buildChatWireBody).
+      minPrivacyTier: payload.minPrivacyTier,
     })
   }
 

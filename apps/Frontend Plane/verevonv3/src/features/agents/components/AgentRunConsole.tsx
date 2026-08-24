@@ -87,6 +87,7 @@ import {
   summarizeToolArgs,
   summarizeToolResult,
 } from '@/features/chat/components/chat-normalizers'
+import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -2183,6 +2184,22 @@ function TelemetryPanel(props: {
 
   const runTime = createMemo(() => formatDuration(props.detail?.createdAt, props.detail?.updatedAt))
   const residency = createMemo(() => props.detail?.residency)
+  // Privacy provenance from the durable run record: the attested tier and/or
+  // the residency region stamped beside it. Rendered ONLY when the run
+  // actually carries one (mirrors the stated/inferred memory rule — an
+  // unspecified/absent tier claims nothing); absent cleanly otherwise.
+  const privacyStat = createMemo(() => {
+    const detail = props.detail
+    if (!detail) return null
+    const region = detail.residency
+    const tier = detail.privacyTier
+    if (!tier || tier === 'unspecified') return region ?? null
+    const label = i18n.tr(
+      PRIVACY_TIER_CONSOLE_LABELS[tier].no,
+      PRIVACY_TIER_CONSOLE_LABELS[tier].en,
+    )
+    return region ? `${label} · ${region}` : label
+  })
 
   return (
     <div class="verevon-run-panel verevon-run-telemetry">
@@ -2204,6 +2221,9 @@ function TelemetryPanel(props: {
         </Show>
         <Show when={props.live?.costUsd != null}>
           <TelemetryStat Icon={Coins} label={i18n.tr('Kostnad', 'Cost')} value={`$${(props.live?.costUsd ?? 0).toFixed(4)}`} />
+        </Show>
+        <Show when={privacyStat()}>
+          {(value) => <TelemetryStat Icon={ShieldCheck} label={i18n.tr('Personvern', 'Privacy')} value={value()} />}
         </Show>
         <Show when={runTime()}>
           {(value) => <TelemetryStat Icon={Timer} label={i18n.tr('Kjøretid', 'Run time')} value={value()} />}
@@ -2237,6 +2257,17 @@ function TelemetryPanel(props: {
       </Show>
     </div>
   )
+}
+
+/**
+ * Console labels per tier, Norwegian-first. `unspecified` has none: it is not
+ * a claim, so the stat falls back to the raw residency region (or nothing).
+ */
+const PRIVACY_TIER_CONSOLE_LABELS: Record<Exclude<PrivacyTier, 'unspecified'>, { no: string; en: string }> = {
+  global: { no: 'Global', en: 'Global' },
+  eu_resident: { no: 'EU/EØS', en: 'EU/EEA' },
+  zdr_contractual: { no: 'ZDR-kontrakt', en: 'ZDR contract' },
+  sovereign: { no: 'Norge', en: 'Norway' },
 }
 
 // ── Run watcher toggle ───────────────────────────────────────────────────────
