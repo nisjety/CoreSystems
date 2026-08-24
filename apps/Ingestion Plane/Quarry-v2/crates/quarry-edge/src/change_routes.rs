@@ -29,6 +29,11 @@ use quarry_core::ids::kinds::RequestKind;
 
 use crate::state::AppState;
 
+// Fan-out helper signatures reference RunKind only under postgres-queue;
+// an ungated import would be unused (warn) in default builds.
+#[cfg(feature = "postgres-queue")]
+use quarry_core::ids::kinds::RunKind;
+
 #[derive(Debug, Deserialize)]
 pub struct CheckRequest {
     pub url: String,
@@ -189,6 +194,13 @@ pub struct RecordRequest {
     #[serde(default)]
     #[allow(dead_code)] // read only under `postgres-queue` in record_check
     pub run_id: String,
+    /// Zero-data-retention posture of the schedule that produced this
+    /// fingerprint, declared by the trusted orchestrator. When true,
+    /// post-persistence side effects (the durable `ChangeDetected` event AND
+    /// the control webhook) are suppressed — fail closed.
+    #[serde(default)]
+    #[allow(dead_code)] // read only under `postgres-queue` in record_check
+    pub zdr: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -286,7 +298,7 @@ pub async fn record_internal(
 
     #[cfg(feature = "postgres-queue")]
     if let Some(store) = state.baseline_store.as_ref() {
-        let resp = record_check(store, state.artifacts.as_ref(), &req)
+        let resp = record_check(&state, store, state.artifacts.as_ref(), &req)
             .await
             .map_err(|e| err_response(&request_id, e))?;
         return Ok(Json(resp));
@@ -307,6 +319,7 @@ pub async fn record_internal(
 /// the same ArtifactStore that page runs use.
 #[cfg(feature = "postgres-queue")]
 async fn record_check(
+    state: &AppState,
     store: &quarry_runtime::postgres_baseline_store::PostgresBaselineStore,
     artifacts: &dyn quarry_runtime::artifact_store::ArtifactStore,
     req: &RecordRequest,
@@ -379,7 +392,7 @@ async fn record_check(
             "content fingerprint changed: {} → {}",
             prev.fingerprint, req.fresh_fingerprint
         );
-        let artifact_run: RunKind = run_kind.unwrap_or_default();
+        let artifact_run: RunKind = run_kind.clone().unwrap_or_default();
         let handle = artifacts
             .put(
                 &req.org_id,
@@ -406,7 +419,109 @@ async fn record_check(
         resp.diff_id = Some(diff_id);
     }
 
+    // Post-persistence fan-out (durable event + signed webhook).
+    let zdr = quarry_core::zdr::ZdrMode::from(req.zdr.unwrap_or(false));
+    emit_change_side_effects(state, &record, run_kind, zdr).await;
+
     Ok(resp)
+}
+
+/// Post-persistence fan-out for a completed check: a durable
+/// `ChangeDetected` event on the event sink (mirrors PageRunner's
+/// ChangeDetected emissions so `/v1/runs/:id/events` consumers see the
+/// change even though this path never ran a page pipeline) and, on real
+/// changes, a signed webhook to control's delivery pipeline (subject
+/// `quarry.change.detected`). Best-effort: a control outage warn-logs and
+/// never fails the caller's check.
+///
+/// Fail closed under ZDR: when the declaring schedule runs
+/// zero-data-retention, NEITHER side effect fires — the durable event log
+/// is content-bearing and the webhook would push the same payload
+/// off-process.
+#[cfg(feature = "postgres-queue")]
+async fn emit_change_side_effects(
+    state: &AppState,
+    record: &ChangeRecord,
+    run_kind: Option<RunKind>,
+    zdr: quarry_core::zdr::ZdrMode,
+) {
+    use quarry_core::change_history::ChangeStatus;
+    use quarry_core::event::EventType;
+
+    if zdr.is_active() {
+        tracing::debug!(
+            org_id = %record.org_id,
+            url = %record.source_url,
+            "zdr active: change event + webhook suppressed"
+        );
+        return;
+    }
+    if record.status != ChangeStatus::Changed {
+        return;
+    }
+
+    // Durable event log entry.
+    let run_id = run_kind.unwrap_or_default();
+    let idem = format!(
+        "change_detected:{}:{}:{}",
+        record.org_id,
+        record.source_url,
+        record
+            .new_baseline
+            .as_ref()
+            .map(|b| b.baseline_id.clone())
+            .unwrap_or_default()
+    );
+    let payload = serde_json::to_value(record).unwrap_or(serde_json::Value::Null);
+    state
+        .event_sink
+        .emit(run_id, EventType::ChangeDetected, payload, idem)
+        .await;
+
+    // Signed webhook → control (subject quarry.change.detected).
+    // Fire-and-forget transport: subscribers poll /v1/change/latest
+    // anyway, so a missed push is availability loss, not correctness loss.
+    if let Some(payload) = crate::change_webhook::change_webhook_payload(record) {
+        if state.control_base_url.is_empty() {
+            tracing::warn!("change webhook not sent: control base url empty");
+        } else if let Some(signer) = state.internal_signer.as_ref() {
+            match crate::change_webhook::sign_change_webhook(signer, &record.org_id, &payload) {
+                Ok((path_q, body, headers)) => {
+                    let base = state.control_base_url.trim_end_matches('/').to_string();
+                    tokio::spawn(async move {
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(10))
+                            .build();
+                        let Ok(client) = client else {
+                            tracing::warn!("change webhook client build failed");
+                            return;
+                        };
+                        let res = client
+                            .post(format!("{base}{path_q}"))
+                            .header(crate::internal_auth::HEADER_SIG, headers.signature)
+                            .header(crate::internal_auth::HEADER_TS, headers.timestamp)
+                            .header(crate::internal_auth::HEADER_NONCE, headers.nonce)
+                            .header("content-type", "application/json")
+                            .body(body)
+                            .send()
+                            .await;
+                        match res {
+                            Ok(r) if r.status().is_success() => {}
+                            Ok(r) => {
+                                tracing::warn!(status = %r.status(), "change webhook delivery failed")
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "change webhook transport failed")
+                            }
+                        }
+                    });
+                }
+                Err(e) => tracing::warn!(error = %e, "change webhook signing failed"),
+            }
+        } else {
+            tracing::warn!("change webhook skipped: QUARRY_EDGE__INTERNAL_SECRET not configured (unsigned delivery refused, fail closed)");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -459,6 +574,17 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(minimal.run_id, "");
+
+        // zdr posture is optional and decodes as a plain bool.
+        assert!(minimal.zdr.is_none());
+        let zdr_on: RecordRequest = serde_json::from_value(serde_json::json!({
+            "org_id": "org_a",
+            "url": "https://example.com",
+            "fresh_fingerprint": "blake3:abc",
+            "zdr": true
+        }))
+        .unwrap();
+        assert_eq!(zdr_on.zdr, Some(true));
     }
 
     #[test]
