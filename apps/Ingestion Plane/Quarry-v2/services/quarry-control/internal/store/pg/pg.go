@@ -57,6 +57,8 @@ func New(ctx context.Context, dsn string) (store.DB, error) {
 	db.webhookDeliveries = &webhookDeliveriesStore{pool: pool}
 	db.blocklists = &blocklistsStore{pool: pool}
 	db.events = &eventLog{pool: pool}
+	db.teamUsage = &teamUsageStore{pool: pool}
+	db.snapshotsV2 = &snapshotsV2Store{pool: pool}
 	return db, nil
 }
 
@@ -73,6 +75,8 @@ type postgresDB struct {
 	webhookDeliveries *webhookDeliveriesStore
 	blocklists        *blocklistsStore
 	events            *eventLog
+	teamUsage         *teamUsageStore
+	snapshotsV2       *snapshotsV2Store
 }
 
 func (d *postgresDB) Jobs() store.JobsStore                               { return d.jobs }
@@ -89,6 +93,8 @@ func (d *postgresDB) WebhookDeliveries() store.WebhookDeliveryStore {
 	return d.webhookDeliveries
 }
 func (d *postgresDB) Blocklists() store.ResourceStore[store.BlocklistEntry] { return d.blocklists }
+func (d *postgresDB) TeamUsage() store.TeamUsageStore                     { return d.teamUsage }
+func (d *postgresDB) SnapshotsV2() store.SnapshotsV2Store                 { return d.snapshotsV2 }
 
 // ListRequestQueues is a read-only projection over Quarry runtime's queue
 // tables. The control plane deliberately does not own these migrations or

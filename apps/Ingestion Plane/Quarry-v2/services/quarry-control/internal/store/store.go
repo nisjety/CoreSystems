@@ -26,6 +26,16 @@ type DB interface {
 	WebhookDeliveries() WebhookDeliveryStore
 	Blocklists() ResourceStore[BlocklistEntry]
 	Events() EventLog
+	// TeamUsage serves the four /v1/team/* aggregate endpoints plus the
+	// activity feed. Both backends implement it: in-memory derives from the
+	// event log + live job set, Postgres from SUM/GROUP BY over the same
+	// tables.
+	TeamUsage() TeamUsageStore
+	// SnapshotsV2 is the enriched snapshot read model behind GET /v1/snapshots
+	// (quarry_core::resources::Snapshot wire shape). Distinct from the legacy
+	// ResourceStore[Snapshot] used by MountRestore — different table, different
+	// producer. See SnapshotV2 for the coexistence rationale.
+	SnapshotsV2() SnapshotsV2Store
 	// PurgeOrg hard-deletes every row this service holds for orgID across
 	// every org-scoped table (jobs, schedules, quarry_sources,
 	// quarry_benchmarks, quarry_idempotency_keys) — the GDPR cross-plane
@@ -397,6 +407,7 @@ type memDB struct {
 	whDeliveries *genericStore[WebhookDelivery]
 	blocklists   *genericStore[BlocklistEntry]
 	events       *memEventLog
+	snapshotsV2  *memSnapshotsV2
 }
 
 func NewMemory() DB {
@@ -412,6 +423,7 @@ func NewMemory() DB {
 		whDeliveries: newGeneric[WebhookDelivery](func(d WebhookDelivery) quarrycontracts.ID { return d.ID }),
 		blocklists:   newGeneric[BlocklistEntry](func(b BlocklistEntry) quarrycontracts.ID { return b.ID }),
 		events:       &memEventLog{},
+		snapshotsV2:  &memSnapshotsV2{},
 	}
 }
 
