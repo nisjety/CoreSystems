@@ -63,8 +63,21 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
             modality: model.modality,
             streaming: model.streaming,
             features,
+            // Venice-style per-model privacy disclosure. The residency label
+            // stays empty for an undeclared (Global) provider so "no commitment
+            // claimed" never renders as a real guarantee.
+            privacy_tier: model.privacy_tier.as_wire_i32(),
+            residency: model.residency_label,
         }
     }
+}
+
+/// Map a wire `PrivacyTier` onto the internal enum. Unknown numerics fail
+/// closed with `invalid_argument`: a NEWER client naming a tier this build
+/// does not know must never be honored as if it had asked for nothing.
+fn tier_from_wire(value: i32) -> Result<provider::PrivacyTier, Status> {
+    provider::PrivacyTier::from_wire(value)
+        .ok_or_else(|| Status::invalid_argument(format!("unknown privacy tier value: {value}")))
 }
 
 pub(crate) struct InferenceService {
@@ -176,7 +189,7 @@ impl InferenceCore for InferenceService {
         let principal = self.authorize(&request).await?;
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req, &principal);
+        let internal_req = to_internal_request(&req, &principal)?;
 
         let result = self
             .chain
@@ -191,6 +204,8 @@ impl InferenceCore for InferenceService {
             stop_reason: result.stop_reason,
             input_tokens: result.input_tokens,
             output_tokens: result.output_tokens,
+            provider_used: result.provider_used,
+            residency: result.residency,
             tool_calls: result
                 .tool_calls
                 .into_iter()
@@ -215,7 +230,7 @@ impl InferenceCore for InferenceService {
         let principal = self.authorize(&request).await?;
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req, &principal);
+        let internal_req = to_internal_request(&req, &principal)?;
 
         let rx = self
             .chain
@@ -255,6 +270,10 @@ impl InferenceCore for InferenceService {
             // Requested residency region. The fallback chain enforces the EU
             // residency gate (deny-by-default) before any network call.
             region: req.region,
+            // The embedding contract has no tier field yet; embeddings are
+            // served from the same EU-attested Azure deployment today, so no
+            // constraint is expressed until that contract grows one.
+            min_privacy_tier: provider::PrivacyTier::Unspecified,
         };
 
         let result = self
@@ -986,10 +1005,14 @@ impl InferenceCore for InferenceService {
 
 /// Convert the public contract to the provider contract. Tenant, user, and
 /// issuer-enforced ZDR posture come only from the verified principal.
+///
+/// # Errors
+/// Returns `invalid_argument` when the caller names a privacy tier this build
+/// cannot interpret.
 fn to_internal_request(
     req: &pb::InferRequest,
     principal: &AuthenticatedPrincipal,
-) -> provider::InferRequest {
+) -> Result<provider::InferRequest, Status> {
     let messages = req
         .messages
         .iter()
@@ -1010,7 +1033,7 @@ fn to_internal_request(
         })
         .collect();
 
-    provider::InferRequest {
+    Ok(provider::InferRequest {
         request_id: req.request_id.clone(),
         provider_hint: req.provider_hint.clone(),
         model: req.model.clone(),
@@ -1023,6 +1046,7 @@ fn to_internal_request(
             Some(req.structured_output_schema.clone())
         },
         zdr: principal.effective_zdr(req.zdr),
+        min_privacy_tier: tier_from_wire(req.min_privacy_tier)?,
         tools,
         tool_choice: req.tool_choice.clone(),
         org_id: principal.org_id.clone(),
@@ -1032,7 +1056,7 @@ fn to_internal_request(
         // org/user to the token's claims). Never serialized into provider
         // bodies — see the field's doc comment.
         caller_bearer: crate::provider::Bearer::new(principal.bearer()),
-    }
+    })
 }
 
 /// Bundle of every provider chain required to construct an [`InferenceService`].
@@ -1266,12 +1290,15 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         provider::ProviderError::RateLimited { retry_after_ms } => {
             Status::resource_exhausted(format!("rate limited: retry after {retry_after_ms}ms"))
         }
-        // EU residency rejection is a precondition the caller can act on
-        // (request an EU region / opt in), not an internal fault.
-        provider::ProviderError::ResidencyViolation(message) => {
+        // All three posture rejections share FAILED_PRECONDITION on purpose: the
+        // caller asked for a guarantee (EU residency, verified ZDR, or a minimum
+        // privacy tier) that no configured provider can honor, so the caller can
+        // act on it (adjust the request / opt in) rather than retry blindly.
+        provider::ProviderError::ResidencyViolation(message)
+        | provider::ProviderError::ZdrUnavailable(message)
+        | provider::ProviderError::TierUnavailable(message) => {
             Status::failed_precondition(message)
         }
-        provider::ProviderError::ZdrUnavailable(message) => Status::failed_precondition(message),
     }
 }
 
@@ -1297,7 +1324,8 @@ mod tests {
             ..Default::default()
         };
 
-        let internal = to_internal_request(&request, &principal);
+        let internal = to_internal_request(&request, &principal)
+            .expect("an UNSPECIFIED tier request always maps onto the internal contract");
 
         assert_eq!(internal.org_id, "org-signed");
         assert_eq!(internal.user_id, "user-signed");

@@ -146,7 +146,7 @@ impl PromptCache {
 
     /// Evict the least-recently-used entries down to `EVICT_TO`. Runs only when
     /// the cache is still at capacity after expired-eviction. Takes one O(n)
-    /// snapshot of (key, last_access) and removes the oldest `len - EVICT_TO`;
+    /// snapshot of (key, `last_access`) and removes the oldest `len - EVICT_TO`;
     /// batching to the low-water mark amortizes the scan over the freed headroom.
     fn evict_lru(&self) {
         let mut stamps: Vec<(String, Instant)> = self

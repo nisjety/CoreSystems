@@ -647,6 +647,9 @@ impl ProviderRouter for OpenAiProvider {
             input_tokens,
             output_tokens,
             tool_calls,
+            // Provenance is stamped by the fallback chain, not the raw adapter.
+            provider_used: String::new(),
+            residency: String::new(),
         })
     }
 
@@ -725,6 +728,8 @@ impl ProviderRouter for OpenAiProvider {
                                     model_used: model_used.clone(),
                                     input_tokens,
                                     output_tokens,
+                                    provider_used: String::new(),
+                                    residency: String::new(),
                                 })
                                 .await;
                             return;
@@ -774,6 +779,8 @@ impl ProviderRouter for OpenAiProvider {
                                     model_used: model_used.clone(),
                                     input_tokens: 0,
                                     output_tokens: 0,
+                                    provider_used: String::new(),
+                                    residency: String::new(),
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -794,6 +801,8 @@ impl ProviderRouter for OpenAiProvider {
                     model_used,
                     input_tokens,
                     output_tokens,
+                    provider_used: String::new(),
+                    residency: String::new(),
                 })
                 .await;
         });
@@ -877,7 +886,17 @@ impl ProviderRouter for OpenAiProvider {
         let provider = self.provider_name().to_owned();
         // chat-parity §2: advertise the model's supported feature families so
         // the client can gate the opt-in `features[]` per model.
-        let chat_features = self.capabilities().feature_flags();
+        let caps = self.capabilities();
+        let chat_features = caps.feature_flags();
+        // Venice-style per-model privacy disclosure from this deployment's
+        // declared residency + ZDR attestation. An undeclared (Global)
+        // residency stays an empty label: "no commitment claimed".
+        let privacy_tier = super::PrivacyTier::classify(&caps);
+        let residency_label = if caps.residency == super::Residency::Global {
+            String::new()
+        } else {
+            caps.residency.as_str().to_owned()
+        };
         self.chat_models
             .iter()
             .map(|id| ModelInfo {
@@ -887,6 +906,8 @@ impl ProviderRouter for OpenAiProvider {
                 streaming: true,
                 features: chat_features.clone(),
                 cheap: is_cheap_model(id),
+                privacy_tier,
+                residency_label: residency_label.clone(),
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {
                 id: id.clone(),

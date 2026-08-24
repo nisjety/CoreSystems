@@ -118,6 +118,13 @@ pub struct InferRequest {
     pub max_tokens: i32,
     pub structured_output_schema: Option<String>,
     pub zdr: bool,
+    /// Minimum privacy tier every serving provider must satisfy. Providers
+    /// whose derived tier is weaker are skipped in every chain path; when none
+    /// remains the request fails closed with
+    /// [`ProviderError::TierUnavailable`] naming the required tier — never a
+    /// silent downgrade. `Unspecified` imposes no constraint and is
+    /// byte-identical to pre-tier behavior.
+    pub min_privacy_tier: PrivacyTier,
     /// chat-parity §2 function-calling: tools the model may call (empty = none).
     pub tools: Vec<ToolDefinition>,
     /// Tool selection policy: "auto" | "none" | "required" | a tool name.
@@ -177,6 +184,13 @@ pub struct InferResponse {
     pub output_tokens: i32,
     /// chat-parity §2: tool calls the model requested (empty for a plain answer).
     pub tool_calls: Vec<ToolCall>,
+    /// Registry id of the provider that actually served this response (e.g.
+    /// "azure-openai"). Phase-4 provenance-receipt input; empty when unknown.
+    pub provider_used: String,
+    /// Residency label of the serving deployment ([`Residency::as_str`]).
+    /// Disclosure only — reports the posture that was actually met. Empty when
+    /// undeclared.
+    pub residency: String,
 }
 
 /// A single streaming chunk.
@@ -188,6 +202,11 @@ pub struct InferChunk {
     pub model_used: String,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    /// Serving-provider provenance (populated on final chunks; same semantics
+    /// as [`InferResponse::provider_used`]). Empty when unknown.
+    pub provider_used: String,
+    /// Residency label of the serving deployment (see [`InferResponse::residency`]).
+    pub residency: String,
 }
 
 /// A unified embedding request used internally across providers.
@@ -208,6 +227,12 @@ pub struct EmbedRequest {
     /// unless `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING` is set. Empty means the
     /// caller expresses no preference and the configured EU deployment is used.
     pub region: String,
+    /// Minimum privacy tier the serving embedding provider must satisfy
+    /// (same semantics as [`InferRequest::min_privacy_tier`]). There is no wire
+    /// field on the embedding contract yet, so callers currently leave this at
+    /// the default (`Unspecified`) — the gate exists so the enforcement path is
+    /// shared, not so embeddings advertise tiers today.
+    pub min_privacy_tier: PrivacyTier,
 }
 
 /// Unified embedding response.
@@ -233,6 +258,12 @@ pub struct ModelInfo {
     /// the UI group "cheap" models and pick a cheap default. Carried as a
     /// `"cheap"` entry in the proto `ModelInfo.features` list at the gRPC edge.
     pub cheap: bool,
+    /// Strongest privacy tier the owning provider can honor (Venice
+    /// `model_spec.privacy` equivalent). `Unspecified` means the provider
+    /// declares no posture.
+    pub privacy_tier: PrivacyTier,
+    /// Declared residency label ([`Residency::as_str`]); empty when undeclared.
+    pub residency_label: String,
 }
 
 /// Introspectable feature flags for a provider.
@@ -431,6 +462,95 @@ impl Residency {
     }
 }
 
+/// Programmatic privacy tier of a provider/deployment (Venice-style).
+///
+/// Ordered weakest→strongest so a request expresses a MINIMUM and eligibility
+/// is a plain `>=`. Combines the two independent axes — geography
+/// ([`Residency`]) and retention (`supports_zdr`) — into one sellable posture:
+/// `EuResident` demands `Residency::Eu`+, `ZdrContractual` additionally
+/// demands a verified ZDR contract, and `Sovereign` demands Norwegian-operated
+/// infrastructure WITH that ZDR contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyTier {
+    /// No constraint expressed / no declared posture.
+    #[default]
+    Unspecified,
+    /// No commitment beyond provider default.
+    Global,
+    /// ML processing committed to the EU/EEA.
+    EuResident,
+    /// EU-or-better residency plus an independently verified Zero-Data-
+    /// Retention contract.
+    ZdrContractual,
+    /// Processed and stored in Norway on Norwegian-operated infrastructure,
+    /// with a verified ZDR contract.
+    Sovereign,
+}
+
+impl PrivacyTier {
+    /// Numeric value matching the `model_plane.v1.PrivacyTier` proto enum.
+    #[must_use]
+    pub const fn as_wire_i32(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Global => 1,
+            Self::EuResident => 2,
+            Self::ZdrContractual => 3,
+            Self::Sovereign => 4,
+        }
+    }
+
+    /// Inverse of [`Self::as_wire_i32`]. Unknown numerics (a NEWER client
+    /// speaking a tier this build does not know) return `None` so callers can
+    /// reject rather than silently treat an unrecognized requirement as none.
+    #[must_use]
+    pub fn from_wire(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Unspecified),
+            1 => Some(Self::Global),
+            2 => Some(Self::EuResident),
+            3 => Some(Self::ZdrContractual),
+            4 => Some(Self::Sovereign),
+            _ => None,
+        }
+    }
+
+    /// Human-readable label for logs, typed errors, and the provenance receipt.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Global => "global",
+            Self::EuResident => "eu_resident",
+            Self::ZdrContractual => "zdr_contractual",
+            Self::Sovereign => "sovereign",
+        }
+    }
+
+    /// Derive the strongest tier a provider can honor from its declared
+    /// capabilities. Geography comes from `residency`; the retention axis from
+    /// `supports_zdr`. A Norwegian-operated resource WITHOUT a ZDR attestation
+    /// classifies `EuResident` on purpose: claiming sovereignty without the
+    /// retention contract would sell a guarantee the deployment does not make.
+    #[must_use]
+    pub fn classify(caps: &ProviderCapabilities) -> Self {
+        if !caps.supports_zdr {
+            return match caps.residency {
+                Residency::Global => Self::Global,
+                Residency::Eu | Residency::Norway => Self::EuResident,
+            };
+        }
+        match caps.residency {
+            // Sovereignty is Norway-specific per the pinned contract: EU
+            // residency with a verified ZDR contract stays `ZdrContractual`,
+            // because geography alone is not sovereignty.
+            Residency::Norway => Self::Sovereign,
+            Residency::Eu | Residency::Global => Self::ZdrContractual,
+        }
+    }
+}
+
 impl ProviderCapabilities {
     /// True if this provider advertises the named modality group.
     #[allow(dead_code)] // intended surface; consumed by router/policy (Phase 2/5)
@@ -577,6 +697,100 @@ mod capability_tests {
     }
 }
 
+#[cfg(test)]
+mod privacy_tier_tests {
+    use super::{PrivacyTier, ProviderCapabilities, Residency};
+
+    /// The tier ladder is the sellable contract: a request expresses a MINIMUM
+    /// and eligibility is `>=`. Reordering these values would silently reprice
+    /// every customer's posture.
+    #[test]
+    fn tiers_are_ordered_weakest_to_strongest() {
+        assert!(PrivacyTier::Global > PrivacyTier::Unspecified);
+        assert!(PrivacyTier::EuResident > PrivacyTier::Global);
+        assert!(PrivacyTier::ZdrContractual > PrivacyTier::EuResident);
+        assert!(PrivacyTier::Sovereign > PrivacyTier::ZdrContractual);
+        assert_eq!(PrivacyTier::default(), PrivacyTier::Unspecified);
+    }
+
+    /// The wire enum is pinned by the proto contract; the frontend and
+    /// capability-core both encode these numerics independently.
+    #[test]
+    fn wire_values_match_the_pinned_proto_contract() {
+        for (value, tier) in [
+            (0, PrivacyTier::Unspecified),
+            (1, PrivacyTier::Global),
+            (2, PrivacyTier::EuResident),
+            (3, PrivacyTier::ZdrContractual),
+            (4, PrivacyTier::Sovereign),
+        ] {
+            assert_eq!(tier.as_wire_i32(), value);
+            assert_eq!(PrivacyTier::from_wire(value), Some(tier));
+        }
+    }
+
+    /// An unknown numeric must NOT collapse to "no constraint" — that would let
+    /// a newer client's stronger requirement be honored by an older build as if
+    /// it had asked for nothing. Fail loud instead.
+    #[test]
+    fn unknown_wire_values_fail_closed() {
+        for value in [-1, 5, 42, i32::MAX] {
+            assert_eq!(
+                PrivacyTier::from_wire(value),
+                None,
+                "wire value {value} must be rejected, not downgraded"
+            );
+        }
+    }
+
+    #[test]
+    fn labels_use_snake_case_for_logs_and_receipts() {
+        assert_eq!(PrivacyTier::Unspecified.label(), "unspecified");
+        assert_eq!(PrivacyTier::Global.label(), "global");
+        assert_eq!(PrivacyTier::EuResident.label(), "eu_resident");
+        assert_eq!(PrivacyTier::ZdrContractual.label(), "zdr_contractual");
+        assert_eq!(PrivacyTier::Sovereign.label(), "sovereign");
+    }
+
+    fn caps(residency: Residency, supports_zdr: bool) -> ProviderCapabilities {
+        ProviderCapabilities {
+            residency,
+            supports_zdr,
+            ..ProviderCapabilities::default()
+        }
+    }
+
+    /// The full mapping table. Two rows are deliberate traps:
+    /// Norway WITHOUT ZDR classifies `EuResident` (geography alone is not
+    /// sovereignty), and Global WITH ZDR classifies `ZdrContractual` (a retention
+    /// contract does not relocate processing).
+    #[test]
+    fn classification_combines_geography_and_retention() {
+        // No ZDR attestation: geography alone caps at EU residency.
+        assert_eq!(PrivacyTier::classify(&caps(Residency::Global, false)), PrivacyTier::Global);
+        assert_eq!(PrivacyTier::classify(&caps(Residency::Eu, false)), PrivacyTier::EuResident);
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Norway, false)),
+            PrivacyTier::EuResident,
+            "a Norwegian region without a verified ZDR contract is EU-resident, \
+             never Sovereign"
+        );
+        // ZDR verified: retention satisfied, geography decides the rest.
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Global, true)),
+            PrivacyTier::ZdrContractual,
+            "a ZDR contract without EU residency stays at ZdrContractual"
+        );
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Eu, true)),
+            PrivacyTier::ZdrContractual,
+            "EU residency plus a ZDR contract is ZdrContractual — SOVEREIGN is \
+             Norway-only per the pinned contract"
+        );
+        assert_eq!(PrivacyTier::classify(&caps(Residency::Norway, true)), PrivacyTier::Sovereign);
+    }
+}
+
 /// Errors from provider operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -609,6 +823,13 @@ pub enum ProviderError {
     /// independently verified ZDR contract. Rejected before any provider call.
     #[error("zero data retention unavailable: {0}")]
     ZdrUnavailable(String),
+
+    /// A request required a minimum privacy tier no matching provider can
+    /// honor (deny-by-default, before any provider call). The message names
+    /// the REQUIRED tier so callers see exactly what could not be met — a
+    /// downgrade is never silent.
+    #[error("required privacy tier unavailable: {0}")]
+    TierUnavailable(String),
 }
 
 /// Canonical EU Azure regions permitted to serve embeddings under the EU
