@@ -26,6 +26,12 @@ use quarry_core::change_history::{BaselineSnapshot, ChangeRecord};
 use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::ids::kinds::RequestKind;
+#[cfg(feature = "postgres-queue")]
+use quarry_core::ids::kinds::SnapshotKind;
+#[cfg(feature = "postgres-queue")]
+use quarry_core::resources::Snapshot;
+#[cfg(feature = "postgres-queue")]
+use quarry_core::tracked_snapshot::baseline_chain_to_snapshot;
 
 use crate::state::AppState;
 
@@ -167,6 +173,181 @@ pub async fn history(
     Err(err_response(
         &request_id,
         QuarryError::new(ErrorCode::Unsupported, "postgres-queue feature required"),
+    ))
+}
+
+// ============================================================================
+// POST /v1/change/snapshot — PromoteTrackedResultToSnapshot.
+//
+// Projects a stored baseline (and its predecessor, when one exists) into
+// the public `resources::Snapshot` wire shape so dashboards can render a
+// tracked URL's latest version through the same surface as source-driven
+// snapshots. Pure projection: nothing is persisted here.
+// ============================================================================
+
+#[cfg(feature = "postgres-queue")]
+#[derive(Debug, Deserialize)]
+pub struct PromoteQuery {
+    pub url: String,
+}
+
+/// `POST /v1/change/snapshot?url=…` — promote the latest tracked baseline
+/// to the public Snapshot shape. Requires `postgres-queue` + DATABASE_URL
+/// (reads through PostgresBaselineStore); 501 with a hint otherwise.
+#[cfg(feature = "postgres-queue")]
+pub async fn promote_snapshot(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Query(q): Query<PromoteQuery>,
+) -> Result<Json<Envelope<Snapshot>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = RequestKind::new().to_string();
+    validate_url(&q.url).map_err(|e| err_response(&request_id, e))?;
+    let Some(store) = state.baseline_store.as_ref() else {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::Unsupported,
+                "snapshot promotion requires postgres-queue feature + DATABASE_URL",
+            ),
+        ));
+    };
+    // load_history(2) returns [latest, prev] when both exist; the chain
+    // variant derives new/unchanged/modified from the fingerprint pair.
+    let chain: Vec<BaselineSnapshot> = store
+        .load_history(&claims.org_id, &q.url, 2)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+    let latest = match chain.first() {
+        Some(b) => b,
+        None => {
+            return Err(err_response(
+                &request_id,
+                QuarryError::new(ErrorCode::NotFound, format!("no baseline for {}", q.url)),
+            ))
+        }
+    };
+    if latest.org_id != claims.org_id {
+        // Defense in depth: the store is org-scoped at the SQL level, but
+        // the projection must never widen it.
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::NotFound, "no baseline for this org"),
+        ));
+    }
+    let prev_fingerprint = chain.get(1).map(|p| p.fingerprint.as_str());
+    let snapshot = baseline_chain_to_snapshot(latest, prev_fingerprint)
+        .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, snapshot)))
+}
+
+#[cfg(not(feature = "postgres-queue"))]
+pub async fn promote_snapshot(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Query(q): Query<UrlQuery>,
+) -> Result<Json<Envelope<()>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = RequestKind::new().to_string();
+    validate_url(&q.url).map_err(|e| err_response(&request_id, e))?;
+    let _ = (&state, &claims);
+    Err(err_response(
+        &request_id,
+        QuarryError::new(
+            ErrorCode::Unsupported,
+            "postgres-queue feature required for snapshot promotion",
+        ),
+    ))
+}
+
+// ============================================================================
+// POST /v1/change/refresh — ScheduleRefreshRun.
+//
+// Enqueues an immediate re-check of a tracked URL onto the org-scoped
+// durable frontier (`PostgresRequestQueue`, the same SKIP LOCKED bridge
+// the orchestrator already pops via /v1/internal/queues). The queue row
+// is created on demand, so a refresh works even for URLs that never had
+// a crawl. Payload carries kind:"change_refresh" + url so any consumer
+// (orchestrator activity or edge poller) knows what to execute.
+// ============================================================================
+
+#[cfg(feature = "postgres-queue")]
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub url: String,
+    #[serde(default)]
+    pub priority: Option<quarry_runtime::request_queue::Priority>,
+}
+
+#[cfg(feature = "postgres-queue")]
+#[derive(Debug, Serialize)]
+pub struct RefreshResponse {
+    pub request_id: String,
+    /// False when an identical request was already queued (idempotent enqueue).
+    pub accepted: bool,
+}
+
+#[cfg(feature = "postgres-queue")]
+pub async fn schedule_refresh(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<RefreshRequest>,
+) -> Result<Json<Envelope<RefreshResponse>>, (StatusCode, Json<Envelope<()>>)> {
+    use quarry_runtime::postgres_queue::PostgresRequestQueue;
+    use quarry_runtime::request_queue::{Priority, RequestQueue};
+
+    let request_id = RequestKind::new().to_string();
+    validate_url(&req.url).map_err(|e| err_response(&request_id, e))?;
+    let Some(pool) = state.queue_pool.as_ref() else {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::Unsupported,
+                "refresh scheduling requires postgres-queue feature + DATABASE_URL",
+            ),
+        ));
+    };
+    let queue = PostgresRequestQueue::bind(
+        pool.clone(),
+        claims.org_id.clone(),
+        "change-refresh",
+        "scrape",
+        std::time::Duration::from_secs(300),
+    )
+    .await
+    .map_err(|e| err_response(&request_id, e))?;
+    let refresh_request_id = format!("chg_{}", SnapshotKind::new().ulid());
+    let payload = serde_json::json!({
+        "kind": "change_refresh",
+        "url": req.url,
+        "org_id": claims.org_id,
+    });
+    let priority = req.priority.unwrap_or(Priority::Default);
+    let accepted = queue
+        .enqueue(refresh_request_id.clone(), req.url, priority, payload)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(
+        request_id,
+        RefreshResponse {
+            request_id: refresh_request_id,
+            accepted,
+        },
+    )))
+}
+
+#[cfg(not(feature = "postgres-queue"))]
+pub async fn schedule_refresh(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<Envelope<()>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = RequestKind::new().to_string();
+    let _ = (&state, &claims, &req);
+    Err(err_response(
+        &request_id,
+        QuarryError::new(
+            ErrorCode::Unsupported,
+            "postgres-queue feature required for refresh scheduling",
+        ),
     ))
 }
 
@@ -585,6 +766,38 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(zdr_on.zdr, Some(true));
+    }
+
+    #[cfg(feature = "postgres-queue")]
+    #[test]
+    fn refresh_request_decodes_with_optional_priority() {
+        let full: RefreshRequest = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/pricing",
+            "priority": "high"
+        }))
+        .unwrap();
+        assert_eq!(
+            full.priority,
+            Some(quarry_runtime::request_queue::Priority::High)
+        );
+        // Default priority when omitted.
+        let minimal: RefreshRequest = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/pricing"
+        }))
+        .unwrap();
+        assert!(minimal.priority.is_none());
+    }
+
+    #[cfg(feature = "postgres-queue")]
+    #[test]
+    fn refresh_response_serializes_snake_case_wire() {
+        let r = RefreshResponse {
+            request_id: "chg_01ARZ3NDeKTSJMdNG7gZ6pvhgp".into(),
+            accepted: true,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        assert!(s.contains("\"request_id\":\"chg_"));
+        assert!(s.contains("\"accepted\":true"));
     }
 
     #[test]

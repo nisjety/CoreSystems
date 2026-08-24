@@ -230,6 +230,17 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/change/check", post(crate::change_routes::check))
         .route("/v1/change/latest", get(crate::change_routes::latest))
         .route("/v1/change/history", get(crate::change_routes::history))
+        // Parity finishers — PromoteTrackedResultToSnapshot +
+        // ScheduleRefreshRun over the PostgresBaselineStore / durable
+        // frontier. Both 501 with a hint when postgres-queue is off.
+        .route(
+            "/v1/change/snapshot",
+            post(crate::change_routes::promote_snapshot),
+        )
+        .route(
+            "/v1/change/refresh",
+            post(crate::change_routes::schedule_refresh),
+        )
         // Cycle 31 / cluster #11 — GraphQL query endpoint (auth-gated).
         .route("/graphql", post(crate::graphql::graphql_handler))
         // Cycle 23 / cluster #5 — schedules list + lifecycle.
