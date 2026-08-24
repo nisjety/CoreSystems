@@ -278,6 +278,22 @@ pub async fn invoke_stream_sse(
     let cost_bearer = cost_bearer.map(|Extension(bearer)| bearer);
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let features = req.features.clone();
+    // Normalize and validate BEFORE branching: an unknown tier numeric must
+    // fail closed on both the durable and the persistence-free path, and the
+    // ZDR branch threads the same floor onto its inference call.
+    let normalized = match crate::normalize::normalize(&req) {
+        Ok(normalized) => normalized,
+        Err((_, Json(error))) => {
+            let message = error
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("invalid invoke request");
+            return error_stream(&request_id, "invalid_request", message, false);
+        }
+    };
+    // Caller's privacy floor as the wire numeric (0 = UNSPECIFIED). Captured
+    // once here so every derived call site threads it without re-deriving.
+    let min_privacy_tier_wire = crate::normalize::min_privacy_tier_wire(&normalized);
     let effective_zdr = claims.effective_zdr(req.zdr);
     let pii_redaction_required = crate::moderation::pii_redaction_required(
         &features,
@@ -370,6 +386,9 @@ pub async fn invoke_stream_sse(
             }
             None => user_content.clone(),
         };
+        // The persistence-free path still honors the caller's privacy floor:
+        // retention and geography are independent axes. The tier was validated
+        // by normalize() before this branch, so no constraint is silently lost.
         return zdr_direct_stream(
             state,
             request_id,
@@ -378,21 +397,12 @@ pub async fn invoke_stream_sse(
             provider_content,
             features,
             grounding,
+            min_privacy_tier_wire,
             inference_bearer,
         )
         .await;
     }
 
-    let normalized = match crate::normalize::normalize(&req) {
-        Ok(normalized) => normalized,
-        Err((_, Json(error))) => {
-            let message = error
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("invalid invoke request");
-            return error_stream(&request_id, "invalid_request", message, false);
-        }
-    };
     // Control Plane owns the org's spend/token ceilings; read them so an
     // operator's cap actually applies to a turn that did not name its own.
     // Fails open on an org-core outage — see `org_quota::fetch_org_limits`.
@@ -743,10 +753,9 @@ pub async fn invoke_stream_sse(
         .await;
     }
 
-    // Safety policy is resolved from capability-core per request; client
-    // features can add PII redaction but cannot disable the org's policy.
-    // Retrieval below uses the raw query (Data Plane is internal); only the
-    // provider-bound prompt is redacted.
+    // Persistence prep for the durable path: PII redaction applies here too
+    // (redaction is orthogonal to retention posture), and the privacy floor
+    // rides on every inference call below via `min_privacy_tier_wire`.
     let user_content = if pii_redaction_required {
         crate::moderation::redact_pii(&req.content).0
     } else {
@@ -773,6 +782,7 @@ pub async fn invoke_stream_sse(
             request_id: &request_id,
             model: &model,
             zdr: effective_zdr,
+            min_privacy_tier: min_privacy_tier_wire,
             inference_bearer: &inference_bearer,
         },
     )
@@ -1188,6 +1198,7 @@ pub async fn invoke_stream_sse(
                 inference_bearer.as_str(),
                 session_bearer.as_str(),
                 effective_zdr,
+                min_privacy_tier_wire,
                 &model_clone,
                 messages,
                 &tool_phase_query,
@@ -1318,6 +1329,7 @@ pub async fn invoke_stream_sse(
                     .as_ref()
                     .map(VerifiedCapabilityBearer::as_str),
                 effective_zdr,
+                min_privacy_tier_wire,
                 &model_clone,
                 messages,
                 tool_defs,
@@ -1365,6 +1377,11 @@ pub async fn invoke_stream_sse(
             max_tokens: answer_token_budget(),
             structured_output_schema,
             zdr: effective_zdr,
+            // The caller's privacy floor rides on the ANSWER call and every
+            // retry/fallback derived from `grpc_req` below; auxiliary
+            // micro-calls (title, follow-ups, compaction summary) keep their
+            // own posture because they carry only already-persisted text.
+            min_privacy_tier: min_privacy_tier_wire,
             ..Default::default()
         };
 
@@ -1677,6 +1694,11 @@ pub async fn invoke_stream_sse(
 
                     let input_tokens = u32::try_from(chunk.input_tokens).unwrap_or(0);
                     let output_tokens = u32::try_from(chunk.output_tokens).unwrap_or(0);
+                    // Provenance comes off the final chunk: which deployment
+                    // answered and under what residency, stamped on the usage
+                    // envelope below.
+                    let provider_used = chunk.provider_used.clone();
+                    let residency = chunk.residency.clone();
                     let model_used = if chunk.model_used.is_empty() {
                         model_clone.clone()
                     } else {
@@ -1756,6 +1778,9 @@ pub async fn invoke_stream_sse(
                         input_tokens,
                         output_tokens,
                         latency_ms,
+                        min_privacy_tier_wire,
+                        provider_used,
+                        residency,
                     );
                     if let Err(e) = publisher
                         .publish(&subjects::usage_subject(&org_clone), &usage_envelope)
@@ -2315,6 +2340,10 @@ struct SummarizerContext<'a> {
     request_id: &'a str,
     model: &'a str,
     zdr: bool,
+    /// Caller-selected minimum privacy tier, already normalized to the wire
+    /// numeric (0 = no constraint) so every derived InferRequest carries the
+    /// caller's floor without re-deriving it.
+    min_privacy_tier: i32,
     inference_bearer: &'a VerifiedInferenceBearer,
 }
 
@@ -2407,6 +2436,7 @@ async fn load_recent_thread_messages(
                 summarizer.model,
                 &crate::compaction::summary_prompt(&transcript),
                 summarizer.zdr,
+                summarizer.min_privacy_tier,
                 summarizer.inference_bearer,
             ),
         )
@@ -3386,6 +3416,9 @@ async fn run_infer_fallback(
     let buffers = state.stream_buffers.clone();
     let buffer_key = crate::stream_buffer::scoped_stream_key(org_id, user_id, request_id);
     let thread_id = run.thread_id.clone();
+    // `grpc_req` is consumed by the call below; keep its floor for the usage
+    // envelope so the fallback stamps the same provenance as the live stream.
+    let min_privacy_tier = grpc_req.min_privacy_tier;
     let result = state
         .inference_client
         .clone()
@@ -3513,6 +3546,9 @@ async fn run_infer_fallback(
                 input_tokens,
                 output_tokens,
                 latency_ms,
+                min_privacy_tier,
+                resp.provider_used.clone(),
+                resp.residency.clone(),
             );
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
@@ -3998,6 +4034,7 @@ async fn direct_infer(
     model: &str,
     content: &str,
     zdr: bool,
+    min_privacy_tier: i32,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<String, tonic::Status> {
     let mut client = state.inference_client.clone();
@@ -4020,6 +4057,9 @@ async fn direct_infer(
                 // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
                 // fallback inference (was hardcoded false, ignoring the run's ZDR).
                 zdr,
+                // Same caller privacy floor as the primary paths — a fallback
+                // must never reach a provider the main chain would refuse.
+                min_privacy_tier,
                 ..Default::default()
             },
             inference_bearer,
@@ -4419,6 +4459,9 @@ async fn zdr_direct_stream(
     content: String,
     features: Vec<String>,
     grounding: Option<crate::retrieval::Grounding>,
+    // Caller's minimum privacy tier (wire numeric; 0 = no constraint). The
+    // persistence-free path still enforces the residency axis.
+    min_privacy_tier: i32,
     inference_bearer: VerifiedInferenceBearer,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let answer = match direct_infer(
@@ -4428,6 +4471,7 @@ async fn zdr_direct_stream(
         &model,
         &content,
         true,
+        min_privacy_tier,
         &inference_bearer,
     )
     .await
@@ -5245,6 +5289,7 @@ fn build_stream_envelope(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // provenance receipt fields ride beside the usage counters
 fn build_usage_envelope(
     request_id: &str,
     org_id: &str,
@@ -5253,6 +5298,9 @@ fn build_usage_envelope(
     input_tokens: u32,
     output_tokens: u32,
     latency_ms: u64,
+    min_privacy_tier: i32,
+    provider_used: String,
+    residency: String,
 ) -> Envelope {
     Envelope {
         event_id: new_ulid(),
@@ -5274,6 +5322,12 @@ fn build_usage_envelope(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "latency_ms": latency_ms,
+            // Provenance receipt inputs, stamped beside the token counts on
+            // every transport: which deployment processed the content and
+            // under what residency / requested privacy floor.
+            "provider_used": provider_used,
+            "residency": residency,
+            "min_privacy_tier": min_privacy_tier,
         }),
         zdr: false,
     }
@@ -6126,10 +6180,43 @@ mod tests {
 
     #[test]
     fn usage_envelope_correlation_id_equals_request_id() {
-        let env = build_usage_envelope("req-ABC", "org-1", "user-1", "gpt-4o", 10, 20, 33);
+        let env = build_usage_envelope(
+            "req-ABC",
+            "org-1",
+            "user-1",
+            "gpt-4o",
+            10,
+            20,
+            33,
+            0,
+            String::new(),
+            String::new(),
+        );
         assert_eq!(env.correlation_id, "req-ABC");
         assert_eq!(env.producer, "model-gateway");
         assert!(env.idempotency_key.contains("req-ABC"));
+    }
+
+    /// The usage envelope carries the provenance receipt inputs (which
+    /// deployment answered, under what residency, against which requested
+    /// floor) so attribution consumers never have to re-derive them.
+    #[test]
+    fn usage_envelope_stamps_provenance_fields() {
+        let env = build_usage_envelope(
+            "req-PROV",
+            "org-1",
+            "user-1",
+            "gpt-4o",
+            10,
+            20,
+            33,
+            4,
+            "azure-norway-eu".to_owned(),
+            "norway".to_owned(),
+        );
+        assert_eq!(env.payload["provider_used"], "azure-norway-eu");
+        assert_eq!(env.payload["residency"], "norway");
+        assert_eq!(env.payload["min_privacy_tier"], 4);
     }
 
     #[test]
@@ -6137,7 +6224,18 @@ mod tests {
         // Parity across the two envelopes a single streamed request emits.
         let request_id = "req-PARITY-1";
         let opened = build_stream_envelope(request_id, "STREAM_OPENED", "o", "u", "m");
-        let usage = build_usage_envelope(request_id, "o", "u", "m", 1, 1, 1);
+        let usage = build_usage_envelope(
+            request_id,
+            "o",
+            "u",
+            "m",
+            1,
+            1,
+            1,
+            0,
+            String::new(),
+            String::new(),
+        );
         assert_eq!(opened.correlation_id, usage.correlation_id);
         assert_eq!(opened.correlation_id, request_id);
     }

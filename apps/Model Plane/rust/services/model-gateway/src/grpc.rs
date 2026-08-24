@@ -422,8 +422,19 @@ fn build_infer_request(
     provider_hint: &str,
     messages: Vec<ChatMessage>,
     req: &InvokeRequest,
-) -> InferRequest {
-    InferRequest {
+) -> Result<InferRequest, Status> {
+    // Fail closed at the edge on an unknown tier numeric, mirroring the HTTP
+    // normalize() path: a NEWER gRPC caller naming a tier this build does not
+    // know must be refused rather than silently read as "no constraint"
+    // downstream. UNSPECIFIED (0) passes through unchanged — it imposes no
+    // floor, exactly like an absent field.
+    mp_contracts::model_plane::v1::PrivacyTier::try_from(req.min_privacy_tier).map_err(|_| {
+        Status::invalid_argument(format!(
+            "unknown privacy tier value: {}",
+            req.min_privacy_tier
+        ))
+    })?;
+    Ok(InferRequest {
         request_id: request_id.to_owned(),
         org_id: org_id.to_owned(),
         model: model.to_owned(),
@@ -433,8 +444,11 @@ fn build_infer_request(
         max_tokens: req.max_tokens,
         structured_output_schema: req.structured_output_schema.clone(),
         zdr: req.zdr,
+        // Same floor the HTTP transports thread; enforced fail-closed by
+        // inference-core's chain selection.
+        min_privacy_tier: req.min_privacy_tier,
         ..Default::default()
-    }
+    })
 }
 
 async fn publish_ingress_accepted(
@@ -487,6 +501,7 @@ async fn publish_usage_envelope(
     latency_ms: u64,
     user_id: &str,
     zdr: bool,
+    min_privacy_tier: i32,
 ) {
     if zdr {
         return;
@@ -512,6 +527,12 @@ async fn publish_usage_envelope(
             "output_tokens": infer.output_tokens,
             "latency_ms": latency_ms,
             "transport": "grpc",
+            // Phase-4 provenance receipt inputs, matching the HTTP envelopes:
+            // which deployment processed the content and under what
+            // residency / requested privacy floor.
+            "provider_used": infer.provider_used.clone(),
+            "residency": infer.residency.clone(),
+            "min_privacy_tier": min_privacy_tier,
         }),
         zdr,
     };
@@ -718,7 +739,7 @@ impl ModelGateway for GatewayService {
         };
         let messages = build_messages(&memory_context, &content);
         let infer_req =
-            build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req);
+            build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req)?;
 
         // The gateway used to consult its own response cache here, BEFORE
         // calling inference-core. It was removed rather than repaired.
@@ -818,6 +839,7 @@ impl ModelGateway for GatewayService {
             latency_ms,
             user_id,
             req.zdr,
+            req.min_privacy_tier,
         )
         .await;
 
@@ -925,7 +947,7 @@ impl ModelGateway for GatewayService {
         };
         let messages = build_messages(&memory_context, &content);
         let infer_req =
-            build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req);
+            build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req)?;
 
         // No gateway-tier cache lookup here — see the `invoke` site. The
         // streaming variant had the same defect and additionally reported a
@@ -1010,6 +1032,10 @@ impl ModelGateway for GatewayService {
                         model_used,
                         input_tokens,
                         output_tokens,
+                        // Newer contract fields (provider_used/residency) are
+                        // deliberately not surfaced on the legacy gRPC chunk
+                        // shape; the unary envelope carries the receipt.
+                        ..
                     }) => {
                         let rid = if chunk_request_id.is_empty() {
                             fallback_request_id.clone()
@@ -2823,6 +2849,8 @@ mod tests {
                 stop_reason: "stop".to_owned(),
                 input_tokens: 1,
                 output_tokens: 1,
+                provider_used: String::new(),
+                residency: String::new(),
                 tool_calls: Vec::new(),
             }))
         }
@@ -2839,6 +2867,8 @@ mod tests {
                     model_used: "mock".to_owned(),
                     input_tokens: 0,
                     output_tokens: 0,
+                    provider_used: String::new(),
+                    residency: String::new(),
                 }),
                 Ok(InferChunk {
                     request_id: "req-stream".to_owned(),
@@ -2847,6 +2877,8 @@ mod tests {
                     model_used: "mock".to_owned(),
                     input_tokens: 2,
                     output_tokens: 3,
+                    provider_used: String::new(),
+                    residency: String::new(),
                 }),
             ]))))
         }
@@ -2874,6 +2906,8 @@ mod tests {
                     modality: "embedding".to_owned(),
                     streaming: false,
                     features: Vec::new(),
+                    privacy_tier: 0,
+                    residency: String::new(),
                 }],
             }))
         }

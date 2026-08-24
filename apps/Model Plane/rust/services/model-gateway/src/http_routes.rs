@@ -5773,6 +5773,13 @@ pub struct InvokeRequest {
     pub structured_output_schema: Option<String>,
     #[serde(default)]
     pub zdr: bool,
+    /// Caller-selected minimum privacy tier (Venice model_spec.privacy
+    /// equivalent). Wire value is the numeric of the shared `PrivacyTier` enum:
+    /// absent/0 = no constraint (today's behavior); 1–4 raise the floor.
+    /// Unknown numerics fail closed at normalization rather than being honored
+    /// as "no constraint" downstream.
+    #[serde(default, alias = "minPrivacyTier")]
+    pub min_privacy_tier: Option<i32>,
     /// Explicit public-web search intent from chat clients. This duplicates the
     /// `web_search` tool definition as a durable request flag so a UI Search
     /// toggle cannot be lost by tool normalization or client/BFF drift.
@@ -6042,6 +6049,26 @@ struct ModelDescriptor {
     modality: String,
     streaming: bool,
     features: Vec<String>,
+    /// Strongest privacy tier this model's serving provider can honor
+    /// (`unspecified|global|eu_resident|zdr_contractual|sovereign`).
+    privacy_tier: &'static str,
+    /// Declared residency label ("eu"/"norway"); empty when the provider makes
+    /// no residency commitment so absence never renders as a guarantee.
+    residency: String,
+}
+
+/// Wire-numeric → tier label. Mirrors inference-core's `PrivacyTier::label`;
+/// unknown numerics degrade to "unspecified" here because ListModels is pure
+/// disclosure — inference-core remains the fail-closed enforcement point.
+fn privacy_tier_label(value: i32) -> &'static str {
+    match mp_contracts::model_plane::v1::PrivacyTier::try_from(value) {
+        Ok(mp_contracts::model_plane::v1::PrivacyTier::Unspecified) => "unspecified",
+        Ok(mp_contracts::model_plane::v1::PrivacyTier::Global) => "global",
+        Ok(mp_contracts::model_plane::v1::PrivacyTier::EuResident) => "eu_resident",
+        Ok(mp_contracts::model_plane::v1::PrivacyTier::ZdrContractual) => "zdr_contractual",
+        Ok(mp_contracts::model_plane::v1::PrivacyTier::Sovereign) => "sovereign",
+        Err(_) => "unspecified",
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -6086,6 +6113,8 @@ async fn list_models(
             modality: m.modality,
             streaming: m.streaming,
             features: m.features,
+            privacy_tier: privacy_tier_label(m.privacy_tier),
+            residency: m.residency,
         })
         .collect();
 
@@ -6881,6 +6910,10 @@ async fn invoke(
                         .clone()
                         .unwrap_or_default(),
                     zdr: true,
+                    // Privacy tier applies on the persistence-free path too:
+                    // retention and geography are independent axes, so an
+                    // EU-resident ephemeral turn still gets the residency gate.
+                    min_privacy_tier: crate::normalize::min_privacy_tier_wire(&normalized),
                     ..Default::default()
                 },
                 &inference_bearer,
@@ -7118,6 +7151,7 @@ async fn invoke(
                         .clone()
                         .unwrap_or_default(),
                     zdr: effective_zdr,
+                    min_privacy_tier: crate::normalize::min_privacy_tier_wire(&normalized),
                     ..Default::default()
                 },
                 &inference_bearer,
@@ -7233,6 +7267,11 @@ async fn invoke(
             "input_tokens": infer_resp.input_tokens,
             "output_tokens": infer_resp.output_tokens,
             "latency_ms": latency_ms,
+            // Phase-4 provenance receipt inputs, stamped beside the zdr flag:
+            // which deployment processed the content and under what residency.
+            "provider_used": infer_resp.provider_used,
+            "residency": infer_resp.residency,
+            "min_privacy_tier": crate::normalize::min_privacy_tier_wire(&normalized),
         }),
         zdr: effective_zdr,
     };
@@ -7618,6 +7657,8 @@ mod capability_contract_tests {
             execution_mode: "agentic".to_owned(),
             cost_class: "variable".to_owned(),
             health_checked_at: "2026-07-13T15:00:00Z".to_owned(),
+            privacy_tier: 0,
+            residency: String::new(),
         });
 
         assert_eq!(value["state"], "approval_required");
