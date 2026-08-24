@@ -102,4 +102,6 @@ serial_test = "3"
 # regression test (P0 fix — Aquatiq crawl-to-KB pipeline, 2026-07-20).
 rsa = { version = "0.9", features = ["pem"] }
 rand = "0.8"
+# Property tests for the change-webhook wire contract.
+proptest = "1"
 
