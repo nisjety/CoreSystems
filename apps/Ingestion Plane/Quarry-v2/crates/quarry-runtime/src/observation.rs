@@ -16,9 +16,10 @@ use quarry_browser::{
 use quarry_core::contracts::{
     ActionOutcome, AgentAction, AgentActionRequest, BrowserObservation, BrowserSnapshot,
     BrowserTelemetry, ChallengeKind, ChallengeSignal, ConsoleLine, DomEvidenceDelta, DomSummary,
-    ElementFingerprint, EvidenceDelta, ExtractionFieldResult, ExtractionProfile, ExtractionResult,
-    ExtractionSource, InteractiveElement, NetworkEntry, NetworkEvidenceDelta, ObservationDelta,
-    ProofBundle, ResolvedTargetProof, SemanticLocator, SnapshotTarget,
+    ElementClickTarget, ElementFingerprint, EvidenceDelta, ExtractionFieldResult,
+    ExtractionProfile, ExtractionResult, ExtractionSource, InteractiveElement, NetworkEntry,
+    NetworkEvidenceDelta, ObservationDelta, ProofBundle, ResolvedTargetProof, SemanticLocator,
+    SnapshotTarget,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::event::EventType;
@@ -1547,6 +1548,9 @@ fn build_active_snapshot(
                 test_id: None,
                 frame_id: native.frame_id.clone(),
                 fingerprint: Some(native_target_fingerprint(native)),
+                // Native AX projections carry their own authority; a
+                // string-scanned click index would be a second numbering.
+                click_index: None,
             };
             targets.insert(
                 ref_id,
@@ -1590,6 +1594,7 @@ fn build_active_snapshot(
                 test_id: element.test_id.clone(),
                 frame_id: None,
                 fingerprint: element.fingerprint.clone(),
+                click_index: element.click_index,
             };
             targets.insert(
                 ref_id,
@@ -1896,7 +1901,19 @@ fn extract_title(html: &str) -> Option<String> {
     }
 }
 
-fn build_dom_summary(html: &str) -> DomSummary {
+/// Build the bounded agent-facing DOM summary.
+///
+/// This scanner has no layout engine, so viewport awareness is implemented at
+/// the attribute level: elements a renderer would not paint (`hidden`,
+/// `inert`, `aria-hidden="true"`, `input[type=hidden]`, and inline styles
+/// forcing invisibility such as `display:none`) are dropped before any slot
+/// is consumed. Stylesheets and offscreen geometry stay out of reach by
+/// design — the heuristic removes only what is explicitly marked invisible.
+/// Surviving elements receive stable 1-based click indices aligned with the
+/// `@eN` snapshot ref convention so action planning can reuse them directly.
+/// Public so the WS4 property suite can pin its invariants from outside
+/// the crate; production callers remain internal.
+pub fn build_dom_summary(html: &str) -> DomSummary {
     let node_count = html.matches('<').count() as u32;
     let mut interactive_elements = Vec::new();
 
@@ -1906,6 +1923,9 @@ fn build_dom_summary(html: &str) -> DomSummary {
             let end = remaining.find('>').unwrap_or(remaining.len());
             let element_str = &remaining[..end];
 
+            if !is_rendered_element(tag, element_str) {
+                continue;
+            }
             let text = extract_inner_text(remaining);
             let role = extract_attr(element_str, "role")
                 .map(|s| s.to_string())
@@ -1997,6 +2017,8 @@ fn build_dom_summary(html: &str) -> DomSummary {
                     .or_else(|| text.clone()),
                 placeholder,
                 test_id: test_id.map(str::to_owned),
+                // Assigned when the dense click map is built below.
+                click_index: None,
                 fingerprint: Some(ElementFingerprint {
                     fingerprint_id,
                     tag: tag.to_string(),
@@ -2012,6 +2034,38 @@ fn build_dom_summary(html: &str) -> DomSummary {
             }
         }
     }
+
+    // Dense, 1-based action-planning indices over exactly the elements that
+    // survived filtering. Row N names `@eN`, the same ref-id form agent
+    // snapshots mint, so a planner can carry an index straight into a
+    // snapshot-backed action without renumbering. Filtered-out elements never
+    // consume an index, keeping the numbering gap-free and stable for a given
+    // page state.
+    let click_map = if interactive_elements.is_empty() {
+        None
+    } else {
+        Some(
+            interactive_elements
+                .iter_mut()
+                .enumerate()
+                .map(|(offset, element)| {
+                    let index = offset as u32 + 1;
+                    element.click_index = Some(index);
+                    ElementClickTarget {
+                        ref_id: format!("@e{index}"),
+                        index,
+                        tag: element.tag.clone(),
+                        selector: Some(element.selector.clone()),
+                        name: element
+                            .accessible_name
+                            .clone()
+                            .or_else(|| element.aria_label.clone())
+                            .or_else(|| element.text.clone()),
+                    }
+                })
+                .collect(),
+        )
+    };
 
     let text_snippet = html
         .find("<body")
@@ -2032,7 +2086,76 @@ fn build_dom_summary(html: &str) -> DomSummary {
         node_count,
         interactive_elements,
         text_snippet,
+        click_map,
     }
+}
+
+/// Attribute-level approximation of "would a renderer paint this?". Only
+/// explicit invisibility markers drop an element; absence of styling evidence
+/// always keeps it (fail-open towards discoverability, never silently hides
+/// actionable controls the snapshot authority did not).
+fn is_rendered_element(tag: &str, element: &str) -> bool {
+    if extract_attr(element, "hidden").is_some() || has_unquoted_token(element, "hidden") {
+        return false;
+    }
+    if has_unquoted_token(element, "inert") {
+        return false;
+    }
+    if extract_attr(element, "aria-hidden") == Some("true") {
+        return false;
+    }
+    if tag == "input" && extract_attr(element, "type") == Some("hidden") {
+        return false;
+    }
+    !inline_style_hides(element)
+}
+
+fn inline_style_hides(element: &str) -> bool {
+    let Some(style) = extract_attr(element, "style") else {
+        return false;
+    };
+    let normalized: String = style
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    css_declares(&normalized, "display", "none")
+        || css_declares(&normalized, "visibility", "hidden")
+        || css_declares(&normalized, "opacity", "0")
+}
+
+/// Match a full CSS declaration `property:value` in whitespace-stripped,
+/// lowercased inline style text. Requires a declaration boundary after the
+/// value so `opacity:0` does not swallow `opacity:0.5`.
+fn css_declares(normalized_style: &str, property: &str, value: &str) -> bool {
+    let needle = format!("{property}:{value}");
+    normalized_style.match_indices(&needle).any(|(position, _)| {
+        let rest = &normalized_style[position + needle.len()..];
+        rest.is_empty() || rest.starts_with(';') || rest.starts_with('}')
+    })
+}
+
+/// True when `name` appears as a bare boolean-style attribute (e.g. `<button
+/// hidden>`), ignoring anything inside quoted attribute values so a title
+/// like "the hidden gem" cannot trigger a false match.
+fn has_unquoted_token(element: &str, name: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut candidate = String::new();
+    for character in element.chars() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) => {}
+            None if character == '"' || character == '\'' => quote = Some(character),
+            None if character.is_ascii_whitespace() || character == '>' => {
+                if candidate == name {
+                    return true;
+                }
+                candidate.clear();
+            }
+            None => candidate.push(character),
+        }
+    }
+    candidate == name
 }
 
 fn tag_openings(html: &str, tag: &str) -> Vec<usize> {
@@ -2469,6 +2592,136 @@ mod tests {
             .unwrap();
         assert_eq!(input.accessible_name.as_deref(), Some("Email address"));
         assert_eq!(input.placeholder.as_deref(), Some("name@example.test"));
+    }
+
+    #[test]
+    fn dom_summary_filters_hidden_elements_and_keeps_rendered_ones() {
+        let html = r#"<body>
+            <button data-testid='visible'>Visible</button>
+            <button hidden data-testid='attr-hidden'>Hidden attr</button>
+            <button data-testid='bare-hidden' hidden>Bare hidden</button>
+            <button aria-hidden='true' data-testid='aria-hidden'>Aria hidden</button>
+            <button style="display:none" data-testid='style-hidden'>Style hidden</button>
+            <button style="display : NONE ;" data-testid='style-case-hidden'>Case style</button>
+            <button style="visibility:hidden" data-testid='vis-hidden'>Vis hidden</button>
+            <button style="opacity:0" data-testid='opacity-hidden'>Opacity hidden</button>
+            <input type='hidden' name='csrf' value='token'>
+            <a href='/real' id='real-link'>Real link</a>
+            <button title='the hidden gem' data-testid='false-positive'>Title mention</button>
+        </body>"#;
+        let summary = build_dom_summary(html);
+        let test_ids: Vec<_> = summary
+            .interactive_elements
+            .iter()
+            .map(|element| {
+                element
+                    .test_id
+                    .as_deref()
+                    .or(Some(element.selector.as_str()))
+                    .unwrap_or("")
+            })
+            .collect();
+        for hidden in [
+            "attr-hidden",
+            "bare-hidden",
+            "aria-hidden",
+            "style-hidden",
+            "style-case-hidden",
+            "vis-hidden",
+            "opacity-hidden",
+        ] {
+            assert!(
+                !test_ids.iter().any(|id| id.contains(hidden)),
+                "hidden element leaked into summary: {hidden}"
+            );
+        }
+        assert!(!summary
+            .interactive_elements
+            .iter()
+            .any(|element| element.tag == "input"));
+        // Exactly the three rendered controls survive: the visible button,
+        // the real link, and the button whose *title text* merely mentions
+        // "hidden" (quoted attribute values must never trigger the filter).
+        assert_eq!(summary.interactive_elements.len(), 3);
+    }
+
+    #[test]
+    fn click_map_is_stable_dense_and_aligned_with_snapshot_refs() {
+        let summary = build_dom_summary(concat!(
+            "<button data-testid='save'>Save</button>",
+            "<a href='/next' id='next'>Next page</a>",
+            "<textarea placeholder='Notes'></textarea>",
+        ));
+        let click_map = summary.click_map.as_ref().expect("non-empty page has a map");
+        assert_eq!(click_map.len(), 3);
+        for (offset, row) in click_map.iter().enumerate() {
+            let expected = offset as u32 + 1;
+            assert_eq!(row.index, expected);
+            assert_eq!(row.ref_id, format!("@e{expected}"));
+            assert_eq!(summary.interactive_elements[offset].click_index, Some(expected));
+        }
+        // Scanner order follows tag scan order (a, button, input, select,
+        // textarea), so the anchor lands first.
+        assert_eq!(click_map[0].tag, "a");
+        assert_eq!(click_map[0].selector.as_deref(), Some("[id=\"next\"]"));
+        assert_eq!(click_map[0].name.as_deref(), Some("Next page"));
+        let save_row = click_map
+            .iter()
+            .find(|row| row.tag == "button")
+            .expect("save button row");
+        assert_eq!(save_row.selector.as_deref(), Some("[data-testid=\"save\"]"));
+        assert_eq!(save_row.name.as_deref(), Some("Save"));
+
+        // The indices are reusable by action planning: every snapshot target
+        // minted from this summary carries the click index it came from and
+        // names the matching @eN ref. The snapshot stays a strict subset of
+        // the click map (the bare textarea has no unique selector to bind an
+        // executable action to), so subset membership — not equality — is
+        // the alignment contract.
+        let run_id: RunKind = Id::new();
+        let snapshot = build_active_snapshot(&run_id, 1, "blake3:page", Some(&summary), None);
+        assert_eq!(snapshot.snapshot.targets.len(), 2);
+        for target in &snapshot.snapshot.targets {
+            let index = target.click_index.expect("scanner targets carry an index");
+            assert_eq!(target.ref_id, format!("@e{index}"));
+            assert_eq!(click_map[index as usize - 1].ref_id, target.ref_id);
+            assert_eq!(click_map[index as usize - 1].tag, target.tag);
+        }
+    }
+
+    #[test]
+    fn empty_page_yields_no_click_map() {
+        let summary = build_dom_summary("<html><body><p>Plain text only</p></body></html>");
+        assert!(summary.interactive_elements.is_empty());
+        assert!(summary.click_map.is_none());
+    }
+
+    #[test]
+    fn dom_summary_wire_shapes_stay_backward_compatible() {
+        // Legacy payloads without the click-map fields still decode.
+        let legacy = serde_json::json!({
+            "node_count": 1,
+            "interactive_elements": [
+                { "tag": "button", "selector": "[data-testid=\"go\"]" }
+            ]
+        });
+        let summary: DomSummary = serde_json::from_value(legacy).unwrap();
+        assert!(summary.click_map.is_none());
+        assert_eq!(summary.interactive_elements[0].click_index, None);
+
+        // Absent optional fields stay absent on re-encode (no null noise).
+        let encoded = serde_json::to_value(&summary).unwrap();
+        assert!(encoded.get("click_map").is_none());
+        assert!(encoded["interactive_elements"][0]
+            .get("click_index")
+            .is_none());
+
+        // Populated maps round-trip losslessly.
+        let full = build_dom_summary("<button data-testid='go'>Go</button>");
+        let json = serde_json::to_string(&full).unwrap();
+        let back: DomSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.click_map, full.click_map);
+        assert_eq!(back.interactive_elements, full.interactive_elements);
     }
 
     #[test]
