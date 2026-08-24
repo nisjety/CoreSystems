@@ -236,8 +236,16 @@ type CapabilityDetail struct {
 	// RFC3339 timestamp for the runtime health attestation; empty means no
 	// attestation and MUST derive to unavailable.
 	HealthCheckedAt string `protobuf:"bytes,15,opt,name=health_checked_at,json=healthCheckedAt,proto3" json:"health_checked_at,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// model-kind only: strongest privacy tier this model's serving providers can
+	// honor (registry-declared; startup-cached — see capability-core models
+	// table). UNSPECIFIED means no declared posture. The enum itself is declared
+	// once in inference.proto (shared package namespace).
+	PrivacyTier PrivacyTier `protobuf:"varint,16,opt,name=privacy_tier,json=privacyTier,proto3,enum=model_plane.v1.PrivacyTier" json:"privacy_tier,omitempty"`
+	// model-kind only: declared residency label ("global", "eu", "norway").
+	// Empty means undeclared.
+	Residency     string `protobuf:"bytes,17,opt,name=residency,proto3" json:"residency,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CapabilityDetail) Reset() {
@@ -371,6 +379,20 @@ func (x *CapabilityDetail) GetCostClass() string {
 func (x *CapabilityDetail) GetHealthCheckedAt() string {
 	if x != nil {
 		return x.HealthCheckedAt
+	}
+	return ""
+}
+
+func (x *CapabilityDetail) GetPrivacyTier() PrivacyTier {
+	if x != nil {
+		return x.PrivacyTier
+	}
+	return PrivacyTier_PRIVACY_TIER_UNSPECIFIED
+}
+
+func (x *CapabilityDetail) GetResidency() string {
+	if x != nil {
+		return x.Residency
 	}
 	return ""
 }
@@ -915,7 +937,7 @@ var File_model_plane_v1_capabilities_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\n" +
-	"!model_plane/v1/capabilities.proto\x12\x0emodel_plane.v1\"\x81\x01\n" +
+	"!model_plane/v1/capabilities.proto\x12\x0emodel_plane.v1\x1a\x1emodel_plane/v1/inference.proto\"\x81\x01\n" +
 	"\x17ListCapabilitiesRequest\x12\x1f\n" +
 	"\vkind_filter\x18\x01 \x01(\tR\n" +
 	"kindFilter\x12\x14\n" +
@@ -927,7 +949,7 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"j\n" +
 	"\x14GetCapabilityRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12-\n" +
-	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\xdb\x03\n" +
+	"\x12version_constraint\x18\x02 \x01(\tR\x11versionConstraint\"\xb9\x04\n" +
 	"\x10CapabilityDetail\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -947,7 +969,9 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\x0eexecution_mode\x18\r \x01(\tR\rexecutionMode\x12\x1d\n" +
 	"\n" +
 	"cost_class\x18\x0e \x01(\tR\tcostClass\x12*\n" +
-	"\x11health_checked_at\x18\x0f \x01(\tR\x0fhealthCheckedAt\"\x9b\x01\n" +
+	"\x11health_checked_at\x18\x0f \x01(\tR\x0fhealthCheckedAt\x12>\n" +
+	"\fprivacy_tier\x18\x10 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\vprivacyTier\x12\x1c\n" +
+	"\tresidency\x18\x11 \x01(\tR\tresidency\"\x9b\x01\n" +
 	"\x15EvaluatePolicyRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n" +
@@ -1026,28 +1050,30 @@ var file_model_plane_v1_capabilities_proto_goTypes = []any{
 	(*CheckSkillPromotionResponse)(nil), // 9: model_plane.v1.CheckSkillPromotionResponse
 	(*PromoteSkillRequest)(nil),         // 10: model_plane.v1.PromoteSkillRequest
 	(*PromoteSkillResponse)(nil),        // 11: model_plane.v1.PromoteSkillResponse
+	(PrivacyTier)(0),                    // 12: model_plane.v1.PrivacyTier
 }
 var file_model_plane_v1_capabilities_proto_depIdxs = []int32{
 	3,  // 0: model_plane.v1.ListCapabilitiesResponse.capabilities:type_name -> model_plane.v1.CapabilityDetail
-	3,  // 1: model_plane.v1.ValidateSkillBundleResponse.capability:type_name -> model_plane.v1.CapabilityDetail
-	3,  // 2: model_plane.v1.PromoteSkillResponse.capability:type_name -> model_plane.v1.CapabilityDetail
-	0,  // 3: model_plane.v1.CapabilityCore.ListCapabilities:input_type -> model_plane.v1.ListCapabilitiesRequest
-	2,  // 4: model_plane.v1.CapabilityCore.GetCapability:input_type -> model_plane.v1.GetCapabilityRequest
-	4,  // 5: model_plane.v1.CapabilityCore.EvaluatePolicy:input_type -> model_plane.v1.EvaluatePolicyRequest
-	6,  // 6: model_plane.v1.CapabilityCore.ValidateSkillBundle:input_type -> model_plane.v1.ValidateSkillBundleRequest
-	8,  // 7: model_plane.v1.CapabilityCore.CheckSkillPromotion:input_type -> model_plane.v1.CheckSkillPromotionRequest
-	10, // 8: model_plane.v1.CapabilityCore.PromoteSkill:input_type -> model_plane.v1.PromoteSkillRequest
-	1,  // 9: model_plane.v1.CapabilityCore.ListCapabilities:output_type -> model_plane.v1.ListCapabilitiesResponse
-	3,  // 10: model_plane.v1.CapabilityCore.GetCapability:output_type -> model_plane.v1.CapabilityDetail
-	5,  // 11: model_plane.v1.CapabilityCore.EvaluatePolicy:output_type -> model_plane.v1.EvaluatePolicyResponse
-	7,  // 12: model_plane.v1.CapabilityCore.ValidateSkillBundle:output_type -> model_plane.v1.ValidateSkillBundleResponse
-	9,  // 13: model_plane.v1.CapabilityCore.CheckSkillPromotion:output_type -> model_plane.v1.CheckSkillPromotionResponse
-	11, // 14: model_plane.v1.CapabilityCore.PromoteSkill:output_type -> model_plane.v1.PromoteSkillResponse
-	9,  // [9:15] is the sub-list for method output_type
-	3,  // [3:9] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	12, // 1: model_plane.v1.CapabilityDetail.privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	3,  // 2: model_plane.v1.ValidateSkillBundleResponse.capability:type_name -> model_plane.v1.CapabilityDetail
+	3,  // 3: model_plane.v1.PromoteSkillResponse.capability:type_name -> model_plane.v1.CapabilityDetail
+	0,  // 4: model_plane.v1.CapabilityCore.ListCapabilities:input_type -> model_plane.v1.ListCapabilitiesRequest
+	2,  // 5: model_plane.v1.CapabilityCore.GetCapability:input_type -> model_plane.v1.GetCapabilityRequest
+	4,  // 6: model_plane.v1.CapabilityCore.EvaluatePolicy:input_type -> model_plane.v1.EvaluatePolicyRequest
+	6,  // 7: model_plane.v1.CapabilityCore.ValidateSkillBundle:input_type -> model_plane.v1.ValidateSkillBundleRequest
+	8,  // 8: model_plane.v1.CapabilityCore.CheckSkillPromotion:input_type -> model_plane.v1.CheckSkillPromotionRequest
+	10, // 9: model_plane.v1.CapabilityCore.PromoteSkill:input_type -> model_plane.v1.PromoteSkillRequest
+	1,  // 10: model_plane.v1.CapabilityCore.ListCapabilities:output_type -> model_plane.v1.ListCapabilitiesResponse
+	3,  // 11: model_plane.v1.CapabilityCore.GetCapability:output_type -> model_plane.v1.CapabilityDetail
+	5,  // 12: model_plane.v1.CapabilityCore.EvaluatePolicy:output_type -> model_plane.v1.EvaluatePolicyResponse
+	7,  // 13: model_plane.v1.CapabilityCore.ValidateSkillBundle:output_type -> model_plane.v1.ValidateSkillBundleResponse
+	9,  // 14: model_plane.v1.CapabilityCore.CheckSkillPromotion:output_type -> model_plane.v1.CheckSkillPromotionResponse
+	11, // 15: model_plane.v1.CapabilityCore.PromoteSkill:output_type -> model_plane.v1.PromoteSkillResponse
+	10, // [10:16] is the sub-list for method output_type
+	4,  // [4:10] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_capabilities_proto_init() }
@@ -1055,6 +1081,7 @@ func file_model_plane_v1_capabilities_proto_init() {
 	if File_model_plane_v1_capabilities_proto != nil {
 		return
 	}
+	file_model_plane_v1_inference_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

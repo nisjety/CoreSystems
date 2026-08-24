@@ -246,6 +246,13 @@ message InvokeRequest {
 
   // Parent message id for edit-and-resubmit / branch (thread fork).
   string parent_message_id = 21;
+
+  // Minimum privacy tier every serving provider must satisfy (see the
+  // PrivacyTier enum in inference.proto). The gateway validates the numeric
+  // and threads it onto every downstream InferRequest; inference-core skips
+  // ineligible providers in every chain path and fails closed with a typed
+  // precondition naming this tier when none remains.
+  PrivacyTier min_privacy_tier = 22;
 }
 
 // ContentPart — one piece of a multimodal turn (chat-parity §9 vision).
