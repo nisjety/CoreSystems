@@ -164,6 +164,11 @@ func main() {
 		resources.MountRestore(r, db)
 		resources.MountEvents(r, db, apiKey, notifySink)
 		resources.MountWebhooks(r, db)
+		// Edge change-webhook receiver (docs/CHANGE_TRACKING.md §"Webhook
+		// emission"): signature + stale-ts + nonce replay are enforced by
+		// the hmacVerifier.Middleware above — mount here, not outside the
+		// group, so the handler inherits verification.
+		resources.MountChangeWebhook(r, db, notifySink)
 		resources.MountBlocklists(r, db)
 		resources.MountWebhookDeliveries(r, db)
 		resources.MountPresets(r)

@@ -158,6 +158,15 @@ type EventLog interface {
 	// when no events exist yet. The handler uses this to assign durable
 	// per-run seq server-side regardless of caller numbering.
 	NextSeq(runID quarrycontracts.ID) uint64
+	// FindByIdempotencyKey resolves a change-webhook retry to the event
+	// already recorded under the caller's Idempotency-Key header. Scoped
+	// to type='change_detected' — exactly the rows the partial unique
+	// index (migration 013) constrains — so keys from other producers can
+	// never shadow an edge retry. The org is deliberately NOT part of the
+	// lookup: the edge mints UUID keys, so a cross-org collision is not a
+	// realistic threat, and the lookup only ever surfaces an event_id,
+	// never payload content, to the retrying caller.
+	FindByIdempotencyKey(key string) (quarrycontracts.Event, bool)
 }
 
 // ---- resource types -------------------------------------------------------
@@ -894,4 +903,21 @@ func (l *memEventLog) ForJob(jobID quarrycontracts.ID, afterSeq uint64, limit in
 		}
 	}
 	return out
+}
+
+// FindByIdempotencyKey mirrors the pg partial-unique-index scope: only
+// change_detected rows participate. Linear scan is fine — the memory store
+// is dev-only.
+func (l *memEventLog) FindByIdempotencyKey(key string) (quarrycontracts.Event, bool) {
+	if key == "" {
+		return quarrycontracts.Event{}, false
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for _, e := range l.events {
+		if e.Type == quarrycontracts.EvtChangeDetected && e.IdempotencyKey == key {
+			return e, true
+		}
+	}
+	return quarrycontracts.Event{}, false
 }
