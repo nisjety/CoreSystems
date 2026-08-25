@@ -721,6 +721,7 @@ pub async fn invoke_stream_sse(
             features,
             agentic_tools,
             effective_zdr,
+            min_privacy_tier_wire,
             posture.to_owned(),
             execution_bearer,
             data_plane_bearer,
@@ -4667,6 +4668,7 @@ fn spawn_run_dispatch(
     content: &str,
     tools: &[ToolDefinition],
     zdr: bool,
+    min_privacy_tier_wire: i32,
     permission_mode: &str,
     execution_bearer: &VerifiedExecutionBearer,
     data_plane_bearer: &VerifiedBearer,
@@ -4693,6 +4695,10 @@ fn spawn_run_dispatch(
         // threaded into execution-core so every inference round + tool audit
         // detail honors it.
         zdr,
+        // Privacy floor: the caller's min_privacy_tier as the wire numeric,
+        // threaded so the governed agent loop enforces the same tier as the
+        // inline invoke path. Never silently downgraded by taking this path.
+        min_privacy_tier: min_privacy_tier_wire,
         // chat-parity: the client's declared tools, merged server-side with the
         // built-in + MCP set under the same governed execute_step path.
         tools: tools.to_vec(),
@@ -4801,6 +4807,7 @@ fn agentic_run_stream(
     features: Vec<String>,
     tools: Vec<ToolDefinition>,
     zdr: bool,
+    min_privacy_tier_wire: i32,
     permission_mode: String,
     execution_bearer: VerifiedExecutionBearer,
     data_plane_bearer: VerifiedBearer,
@@ -4841,6 +4848,7 @@ fn agentic_run_stream(
             &content,
             &tools,
             zdr,
+            min_privacy_tier_wire,
             &permission_mode,
             &execution_bearer,
             &data_plane_bearer,

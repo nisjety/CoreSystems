@@ -115,6 +115,14 @@ message RunAgentRequest {
   // client tool that resolves to no executor returns a graceful error the
   // ReAct loop feeds back. Empty → only the server-side set is offered.
   repeated ToolDefinition tools = 10;
+
+  // Minimum privacy tier every serving provider of EVERY inference round of
+  // this run must satisfy. The gateway threads the chat request's floor here;
+  // execution-core copies it onto each round's InferRequest so the governed
+  // agent loop enforces the same constraint as the inline path — a tier can
+  // never be lost by routing a constrained chat turn through the agent loop.
+  // UNSPECIFIED imposes no constraint.
+  PrivacyTier min_privacy_tier = 11;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.
