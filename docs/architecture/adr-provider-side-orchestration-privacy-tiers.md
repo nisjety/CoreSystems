@@ -51,20 +51,17 @@ narrows the catalog.
    which models carry which tier/residency, loaded at startup — not consulted
    on the hot path (§4.5).
 
-4. **Remaining capability-core tasks** (documented follow-up, not yet
-   implemented):
-   - Migration `0013_privacy_tier_columns` — the latest migration today is
-     `0012_run_watch_subscriptions` — adding `privacy_tier` and `residency`
-     columns to the `models` table, with values set explicitly for seeded rows
-     rather than left to defaults.
-   - Startup-loaded registry cache: capability-core loads the models table once
-     at boot and serves listing/authz projections from it. No synchronous
-     hot-path RPC between model-gateway and capability-core.
-   - Remove the decorative seed row `google/gemini-1.5-pro`
-     (`0002_seed_models.up.sql`, seeded with `config_json = '{}'`). It
-     advertises a model with no registered provider backing; now that
-     `/v1/models` carries privacy metadata, leaving it in place means
-     fabricating a `privacy_tier` claim for a model that cannot serve traffic.
+4. **capability-core registry facts land as schema + cache** (implemented in
+   this decision's follow-through):
+   - Migration `0013_privacy_tier_columns` (after `0012_run_watch_subscriptions`)
+     adds `privacy_tier` and `residency` columns to the `models` table with a
+     check-constrained label set mirroring the wire enum, and soft-deletes the
+     decorative seed row `google/gemini-1.5-pro` (`config_json = '{}'`), which
+     had no provider backing and would otherwise force a fabricated tier claim
+     now that rows carry disclosure metadata.
+   - A startup-loaded `ModelsCache` serves listing/authz projections from an
+     in-memory snapshot; there is no synchronous hot-path RPC between
+     model-gateway and capability-core (§4.5).
 
 ## Consequences
 
@@ -73,8 +70,7 @@ an owned-path equivalent usable by constrained tiers, or be gated off entirely
 for requests above `UNSPECIFIED`. "It only works provider-side" is a reason to
 not offer the feature to those customers, not a reason to route them into it.
 
-Until the registry work lands, tier disclosure rests on runtime classification
-in inference-core; the `models` columns and startup cache make capability-core
-the declarative source of record and let catalogs be curated without code
-changes. The seed-row removal should land with the tier disclosure work so the
-catalog never contains a row whose tier cannot be honored.
+With the `models` columns and startup cache landed alongside the tier
+disclosure work, capability-core is the declarative source of record: catalogs
+can be curated (tier/residency per row) without code changes, and the catalog
+cannot contain an enabled row whose tier cannot be honored.
