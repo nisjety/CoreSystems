@@ -1034,3 +1034,50 @@ the agent side — a measured non-fix that would read as coverage).
 Left open: chat has no elicitation snippet, so the gate is its only defense and it
 always pays one round-trip where the agent loop avoids it 11/20. Fixing that means
 touching session-core's prompt assembly; not done blind.
+
+## Adoption scorecard verified claim-by-claim (2026-08-25) — status: **8 of 22 claims are built but unreachable**
+
+A 22-claim adversarial verification of the four-harness adoption scorecard
+(Claude Code / Hermes / DeepSeek / pi), each claim traced from advertisement to
+production caller. 12 CONFIRMED-and-reachable, 8 with a real reachability
+defect, 2 stale.
+
+**The defects, each with its missing link — these are work items, not notes:**
+
+1. **Context inspector returns nothing, ever.** `session-core/src/grpc.rs`
+   calls `authorize_run_owner(..., OwnerIntent::Mutate)` *before*
+   `get_context_assembly_inner`, and that function has no empty-string guard —
+   it runs `SELECT ... FROM runs WHERE id = $1` and rejects. Every production
+   request dies before the assembler runs. The whole SPA panel is unreachable.
+2. **Extended-thinking dial has zero production writers.** `InvokeRequest.effort`
+   is read once (`sse.rs`) and turned into `thinking_budget_tokens`, but nothing
+   in the product ever sets it, and the `deep` tier has no reachable config.
+3. **The per-call autonomy gate can never refuse anything.** Only one non-test
+   constructor of `RunAgentRequest` sets the rung; every in-loop construction
+   leaves it unset, which reads as the narrowest rung but is never checked
+   against a graded grant.
+4. **`ProviderError::TooLong` is never propagated.** Constructed at exactly one
+   site (`overflow.rs` `classify_http_failure`); every consumer chain swallows
+   it, so there is no reachable route to `too_long_status` at all.
+5. **The mid-run queued-input fix is client-side dead.** The server half is real,
+   but `ChatPage.tsx` passes `submitting={isStreaming()}` and the composer
+   returns silently — so the silent-drop bug the module exists to fix is *still
+   live in the product*.
+6. **`save_memory`/`recall_memory` are advertised AND dispatched yet still
+   unreachable** — the usual dead-arm test passes, so this one needs the full
+   chain re-walked.
+7. **Memory provenance renders only vacuously**: nothing writes a non-zero
+   origin on the path that feeds it, so two of its three states cannot occur.
+8. **`run_subagent` has no first-party dispatch path.** Dispatch is prefix-based
+   on `subagent.`, and no catalogue advertises any `subagent.*` name.
+
+**Two stale claims**, both in the optimistic-then-pessimistic direction that
+this repo keeps producing: fork-semantics was recorded as "open, next in
+sequence" when it is a dated **reject** (DeepSeek rejected it first and we
+concurred); and the plan-approval ladder was recorded as "needs a product
+decision" when the decision is recorded and the code shipped.
+
+**Standing lesson, now third time this session:** a ✅ in
+`claude-hermes-deepseek.md` means "the mechanism was built", and repeatedly does
+not mean "a user can reach it." Verification must trace advertisement → caller →
+writer → reader. The TL;DR now says this explicitly.

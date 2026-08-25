@@ -27,13 +27,47 @@ harnesses cloned locally at `/Volumes/Lagring/Triodelab/{deepseek-harness,hermes
   primitive `deepseek-harness` uses and the one Model Plane's own harvest plan
   recommended vendoring from `codex`. This was not yet true as of the last
   written audit — update `gap-analysis.md`/`GOAL.md` accordingly.
-- **What's still genuinely missing, confirmed by fresh code reads:** parallel
-  tool-call dispatch within a round (all three external systems support this in
-  some form; Model Plane still runs tool calls in a plain sequential loop),
-  a populated tools/plugins/MCP registry in `capability-core` (still stubs),
-  a real long-term/semantic memory backend (`letta-bridge` is still an in-memory
-  stub — correctly deferred, see §7), and any compaction-quality eval harness
-  (both `hermes-agent` and `deepseek-harness` have one; Model Plane has none).
+- **CORRECTION (2026-08-25): the four gaps this TL;DR used to name are closed, and
+  three of them were never real.** This bullet previously read "still genuinely
+  missing: parallel tool-call dispatch, a populated tools/plugins/MCP registry,
+  a real long-term memory backend, and any compaction-quality eval harness."
+  Every one of those is now ✅ or CORRECTED in §3, most as of 2026-08-22 — and
+  the registry and memory claims were **wrong when written**, not merely
+  outdated: they inferred absence from the absence of an expected *type name*
+  (see §3's warning box). Parallel dispatch shipped 2026-08-22; the
+  compaction-recall harness shipped the same day. The TL;DR sat stale for three
+  days while the matrix beneath it was correct, which is exactly the failure
+  `CLAUDE.md` warns about for `ROADMAP.md`, recurring in the newer document.
+- **What is *actually* the dominant gap, measured 2026-08-25: reachability, not
+  absence.** A 22-claim adversarial verification of the adoption scorecard —
+  each claim traced from advertisement to production caller — found **8 claims
+  where the code exists, is tested, and cannot activate in production**:
+  - the **context inspector** never returns data: session-core's
+    `authorize_run_owner` runs *before* `get_context_assembly_inner` and has no
+    empty-string guard, so every production request is rejected first;
+  - the **extended-thinking dial** has zero production writers, so no request
+    ever carries a budget;
+  - the **per-call autonomy gate can never refuse anything** — only one
+    non-test constructor of `RunAgentRequest` sets the rung;
+  - `ProviderError::TooLong` is constructed at exactly one site and **nothing
+    propagates it**;
+  - the mid-run **queued-input** fix is real server-side while the SPA composer
+    still returns silently during a stream, so the silent-drop bug it exists to
+    fix is *still live in the product*;
+  - **`save_memory`/`recall_memory`** are advertised and dispatched yet still
+    unreachable; **memory provenance** renders only because nothing writes a
+    non-zero origin on the feeding path; and `run_subagent` has **no
+    first-party dispatch path at all** because no catalogue advertises a
+    `subagent.*` name.
+  A ✅ in this document means "the mechanism was built." It has repeatedly not
+  meant "a user can reach it." Read every row with that distinction.
+- **Where Model Plane now leads rather than follows: tool-argument grounding.**
+  None of the four external harnesses checks that a tool argument is *grounded
+  in the request*. Measured 2026-08-25, required user-held values were
+  fabricated 55–70 % of the time in the agent loop and **100 %** in chat — every
+  fabrication schema-valid, because shape validation cannot see an invented
+  postal code. A pre-dispatch grounding gate now refuses them in both loops.
+  This is a genuine lead and had no row in §3 until now — see the matrix.
 - **The single most reusable idea across all three external systems** is the
   same pattern under different names: a swappable capability = one interface +
   one adapter shape that both "real OS resource" and "SDK-only/remote backend"
@@ -53,8 +87,14 @@ harnesses cloned locally at `/Volumes/Lagring/Triodelab/{deepseek-harness,hermes
   Hermes has the richest plugin/backend ecosystem and the most honest security
   posture documentation (including admitting its own defaults are weak); Model
   Plane has the strongest production-readiness *discipline* (evidence states,
-  coverage gates, signed release artifacts) but the least mature harness-specific
-  feature surface of the four.
+  coverage gates, signed release artifacts). **The "least mature harness feature
+  surface of the four" clause that used to end this line is retired as of
+  2026-08-25**: the 25-item adoption plan closed, and the surface is now broadly
+  comparable — 22 of 34 matrix capabilities ✅, with two of the five ❌ being
+  documented decisions the reference harness itself agrees with. What separates
+  Model Plane from the other three is no longer feature count but the
+  build-to-reachable gap described above: it ships mechanisms faster than it
+  wires them to users.
 
 ---
 
@@ -202,6 +242,8 @@ Legend: ✅ real & live · 🟡 partial/stub/opt-in · ❌ absent · — not app
 | Generated, freshness-gated documentation as a CI gate | ❌ | ❌ | ✅ boots real plugins, diffs against committed docs | ❌ |
 | Blameless postmortem / rejected-design ledger | ✅ **now live** (2026-08-22) — `docs/postmortem/0001-...` + `docs/decisions/ledger.md`, seeded with HARN-1/2, the letta-bridge deferral, and the sandbox-backend-trait deferral (§7.1); see §7.6 | ❌ (not observable from source alone) | ✅ 4 numbered postmortems + 688-entry Agent Notes ledger | ❌ |
 | Dedicated eval harness (general agent quality) | ✅ "eval harness MVP" recently shipped (git log, 2026-08) | ❌ (not observed) | 🟡 (snapshot-replay tests, not a scored eval harness) | ✅ `evals/readtool`, `evals/compaction` |
+| **Tool-argument grounding (a required value must appear in the request)** | ✅ **live in both loops** (2026-08-25) — `mp_contracts::tool_arguments::{ungrounded_arguments, grounding_message}`, called pre-dispatch right after schema validation. Measured need: required user-held values were fabricated **55–70 %** of the time in the agent loop and **100 %** (20/20) in chat, every fabrication schema-valid. A prompt-only fix took the agent loop from 1/20 to 12/20 and stalled there; the gate makes the residual zero by construction, and 9/9 refusals produced a question rather than a second guess. Narrow by design — two shipping tools, because a required value that merely *restates the request* (`web_search.query`) or is public fact (`yr_weather.lat/lon`) must never be asked for, and a *discoverable* id (`execute_provider_action.connection_id`) is already resolved unprompted 10/10 via `list_provider_actions` | ❌ | ❌ | ❌ |
+| Elicitation instruction for un-inventable arguments | 🟡 agent loop only — `SNIPPET_USER_SUPPLIED_ARGS`, gated on the offered set (+18.3 pp, p=0.016, with zero under-calling regression at n=60). Chat gets none: its prompt is assembled by session-core, so on chat the gate is the sole defense and every under-specified quote costs one extra round-trip | 🟡 (per-tool description prose) | ❌ | ❌ |
 | Signed/attested release artifacts | ✅ artifact-v3, uniquely rigorous among the four | ❌ n/a (leaked snapshot) | ❌ n/a (dev preview) | ❌ n/a |
 | License | Internal/proprietary | **None — leaked proprietary** | MIT | MIT |
 
