@@ -1,26 +1,32 @@
 
-# EnvelopeEgressReceipts
+# FrameTypeRefAction
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`snapshotId` | string
+`generation` | number
+`frameId` | string
+`type` | string
+`refId` | string
+`text` | string
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { FrameTypeRefAction } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "snapshotId": null,
+  "generation": null,
+  "frameId": null,
+  "type": null,
+  "refId": @e1,
+  "text": null,
+} satisfies FrameTypeRefAction
 
 console.log(example)
 
@@ -29,7 +35,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as FrameTypeRefAction
 console.log(exampleParsed)
 ```
 

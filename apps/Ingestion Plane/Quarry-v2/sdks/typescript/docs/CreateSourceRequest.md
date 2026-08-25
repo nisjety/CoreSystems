@@ -1,26 +1,32 @@
 
-# EnvelopeEgressReceipts
+# CreateSourceRequest
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`name` | string
+`url` | string
+`kind` | string
+`monitor` | boolean
+`preset` | string
+`config` | { [key: string]: any; }
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { CreateSourceRequest } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "name": null,
+  "url": null,
+  "kind": null,
+  "monitor": null,
+  "preset": null,
+  "config": null,
+} satisfies CreateSourceRequest
 
 console.log(example)
 
@@ -29,7 +35,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as CreateSourceRequest
 console.log(exampleParsed)
 ```
 

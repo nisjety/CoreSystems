@@ -1,26 +1,24 @@
 
-# EnvelopeEgressReceipts
+# SnapshotTargetBase
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`snapshotId` | string
+`generation` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { SnapshotTargetBase } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "snapshotId": null,
+  "generation": null,
+} satisfies SnapshotTargetBase
 
 console.log(example)
 
@@ -29,7 +27,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as SnapshotTargetBase
 console.log(exampleParsed)
 ```
 

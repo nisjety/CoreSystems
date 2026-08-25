@@ -1,26 +1,30 @@
 
-# EnvelopeEgressReceipts
+# BrowserFrame
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`frameId` | string
+`parentFrameId` | string
+`origin` | string
+`name` | string
+`childFrameIds` | Array&lt;string&gt;
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { BrowserFrame } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "frameId": null,
+  "parentFrameId": null,
+  "origin": null,
+  "name": null,
+  "childFrameIds": null,
+} satisfies BrowserFrame
 
 console.log(example)
 
@@ -29,7 +33,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as BrowserFrame
 console.log(exampleParsed)
 ```
 

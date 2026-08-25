@@ -1,26 +1,40 @@
 
-# EnvelopeEgressReceipts
+# SemanticLocator
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`kind` | string
+`role` | string
+`name` | string
+`exact` | boolean
+`text` | string
+`label` | string
+`placeholder` | string
+`testId` | string
+`selector` | string
+`index` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { SemanticLocator } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "kind": null,
+  "role": null,
+  "name": null,
+  "exact": null,
+  "text": null,
+  "label": null,
+  "placeholder": null,
+  "testId": null,
+  "selector": null,
+  "index": null,
+} satisfies SemanticLocator
 
 console.log(example)
 
@@ -29,7 +43,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as SemanticLocator
 console.log(exampleParsed)
 ```
 

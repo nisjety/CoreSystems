@@ -1,26 +1,34 @@
 
-# EnvelopeEgressReceipts
+# SnapshotRefAction
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`snapshotId` | string
+`generation` | number
+`type` | string
+`refId` | string
+`text` | string
+`value` | string
+`timeoutMs` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { SnapshotRefAction } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "snapshotId": null,
+  "generation": null,
+  "type": null,
+  "refId": @e1,
+  "text": null,
+  "value": null,
+  "timeoutMs": null,
+} satisfies SnapshotRefAction
 
 console.log(example)
 
@@ -29,7 +37,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as SnapshotRefAction
 console.log(exampleParsed)
 ```
 

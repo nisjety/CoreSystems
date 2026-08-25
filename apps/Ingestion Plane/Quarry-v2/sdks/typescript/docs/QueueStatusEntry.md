@@ -1,26 +1,28 @@
 
-# EnvelopeEgressReceipts
+# QueueStatusEntry
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`queueId` | string
+`name` | string
+`queued` | number
+`inFlight` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { QueueStatusEntry } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "queueId": null,
+  "name": null,
+  "queued": null,
+  "inFlight": null,
+} satisfies QueueStatusEntry
 
 console.log(example)
 
@@ -29,7 +31,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as QueueStatusEntry
 console.log(exampleParsed)
 ```
 

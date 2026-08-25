@@ -1,26 +1,26 @@
 
-# EnvelopeEgressReceipts
+# EvidenceDeltaNetwork
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`added` | Array&lt;string&gt;
+`removed` | Array&lt;string&gt;
+`currentCount` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { EvidenceDeltaNetwork } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "added": null,
+  "removed": null,
+  "currentCount": null,
+} satisfies EvidenceDeltaNetwork
 
 console.log(example)
 
@@ -29,7 +29,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as EvidenceDeltaNetwork
 console.log(exampleParsed)
 ```
 

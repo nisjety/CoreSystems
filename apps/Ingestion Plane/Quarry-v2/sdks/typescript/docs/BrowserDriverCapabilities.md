@@ -1,21 +1,49 @@
+
 # BrowserDriverCapabilities
 
-Explicit browser-driver routing claims. A missing or `false` value is never
-inferred from a provider name. Agent runs require both `isolatedEgress` and
-`securityEvidence`, regardless of optional requested capabilities.
+Requested or selected execution capabilities. Every true value is an affirmative provider claim; omitted values are not inferred. Agent runs always require isolated_egress and security_evidence regardless of optional requirements.
 
 ## Properties
 
-Name | Type | Meaning
------------- | ------------- | -------------
-`persistentProfile` | boolean | Durable profile support for an approved run.
-`devtoolsTrace` | boolean | Redacted CDP trace support.
-`downloadsToArtifacts` | boolean | Browser downloads can be quarantined and admitted as Quarry artifacts.
-`uploadsFromArtifacts` | boolean | Only approved Quarry artifacts can be attached to native file inputs.
-`fullVisualFidelity` | boolean | Full Chromium-compatible visual surface.
-`isolatedEgress` | boolean | Browser traffic uses Quarry's governed egress boundary.
-`securityEvidence` | boolean | The claimed browser request surface has current security proof.
-`atomicTargetActions` | boolean | Snapshot target verification and effect are atomic in the driver.
+Name | Type
+------------ | -------------
+`persistentProfile` | boolean
+`devtoolsTrace` | boolean
+`downloadsToArtifacts` | boolean
+`uploadsFromArtifacts` | boolean
+`fullVisualFidelity` | boolean
+`isolatedEgress` | boolean
+`securityEvidence` | boolean
+`atomicTargetActions` | boolean
 
-No capability is promised until it is present and `true` in the selected
-driver's response.
+## Example
+
+```typescript
+import type { BrowserDriverCapabilities } from '@quarry/client'
+
+// TODO: Update the object below with actual values
+const example = {
+  "persistentProfile": null,
+  "devtoolsTrace": null,
+  "downloadsToArtifacts": null,
+  "uploadsFromArtifacts": null,
+  "fullVisualFidelity": null,
+  "isolatedEgress": null,
+  "securityEvidence": null,
+  "atomicTargetActions": null,
+} satisfies BrowserDriverCapabilities
+
+console.log(example)
+
+// Convert the instance to a JSON string
+const exampleJSON: string = JSON.stringify(example)
+console.log(exampleJSON)
+
+// Parse the JSON string back to an object
+const exampleParsed = JSON.parse(exampleJSON) as BrowserDriverCapabilities
+console.log(exampleParsed)
+```
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+

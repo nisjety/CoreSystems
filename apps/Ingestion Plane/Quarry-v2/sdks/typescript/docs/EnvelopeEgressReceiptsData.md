@@ -1,26 +1,24 @@
 
-# EnvelopeEgressReceipts
+# EnvelopeEgressReceiptsData
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`receipts` | [Array&lt;BrowserEgressReceipt&gt;](BrowserEgressReceipt.md)
+`zdr` | boolean
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { EnvelopeEgressReceiptsData } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "receipts": null,
+  "zdr": null,
+} satisfies EnvelopeEgressReceiptsData
 
 console.log(example)
 
@@ -29,7 +27,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceiptsData
 console.log(exampleParsed)
 ```
 

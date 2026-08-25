@@ -1,26 +1,30 @@
 
-# EnvelopeEgressReceipts
+# DialogResponseAction
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`type` | string
+`dialogId` | string
+`accept` | boolean
+`approvalGrantId` | string
+`promptText` | string
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { DialogResponseAction } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "type": null,
+  "dialogId": null,
+  "accept": null,
+  "approvalGrantId": null,
+  "promptText": null,
+} satisfies DialogResponseAction
 
 console.log(example)
 
@@ -29,7 +33,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as DialogResponseAction
 console.log(exampleParsed)
 ```
 

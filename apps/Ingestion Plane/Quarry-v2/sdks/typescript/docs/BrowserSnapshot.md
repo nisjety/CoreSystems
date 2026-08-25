@@ -1,26 +1,30 @@
 
-# EnvelopeEgressReceipts
+# BrowserSnapshot
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`snapshotId` | string
+`generation` | number
+`targets` | [Array&lt;SnapshotTarget&gt;](SnapshotTarget.md)
+`accessibility` | [AccessibilityProjection](AccessibilityProjection.md)
+`frames` | [Array&lt;BrowserFrame&gt;](BrowserFrame.md)
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { BrowserSnapshot } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "snapshotId": null,
+  "generation": null,
+  "targets": null,
+  "accessibility": null,
+  "frames": null,
+} satisfies BrowserSnapshot
 
 console.log(example)
 
@@ -29,7 +33,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as BrowserSnapshot
 console.log(exampleParsed)
 ```
 

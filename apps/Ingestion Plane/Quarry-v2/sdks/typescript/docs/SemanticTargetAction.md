@@ -1,26 +1,34 @@
 
-# EnvelopeEgressReceipts
+# SemanticTargetAction
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`snapshotId` | string
+`generation` | number
+`type` | string
+`locator` | [SemanticLocator](SemanticLocator.md)
+`text` | string
+`value` | string
+`timeoutMs` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { SemanticTargetAction } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "snapshotId": null,
+  "generation": null,
+  "type": null,
+  "locator": null,
+  "text": null,
+  "value": null,
+  "timeoutMs": null,
+} satisfies SemanticTargetAction
 
 console.log(example)
 
@@ -29,7 +37,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as SemanticTargetAction
 console.log(exampleParsed)
 ```
 

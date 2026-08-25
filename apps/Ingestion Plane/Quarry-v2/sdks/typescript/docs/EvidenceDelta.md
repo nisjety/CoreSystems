@@ -1,26 +1,31 @@
 
-# EnvelopeEgressReceipts
+# EvidenceDelta
 
+Bounded DOM, visual, and redacted-network evidence stored in an artifact.
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`version` | number
+`step` | number
+`dom` | [EvidenceDeltaDom](EvidenceDeltaDom.md)
+`network` | [EvidenceDeltaNetwork](EvidenceDeltaNetwork.md)
+`visualObservationArtifactId` | string
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { EvidenceDelta } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "version": null,
+  "step": null,
+  "dom": null,
+  "network": null,
+  "visualObservationArtifactId": null,
+} satisfies EvidenceDelta
 
 console.log(example)
 
@@ -29,7 +34,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as EvidenceDelta
 console.log(exampleParsed)
 ```
 

@@ -1,32 +1,38 @@
 
-# EnvelopeStartAgentRunData
+# JobSummary
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
+`jobId` | string
+`kind` | string
+`orgId` | string
+`status` | string
+`createdAt` | Date
 `runId` | string
-`leaseId` | string
-`profileId` | string
-`driverCapabilities` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
-`executionTier` | string
-`executionEngine` | string
+`startedAt` | Date
+`completedAt` | Date
+`stats` | any
 
 ## Example
 
 ```typescript
-import type { EnvelopeStartAgentRunData } from '@quarry/client'
+import type { JobSummary } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
+  "jobId": null,
+  "kind": null,
+  "orgId": null,
+  "status": null,
+  "createdAt": null,
   "runId": null,
-  "leaseId": null,
-  "profileId": null,
-  "driverCapabilities": null,
-  "executionTier": null,
-  "executionEngine": null,
-} satisfies EnvelopeStartAgentRunData
+  "startedAt": null,
+  "completedAt": null,
+  "stats": null,
+} satisfies JobSummary
 
 console.log(example)
 
@@ -35,7 +41,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeStartAgentRunData
+const exampleParsed = JSON.parse(exampleJSON) as JobSummary
 console.log(exampleParsed)
 ```
 

@@ -1,26 +1,36 @@
 
-# EnvelopeEgressReceipts
+# BenchmarkSummary
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`benchmarkId` | string
+`orgId` | string
+`name` | string
+`suite` | string
+`baseline` | string
+`status` | string
+`lastRunAt` | Date
+`latestScore` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { BenchmarkSummary } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "benchmarkId": null,
+  "orgId": null,
+  "name": null,
+  "suite": null,
+  "baseline": null,
+  "status": null,
+  "lastRunAt": null,
+  "latestScore": null,
+} satisfies BenchmarkSummary
 
 console.log(example)
 
@@ -29,7 +39,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as BenchmarkSummary
 console.log(exampleParsed)
 ```
 

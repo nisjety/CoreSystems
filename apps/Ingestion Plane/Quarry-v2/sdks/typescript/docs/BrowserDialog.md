@@ -1,26 +1,34 @@
 
-# EnvelopeEgressReceipts
+# BrowserDialog
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`dialogId` | string
+`frameId` | string
+`kind` | string
+`message` | string
+`defaultPrompt` | string
+`origin` | string
+`openedAtMs` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { BrowserDialog } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "dialogId": null,
+  "frameId": null,
+  "kind": null,
+  "message": null,
+  "defaultPrompt": null,
+  "origin": null,
+  "openedAtMs": null,
+} satisfies BrowserDialog
 
 console.log(example)
 
@@ -29,7 +37,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as BrowserDialog
 console.log(exampleParsed)
 ```
 

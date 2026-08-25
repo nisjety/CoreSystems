@@ -1,26 +1,34 @@
 
-# EnvelopeEgressReceipts
+# AccessibilityNode
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`nodeId` | string
+`role` | string
+`name` | string
+`value` | string
+`ignored` | boolean
+`frameId` | string
+`childIds` | Array&lt;string&gt;
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { AccessibilityNode } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "nodeId": null,
+  "role": null,
+  "name": null,
+  "value": null,
+  "ignored": null,
+  "frameId": null,
+  "childIds": null,
+} satisfies AccessibilityNode
 
 console.log(example)
 
@@ -29,7 +37,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as AccessibilityNode
 console.log(exampleParsed)
 ```
 

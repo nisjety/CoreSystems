@@ -1,26 +1,34 @@
 
-# EnvelopeEgressReceipts
+# RequestQueueSummary
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`queueId` | string
+`orgId` | string
+`name` | string
+`kind` | string
+`status` | string
+`createdAt` | Date
+`stats` | [RequestQueueSummaryStats](RequestQueueSummaryStats.md)
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { RequestQueueSummary } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "queueId": null,
+  "orgId": null,
+  "name": null,
+  "kind": null,
+  "status": null,
+  "createdAt": null,
+  "stats": null,
+} satisfies RequestQueueSummary
 
 console.log(example)
 
@@ -29,7 +37,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as RequestQueueSummary
 console.log(exampleParsed)
 ```
 

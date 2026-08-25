@@ -1,26 +1,30 @@
 
-# EnvelopeEgressReceipts
+# MouseWheelAction
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`type` | string
+`x` | number
+`y` | number
+`deltaX` | number
+`deltaY` | number
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { MouseWheelAction } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "type": null,
+  "x": null,
+  "y": null,
+  "deltaX": null,
+  "deltaY": null,
+} satisfies MouseWheelAction
 
 console.log(example)
 
@@ -29,7 +33,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as MouseWheelAction
 console.log(exampleParsed)
 ```
 

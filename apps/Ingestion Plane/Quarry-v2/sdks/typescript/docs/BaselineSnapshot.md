@@ -1,32 +1,36 @@
 
-# EnvelopeStartAgentRunData
+# BaselineSnapshot
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
+`baselineId` | string
+`orgId` | string
+`sourceUrl` | string
+`fingerprint` | string
+`artifactId` | string
+`prevBaselineId` | string
+`capturedAt` | Date
 `runId` | string
-`leaseId` | string
-`profileId` | string
-`driverCapabilities` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
-`executionTier` | string
-`executionEngine` | string
 
 ## Example
 
 ```typescript
-import type { EnvelopeStartAgentRunData } from '@quarry/client'
+import type { BaselineSnapshot } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
+  "baselineId": null,
+  "orgId": null,
+  "sourceUrl": null,
+  "fingerprint": null,
+  "artifactId": null,
+  "prevBaselineId": null,
+  "capturedAt": null,
   "runId": null,
-  "leaseId": null,
-  "profileId": null,
-  "driverCapabilities": null,
-  "executionTier": null,
-  "executionEngine": null,
-} satisfies EnvelopeStartAgentRunData
+} satisfies BaselineSnapshot
 
 console.log(example)
 
@@ -35,7 +39,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeStartAgentRunData
+const exampleParsed = JSON.parse(exampleJSON) as BaselineSnapshot
 console.log(exampleParsed)
 ```
 

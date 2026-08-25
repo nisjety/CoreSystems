@@ -10,8 +10,8 @@ All URIs are relative to *http://localhost:8080*
 | [**closeAgentRun**](AgentApi.md#closeagentrun) | **DELETE** /v1/agent/runs/{run_id} | Close a browser-agent run and release its lease |
 | [**compileAgentProcedure**](AgentApi.md#compileagentprocedure) | **POST** /v1/agent/runs/{run_id}/procedure | Compile verified receipts into a replay candidate |
 | [**impactCheckAgentProcedure**](AgentApi.md#impactcheckagentprocedure) | **POST** /v1/agent/procedures/impact-check | Identify changed sources that require procedure quarantine |
-| [**listAgentReceipts**](AgentApi.md#listagentreceipts) | **GET** /v1/agent/runs/{run_id}/receipts | Read tenant-scoped immutable action receipts |
 | [**listAgentEgressReceipts**](AgentApi.md#listagentegressreceipts) | **GET** /v1/agent/runs/{run_id}/egress-receipts | Read redacted live browser egress decisions |
+| [**listAgentReceipts**](AgentApi.md#listagentreceipts) | **GET** /v1/agent/runs/{run_id}/receipts | Read tenant-scoped immutable action receipts |
 | [**qualityCheckAgentProcedure**](AgentApi.md#qualitycheckagentprocedure) | **POST** /v1/agent/procedures/quality-check | Evaluate deterministic procedure promotion evidence |
 | [**startAgentRun**](AgentApi.md#startagentrunoperation) | **POST** /v1/agent/runs | Acquire a governed browser-agent run |
 
@@ -82,6 +82,7 @@ No authorization required
 |-------------|-------------|------------------|
 | **200** | Observation and immutable outcome proof |  -  |
 | **403** | Domain, SSRF, policy, or grant denial |  -  |
+| **409** | Snapshot target is stale, absent, ambiguous, or changed; re-observe before acting |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
@@ -151,6 +152,7 @@ No authorization required
 |-------------|-------------|------------------|
 | **200** | Observation and immutable outcome proof |  -  |
 | **403** | Domain, SSRF, policy, or grant denial |  -  |
+| **409** | Snapshot target is stale, absent, ambiguous, or changed; re-observe before acting |  -  |
 | **429** | Step budget exhausted |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
@@ -421,6 +423,81 @@ No authorization required
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
 
+## listAgentEgressReceipts
+
+> EnvelopeEgressReceipts listAgentEgressReceipts(runId, afterSequence, limit)
+
+Read redacted live browser egress decisions
+
+Returns bounded, driver-authored policy receipts for the live session. URLs contain only origin and path; query strings, headers, bodies, credentials, resolved IP addresses, and proxy details are omitted.
+
+### Example
+
+```ts
+import {
+  Configuration,
+  AgentApi,
+} from '@quarry/client';
+import type { ListAgentEgressReceiptsRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new AgentApi();
+
+  const body = {
+    // string | Tenant-owned Quarry run identifier
+    runId: runId_example,
+    // number (optional)
+    afterSequence: 56,
+    // number (optional)
+    limit: 56,
+  } satisfies ListAgentEgressReceiptsRequest;
+
+  try {
+    const data = await api.listAgentEgressReceipts(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **runId** | `string` | Tenant-owned Quarry run identifier | [Defaults to `undefined`] |
+| **afterSequence** | `number` |  | [Optional] [Defaults to `0`] |
+| **limit** | `number` |  | [Optional] [Defaults to `100`] |
+
+### Return type
+
+[**EnvelopeEgressReceipts**](EnvelopeEgressReceipts.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: `application/json`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | Ordered, redacted egress decisions |  -  |
+| **404** | Run not found or not owned by the caller |  -  |
+| **409** | Requested receipt cursor is no longer continuous in the bounded proof buffer |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
 ## listAgentReceipts
 
 > EnvelopeStepReceipts listAgentReceipts(runId)
@@ -483,37 +560,6 @@ No authorization required
 |-------------|-------------|------------------|
 | **200** | Ordered action receipt stream |  -  |
 | **404** | Run or receipt stream not found |  -  |
-
-[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
-
-
-## listAgentEgressReceipts
-
-> EnvelopeEgressReceipts listAgentEgressReceipts(runId, afterSequence?, limit?)
-
-Read ordered, redacted policy decisions from the live browser egress boundary.
-The receipt stream is cursor-based. A cursor that can no longer be served as
-a continuous sequence is rejected rather than returning partial proof.
-
-### Parameters
-
-| Name | Type | Description | Notes |
-|------------- | ------------- | ------------- | -------------|
-| **runId** | `string` | Tenant-owned Quarry run identifier | required |
-| **afterSequence** | `number` | Return receipts after this sequence | optional, minimum `0` |
-| **limit** | `number` | Maximum returned receipts | optional, `1`–`512` |
-
-### Return type
-
-[**EnvelopeEgressReceipts**](EnvelopeEgressReceipts.md)
-
-### HTTP response details
-
-| Status code | Description |
-|-------------|-------------|
-| **200** | Ordered redacted egress decisions |
-| **404** | Run not found or not owned by the caller |
-| **409** | Receipt cursor is no longer continuous in the bounded proof buffer |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
@@ -650,3 +696,4 @@ No authorization required
 | **403** | Missing or invalid BrowserBroker grant |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+

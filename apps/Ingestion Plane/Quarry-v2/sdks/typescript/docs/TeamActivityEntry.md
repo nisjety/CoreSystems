@@ -1,32 +1,32 @@
 
-# EnvelopeStartAgentRunData
+# TeamActivityEntry
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
+`eventId` | string
+`orgId` | string
+`eventType` | string
 `runId` | string
-`leaseId` | string
-`profileId` | string
-`driverCapabilities` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
-`executionTier` | string
-`executionEngine` | string
+`ts` | Date
+`summary` | string
 
 ## Example
 
 ```typescript
-import type { EnvelopeStartAgentRunData } from '@quarry/client'
+import type { TeamActivityEntry } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
+  "eventId": null,
+  "orgId": null,
+  "eventType": null,
   "runId": null,
-  "leaseId": null,
-  "profileId": null,
-  "driverCapabilities": null,
-  "executionTier": null,
-  "executionEngine": null,
-} satisfies EnvelopeStartAgentRunData
+  "ts": null,
+  "summary": null,
+} satisfies TeamActivityEntry
 
 console.log(example)
 
@@ -35,7 +35,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeStartAgentRunData
+const exampleParsed = JSON.parse(exampleJSON) as TeamActivityEntry
 console.log(exampleParsed)
 ```
 

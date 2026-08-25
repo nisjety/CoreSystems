@@ -1,26 +1,26 @@
 
-# EnvelopeEgressReceipts
+# TriggerSchedule202Response
 
 
 ## Properties
 
 Name | Type
 ------------ | -------------
-`requestId` | string
-`success` | boolean
-`data` | [EnvelopeEgressReceiptsData](EnvelopeEgressReceiptsData.md)
+`scheduleId` | string
+`status` | string
+`note` | string
 
 ## Example
 
 ```typescript
-import type { EnvelopeEgressReceipts } from '@quarry/client'
+import type { TriggerSchedule202Response } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "requestId": null,
-  "success": null,
-  "data": null,
-} satisfies EnvelopeEgressReceipts
+  "scheduleId": null,
+  "status": null,
+  "note": null,
+} satisfies TriggerSchedule202Response
 
 console.log(example)
 
@@ -29,7 +29,7 @@ const exampleJSON: string = JSON.stringify(example)
 console.log(exampleJSON)
 
 // Parse the JSON string back to an object
-const exampleParsed = JSON.parse(exampleJSON) as EnvelopeEgressReceipts
+const exampleParsed = JSON.parse(exampleJSON) as TriggerSchedule202Response
 console.log(exampleParsed)
 ```
 
