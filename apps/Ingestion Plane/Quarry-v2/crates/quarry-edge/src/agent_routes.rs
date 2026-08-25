@@ -61,7 +61,7 @@ mod enabled {
         analyze_impact, assess_quality, compare_replay, compile_procedure, BrowserProcedure,
         ProcedureImpactReport, ProcedureQualityReport, ReplayDecision,
     };
-    use quarry_runtime::observation::{ObservationContext, ObservationRunner};
+    use quarry_runtime::observation::{ObservationContext, ObservationRunner, ObservationSnapshot};
     use quarry_runtime::step_receipts::{
         AgentRunCheckpoint, AgentRunStatus, BrowserControlMode, BrowserProfileScope,
         BrowserTabOperation, BrowserTimelineEvent, BrowserTimelineEventKind,
@@ -1207,19 +1207,19 @@ mod enabled {
         require_driver_capabilities(&body.driver_requirements, state.agent_driver.capabilities())
             .map_err(|error| driver_err(&request_id, error))?;
 
-        let resume_run_id = body
-            .resume_run_id
-            .as_deref()
-            .map(|raw| {
-                raw.parse::<RunKind>().map_err(|_| {
-                    status_err(
+        let resume_run_id = match body.resume_run_id.as_deref() {
+            Some(raw) => match raw.parse::<RunKind>() {
+                Ok(run_id) => Some(run_id),
+                Err(_) => {
+                    return Err(status_err(
                         StatusCode::BAD_REQUEST,
                         &request_id,
                         "invalid resume_run_id",
-                    )
-                })
-            })
-            .transpose()?;
+                    ));
+                }
+            },
+            None => None,
+        };
         let resume_checkpoint = if let Some(run_id) = resume_run_id.as_ref() {
             let checkpoint = state
                 .receipts
@@ -1467,15 +1467,21 @@ mod enabled {
                 page_hash: resume_checkpoint
                     .as_ref()
                     .map_or_else(String::new, |cp| cp.page_hash.clone()),
-                previous_page_hash: resume_checkpoint
-                    .as_ref()
-                    .and_then(|cp| (!cp.page_hash.is_empty()).then(|| cp.page_hash.clone())),
                 previous_screenshot: None,
-                previous_url: resume_checkpoint
+                // A resumed run continues diffing against the checkpointed page
+                // identity instead of pretending the recovery navigation is a
+                // fresh baseline.
+                previous_observation: resume_checkpoint
                     .as_ref()
-                    .and_then(|cp| (!cp.current_url.is_empty()).then(|| cp.current_url.clone())),
-                previous_title: None,
-                previous_dom_node_count: None,
+                    .filter(|cp| !cp.current_url.is_empty() || !cp.page_hash.is_empty())
+                    .map(|cp| {
+                        ObservationSnapshot::capture(
+                            &cp.current_url,
+                            None,
+                            None,
+                            (!cp.page_hash.is_empty()).then_some(cp.page_hash.as_str()),
+                        )
+                    }),
                 previous_network_keys: vec![],
                 last_egress_sequence: 0,
                 active_snapshot: None,
@@ -1971,11 +1977,8 @@ mod enabled {
                     step: 2,
                     current_url: String::new(),
                     page_hash: String::new(),
-                    previous_page_hash: None,
                     previous_screenshot: None,
-                    previous_url: None,
-                    previous_title: None,
-                    previous_dom_node_count: None,
+                    previous_observation: None,
                     previous_network_keys: vec![],
                     last_egress_sequence: 0,
                     active_snapshot: None,

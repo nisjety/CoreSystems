@@ -47,14 +47,12 @@ pub struct ObservationContext {
     pub step: u32,
     pub current_url: String,
     pub page_hash: String,
-    /// Fingerprint from the last completed observation. This is separate from
+    pub previous_screenshot: Option<Vec<u8>>,
+    /// Page identity captured by the last completed observation and used to
+    /// compute each new observation's delta. This is separate from
     /// `page_hash`, which is used while an action is executing for artifact
     /// attribution.
-    pub previous_page_hash: Option<String>,
-    pub previous_screenshot: Option<Vec<u8>>,
-    pub previous_url: Option<String>,
-    pub previous_title: Option<String>,
-    pub previous_dom_node_count: Option<u32>,
+    pub previous_observation: Option<ObservationSnapshot>,
     /// Redacted request identity keys from the prior observation. Kept only in
     /// memory and never contains a query string or request body.
     pub previous_network_keys: Vec<String>,
@@ -69,6 +67,66 @@ pub struct ObservationContext {
     /// resume, matching the snapshot and prior-network lifecycle.
     pub observed_action_count: u32,
     pub challenge_observation_count: u32,
+}
+
+/// Page identity captured at observation time. Deliberately tiny so carrying
+/// it between steps never retains page bodies, screenshots, or DevTools data.
+#[derive(Debug, Clone)]
+pub struct ObservationSnapshot {
+    url: String,
+    title: Option<String>,
+    dom_node_count: Option<u32>,
+    page_hash: Option<String>,
+}
+
+impl ObservationSnapshot {
+    pub fn capture(
+        url: &str,
+        title: Option<&str>,
+        dom_node_count: Option<u32>,
+        page_hash: Option<&str>,
+    ) -> Self {
+        Self {
+            url: url.to_owned(),
+            title: title.map(str::to_owned),
+            dom_node_count,
+            page_hash: page_hash.map(str::to_owned),
+        }
+    }
+
+    fn delta_against(&self, current: &Self) -> ObservationDelta {
+        let url_changed = self.url != current.url;
+        let title_changed = self.title != current.title;
+        let dom_changed = self
+            .dom_node_count
+            .zip(current.dom_node_count)
+            .is_some_and(|(previous, nodes)| nodes != previous);
+        let content_changed = self
+            .page_hash
+            .as_ref()
+            .zip(current.page_hash.as_ref())
+            .is_some_and(|(previous, hash)| hash != previous);
+        let mut changed_fields = Vec::new();
+        if url_changed {
+            changed_fields.push("url".to_string());
+        }
+        if title_changed {
+            changed_fields.push("title".to_string());
+        }
+        if dom_changed {
+            changed_fields.push("dom".to_string());
+        }
+        if content_changed {
+            changed_fields.push("content".to_string());
+        }
+        ObservationDelta {
+            changed_fields,
+            url_changed,
+            title_changed,
+            dom_changed,
+            content_changed,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -789,23 +847,34 @@ impl ObservationRunner {
             };
         }
 
-        let delta = observation_delta(
-            ctx.previous_url.as_deref(),
-            ctx.previous_title.as_deref(),
-            ctx.previous_dom_node_count,
-            ctx.previous_page_hash.as_deref(),
+        let current_observation = ObservationSnapshot::capture(
             &ctx.current_url,
             title.as_deref(),
             dom_summary.as_ref().map(|summary| summary.node_count),
             (!ctx.page_hash.is_empty()).then_some(ctx.page_hash.as_str()),
         );
+        // The first completed observation is the baseline: everything that
+        // follows is diffed against it instead of being reported as changed.
+        let delta = match &ctx.previous_observation {
+            Some(previous) => previous.delta_against(&current_observation),
+            None => ObservationDelta {
+                changed_fields: vec!["initial_observation".to_string()],
+                url_changed: false,
+                title_changed: false,
+                dom_changed: false,
+                content_changed: false,
+            },
+        };
         let network_summary = network_summary_from_devtools(&devtools_events);
         let network_delta = network_evidence_delta(&ctx.previous_network_keys, &network_summary);
         let evidence_delta = EvidenceDelta {
             version: 1,
             step: ctx.step,
             dom: DomEvidenceDelta {
-                previous_node_count: ctx.previous_dom_node_count,
+                previous_node_count: ctx
+                    .previous_observation
+                    .as_ref()
+                    .and_then(|previous| previous.dom_node_count),
                 current_node_count: dom_summary.as_ref().map(|summary| summary.node_count),
                 changed: delta.dom_changed || delta.content_changed,
                 snapshot_target_count: snapshot
@@ -919,13 +988,7 @@ impl ObservationRunner {
             observed_at: Utc::now(),
         };
 
-        ctx.previous_url = Some(observation.url.clone());
-        ctx.previous_title = observation.title.clone();
-        ctx.previous_dom_node_count = observation
-            .dom_summary
-            .as_ref()
-            .map(|summary| summary.node_count);
-        ctx.previous_page_hash = (!ctx.page_hash.is_empty()).then(|| ctx.page_hash.clone());
+        ctx.previous_observation = Some(current_observation);
         ctx.previous_network_keys = observation
             .network_summary
             .iter()
@@ -2322,48 +2385,6 @@ fn json_value_field<'a>(value: &'a Value, field: &str) -> Option<&'a Value> {
     }
 }
 
-fn observation_delta(
-    previous_url: Option<&str>,
-    previous_title: Option<&str>,
-    previous_dom_nodes: Option<u32>,
-    previous_page_hash: Option<&str>,
-    current_url: &str,
-    current_title: Option<&str>,
-    current_dom_nodes: Option<u32>,
-    current_page_hash: Option<&str>,
-) -> ObservationDelta {
-    let url_changed = previous_url.is_some_and(|previous| previous != current_url);
-    let title_changed = previous_title != current_title;
-    let dom_changed = previous_dom_nodes
-        .is_some_and(|previous| current_dom_nodes.is_some_and(|current| current != previous));
-    let content_changed = previous_page_hash
-        .is_some_and(|previous| current_page_hash.is_some_and(|current| current != previous));
-    let mut changed_fields = Vec::new();
-    if previous_url.is_none() {
-        changed_fields.push("initial_observation".to_string());
-    } else {
-        if url_changed {
-            changed_fields.push("url".to_string());
-        }
-        if title_changed {
-            changed_fields.push("title".to_string());
-        }
-        if dom_changed {
-            changed_fields.push("dom".to_string());
-        }
-        if content_changed {
-            changed_fields.push("content".to_string());
-        }
-    }
-    ObservationDelta {
-        changed_fields,
-        url_changed,
-        title_changed,
-        dom_changed,
-        content_changed,
-    }
-}
-
 fn extract_attr<'a>(element: &'a str, attr: &str) -> Option<&'a str> {
     for quote in ['"', '\''] {
         let pattern = format!("{attr}={quote}");
@@ -2887,11 +2908,8 @@ mod tests {
             step: 4,
             current_url: "https://example.test".into(),
             page_hash: "blake3:old".into(),
-            previous_page_hash: None,
             previous_screenshot: None,
-            previous_url: None,
-            previous_title: None,
-            previous_dom_node_count: None,
+            previous_observation: None,
             previous_network_keys: vec![],
             last_egress_sequence: 0,
             observed_action_count: 0,
@@ -3152,11 +3170,8 @@ mod tests {
             step: 1,
             current_url: "https://example.com".into(),
             page_hash: "blake3:page".into(),
-            previous_page_hash: None,
             previous_screenshot: Some(b"previous".to_vec()),
-            previous_url: None,
-            previous_title: None,
-            previous_dom_node_count: None,
+            previous_observation: None,
             previous_network_keys: vec![],
             last_egress_sequence: 0,
             active_snapshot: None,
