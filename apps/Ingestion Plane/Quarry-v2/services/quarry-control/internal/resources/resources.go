@@ -35,9 +35,6 @@ func MountJobs(r chi.Router, db store.DB) {
 func MountStores(r chi.Router, db store.DB) {
 	mountSimple[store.NamedStore](r, "/v1/stores", db.Stores())
 }
-func MountSnapshots(r chi.Router, db store.DB) {
-	mountSimple[store.Snapshot](r, "/v1/snapshots", db.Snapshots())
-}
 func MountArtifacts(r chi.Router, db store.DB) {
 	mountSimple[store.Artifact](r, "/v1/artifacts", db.Artifacts())
 }

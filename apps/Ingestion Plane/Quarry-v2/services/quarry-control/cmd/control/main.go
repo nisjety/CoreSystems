@@ -155,23 +155,33 @@ func main() {
 
 		resources.MountJobs(r, db)
 		resources.MountStores(r, db)
-		resources.MountSnapshots(r, db)
+		// Legacy snapshot CRUD was folded into MountSnapshotsV2 below — the
+		// enriched list is the only /v1/snapshots surface; restore reads the
+		// legacy store internally.
 		resources.MountArtifacts(r, db)
 		resources.MountProfiles(r, db)
 		resources.MountSchedules(r, db)
+		resources.MountRestore(r, db)
 		resources.MountEvents(r, db, apiKey, notifySink)
 		resources.MountWebhooks(r, db)
+		// Edge change-webhook receiver (docs/CHANGE_TRACKING.md §"Webhook
+		// emission"): signature + stale-ts + nonce replay are enforced by
+		// the hmacVerifier.Middleware above — mount here, not outside the
+		// group, so the handler inherits verification.
+		resources.MountChangeWebhook(r, db, notifySink)
 		resources.MountBlocklists(r, db)
 		resources.MountWebhookDeliveries(r, db)
 		resources.MountPresets(r)
 
-		// Cycle 23 additions — REST resource breadth part 2 +
-		// schedule lifecycle aliases. /v1/sources is now a real,
-		// org-scoped CRUD over `quarry_sources` (PR-7); benchmarks +
-		// request-queues stay stub-shaped where the schema isn't ready.
+		// Cycle 23/24 additions — REST resource breadth part 2 +
+		// schedule lifecycle aliases. /v1/sources is a real,
+		// org-scoped CRUD over `quarry_sources`; team aggregates,
+		// activity, snapshots and request-queues serve their full
+		// quarry_core wire shapes (cycle 24 parity work).
 		resources.MountSources(r, db)
 		resources.MountBenchmarks(r)
-		resources.MountRequestQueues(r, db)
+		resources.MountSnapshotsV2(r, db) // replaces MountSnapshots at GET /v1/snapshots
+		resources.MountRequestQueuesV2(r, db)
 		resources.MountTeam(r, db)
 		resources.MountScheduleAliases(r, db)
 		resources.MountJobsByKind(r, db)

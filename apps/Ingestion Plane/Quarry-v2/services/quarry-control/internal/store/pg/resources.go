@@ -1013,6 +1013,48 @@ func (l *eventLog) ForJob(jobID quarrycontracts.ID, afterSeq uint64, limit int) 
 	return l.forField("job_id", string(jobID), afterSeq, limit)
 }
 
+// FindByIdempotencyKey resolves an edge change-webhook retry to its already-
+// persisted event. The WHERE clause must stay in lockstep with the partial
+// unique index from migration 013_change_webhook_idempotency.sql — that index
+// is what turns a concurrent double-delivery into a benign ErrConflict at
+// Append time; this lookup is what makes a retry AFTER the first append
+// succeeded return the original instead of attempting a second insert.
+func (l *eventLog) FindByIdempotencyKey(key string) (quarrycontracts.Event, bool) {
+	if key == "" {
+		return quarrycontracts.Event{}, false
+	}
+	var (
+		evt     quarrycontracts.Event
+		runID   *string
+		jobID   *string
+		payload []byte
+		seq     int64
+	)
+	err := l.pool.QueryRow(context.Background(),
+		`SELECT event_id, run_id, job_id, type, ts, seq, payload, COALESCE(idempotency_key,'')
+		   FROM events
+		  WHERE idempotency_key = $1 AND type = 'change_detected'`,
+		key,
+	).Scan(&evt.EventID, &runID, &jobID, &evt.Type, &evt.Timestamp,
+		&seq, &payload, &evt.IdempotencyKey)
+	if err != nil {
+		return quarrycontracts.Event{}, false
+	}
+	evt.Seq = uint64(seq)
+	if runID != nil {
+		id := quarrycontracts.ID(*runID)
+		evt.RunID = &id
+	}
+	if jobID != nil {
+		id := quarrycontracts.ID(*jobID)
+		evt.JobID = &id
+	}
+	if len(payload) > 0 {
+		_ = json.Unmarshal(payload, &evt.Payload)
+	}
+	return evt, true
+}
+
 func (l *eventLog) forField(col, val string, afterSeq uint64, limit int) []quarrycontracts.Event {
 	limit = pageLimit(limit, defaultMaxPage)
 	q := fmt.Sprintf(

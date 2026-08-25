@@ -1,14 +1,10 @@
 // Cycle 23 — REST resource breadth + schedule alias routes + HMAC-gated
 // internal endpoints. Adds the routes the Rust edge expects:
 //
-//   - /v1/sources              (list — currently empty, schema TODO)
-//   - /v1/benchmarks           (list — cycle 28 owner)
-//   - /v1/request-queues       (list — reads Rust-owned quarry_request_queues if reachable)
-//   - /v1/team/credit-usage    (aggregate; today returns zero-shape)
-//   - /v1/team/token-usage     (aggregate; today returns zero-shape)
-//   - /v1/team/concurrency     (aggregate; today returns zero-shape)
-//   - /v1/team/queue-status    (aggregate; today returns zero-shape)
-//   - /v1/team/activity        (paginated events; reads existing event log)
+//   - /v1/sources              (real org-scoped CRUD over quarry_sources)
+//   - /v1/benchmarks           (list — cycle 28 owner, still empty page)
+//   - /v1/team/* aggregates    → moved to cycle24.go (real store-backed reads)
+//   - /v1/team/activity        → moved to cycle24.go
 //   - /v1/schedules/:id/pause   (alias for /disable)
 //   - /v1/schedules/:id/unpause (alias for /enable)
 //   - /v1/schedules/:id/trigger  (stub; Temporal SDK pending — returns current schedule)
@@ -246,137 +242,6 @@ func MountBenchmarks(r chi.Router) {
 	})
 }
 
-// =============================================================================
-// /v1/request-queues — read-only view over the Rust runtime's
-// `quarry_request_queues` table. Cycle 20 created the schema; Go
-// control reads it without owning migrations.
-// =============================================================================
-
-// MountRequestQueues exposes a list view over the Rust-owned queue
-// tables. When the Postgres pool isn't shared (in-memory dev mode),
-// returns an empty page so the contract holds.
-func MountRequestQueues(r chi.Router, db store.DB) {
-	r.Get("/v1/request-queues", func(w http.ResponseWriter, r *http.Request) {
-		orgID := strings.TrimSpace(r.URL.Query().Get("org_id"))
-		reader, ok := db.(store.RequestQueueReader)
-		if !ok {
-			emptyPage(w, r)
-			return
-		}
-		limit, _ := strconv.Atoi(pickQuery(r, "limit", "50"))
-		cursor := r.URL.Query().Get("cursor")
-		items, next, err := reader.ListRequestQueues(orgID, limit, cursor)
-		if err != nil {
-			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, "request queue read failed", nil)
-			return
-		}
-		var nextPtr *string
-		if next != "" {
-			nextPtr = &next
-		}
-		writePage(w, r, items, nil, nextPtr)
-	})
-}
-
-// =============================================================================
-// /v1/team/* — per-org aggregates. Today returns zero-shape responses.
-// Cycle 24 wires real SUM queries against the event log + usage events.
-// =============================================================================
-
-type teamCreditUsage struct {
-	OrgID              string  `json:"org_id"`
-	Period             string  `json:"period"`
-	CreditsUsed        float64 `json:"credits_used"`
-	CreditsLimit       *int64  `json:"credits_limit,omitempty"`
-	UtilizationPercent float64 `json:"utilization_percent"`
-}
-
-type teamTokenUsage struct {
-	OrgID        string `json:"org_id"`
-	Period       string `json:"period"`
-	InputTokens  uint64 `json:"input_tokens"`
-	OutputTokens uint64 `json:"output_tokens"`
-	TotalTokens  uint64 `json:"total_tokens"`
-	CostMicroUSD *int64 `json:"cost_micro_usd,omitempty"`
-}
-
-type hostConcurrency struct {
-	Host          string   `json:"host"`
-	Current       uint32   `json:"current"`
-	Ceiling       uint32   `json:"ceiling"`
-	EWMALatencyMs *float64 `json:"ewma_latency_ms,omitempty"`
-}
-
-type teamConcurrency struct {
-	OrgID   string            `json:"org_id"`
-	Current uint32            `json:"current"`
-	Ceiling uint32            `json:"ceiling"`
-	ByHost  []hostConcurrency `json:"by_host"`
-}
-
-type queueStatusEntry struct {
-	QueueID  string `json:"queue_id"`
-	Name     string `json:"name"`
-	Queued   uint64 `json:"queued"`
-	InFlight uint64 `json:"in_flight"`
-}
-
-type teamQueueStatus struct {
-	OrgID         string             `json:"org_id"`
-	QueuedTotal   uint64             `json:"queued_total"`
-	InFlightTotal uint64             `json:"in_flight_total"`
-	ByQueue       []queueStatusEntry `json:"by_queue"`
-}
-
-// MountTeam registers /v1/team/{credit-usage,token-usage,concurrency,
-// queue-status,activity}. The list view (activity) returns a Page<T>
-// envelope; the other four are single objects.
-func MountTeam(r chi.Router, _ store.DB) {
-	r.Get("/v1/team/credit-usage", func(w http.ResponseWriter, r *http.Request) {
-		orgID := r.URL.Query().Get("org_id")
-		period := pickQuery(r, "period", "7d")
-		_ = json.NewEncoder(w).Encode(teamCreditUsage{
-			OrgID:              orgID,
-			Period:             period,
-			CreditsUsed:        0,
-			CreditsLimit:       nil,
-			UtilizationPercent: 0,
-		})
-	})
-	r.Get("/v1/team/token-usage", func(w http.ResponseWriter, r *http.Request) {
-		orgID := r.URL.Query().Get("org_id")
-		period := pickQuery(r, "period", "7d")
-		_ = json.NewEncoder(w).Encode(teamTokenUsage{
-			OrgID:        orgID,
-			Period:       period,
-			InputTokens:  0,
-			OutputTokens: 0,
-			TotalTokens:  0,
-			CostMicroUSD: nil,
-		})
-	})
-	r.Get("/v1/team/concurrency", func(w http.ResponseWriter, r *http.Request) {
-		orgID := r.URL.Query().Get("org_id")
-		_ = json.NewEncoder(w).Encode(teamConcurrency{
-			OrgID:   orgID,
-			Current: 0,
-			Ceiling: 0,
-			ByHost:  []hostConcurrency{},
-		})
-	})
-	r.Get("/v1/team/queue-status", func(w http.ResponseWriter, r *http.Request) {
-		orgID := r.URL.Query().Get("org_id")
-		_ = json.NewEncoder(w).Encode(teamQueueStatus{
-			OrgID:         orgID,
-			QueuedTotal:   0,
-			InFlightTotal: 0,
-			ByQueue:       []queueStatusEntry{},
-		})
-	})
-	r.Get("/v1/team/activity", func(w http.ResponseWriter, r *http.Request) {
-		emptyPage(w, r)
-	})
-}
 
 func pickQuery(r *http.Request, name, def string) string {
 	v := r.URL.Query().Get(name)
