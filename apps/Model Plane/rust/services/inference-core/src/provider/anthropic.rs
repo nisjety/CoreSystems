@@ -372,6 +372,99 @@ fn apply_prompt_caching(body: &mut serde_json::Value, req: &InferRequest) {
 }
 
 /// Build the Anthropic messages API request body.
+/// Split one Anthropic `content_block_delta` into (answer, reasoning).
+///
+/// Exactly one of the two is non-empty for any delta that carries readable
+/// text; both are empty for deltas that carry neither (a thinking block's
+/// cryptographic `signature_delta`, or a tool call's `input_json_delta`, which
+/// is assembled elsewhere). Returning both channels explicitly is what keeps a
+/// reasoning delta from ever being appended to the user's answer.
+fn split_content_block_delta(delta: &serde_json::Value) -> (String, String) {
+    // Absent `type` means a plain text delta: that is what every pre-thinking
+    // stream sent, and defaulting the other way would drop all answer text.
+    match delta["type"].as_str().unwrap_or("text_delta") {
+        "thinking_delta" => (
+            String::new(),
+            delta["thinking"].as_str().unwrap_or("").to_owned(),
+        ),
+        "signature_delta" | "input_json_delta" => (String::new(), String::new()),
+        _ => (
+            delta["text"].as_str().unwrap_or("").to_owned(),
+            String::new(),
+        ),
+    }
+}
+
+/// Anthropic's floor for `thinking.budget_tokens`. A smaller budget is a 400,
+/// not a smaller amount of thinking.
+const MIN_THINKING_BUDGET_TOKENS: i32 = 1024;
+
+/// Model families that pre-date extended thinking and reject the parameter.
+///
+/// # Why an exclusion list rather than an allowlist
+///
+/// Every Claude family from 3.7 onward supports extended thinking and every
+/// future one is expected to, so an allowlist would silently drop thinking for
+/// each new model until someone remembered to add it — failing quietly in the
+/// direction of "the feature doesn't work". An exclusion list fails in the
+/// direction of "a new model gets asked to think", which is the correct default
+/// for this provider and is caught immediately if wrong. The same reasoning the
+/// `temperature` comment above records: what breaks on Anthropic is sending a
+/// parameter the *older* models reject.
+const NO_THINKING_MODEL_MARKERS: &[&str] = &[
+    "claude-2",
+    "claude-instant",
+    "claude-3-opus",
+    "claude-3-sonnet",
+    "claude-3-haiku",
+    "claude-3-5",
+    "claude-3.5",
+];
+
+/// The `budget_tokens` to send, or `None` to omit `thinking` entirely.
+///
+/// Returns `None` — rather than erroring — whenever thinking cannot be honoured:
+/// no budget requested, a model that rejects the parameter, a budget under
+/// Anthropic's floor, or a budget that does not leave room for an answer
+/// (`max_tokens` must exceed it, since the budget is spent *from* that ceiling).
+/// Degrading to "no thinking" keeps a bad budget from turning a working turn
+/// into a provider 400.
+fn resolve_thinking_budget(model: &str, requested: i32, max_tokens: i32) -> Option<i32> {
+    if requested <= 0 {
+        return None;
+    }
+    let normalized = model.to_ascii_lowercase();
+    if NO_THINKING_MODEL_MARKERS
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        tracing::debug!(
+            model,
+            "extended thinking requested for a model that rejects it; omitting"
+        );
+        return None;
+    }
+    if requested < MIN_THINKING_BUDGET_TOKENS {
+        tracing::warn!(
+            requested,
+            minimum = MIN_THINKING_BUDGET_TOKENS,
+            "extended-thinking budget below the provider minimum; omitting rather than 400ing"
+        );
+        return None;
+    }
+    // The budget is drawn from max_tokens, so an equal or larger budget leaves
+    // nothing for the answer and the provider rejects it.
+    if max_tokens <= requested {
+        tracing::warn!(
+            requested,
+            max_tokens,
+            "extended-thinking budget leaves no room for an answer; omitting"
+        );
+        return None;
+    }
+    Some(requested)
+}
+
 fn build_request_body(req: &InferRequest) -> serde_json::Value {
     // The Anthropic Messages API takes the system prompt as a TOP-LEVEL `system`
     // parameter, not as a message with role "system" — sending it inline 400s:
@@ -404,6 +497,14 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
         "messages": messages,
         "max_tokens": req.max_tokens,
     });
+    if let Some(budget) =
+        resolve_thinking_budget(&req.model, req.thinking_budget_tokens, req.max_tokens)
+    {
+        body["thinking"] = serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget,
+        });
+    }
     // `temperature` is deliberately omitted. Anthropic constrains it to [0, 1]
     // (vs OpenAI's [0, 2]) and the newest Claude models reject it outright
     // ("`temperature` is deprecated for this model" — e.g. claude-opus-4-8), so
@@ -429,8 +530,7 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
             .tools
             .iter()
             .map(|t| {
-                let schema = serde_json::from_str::<serde_json::Value>(&t.parameters_json)
-                    .unwrap_or_else(|_| serde_json::json!({ "type": "object", "properties": {} }));
+                let schema = super::tool_parameters(&t.name, &t.parameters_json);
                 serde_json::json!({
                     "name": t.name,
                     "description": t.description,
@@ -514,6 +614,17 @@ fn total_input_tokens(usage: &serde_json::Value) -> i32 {
     to_i32_or_max(usage["input_tokens"].as_i64().unwrap_or(0))
         .saturating_add(cache_read_input_tokens(usage))
         .saturating_add(cache_creation_input_tokens(usage))
+}
+
+/// This `message_delta` SSE event's `stop_reason`, if set.
+///
+/// Anthropic's streaming `stop_reason` is `null` in `message_start` and
+/// arrives ONLY on `message_delta` (nested under `delta`, not top-level like
+/// the unary response's `json["stop_reason"]`) — never on any other event.
+/// Verified against platform.claude.com's SSE/streaming reference, not
+/// assumed.
+fn anthropic_message_delta_stop_reason(json: &serde_json::Value) -> Option<&str> {
+    json["delta"]["stop_reason"].as_str()
 }
 
 fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
@@ -649,7 +760,9 @@ impl ProviderRouter for AnthropicProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "no body".to_owned());
-            return Err(ProviderError::Http(format!("{status}: {text}")));
+            return Err(crate::provider::overflow::classify_http_failure(
+                status, &text,
+            ));
         }
 
         let json: serde_json::Value = response
@@ -709,7 +822,9 @@ impl ProviderRouter for AnthropicProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "no body".to_owned());
-            return Err(ProviderError::Http(format!("{status}: {text}")));
+            return Err(crate::provider::overflow::classify_http_failure(
+                status, &text,
+            ));
         }
 
         let request_id = req.request_id.clone();
@@ -731,6 +846,11 @@ impl ProviderRouter for AnthropicProvider {
             // bug) always resolved to 0.
             let mut input_tokens: i32 = 0;
             let mut output_tokens: i32 = 0;
+            // Set from `message_delta.delta.stop_reason` once it arrives.
+            // Stays empty if the loop exits without ever seeing one -- the
+            // tail-chunk fallback below treats that as an incomplete stream,
+            // not a natural completion.
+            let mut stop_reason = String::new();
 
             while let Some(chunk_result) = bytes_stream.next().await {
                 let bytes = match chunk_result {
@@ -751,12 +871,18 @@ impl ProviderRouter for AnthropicProvider {
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" {
                             let final_chunk = InferChunk {
+                                reasoning_delta: String::new(),
                                 request_id: request_id.clone(),
                                 delta: String::new(),
                                 done: true,
                                 model_used: model.clone(),
                                 input_tokens,
                                 output_tokens,
+                                stop_reason: if stop_reason.is_empty() {
+                                    "end_turn".to_owned()
+                                } else {
+                                    stop_reason.clone()
+                                },
                             };
                             let _ = tx.send(final_chunk).await;
                             return;
@@ -771,8 +897,23 @@ impl ProviderRouter for AnthropicProvider {
                                 if let Some(v) = json["usage"]["output_tokens"].as_i64() {
                                     output_tokens = to_i32_or_max(v);
                                 }
+                                if let Some(reason) = anthropic_message_delta_stop_reason(&json) {
+                                    stop_reason = reason.to_owned();
+                                }
                             } else if event_type == "content_block_delta" {
-                                let delta = json["delta"]["text"].as_str().unwrap_or("").to_owned();
+                                // A delta belongs to exactly ONE channel. With
+                                // extended thinking enabled the stream
+                                // interleaves `thinking_delta` blocks with
+                                // `text_delta` ones, and reading `delta.text`
+                                // unconditionally — as this did — turned every
+                                // thinking delta into an EMPTY answer chunk:
+                                // the model's reasoning silently discarded, and
+                                // a run of no-op chunks sent in its place.
+                                let (delta, reasoning_delta) =
+                                    split_content_block_delta(&json["delta"]);
+                                if delta.is_empty() && reasoning_delta.is_empty() {
+                                    continue;
+                                }
                                 let chunk = InferChunk {
                                     request_id: request_id.clone(),
                                     delta,
@@ -780,18 +921,26 @@ impl ProviderRouter for AnthropicProvider {
                                     model_used: model.clone(),
                                     input_tokens: 0,
                                     output_tokens: 0,
+                                    stop_reason: String::new(),
+                                    reasoning_delta,
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
                                 }
                             } else if event_type == "message_stop" {
                                 let final_chunk = InferChunk {
+                                    reasoning_delta: String::new(),
                                     request_id: request_id.clone(),
                                     delta: String::new(),
                                     done: true,
                                     model_used: model.clone(),
                                     input_tokens,
                                     output_tokens,
+                                    stop_reason: if stop_reason.is_empty() {
+                                        "end_turn".to_owned()
+                                    } else {
+                                        stop_reason.clone()
+                                    },
                                 };
                                 let _ = tx.send(final_chunk).await;
                                 return;
@@ -801,14 +950,24 @@ impl ProviderRouter for AnthropicProvider {
                 }
             }
 
-            // End of stream without explicit done marker
+            // End of stream without explicit done marker -- the abnormal
+            // path (a transport error above `break`s into it, and so does a
+            // connection that just closes early). A stop_reason seen on a
+            // real message_delta event still wins, but absent that,
+            // "end_turn" would misreport an incomplete answer as a clean one.
             let final_chunk = InferChunk {
+                reasoning_delta: String::new(),
                 request_id,
                 delta: String::new(),
                 done: true,
                 model_used: model,
                 input_tokens,
                 output_tokens,
+                stop_reason: if stop_reason.is_empty() {
+                    "stream_incomplete".to_owned()
+                } else {
+                    stop_reason
+                },
             };
             let _ = tx.send(final_chunk).await;
         });
@@ -825,6 +984,7 @@ mod tool_tests {
     #[test]
     fn build_request_body_includes_tools_in_anthropic_shape() {
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             model: "claude-sonnet-4-20250514".to_owned(),
             max_tokens: 1024,
             tools: vec![ToolDefinition {
@@ -862,6 +1022,7 @@ mod tool_tests {
     fn build_request_body_hoists_system_and_omits_temperature() {
         use crate::provider::ChatMessage;
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             model: "claude-opus-4-8".to_owned(),
             max_tokens: 256,
             // Newest Claude models reject `temperature` — it must not be sent.
@@ -893,8 +1054,8 @@ mod tool_tests {
 #[cfg(test)]
 mod prompt_cache_tests {
     use super::{
-        build_request_body, min_cacheable_tokens, parse_response, total_input_tokens,
-        MAX_CACHE_BREAKPOINTS,
+        anthropic_message_delta_stop_reason, build_request_body, min_cacheable_tokens,
+        parse_response, total_input_tokens, MAX_CACHE_BREAKPOINTS,
     };
     use crate::provider::{ChatMessage, InferRequest, ToolDefinition};
 
@@ -929,6 +1090,7 @@ mod prompt_cache_tests {
     /// three prefixes (tools, system, messages) — roughly 4 KiB each.
     fn large_request(model: &str) -> InferRequest {
         InferRequest {
+            thinking_budget_tokens: 0,
             model: model.to_owned(),
             max_tokens: 1024,
             tools: vec![padded_tool(5_000)],
@@ -1051,6 +1213,7 @@ mod prompt_cache_tests {
         // Marking a prefix Anthropic is too small to cache buys nothing: it is
         // silently ignored, so the breakpoint slot is simply wasted.
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             model: "claude-sonnet-4-6".to_owned(),
             max_tokens: 256,
             tools: vec![padded_tool(8)],
@@ -1092,6 +1255,7 @@ mod prompt_cache_tests {
         // ~6 KiB of prompt ≈ 1500 estimated tokens: over Sonnet's 1024 floor,
         // under Haiku's 2048. The same prompt must cache on one and not the other.
         let mid_sized = |model: &str| InferRequest {
+            thinking_budget_tokens: 0,
             model: model.to_owned(),
             max_tokens: 512,
             messages: vec![
@@ -1187,6 +1351,26 @@ mod prompt_cache_tests {
         // `message_stop` itself has no usage to read — confirms the fields
         // must be carried forward from the earlier events instead.
         assert!(message_stop["usage"].is_null());
+    }
+
+    #[test]
+    fn message_delta_stop_reason_reads_the_nested_delta_path() {
+        // Shape verified against platform.claude.com's streaming/handling-
+        // stop-reasons reference: nested under `delta`, present ONLY on
+        // `message_delta` -- `message_start` and `message_stop` never carry
+        // it at all.
+        let message_delta = serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "max_tokens", "stop_sequence": null },
+            "usage": { "output_tokens": 63 }
+        });
+        assert_eq!(
+            anthropic_message_delta_stop_reason(&message_delta),
+            Some("max_tokens")
+        );
+
+        let message_stop = serde_json::json!({ "type": "message_stop" });
+        assert_eq!(anthropic_message_delta_stop_reason(&message_stop), None);
     }
 }
 
@@ -1342,5 +1526,125 @@ mod zdr_capability_tests {
                 .contains(&"zdr".to_owned()),
             "an attested provider must advertise the zdr feature family"
         );
+    }
+}
+
+#[cfg(test)]
+mod extended_thinking_tests {
+    use super::{resolve_thinking_budget, split_content_block_delta, MIN_THINKING_BUDGET_TOKENS};
+
+    #[test]
+    fn no_budget_requested_omits_the_parameter() {
+        assert_eq!(resolve_thinking_budget("claude-opus-4-8", 0, 8192), None);
+        assert_eq!(resolve_thinking_budget("claude-opus-4-8", -1, 8192), None);
+    }
+
+    /// Sending `thinking` to a model that predates it is a 400, so those models
+    /// must silently omit it rather than fail the turn.
+    #[test]
+    fn models_that_predate_thinking_omit_it() {
+        for model in [
+            "claude-3-opus-20240229",
+            "claude-3-5-sonnet-20241022",
+            "claude-3.5-haiku",
+            "claude-2.1",
+            "claude-instant-1.2",
+        ] {
+            assert_eq!(
+                resolve_thinking_budget(model, 2048, 8192),
+                None,
+                "{model} rejects the thinking parameter"
+            );
+        }
+    }
+
+    /// The exclusion list must not accidentally veto current or future models —
+    /// that is the failure direction it was chosen to avoid.
+    #[test]
+    fn current_and_future_models_are_allowed_to_think() {
+        for model in [
+            "claude-opus-4-8",
+            "claude-sonnet-4-5",
+            "claude-3-7-sonnet-20250219",
+            "claude-opus-5",
+        ] {
+            assert_eq!(
+                resolve_thinking_budget(model, 2048, 8192),
+                Some(2048),
+                "{model} should be allowed extended thinking"
+            );
+        }
+    }
+
+    #[test]
+    fn a_budget_below_the_provider_floor_is_omitted_not_clamped() {
+        // Clamping up would spend tokens the caller did not ask for; clamping
+        // down is impossible. Omitting keeps the turn working.
+        assert_eq!(
+            resolve_thinking_budget("claude-opus-4-8", MIN_THINKING_BUDGET_TOKENS - 1, 8192),
+            None
+        );
+        assert_eq!(
+            resolve_thinking_budget("claude-opus-4-8", MIN_THINKING_BUDGET_TOKENS, 8192),
+            Some(MIN_THINKING_BUDGET_TOKENS)
+        );
+    }
+
+    /// The budget is drawn FROM max_tokens, so one that does not leave room for
+    /// an answer must be dropped — otherwise the provider 400s, or worse the
+    /// model reasons well and has no room to reply.
+    #[test]
+    fn a_budget_that_leaves_no_room_for_an_answer_is_omitted() {
+        assert_eq!(resolve_thinking_budget("claude-opus-4-8", 8192, 8192), None);
+        assert_eq!(resolve_thinking_budget("claude-opus-4-8", 8192, 4096), None);
+        assert_eq!(
+            resolve_thinking_budget("claude-opus-4-8", 4096, 8192),
+            Some(4096)
+        );
+    }
+
+    /// The bug the split fixes: reading `delta.text` unconditionally turned
+    /// every thinking delta into an empty answer chunk.
+    #[test]
+    fn a_thinking_delta_never_becomes_answer_text() {
+        let delta = serde_json::json!({ "type": "thinking_delta", "thinking": "let me check" });
+        let (answer, reasoning) = split_content_block_delta(&delta);
+        assert_eq!(answer, "", "reasoning must never land in the answer");
+        assert_eq!(reasoning, "let me check");
+    }
+
+    #[test]
+    fn a_text_delta_stays_answer_text() {
+        let delta = serde_json::json!({ "type": "text_delta", "text": "Bergen is rainy" });
+        assert_eq!(
+            split_content_block_delta(&delta),
+            ("Bergen is rainy".to_owned(), String::new())
+        );
+    }
+
+    /// Every pre-thinking stream sent deltas with no `type`. Defaulting the
+    /// other way would drop all answer text.
+    #[test]
+    fn an_untyped_delta_defaults_to_answer_text() {
+        let delta = serde_json::json!({ "text": "hello" });
+        assert_eq!(
+            split_content_block_delta(&delta),
+            ("hello".to_owned(), String::new())
+        );
+    }
+
+    /// Signatures and tool-argument fragments are neither answer nor reasoning.
+    #[test]
+    fn non_readable_deltas_produce_nothing() {
+        for delta in [
+            serde_json::json!({ "type": "signature_delta", "signature": "abc123" }),
+            serde_json::json!({ "type": "input_json_delta", "partial_json": "{\"a\":" }),
+        ] {
+            assert_eq!(
+                split_content_block_delta(&delta),
+                (String::new(), String::new()),
+                "{delta} is not readable content"
+            );
+        }
     }
 }

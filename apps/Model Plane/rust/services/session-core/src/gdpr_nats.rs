@@ -67,7 +67,11 @@ const DURABLE_NAME: &str = "session-core-gdpr-erasure-v1";
 ///
 /// Returns an error if the initial NATS connection fails, the stream is
 /// unavailable, or the pre-provisioned consumer is missing/misconfigured.
-pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
+pub async fn run(
+    pool: Pool,
+    nats_url: String,
+    letta: Option<crate::letta_adapter::LettaMemoryAdapter>,
+) -> anyhow::Result<()> {
     info!(%nats_url, subject = SUBJECT, "session-core GDPR erasure consumer connecting");
 
     let client = crate::nats_connection::connect_shared(&nats_url).await?;
@@ -102,7 +106,7 @@ pub async fn run(pool: Pool, nats_url: String) -> anyhow::Result<()> {
         };
 
         let started = Instant::now();
-        match handle_message(&pool, &msg.payload).await {
+        match handle_message(&pool, &msg.payload, letta.as_ref()).await {
             Ok(Outcome::Purged { org_id, rows }) => {
                 histogram!("mp_session_gdpr_erasure_duration_seconds")
                     .record(started.elapsed().as_secs_f64());
@@ -139,13 +143,17 @@ enum Outcome {
     Skipped,
 }
 
-async fn handle_message(pool: &Pool, payload: &[u8]) -> anyhow::Result<Outcome> {
+async fn handle_message(
+    pool: &Pool,
+    payload: &[u8],
+    letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
+) -> anyhow::Result<Outcome> {
     let Some(erasure) = parse_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
     else {
         return Ok(Outcome::Skipped);
     };
 
-    let summary = purge_organization_data(pool, &erasure.org_id).await?;
+    let summary = purge_organization_data(pool, &erasure.org_id, letta).await?;
     Ok(Outcome::Purged {
         org_id: erasure.org_id,
         rows: summary.total(),

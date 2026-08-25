@@ -194,6 +194,24 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
     if req.run_id.is_empty() {
         return Err(Status::invalid_argument("run_id is required"));
     }
+
+    // Leaving plan mode IS the grant, so it must say what is granted and why.
+    //
+    // Before this, the request carried neither: any caller with write access
+    // could flip a run out of plan mode, and nothing recorded what authority it
+    // gained or on what grounds. That is exactly the shape DeepSeek calls a
+    // malformed ask — "an approval prompt without a reason, or a reason driving
+    // nothing". The run is leaving READ_ONLY by definition (plan mode is
+    // investigate-only), so the escalation is validated against that floor.
+    let requested = mp_contracts::model_plane::v1::AutonomyRung::try_from(req.granted_rung)
+        .unwrap_or(mp_contracts::model_plane::v1::AutonomyRung::Unspecified);
+    let escalation = mp_contracts::autonomy::AutonomyEscalation::request(
+        mp_contracts::model_plane::v1::AutonomyRung::ReadOnly,
+        requested,
+        &req.justification,
+    )
+    .map_err(|refusal| Status::invalid_argument(refusal.message()))?;
+
     let was_active = store.exit(&req.org_id, &req.run_id);
     if was_active {
         let envelope = mp_events::envelope::Envelope {
@@ -211,6 +229,11 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
             payload: serde_json::json!({
                 "run_id": req.run_id,
                 "session_id": req.session_id,
+                // Both, together. A grant with no reason is unreviewable after
+                // the fact, and a reason with no grant does not say what
+                // changed.
+                "granted_rung": mp_contracts::autonomy::label(escalation.to()),
+                "justification": escalation.justification(),
             }),
             zdr: false,
         };
@@ -544,6 +567,8 @@ mod tests {
                 org_id: "org-1".to_owned(),
                 run_id: "run-1".to_owned(),
                 session_id: "session-1".to_owned(),
+                granted_rung: mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite as i32,
+                justification: "the approved plan writes its report into the workspace".to_owned(),
             },
         )
         .await

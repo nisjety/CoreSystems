@@ -107,6 +107,26 @@ message InferRequest {
   // Tool selection policy: "auto" (default), "none", "required", or a specific
   // tool name. Empty is treated as "auto" when `tools` is non-empty.
   string tool_choice = 11;
+
+  // Requested minimum residency floor for this call (e.g. "eu", "norway").
+  // inference-core enforces this deny-by-default at the provider-selection
+  // gate: a provider whose declared residency is weaker than this floor is
+  // skipped, the same way a non-ZDR provider is skipped when `zdr` is true
+  // (see provider/fallback.rs's infer_one_model/stream_one_model). Empty
+  // means no floor -- any configured provider may serve the request.
+  // Accepted tokens match `Residency::parse` ("global", "eu"/"eea", "norway"/
+  // "no"/"sovereign"); an unrecognized token is rejected before any provider
+  // is tried, rather than silently treated as "no requirement".
+  string min_residency = 12;
+
+  // Extended-thinking budget in tokens for this request. 0 (default) requests
+  // no thinking and is byte-identical to the pre-existing behaviour.
+  //
+  // Advisory, not a guarantee: inference-core forwards it only to models that
+  // actually accept a thinking parameter, because sending one to a model that
+  // does not is a hard provider error, not a silent no-op. A budget set for a
+  // model that cannot think is dropped and the request proceeds normally.
+  int32 thinking_budget_tokens = 13;
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).
@@ -182,6 +202,21 @@ message InferChunk {
   int32 input_tokens = 5;
   // Number of generated tokens on the final chunk.
   int32 output_tokens = 6;
+
+  // Why generation stopped (populated on the final chunk): "end_turn",
+  // "max_tokens"/"length" (provider-dependent spelling for hitting the token
+  // ceiling), "stop_sequence", or "stream_incomplete" -- inference-core's own
+  // value, set ONLY when the provider connection broke or closed before any
+  // proper termination signal (message_stop / finish_reason / [DONE]) arrived,
+  // so a silently truncated streamed answer is never indistinguishable from a
+  // normal completion. Empty on every non-final chunk.
+  string stop_reason = 7;
+
+  // Incremental extended-thinking text, when the model produced any. Carried
+  // separately from `delta` so a client can render, hide, or drop the model's
+  // reasoning independently of its answer -- and so reasoning can never be
+  // concatenated into the answer by a client that does not know about it.
+  string reasoning_delta = 8;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.

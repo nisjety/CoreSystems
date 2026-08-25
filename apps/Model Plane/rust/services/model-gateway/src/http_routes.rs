@@ -109,6 +109,8 @@ pub fn build_router_with_readiness(
         .route("/v1/invoke/resume/:request_id", get(sse::invoke_resume_sse))
         // chat-parity §4: cooperative stop/cancel of an in-flight stream.
         .route("/v1/invoke/:request_id/cancel", post(invoke_cancel))
+        // Mid-run user input, delivered at the next tool-round boundary.
+        .route("/v1/invoke/:request_id/queue", post(invoke_queue_input))
         // chat-parity §1: reload a thread's conversation (cross-device resume).
         .route("/v1/threads", get(list_threads).delete(delete_threads))
         // Archiving remains available as a non-destructive administrative
@@ -119,6 +121,13 @@ pub fn build_router_with_readiness(
             post(update_thread_presentation),
         )
         .route("/v1/threads/:thread_id/archive", post(archive_thread))
+        // Context inspector (plan item 3.5): what is actually in the model's
+        // window for this thread, itemized. session-core has computed this all
+        // along (`GetContextAssembly` returns per-segment token estimates) and
+        // the gateway already calls it to BUILD prompts — it was simply never
+        // exposed, so the one surface that could answer "why did it answer from
+        // that?" was unreachable.
+        .route("/v1/threads/:thread_id/context", get(get_thread_context))
         .route("/v1/threads/:thread_id", delete(delete_thread))
         // Control-authorized internal deletion adapter. This is deliberately
         // outside the browser/BFF API and is allowed only for the exact
@@ -154,6 +163,8 @@ pub fn build_router_with_readiness(
         // thread_id a person can supply will ever reach one.
         .route("/v1/runs/system", get(list_system_runs))
         .route("/v1/runs/:run_id", get(get_run))
+        // Approving a plan IS the autonomy grant — see `plan_approval`.
+        .route("/v1/runs/:run_id/plan-approval", post(plan_approval))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -5821,6 +5832,12 @@ pub struct InvokeRequest {
     /// injects no directive. See `crate::verbosity`.
     #[serde(default)]
     pub verbosity: Option<String>,
+    /// Extended-thinking effort dial: `quick` | `standard` | `deep`.
+    /// `standard`/unset/unknown requests no thinking, so the default turn is
+    /// unchanged. The token budget is derived server-side from the profile —
+    /// a client selects an effort, never a raw budget. See `crate::thinking`.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Opt-in rich SSE event families the client understands (chat-parity §2:
     /// "reasoning", "tools", "citations", "artifacts", "steps", "usage"). EMPTY
     /// → plain stream (connected/chunk/done/error only); protects profile:"chat".
@@ -6035,6 +6052,291 @@ async fn invoke_cancel(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct PlanApprovalRequest {
+    /// `read_only` | `workspace_write` | `danger_full_access`. A keyword rather
+    /// than a number on the HTTP edge: a browser sending `2` and meaning
+    /// something else is a silent mis-grant, and an unknown keyword is refused
+    /// rather than guessed at.
+    granted_rung: String,
+    /// Why. Required and required to be substantive — see
+    /// `mp_contracts::autonomy`.
+    justification: String,
+}
+
+/// Approve a plan: take the run out of plan mode at a named autonomy rung, with
+/// a stated reason.
+///
+/// # Why this route exists at all
+///
+/// `ExitPlanMode` was reachable only over gRPC and had **no production caller**.
+/// Plan mode could be entered from the composer and never left, so the one
+/// control that decides how much a run may do had no way to be exercised — and
+/// the grant it makes was neither named nor justified anywhere.
+///
+/// Both halves are validated through the shared ladder and both are persisted
+/// onto the run, so the next `RunAgentRequest` carries the granted rung and
+/// execution-core enforces it per call.
+async fn plan_approval(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+    Json(body): Json<PlanApprovalRequest>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::autonomy::{label, rung_from_keyword, AutonomyEscalation};
+    use mp_contracts::model_plane::v1::{AutonomyRung, ExitPlanModeRequest, SetRunModeRequest};
+
+    let bad_request = |message: String| -> HttpJsonError {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+    };
+
+    // A keyword on the HTTP edge rather than a number: a browser sending `2` and
+    // meaning something else is a silent mis-grant, and an unknown keyword is
+    // refused rather than guessed at — guessing turns a typo into a grant.
+    let Some(requested) = rung_from_keyword(&body.granted_rung) else {
+        return Err(bad_request(format!(
+            "unknown autonomy rung '{}': expected read_only, workspace_write or \
+             danger_full_access",
+            body.granted_rung
+        )));
+    };
+    let escalation =
+        AutonomyEscalation::request(AutonomyRung::ReadOnly, requested, &body.justification)
+            .map_err(|refusal| bad_request(refusal.message()))?;
+
+    // Only the run's own owner may grant it authority. Without this, a run id
+    // would be enough to widen someone else's run.
+    crate::session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        bearer.as_str(),
+    )
+    .await
+    .map_err(|error| grpc_status_to_http(&error))?;
+
+    // In-process: this IS the gateway, so calling the coordinator directly
+    // rather than dialling our own gRPC surface keeps one code path and one
+    // validation.
+    let exited = crate::coordinator::handle_exit_plan_mode(
+        &state.plan_mode,
+        &*state.publisher,
+        ExitPlanModeRequest {
+            request_id: format!("plan-approval-{run_id}"),
+            org_id: claims.org_id.clone(),
+            run_id: run_id.clone(),
+            session_id: String::new(),
+            granted_rung: escalation.to() as i32,
+            justification: escalation.justification().to_owned(),
+        },
+    )
+    .await
+    .map_err(|error| grpc_status_to_http(&error))?;
+
+    // The durable half. Reported rather than swallowed: a grant the run does not
+    // carry is a grant the next request will not honour, and the caller should
+    // learn that here instead of by watching the agent refuse work it was just
+    // authorized to do.
+    let persisted = state
+        .session_client
+        .clone()
+        .set_run_mode(authenticated_session_request(
+            SetRunModeRequest {
+                run_id: run_id.clone(),
+                mode: "execute".to_owned(),
+                org_id: claims.org_id.clone(),
+                granted_rung: escalation.to() as i32,
+                justification: escalation.justification().to_owned(),
+            },
+            &bearer,
+        )?)
+        .await;
+    if let Err(error) = &persisted {
+        tracing::warn!(%error, %run_id, "plan approval granted but not durably recorded");
+    }
+
+    Ok(Json(json!({
+        "run_id": run_id,
+        "was_in_plan_mode": exited.was_active,
+        "granted_rung": label(escalation.to()),
+        "justification": escalation.justification(),
+        "persisted": persisted.is_ok(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct QueueInputRequest {
+    content: String,
+    /// The fresh, content-bound `thread:append` decision the BFF minted for THIS
+    /// message. Present only for a Space-scoped thread — an ordinary thread's
+    /// append carries none, exactly as the normal send path does.
+    #[serde(default)]
+    space_append_context: Option<crate::session_flow::ThreadSpaceContext>,
+    /// The thread the BFF minted the append decision against, when it minted
+    /// one. Checked against the stream's own thread rather than used as the
+    /// append target: a decision issued for a different conversation must not be
+    /// spent on this one, even though both belong to the same user.
+    #[serde(default)]
+    thread_id: Option<String>,
+}
+
+/// Deliver a message the user typed WHILE a run was streaming.
+///
+/// Two things happen, in this order and for different reasons:
+///
+/// 1. The message is persisted to the thread the *stream* is on. It exists
+///    because the user sent it, whether or not the run lives long enough to read
+///    it — and a reply to a message the transcript does not contain is a
+///    transcript that lies.
+/// 2. It is queued for the run's next tool-round boundary, where it arrives with
+///    the classify-and-continue pause (`queued_input`).
+///
+/// Queueing first would risk the model answering a message that then failed to
+/// persist. Persisting first, at worst, records a message the run never saw —
+/// and the response says exactly that, so the client can resend it as an
+/// ordinary turn.
+///
+/// The thread id comes from the stream's own registration, never from the
+/// request: a client that could name the thread could aim a message at a
+/// conversation it is not streaming.
+async fn invoke_queue_input(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(request_id): Path<String>,
+    Json(body): Json<QueueInputRequest>,
+) -> Response {
+    use crate::queued_input::{EnqueueOutcome, MAX_QUEUED_CHARS, MAX_QUEUED_MESSAGES};
+
+    // A mismatched claim is refused BEFORE the enqueue. Refusing afterwards
+    // would leave a message that failed its authority check queued for delivery
+    // anyway — the model would read it and the ledger would not have it.
+    if let (Some(claimed), Some(streaming)) = (
+        body.thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|claimed| !claimed.is_empty()),
+        state
+            .queued_inputs
+            .thread_for(&request_id, &claims.org_id, &claims.user_id),
+    ) {
+        if claimed != streaming {
+            tracing::warn!(
+                %request_id,
+                %streaming,
+                %claimed,
+                "queued message named a thread other than the stream's; refusing"
+            );
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "queued": false,
+                    "error": "this run is not streaming that thread",
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Ownership and bounds are decided before anything is written, so a refused
+    // message leaves no trace and a mismatched owner learns nothing about which
+    // runs exist (same 404 as an inactive stream — see `enqueue_for`).
+    let outcome = state.queued_inputs.enqueue_for(
+        &request_id,
+        &claims.org_id,
+        &claims.user_id,
+        &body.content,
+    );
+    let (pending, thread_id) = match outcome {
+        EnqueueOutcome::Queued { pending, thread_id } => (pending, thread_id),
+        EnqueueOutcome::NoActiveStream => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "queued": false,
+                    "error": "no active stream",
+                    // Names the client's next move: this is the case where the
+                    // run already finished, and an ordinary send is correct.
+                    "resend_as_new_turn": true,
+                })),
+            )
+                .into_response();
+        }
+        EnqueueOutcome::Full { pending } => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "queued": false,
+                    "error": "too many messages already waiting for this run",
+                    "pending": pending,
+                    "max_pending": MAX_QUEUED_MESSAGES,
+                })),
+            )
+                .into_response()
+        }
+        EnqueueOutcome::TooLong { chars } => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "queued": false,
+                    "error": "message is too long to deliver mid-run",
+                    "chars": chars,
+                    "max_chars": MAX_QUEUED_CHARS,
+                })),
+            )
+                .into_response()
+        }
+        EnqueueOutcome::Empty => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "request_id": request_id,
+                    "queued": false,
+                    "error": "content is required",
+                })),
+            )
+                .into_response()
+        }
+    };
+
+    // Accepted and queued. The append failing now is a durability problem, not
+    // a delivery one: the run will still read the message, so say both plainly
+    // rather than pretending either half succeeded.
+    let persisted = crate::session_flow::append_queued_user_message(
+        &state,
+        &thread_id,
+        body.content.trim(),
+        &bearer,
+        body.space_append_context.as_ref(),
+    )
+    .await;
+    if let Err(error) = &persisted {
+        tracing::warn!(
+            %error,
+            %request_id,
+            %thread_id,
+            "mid-run message queued but not durably recorded"
+        );
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "request_id": request_id,
+            "queued": true,
+            "pending": pending,
+            "persisted": persisted.is_ok(),
+        })),
+    )
+        .into_response()
+}
+
 #[derive(Debug, Serialize)]
 struct ModelDescriptor {
     id: String,
@@ -6193,6 +6495,10 @@ struct ListThreadMessagesResponse {
 struct ListThreadsQuery {
     limit: Option<u32>,
     space_id: Option<String>,
+    /// See session-core's `ListThreadsRequest.origin` — filters to threads a
+    /// surface itself created (e.g. "chat"), rather than every unscoped
+    /// thread regardless of which surface created it.
+    origin: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -6208,6 +6514,10 @@ struct ThreadSummaryResponse {
     latest_run_id: String,
     latest_run_status: String,
     latest_run_updated_at: Option<String>,
+    /// Which surface created this thread — see session-core's
+    /// `ThreadSummary.origin`. Relayed so a caller can defensively re-check
+    /// scope on the response rather than trusting the request-side filter alone.
+    origin: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -6281,6 +6591,90 @@ struct DeleteSpaceSchedulesResponseBody {
     outcome: String,
 }
 
+/// One segment of the assembled context window.
+#[derive(Debug, serde::Serialize)]
+struct ContextSegmentResponse {
+    kind: String,
+    /// Segment text. Present so the inspector can show WHAT was included, not
+    /// only how much — "1,200 tokens of grounding" does not answer "why did it
+    /// say that?".
+    content: String,
+    estimated_tokens: u32,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ThreadContextResponse {
+    thread_id: String,
+    /// session-core's own total. Reported rather than summed from the segments:
+    /// if the two ever disagree, the inspector should show what the assembler
+    /// believes, not a number this route computed.
+    estimated_tokens: u32,
+    /// The budget the segments were assembled against, so a reader can see how
+    /// full the window is rather than guessing.
+    budget_tokens: u32,
+    segments: Vec<ContextSegmentResponse>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ThreadContextQuery {
+    /// Optional run scope. Empty asks for the thread's current assembly.
+    #[serde(default)]
+    run_id: Option<String>,
+}
+
+/// The itemized context window for a thread — the read half of the context
+/// inspector.
+///
+/// Deliberately NOT delegating a Data Plane credential, unlike the prompt-build
+/// path: this is a read-only introspection view of the durable segments, and
+/// forwarding a retrieval credential here would let an inspector request trigger
+/// live grounding fan-out (and bill for it) every time someone opened a panel.
+/// Grounding segments already assembled into the thread are still reported.
+async fn get_thread_context(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ThreadContextQuery>,
+) -> Result<Json<ThreadContextResponse>, (StatusCode, Json<serde_json::Value>)> {
+    use mp_contracts::model_plane::v1::GetContextAssemblyRequest;
+
+    let _ = &claims;
+    let budget = crate::sse::context_assembly_budget();
+    let response = state
+        .session_client
+        .clone()
+        .get_context_assembly(authenticated_session_request(
+            GetContextAssemblyRequest {
+                thread_id: thread_id.clone(),
+                run_id: query.run_id.unwrap_or_default(),
+                max_tokens: budget,
+                policy_id: String::new(),
+                workspace_id: String::new(),
+                agent_id: String::new(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_thread_error("session-core get_context_assembly failed", &e))?
+        .into_inner();
+
+    Ok(Json(ThreadContextResponse {
+        thread_id,
+        estimated_tokens: response.estimated_tokens,
+        budget_tokens: budget,
+        segments: response
+            .segments
+            .into_iter()
+            .map(|segment| ContextSegmentResponse {
+                kind: segment.kind,
+                content: segment.content,
+                estimated_tokens: segment.estimated_tokens,
+            })
+            .collect(),
+    }))
+}
+
 async fn list_threads(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -6298,6 +6692,7 @@ async fn list_threads(
                 user_id: claims.user_id.clone(),
                 limit: query.limit.unwrap_or(80),
                 space_id: query.space_id.unwrap_or_default(),
+                origin: query.origin.unwrap_or_default(),
             },
             &bearer,
         )?)
@@ -6322,6 +6717,7 @@ async fn list_threads(
             latest_run_updated_at: thread
                 .latest_run_updated_at
                 .map(|value| timestamp_to_rfc3339(Some(value))),
+            origin: thread.origin,
         })
         .collect();
 

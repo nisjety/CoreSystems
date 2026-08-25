@@ -58,10 +58,12 @@ func envBytes(t *testing.T, eventType, resourceRef, org, payload string) []byte 
 // envBytesWithRetention builds an envelope carrying an explicit `zdr` flag, or
 // none at all when zdr is nil.
 //
-// The flag is injected into the marshalled JSON rather than set on a struct
-// field because pkg/envelope.Envelope HAS no `zdr` field — the very gap that
-// makes this gate necessary. Injecting it reproduces what a producer at parity
-// with the proto `Event` (field 13) and the Rust envelope would put on the wire.
+// The flag is injected into the marshalled JSON rather than set on
+// envelope.Envelope.Zdr so that the ABSENT case stays reachable: the struct
+// field is `*bool` with `omitempty`, and injecting into the raw JSON lets a test
+// build all three wire states (absent / false / true) without depending on how
+// the struct chooses to omit. Absent is the state the gate exists for, and it is
+// the one a lossy producer is most likely to emit.
 func envBytesWithRetention(t *testing.T, eventType, resourceRef, org, payload string, zdr *bool) []byte {
 	t.Helper()
 	if payload == "" {

@@ -24,6 +24,8 @@ pub fn bridge_to_grpc(
                 model_used: chunk.model_used,
                 input_tokens: chunk.input_tokens,
                 output_tokens: chunk.output_tokens,
+                stop_reason: chunk.stop_reason,
+                reasoning_delta: chunk.reasoning_delta,
             };
             if tx.send(Ok(proto_chunk)).await.is_err() {
                 break;

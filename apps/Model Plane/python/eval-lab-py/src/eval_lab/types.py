@@ -58,6 +58,14 @@ class CaseSpec(BaseModel, frozen=True):
         default_factory=lambda: ["usage", "tools", "citations"]
     )
     zdr: bool = False
+    # Compaction-quality cases only (harness-adoption §7.4): turns sent BEFORE
+    # `prompt`, all in the SAME session so they accumulate into one thread's
+    # history. `prompt` becomes the recall question asked once enough history
+    # has built up to force model-gateway's compaction.rs to fire; `checks`
+    # scores the recall ANSWER exactly like any other case (the gold recall
+    # question IS `prompt` + `checks`, not a separate mechanism). Empty means
+    # "not a multi-turn case" — every existing single-shot case is unaffected.
+    seed_turns: list[str] = Field(default_factory=list)
     org_fixture: str = "eval-org-a"  # key into the fixture org registry
     max_cost_usd: float | None = None  # sent to the gateway (budget guard)
     cost_ceiling_usd: float | None = None  # metric ceiling (fail if exceeded)

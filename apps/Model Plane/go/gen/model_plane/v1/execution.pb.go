@@ -286,7 +286,31 @@ type RunAgentRequest struct {
 	// (permission gate + HITL), so forwarding them cannot bypass approval; a
 	// client tool that resolves to no executor returns a graceful error the
 	// ReAct loop feeds back. Empty → only the server-side set is offered.
-	Tools         []*ToolDefinition `protobuf:"bytes,10,rep,name=tools,proto3" json:"tools,omitempty"`
+	Tools []*ToolDefinition `protobuf:"bytes,10,rep,name=tools,proto3" json:"tools,omitempty"`
+	// When true, this run must never take a real side-effecting action,
+	// regardless of `mode` -- the human asked to see what the agent WOULD do
+	// before letting it act. Read-only tools (knowledge_search, yr_weather,
+	// ...) still run; anything `permission::is_risky_call` classifies as
+	// risky is refused outright, the same way a delegated subagent already
+	// refuses one (see runtime_loop::agent's leaf/orchestrator role split).
+	// Sourced from the chat request's `plan_mode` flag (model-gateway).
+	// Before this field existed, the request carried NO way to express this at
+	// all -- `plan_mode` was tracked only as a durable status flag
+	// (session-core `run.mode` / `PlanModeStore.is_plan_mode`) for the UI to
+	// query, with no code path that ever consulted it before dispatching a
+	// tool. A run a human believed was "planning" could still execute a real
+	// action if its `mode` happened to be `auto`.
+	PlanMode bool `protobuf:"varint,11,opt,name=plan_mode,json=planMode,proto3" json:"plan_mode,omitempty"`
+	// The rung this run is permitted to operate at, checked PER CALL by the
+	// runtime loop. Unset reads as the narrowest rung, never as a grant — an
+	// older caller that does not set it must not accidentally authorize
+	// everything.
+	//
+	// Distinct from `plan_mode` and from `mode`: plan_mode is the binary "show me
+	// what you would do" gate, while this is the graded authority a human granted
+	// when they approved the plan. A run can be out of plan mode and still be
+	// held at `WORKSPACE_WRITE`.
+	AutonomyRung  AutonomyRung `protobuf:"varint,12,opt,name=autonomy_rung,json=autonomyRung,proto3,enum=model_plane.v1.AutonomyRung" json:"autonomy_rung,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -391,6 +415,20 @@ func (x *RunAgentRequest) GetTools() []*ToolDefinition {
 	return nil
 }
 
+func (x *RunAgentRequest) GetPlanMode() bool {
+	if x != nil {
+		return x.PlanMode
+	}
+	return false
+}
+
+func (x *RunAgentRequest) GetAutonomyRung() AutonomyRung {
+	if x != nil {
+		return x.AutonomyRung
+	}
+	return AutonomyRung_AUTONOMY_RUNG_UNSPECIFIED
+}
+
 // RunAgentResponse — terminal outcome of a driven agent run.
 type RunAgentResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -405,9 +443,18 @@ type RunAgentResponse struct {
 	// score confidence honestly instead of assuming ungrounded. False for
 	// "awaiting_approval" (run not finished) and when no knowledge_search
 	// call succeeded with real results.
-	Grounded      bool `protobuf:"varint,4,opt,name=grounded,proto3" json:"grounded,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Grounded bool `protobuf:"varint,4,opt,name=grounded,proto3" json:"grounded,omitempty"`
+	// True when the loop cleared tool-result payloads to stay inside the context
+	// window during this run.
+	//
+	// Reported because compaction is LOSSY and otherwise invisible: an answer
+	// built on a prompt whose earlier tool results were cleared can be worse for a
+	// reason nothing in the response explains. `StepOutcome` carries the same flag
+	// for the single-step surface, where it is correctly always false — one step
+	// accumulates no history to compact.
+	CompactionTriggered bool `protobuf:"varint,5,opt,name=compaction_triggered,json=compactionTriggered,proto3" json:"compaction_triggered,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *RunAgentResponse) Reset() {
@@ -464,6 +511,13 @@ func (x *RunAgentResponse) GetRoundsExecuted() uint32 {
 func (x *RunAgentResponse) GetGrounded() bool {
 	if x != nil {
 		return x.Grounded
+	}
+	return false
+}
+
+func (x *RunAgentResponse) GetCompactionTriggered() bool {
+	if x != nil {
+		return x.CompactionTriggered
 	}
 	return false
 }
@@ -932,7 +986,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"receipt_id\x18\x03 \x01(\tR\treceiptId\x12\x16\n" +
 	"\x06output\x18\x04 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x05 \x01(\tR\x05error\x12'\n" +
-	"\x0funknown_outcome\x18\x06 \x01(\bR\x0eunknownOutcome\"\x9a\x02\n" +
+	"\x0funknown_outcome\x18\x06 \x01(\bR\x0eunknownOutcome\"\xfa\x02\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -945,12 +999,15 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"max_rounds\x18\b \x01(\rR\tmaxRounds\x12\x10\n" +
 	"\x03zdr\x18\t \x01(\bR\x03zdr\x124\n" +
 	"\x05tools\x18\n" +
-	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\"\x92\x01\n" +
+	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\x12\x1b\n" +
+	"\tplan_mode\x18\v \x01(\bR\bplanMode\x12A\n" +
+	"\rautonomy_rung\x18\f \x01(\x0e2\x1c.model_plane.v1.AutonomyRungR\fautonomyRung\"\xc5\x01\n" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
 	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\x12\x1a\n" +
-	"\bgrounded\x18\x04 \x01(\bR\bgrounded\"\x8e\x02\n" +
+	"\bgrounded\x18\x04 \x01(\bR\bgrounded\x121\n" +
+	"\x14compaction_triggered\x18\x05 \x01(\bR\x13compactionTriggered\"\x8e\x02\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +
@@ -1017,28 +1074,30 @@ var file_model_plane_v1_execution_proto_goTypes = []any{
 	(*PauseRunRequest)(nil),              // 8: model_plane.v1.PauseRunRequest
 	(*PauseRunResponse)(nil),             // 9: model_plane.v1.PauseRunResponse
 	(*ToolDefinition)(nil),               // 10: model_plane.v1.ToolDefinition
-	(*CancelRunRequest)(nil),             // 11: model_plane.v1.CancelRunRequest
-	(*CancelRunResponse)(nil),            // 12: model_plane.v1.CancelRunResponse
+	(AutonomyRung)(0),                    // 11: model_plane.v1.AutonomyRung
+	(*CancelRunRequest)(nil),             // 12: model_plane.v1.CancelRunRequest
+	(*CancelRunResponse)(nil),            // 13: model_plane.v1.CancelRunResponse
 }
 var file_model_plane_v1_execution_proto_depIdxs = []int32{
 	10, // 0: model_plane.v1.RunAgentRequest.tools:type_name -> model_plane.v1.ToolDefinition
-	4,  // 1: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
-	6,  // 2: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
-	11, // 3: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	8,  // 4: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
-	2,  // 5: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
-	0,  // 6: model_plane.v1.ExecutionCore.ExecuteScheduledStep:input_type -> model_plane.v1.ExecuteScheduledStepRequest
-	5,  // 7: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
-	7,  // 8: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
-	12, // 9: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	9,  // 10: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
-	3,  // 11: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
-	1,  // 12: model_plane.v1.ExecutionCore.ExecuteScheduledStep:output_type -> model_plane.v1.ExecuteScheduledStepResponse
-	7,  // [7:13] is the sub-list for method output_type
-	1,  // [1:7] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	11, // 1: model_plane.v1.RunAgentRequest.autonomy_rung:type_name -> model_plane.v1.AutonomyRung
+	4,  // 2: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
+	6,  // 3: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
+	12, // 4: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	8,  // 5: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
+	2,  // 6: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
+	0,  // 7: model_plane.v1.ExecutionCore.ExecuteScheduledStep:input_type -> model_plane.v1.ExecuteScheduledStepRequest
+	5,  // 8: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
+	7,  // 9: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
+	13, // 10: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	9,  // 11: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
+	3,  // 12: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
+	1,  // 13: model_plane.v1.ExecutionCore.ExecuteScheduledStep:output_type -> model_plane.v1.ExecuteScheduledStepResponse
+	8,  // [8:14] is the sub-list for method output_type
+	2,  // [2:8] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_execution_proto_init() }

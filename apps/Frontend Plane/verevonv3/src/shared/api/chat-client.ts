@@ -56,6 +56,16 @@ export type ChatInvokeRequest = {
   browseWeb?: boolean
   /** Deep research mode: gateway runs plan -> concurrent searches -> page reads -> a cited report. */
   deepResearch?: boolean
+  /**
+   * Extended-thinking effort: `quick` | `standard` | `deep`.
+   *
+   * The gateway derives the token budget from this profile — the client picks an
+   * effort, never a raw budget. `standard` (and unset) requests no thinking, so
+   * the ordinary turn is unchanged; only `deep`/`quick` cost the extra latency
+   * and tokens. Reasoning arrives on `reasoning_delta`, which requires the
+   * `reasoning` feature (already in `DEFAULT_FEATURES`).
+   */
+  effort?: 'quick' | 'standard' | 'deep'
   attachments?: ChatAttachment[]
   /** Explicit tool definitions (advanced); usually derived from actions/browseWeb. */
   tools?: ChatToolSpec[]
@@ -94,16 +104,101 @@ export type ChatConnectedEvent = {
   runId?: string
 }
 export type ChatMessageEvent = { content: string; requestId?: string }
-export type ChatDoneEvent = { requestId?: string; modelUsed?: string; outputTokens?: number }
-export type ChatErrorEvent = { code: string; message: string; retryable?: boolean }
-export type ChatArtifactEvent = { id?: string; kind?: string; title?: string; content?: string; version?: number }
+export type ChatDoneEvent = {
+  requestId?: string
+  modelUsed?: string
+  outputTokens?: number
+  /**
+   * Why generation stopped, when the backend reported it. `'stream_incomplete'`
+   * means the provider connection broke before any proper termination signal —
+   * the answer may be truncated. See model_plane.v1.InferChunk.stop_reason.
+   */
+  stopReason?: string
+}
+/**
+ * The run was stopped before finishing. Distinct from `onDone` on purpose: a
+ * server-side stop used to be routed to `onDone`, which rendered a halted
+ * answer as a normally-completed one.
+ */
+export type ChatStoppedEvent = { requestId?: string; reason?: string }
+/**
+ * Long-term memory was injected into this turn's prompt (Model Plane's
+ * `memory_recall` event, `memory` feature family). Emitted at most once per
+ * turn and only when memory was genuinely recalled, so `count` is never 0.
+ */
+/**
+ * How a recalled memory came to exist.
+ *
+ * THREE states, not a boolean. `unrecorded` covers rows written before
+ * provenance was tracked, and the backend contract is explicit that those must
+ * never be presented as `stated` — saying "you told me this" about a row that
+ * does not record it manufactures consent. Any value this build does not
+ * recognise is read as `unrecorded` for the same reason.
+ */
+export type MemoryOrigin = 'stated' | 'inferred' | 'unrecorded'
+
+/** Whether the memory came from another conversation or is org-level context. */
+export type MemoryRole = 'recall' | 'inject'
+
+export type RecalledMemory = {
+  /** Stable id, so the reader can act on this exact row. */
+  memoryId: string
+  role: MemoryRole
+  origin: MemoryOrigin
+  label: string
+  preview: string
+}
+
+export type ChatMemoryRecallEvent = {
+  count: number
+  latencyMs?: number
+  /** What was recalled. Empty when the backend reported only a count. */
+  memories: RecalledMemory[]
+}
+
+/** Mid-run user messages the agent has just been handed. */
+export type ChatQueuedInputEvent = { messages: string[] }
+export type ChatErrorEvent = {
+  code: string
+  message: string
+  retryable?: boolean
+}
+export type ChatArtifactEvent = {
+  id?: string
+  kind?: string
+  title?: string
+  content?: string
+  version?: number
+}
 export type ChatReasoningEvent = { delta: string }
 export type ChatToolCallEvent = { id?: string; name?: string; args?: unknown }
-export type ChatToolResultEvent = { id?: string; output?: string; error?: string; status?: string }
-export type ChatCitationEvent = { id?: string; title?: string; url?: string; snippet?: string }
+export type ChatToolResultEvent = {
+  id?: string
+  output?: string
+  error?: string
+  status?: string
+}
+export type ChatCitationEvent = {
+  id?: string
+  title?: string
+  url?: string
+  snippet?: string
+}
 export type ChatGroundingEvent = { value: unknown }
-export type ChatStepEvent = { id?: string; title?: string; detail?: string; status?: string }
-export type ChatAttachmentEvent = { id?: string; name?: string; mime?: string; type?: string; url?: string; size?: number }
+export type ChatStepEvent = {
+  id?: string
+  title?: string
+  detail?: string
+  status?: string
+}
+export type ChatAttachmentEvent = {
+  id?: string
+  name?: string
+  mime?: string
+  type?: string
+  url?: string
+  size?: number
+}
 export type ChatUsageEvent = {
   inputTokens?: number
   outputTokens?: number
@@ -125,6 +220,44 @@ export type ChatTitleEvent = { title: string; requestId?: string }
  */
 export type ChatFollowUpsEvent = { suggestions: string[]; requestId?: string }
 
+/**
+ * Read the recalled-memory list off the wire.
+ *
+ * Unknown `origin`/`role` values degrade rather than being dropped — the
+ * backend's vocabulary may already be wider than this build's, and a row the
+ * reader cannot see is worse than one labelled conservatively. `origin`
+ * specifically degrades to `unrecorded`, never to `stated`: reading an
+ * unrecognised value as "you told me this" is the one mistake that misleads.
+ */
+function normalizeRecalledMemories(raw: unknown): RecalledMemory[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((entry): RecalledMemory[] => {
+    if (!entry || typeof entry !== 'object') return []
+    const record = entry as Record<string, unknown>
+    const memoryId =
+      typeof record.memory_id === 'string' ? record.memory_id : ''
+    const preview = typeof record.preview === 'string' ? record.preview : ''
+    // Without an id the row cannot be acted on, and without a preview there is
+    // nothing to read; either way it earns no line.
+    if (!memoryId || !preview.trim()) return []
+    const origin = record.origin
+    const role = record.role
+    return [
+      {
+        memoryId,
+        role: role === 'inject' ? 'inject' : 'recall',
+        origin:
+          origin === 'stated' || origin === 'inferred' ? origin : 'unrecorded',
+        label:
+          typeof record.label === 'string' && record.label
+            ? record.label
+            : 'Minne',
+        preview,
+      },
+    ]
+  })
+}
+
 export type ChatStreamHandlers = {
   onConnected?: (event: ChatConnectedEvent) => void
   onMessage?: (event: ChatMessageEvent) => void
@@ -141,6 +274,33 @@ export type ChatStreamHandlers = {
   onUsage?: (event: ChatUsageEvent) => void
   onTitle?: (event: ChatTitleEvent) => void
   onFollowUps?: (event: ChatFollowUpsEvent) => void
+  onStopped?: (event: ChatStoppedEvent) => void
+  onMemoryRecall?: (event: ChatMemoryRecallEvent) => void
+  /**
+   * A message the user sent mid-run has reached the agent. Emitted at delivery
+   * rather than at enqueue: the POST already confirmed acceptance, and what the
+   * client cannot otherwise know is when the agent actually saw it.
+   */
+  onQueuedInput?: (event: ChatQueuedInputEvent) => void
+  /**
+   * Any SSE event this client has no case for. The gateway relays upstream
+   * events verbatim with no allowlist, so a new backend event reaches the
+   * browser and — before this hook — died here silently. Log, never drop.
+   */
+  onUnknownEvent?: (event: {
+    name: string
+    payload: Record<string, unknown>
+  }) => void
+  /**
+   * The SSE `id:` of every frame that carries one, in arrival order.
+   *
+   * Resume needs this. The server buffers each frame under a monotonic seq and
+   * replays those with `seq > Last-Event-ID`, so without tracking the highest id
+   * we saw, a reconnect can only replay the stream **from the beginning** — which
+   * is what it did: the controller dropped the cached partial answer on the
+   * first replayed delta precisely because it knew everything was coming again.
+   */
+  onFrameId?: (id: string) => void
 }
 
 export type ChatMessage = {
@@ -261,7 +421,18 @@ export type ModelInfo = {
 }
 
 // Opt-in rich SSE families the model-gateway understands (chat-parity §2).
-const DEFAULT_FEATURES = ['usage', 'citations', 'reasoning', 'steps', 'artifacts']
+// `memory` opts this client in to the `memory_recall` visibility event. The
+// memory INJECTION itself is unconditional server-side (prompt quality is not
+// a client choice) — this only asks to be TOLD when it happened, so the UI can
+// show "recalled N memories" instead of silently benefiting from it.
+const DEFAULT_FEATURES = [
+  'usage',
+  'citations',
+  'reasoning',
+  'steps',
+  'artifacts',
+  'memory',
+]
 function str(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
@@ -378,7 +549,13 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
     // multi-round research pipeline off this flag.
-    deep_research: supportReadOnly ? false : request.deepResearch ?? false,
+    deep_research: supportReadOnly ? false : (request.deepResearch ?? false),
+    // Omitted entirely when unset or `standard`: the gateway treats an absent
+    // effort as "no thinking", and sending `standard` explicitly would be a
+    // no-op field on every ordinary turn.
+    ...(request.effort && request.effort !== 'standard'
+      ? { effort: request.effort }
+      : {}),
     attachments: request.attachments ?? [],
     ...(supportContextQuery ? { support_context_query: supportContextQuery } : {}),
     features: [...features],
@@ -421,10 +598,23 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         requestId: str(payload.request_id),
         modelUsed: str(payload.model_used) ?? str(payload.modelUsed),
         outputTokens: num(payload.output_tokens) ?? num(payload.outputTokens),
+        stopReason: str(payload.stop_reason) ?? str(payload.stopReason),
       })
       break
     case 'stopped':
-      handlers.onDone?.({ requestId: str(payload.request_id) })
+      // Routed to its OWN handler. Previously this called `onDone`, so a
+      // server-side stop (cancelled upstream, budget exhausted) rendered as a
+      // normally-completed answer and the user had no way to tell.
+      // `onStopped` falls back to `onDone` only for callers that predate it,
+      // preserving their existing behaviour rather than silently going quiet.
+      if (handlers.onStopped) {
+        handlers.onStopped({
+          requestId: str(payload.request_id),
+          reason: str(payload.reason),
+        })
+      } else {
+        handlers.onDone?.({ requestId: str(payload.request_id) })
+      }
       break
     case 'error':
       handlers.onError?.({
@@ -517,7 +707,50 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       }
       break
     }
-    // STREAM_* envelopes are emitted by some upstreams and ignored gracefully.
+    case 'memory_recall': {
+      const count = num(payload.count)
+      // The backend only emits this when memory was genuinely injected, so a
+      // 0/absent count means a malformed payload — not "recalled nothing".
+      // Dropping it is better than rendering "recalled 0 memories".
+      if (count !== undefined && count > 0) {
+        handlers.onMemoryRecall?.({
+          count,
+          latencyMs: num(payload.latency_ms),
+          memories: normalizeRecalledMemories(payload.memories),
+        })
+      }
+      break
+    }
+    case 'queued_input': {
+      const messages = Array.isArray(payload.messages)
+        ? payload.messages.filter(
+            (item): item is string =>
+              typeof item === 'string' && item.trim().length > 0,
+          )
+        : []
+      // A delivery with no readable text is a malformed frame, not a delivery.
+      // Reporting it would tell the user their message arrived when we cannot
+      // show which one.
+      if (messages.length > 0) {
+        handlers.onQueuedInput?.({ messages })
+      }
+      break
+    }
+    default: {
+      // STREAM_* envelopes are emitted by some upstreams and are noise here.
+      // Everything else is a backend event this client has not learned yet:
+      // surface it instead of dropping it, so adding an event server-side is
+      // discoverable rather than invisible.
+      //
+      // `event.event` is optional on the wire type, and an unnamed frame is not
+      // a discoverable new event — it is malformed. Reporting it as one would
+      // put `undefined` in the log line this hook exists to make useful.
+      const name = event.event
+      if (name && !name.startsWith('STREAM_')) {
+        handlers.onUnknownEvent?.({ name, payload })
+      }
+      break
+    }
   }
 }
 
@@ -537,7 +770,10 @@ export async function streamChat(
       signal,
       lastEventId,
     },
-    (event) => dispatchEvent(event, handlers),
+    (event) => {
+      if (event.id) handlers.onFrameId?.(event.id)
+      dispatchEvent(event, handlers)
+    },
     (err) => {
       connError = err
     },
@@ -560,7 +796,10 @@ export async function resumeStream(
   await readSseStream(
     `/api/v1/chat/stream/resume/${encodeURIComponent(requestId)}`,
     { method: 'GET', signal, lastEventId },
-    (event) => dispatchEvent(event, handlers),
+    (event) => {
+      if (event.id) handlers.onFrameId?.(event.id)
+      dispatchEvent(event, handlers)
+    },
     (err) => {
       connError = err
     },
@@ -578,7 +817,207 @@ export async function cancelInvocation(requestId: string): Promise<void> {
   })
 }
 
-export async function getThreadMessages(threadId: string): Promise<ChatMessage[]> {
+/**
+ * How much a run is permitted to do. A strictly ordered ladder — each rung
+ * includes everything below it.
+ *
+ * Mirrors the Model Plane's `AutonomyRung`. Sent as a keyword, not a number: a
+ * number that means something else on the other side is a silent mis-grant.
+ */
+export type AutonomyRung = 'read_only' | 'workspace_write' | 'danger_full_access'
+
+/**
+ * Shortest justification the Model Plane accepts.
+ *
+ * Mirrored here so the UI can say so BEFORE the request. Not zero-plus-one on
+ * purpose: 'ok' and 'ja' are non-empty and say nothing, and a person has to read
+ * this to decide.
+ */
+export const MIN_PLAN_JUSTIFICATION_CHARS = 12
+
+export type PlanApprovalResult = {
+  grantedRung: AutonomyRung
+  /** False when the run was not actually in plan mode — an idempotent re-approve. */
+  wasInPlanMode: boolean
+  /**
+   * False when the grant reached the running agent but was not written to the
+   * run. Surfaced rather than swallowed: the next turn would then not carry it,
+   * and the agent would refuse work it was just authorized to do.
+   */
+  persisted: boolean
+}
+
+/**
+ * Approve a planning run: grant it the authority to execute, at a named rung,
+ * with a stated reason.
+ *
+ * Both are required by the Model Plane — an approval with no reason, or a reason
+ * granting nothing, is refused rather than recorded as an empty justification.
+ */
+export async function approvePlan(
+  runId: string,
+  grantedRung: AutonomyRung,
+  justification: string,
+): Promise<PlanApprovalResult> {
+  const raw = await requestJson<Record<string, unknown>>(
+    `/api/v1/agents/runs/${encodeURIComponent(runId)}/plan-approval`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ granted_rung: grantedRung, justification }),
+    },
+  )
+  return {
+    grantedRung: (typeof raw.granted_rung === 'string'
+      ? raw.granted_rung
+      : grantedRung) as AutonomyRung,
+    wasInPlanMode: raw.was_in_plan_mode === true,
+    persisted: raw.persisted !== false,
+  }
+}
+
+/**
+ * What happened to a message sent while a run was still streaming.
+ *
+ * Every arm is distinct because each needs a different response from the UI, and
+ * collapsing them is what made the original behaviour invisible: the send path
+ * simply returned, and the user's words were gone.
+ */
+export type QueuedInputResult =
+  /** Delivered to the running agent at its next tool-round boundary. */
+  | { outcome: 'queued'; pending: number; persisted: boolean }
+  /**
+   * The run finished before the message landed. Not an error — the caller should
+   * send it as an ordinary turn instead, so nothing is lost.
+   */
+  | { outcome: 'run_ended' }
+  /** Refused with a reason worth showing: too many pending, or too long. */
+  | {
+      outcome: 'refused'
+      reason: 'too_many' | 'too_long' | 'other'
+      message: string
+    }
+
+/**
+ * Send a message to a run that is already streaming.
+ *
+ * `spaceRef` and `threadId` are hints, not authority: the BFF strips every
+ * authority field and mints a fresh, content-bound append decision from Control
+ * for this exact message, and the Model Plane appends to the thread its own
+ * stream registration recorded — never to a thread named here.
+ */
+export async function queueInvocationInput(
+  requestId: string,
+  content: string,
+  options: { threadId?: string; spaceRef?: string } = {},
+): Promise<QueuedInputResult> {
+  try {
+    const raw = await requestJson<Record<string, unknown>>(
+      `/api/v1/chat/invocations/${encodeURIComponent(requestId)}/queue`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          content,
+          ...(options.threadId ? { thread_id: options.threadId } : {}),
+          ...(options.spaceRef ? { space_ref: options.spaceRef } : {}),
+        }),
+      },
+    )
+    return {
+      outcome: 'queued',
+      pending: typeof raw.pending === 'number' ? raw.pending : 1,
+      // `false` means the run WILL read the message but the thread does not
+      // record it. Surfaced rather than swallowed: the reply would otherwise
+      // appear in history answering nothing.
+      persisted: raw.persisted !== false,
+    }
+  } catch (error) {
+    if (!(error instanceof ApiError)) {
+      return {
+        outcome: 'refused',
+        reason: 'other',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Kunne ikke levere meldingen.',
+      }
+    }
+    // 404 is the ordinary race, not a failure: the stream ended between the
+    // keystroke and the request.
+    if (error.status === 404) return { outcome: 'run_ended' }
+    if (error.status === 429) {
+      return { outcome: 'refused', reason: 'too_many', message: error.message }
+    }
+    if (error.status === 413) {
+      return { outcome: 'refused', reason: 'too_long', message: error.message }
+    }
+    return { outcome: 'refused', reason: 'other', message: error.message }
+  }
+}
+
+/** One segment of the assembled context window. */
+export type ContextSegment = {
+  kind: string
+  content: string
+  estimatedTokens: number
+}
+
+/**
+ * What is actually in the model's context window for a thread.
+ *
+ * session-core has itemized this all along and the gateway already called it to
+ * BUILD prompts — it was simply never exposed, so the one surface that could
+ * answer "why did it answer from that?" was unreachable from the UI.
+ */
+export type ThreadContext = {
+  threadId: string
+  /** The assembler's own total — reported, not summed from the segments. */
+  estimatedTokens: number
+  /** The budget the segments were assembled against. */
+  budgetTokens: number
+  segments: ContextSegment[]
+}
+
+export async function getThreadContext(
+  threadId: string,
+  runId?: string,
+): Promise<ThreadContext> {
+  const query = runId?.trim()
+    ? `?run_id=${encodeURIComponent(runId.trim())}`
+    : ''
+  const raw = await requestJson<Record<string, unknown>>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/context${query}`,
+  )
+  const segments = Array.isArray(raw?.segments) ? raw.segments : []
+  return {
+    threadId: typeof raw?.thread_id === 'string' ? raw.thread_id : threadId,
+    estimatedTokens:
+      typeof raw?.estimated_tokens === 'number' ? raw.estimated_tokens : 0,
+    budgetTokens:
+      typeof raw?.budget_tokens === 'number' ? raw.budget_tokens : 0,
+    segments: segments.flatMap((entry): ContextSegment[] => {
+      if (!entry || typeof entry !== 'object') return []
+      const segment = entry as Record<string, unknown>
+      const kind = typeof segment.kind === 'string' ? segment.kind : ''
+      // A segment with no kind cannot be labelled, and an unlabelled block of
+      // prompt text in an inspector is worse than omitting it.
+      if (!kind) return []
+      return [
+        {
+          kind,
+          content: typeof segment.content === 'string' ? segment.content : '',
+          estimatedTokens:
+            typeof segment.estimated_tokens === 'number'
+              ? segment.estimated_tokens
+              : 0,
+        },
+      ]
+    }),
+  }
+}
+
+export async function getThreadMessages(
+  threadId: string,
+): Promise<ChatMessage[]> {
   const raw = await requestJson<unknown>(
     `/api/v1/chat/threads/${encodeURIComponent(threadId)}/messages`,
   )

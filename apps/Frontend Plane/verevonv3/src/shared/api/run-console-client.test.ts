@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getRunProofBundle, streamRunEvents } from './run-console-client'
 import { listPlans, listTodos } from './orchestration-client'
@@ -394,5 +395,48 @@ describe('getRunProofBundle', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     expect(await getRunProofBundle('run_1')).toBeNull()
+  })
+})
+
+/**
+ * Contract: every orchestration event model-gateway can emit must have a case in
+ * this client.
+ *
+ * An event with no case is parsed and dropped — the run console simply never
+ * shows that step, the stream still succeeds, and the obvious place to look (the
+ * backend, which is emitting correctly) is the wrong one. The adoption plan
+ * carried a claim that four approval/pause events were unwired; they were not,
+ * but nothing was stopping them from becoming unwired again.
+ *
+ * The list is read from the Rust source rather than duplicated here, so an event
+ * added on the backend is covered automatically. Same technique as the
+ * gateway's `sse_relay_no_allowlist` test and `tool_retry_contract.rs`: the two
+ * sides are separately deployed and neither can import the other.
+ */
+describe('orchestration event coverage', () => {
+  // Resolved from the vitest root (this app's directory) rather than
+  // `import.meta.url`, which is not a file URL under vitest's transform.
+  const GATEWAY_SSE = '../../Model Plane/rust/services/model-gateway/src/sse.rs'
+  const CLIENT = 'src/shared/api/run-console-client.ts'
+
+  it('handles every event name the gateway maps', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { resolve } = await import('node:path')
+    const source = readFileSync(resolve(process.cwd(), GATEWAY_SSE), 'utf8')
+
+    const start = source.indexOf('fn orchestration_event_to_sse')
+    expect(start, 'orchestration_event_to_sse not found — re-point this test').toBeGreaterThan(-1)
+    const body = source.slice(start, source.indexOf('\n}', start))
+    const emitted = [...body.matchAll(/=>\s*\{?\s*"([a-z_]+)"/g)].map((m) => m[1])
+    // A parser that silently matched nothing would make this test vacuous.
+    expect(emitted.length).toBeGreaterThanOrEqual(10)
+
+    const client = readFileSync(resolve(process.cwd(), CLIENT), 'utf8')
+    const unhandled = emitted.filter((name) => !client.includes(`case '${name}':`))
+    expect(
+      unhandled,
+      `these orchestration events are emitted by the gateway and have no case in ` +
+        `run-console-client.ts, so the run console drops them silently: ${unhandled.join(', ')}`,
+    ).toEqual([])
   })
 })

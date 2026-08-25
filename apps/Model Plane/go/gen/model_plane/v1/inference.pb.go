@@ -47,9 +47,27 @@ type InferRequest struct {
 	Tools []*ToolDefinition `protobuf:"bytes,10,rep,name=tools,proto3" json:"tools,omitempty"`
 	// Tool selection policy: "auto" (default), "none", "required", or a specific
 	// tool name. Empty is treated as "auto" when `tools` is non-empty.
-	ToolChoice    string `protobuf:"bytes,11,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ToolChoice string `protobuf:"bytes,11,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
+	// Requested minimum residency floor for this call (e.g. "eu", "norway").
+	// inference-core enforces this deny-by-default at the provider-selection
+	// gate: a provider whose declared residency is weaker than this floor is
+	// skipped, the same way a non-ZDR provider is skipped when `zdr` is true
+	// (see provider/fallback.rs's infer_one_model/stream_one_model). Empty
+	// means no floor -- any configured provider may serve the request.
+	// Accepted tokens match `Residency::parse` ("global", "eu"/"eea", "norway"/
+	// "no"/"sovereign"); an unrecognized token is rejected before any provider
+	// is tried, rather than silently treated as "no requirement".
+	MinResidency string `protobuf:"bytes,12,opt,name=min_residency,json=minResidency,proto3" json:"min_residency,omitempty"`
+	// Extended-thinking budget in tokens for this request. 0 (default) requests
+	// no thinking and is byte-identical to the pre-existing behaviour.
+	//
+	// Advisory, not a guarantee: inference-core forwards it only to models that
+	// actually accept a thinking parameter, because sending one to a model that
+	// does not is a hard provider error, not a silent no-op. A budget set for a
+	// model that cannot think is dropped and the request proceeds normally.
+	ThinkingBudgetTokens int32 `protobuf:"varint,13,opt,name=thinking_budget_tokens,json=thinkingBudgetTokens,proto3" json:"thinking_budget_tokens,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *InferRequest) Reset() {
@@ -157,6 +175,20 @@ func (x *InferRequest) GetToolChoice() string {
 		return x.ToolChoice
 	}
 	return ""
+}
+
+func (x *InferRequest) GetMinResidency() string {
+	if x != nil {
+		return x.MinResidency
+	}
+	return ""
+}
+
+func (x *InferRequest) GetThinkingBudgetTokens() int32 {
+	if x != nil {
+		return x.ThinkingBudgetTokens
+	}
+	return 0
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).
@@ -465,9 +497,22 @@ type InferChunk struct {
 	// Token counts (populated on final chunk).
 	InputTokens int32 `protobuf:"varint,5,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
 	// Number of generated tokens on the final chunk.
-	OutputTokens  int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OutputTokens int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// Why generation stopped (populated on the final chunk): "end_turn",
+	// "max_tokens"/"length" (provider-dependent spelling for hitting the token
+	// ceiling), "stop_sequence", or "stream_incomplete" -- inference-core's own
+	// value, set ONLY when the provider connection broke or closed before any
+	// proper termination signal (message_stop / finish_reason / [DONE]) arrived,
+	// so a silently truncated streamed answer is never indistinguishable from a
+	// normal completion. Empty on every non-final chunk.
+	StopReason string `protobuf:"bytes,7,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"`
+	// Incremental extended-thinking text, when the model produced any. Carried
+	// separately from `delta` so a client can render, hide, or drop the model's
+	// reasoning independently of its answer -- and so reasoning can never be
+	// concatenated into the answer by a client that does not know about it.
+	ReasoningDelta string `protobuf:"bytes,8,opt,name=reasoning_delta,json=reasoningDelta,proto3" json:"reasoning_delta,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *InferChunk) Reset() {
@@ -540,6 +585,20 @@ func (x *InferChunk) GetOutputTokens() int32 {
 		return x.OutputTokens
 	}
 	return 0
+}
+
+func (x *InferChunk) GetStopReason() string {
+	if x != nil {
+		return x.StopReason
+	}
+	return ""
+}
+
+func (x *InferChunk) GetReasoningDelta() string {
+	if x != nil {
+		return x.ReasoningDelta
+	}
+	return ""
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
@@ -4438,7 +4497,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\x9c\x03\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xf7\x03\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -4454,7 +4513,9 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x05tools\x18\n" +
 	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\x12\x1f\n" +
 	"\vtool_choice\x18\v \x01(\tR\n" +
-	"toolChoice\"o\n" +
+	"toolChoice\x12#\n" +
+	"\rmin_residency\x18\f \x01(\tR\fminResidency\x124\n" +
+	"\x16thinking_budget_tokens\x18\r \x01(\x05R\x14thinkingBudgetTokens\"o\n" +
 	"\x0eToolDefinition\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
@@ -4478,7 +4539,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\finput_tokens\x18\x05 \x01(\x05R\vinputTokens\x12#\n" +
 	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\x127\n" +
 	"\n" +
-	"tool_calls\x18\a \x03(\v2\x18.model_plane.v1.ToolCallR\ttoolCalls\"\xbc\x01\n" +
+	"tool_calls\x18\a \x03(\v2\x18.model_plane.v1.ToolCallR\ttoolCalls\"\x86\x02\n" +
 	"\n" +
 	"InferChunk\x12\x1d\n" +
 	"\n" +
@@ -4488,7 +4549,10 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
 	"model_used\x18\x04 \x01(\tR\tmodelUsed\x12!\n" +
 	"\finput_tokens\x18\x05 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\"\xc7\x01\n" +
+	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\x12\x1f\n" +
+	"\vstop_reason\x18\a \x01(\tR\n" +
+	"stopReason\x12'\n" +
+	"\x0freasoning_delta\x18\b \x01(\tR\x0ereasoningDelta\"\xc7\x01\n" +
 	"\x16CreateEmbeddingRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +

@@ -1878,7 +1878,11 @@ async fn update_space_instructions(
             )),
         );
     }
-    let instructions = body.instructions.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let instructions = body
+        .instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     // Character count, not byte length — see orgs/instructions.rs's identical
     // check for why: Convex and the browser both count characters, and a
     // byte-length check would wrongly reject valid Norwegian text.
@@ -2276,7 +2280,11 @@ async fn fetch_org_instructions(state: &AppState, org_id: &str) -> Option<String
 /// ADR-0003's Space layer: the Space owner/manager/editor-authored
 /// instruction, resolved from Convex. `None` for a Space with nothing
 /// authored, or one Convex cannot resolve for this org.
-async fn fetch_space_instructions(state: &AppState, org_id: &str, space_ref: &str) -> Option<String> {
+async fn fetch_space_instructions(
+    state: &AppState,
+    org_id: &str,
+    space_ref: &str,
+) -> Option<String> {
     let value = convex_gateway_call(
         state,
         "query",
@@ -2450,8 +2458,14 @@ pub(crate) async fn inject_mentioned_space_agent_persona(
 ///   unattended run. Only an explicit `"auto"` leaves them untouched.
 /// * `allowed_tools: []` — strips the `tools` feature and any tool specs, so
 ///   the agent answers from its instructions and the conversation alone.
-///   A non-empty list keeps the tool surface on; per-tool filtering belongs
-///   to the model plane and no flow writes a non-empty list yet.
+/// * `allowed_tools: [...]` (non-empty) — narrows `tools` to the specs whose
+///   `name` is in the list; this is a filter, never a grant, so it can only
+///   remove specs the caller already asked for, and if that leaves nothing
+///   the `tools` feature is stripped too, exactly like the empty-list case.
+///   Real authority still lives in the model plane's capability_scopes
+///   (`CapabilityPolicy::evaluate`, checked per tool call regardless of
+///   what this binding says) — this filter only trims what the model is
+///   even offered, it is not the security boundary.
 fn apply_mention_binding_policy(
     object: &mut Map<String, Value>,
     agent: &Value,
@@ -2494,15 +2508,31 @@ fn apply_mention_binding_policy(
         }
     }
 
-    if agent
-        .get("allowed_tools")
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty)
-    {
-        if let Some(features) = object.get_mut("features").and_then(Value::as_array_mut) {
-            features.retain(|feature| feature.as_str() != Some("tools"));
+    if let Some(allowed_tools) = agent.get("allowed_tools").and_then(Value::as_array) {
+        let remaining: Vec<Value> = if allowed_tools.is_empty() {
+            Vec::new()
+        } else {
+            let allowed_names: std::collections::HashSet<&str> =
+                allowed_tools.iter().filter_map(Value::as_str).collect();
+            object
+                .get("tools")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|spec| {
+                    spec.get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| allowed_names.contains(name))
+                })
+                .cloned()
+                .collect()
+        };
+        if remaining.is_empty() {
+            if let Some(features) = object.get_mut("features").and_then(Value::as_array_mut) {
+                features.retain(|feature| feature.as_str() != Some("tools"));
+            }
         }
-        object.insert("tools".to_owned(), json!([]));
+        object.insert("tools".to_owned(), json!(remaining));
     }
 
     Ok(())
@@ -4755,6 +4785,136 @@ mod tests {
         assert_eq!(body["tools"], json!([]), "tool specs must be cleared");
     }
 
+    /// A non-empty `allowedTools` narrows the turn's tool specs to the
+    /// matching names instead of the old all-or-nothing behavior -- it must
+    /// filter, never grant: a spec the request never asked for cannot appear
+    /// just because the binding's allowlist happens to name it.
+    #[tokio::test]
+    async fn a_nonempty_allowlist_narrows_tool_specs_to_matching_names() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (application_state, application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_1",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundestøtte",
+                "status": "active",
+                "triggerModes": ["mention"],
+                "allowedTools": ["web_search"],
+                "approvalMode": "auto",
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:agentPersonaForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"name": "Kundestøtte", "systemPrompt": "Answer briefly."}
+            })))
+            .mount(&application)
+            .await;
+
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+            "plan_mode": true,
+            "features": ["tools", "agentic", "memory"],
+            "tools": [{"name": "web_search"}, {"name": "delete_file"}],
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &application_state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(
+            result.is_ok(),
+            "a mention-enabled binding must be authorized"
+        );
+        assert_eq!(
+            body["tools"],
+            json!([{"name": "web_search"}]),
+            "only the allow-listed spec survives"
+        );
+        assert_eq!(
+            body["features"],
+            json!(["tools", "agentic", "memory"]),
+            "a non-empty surviving tool set keeps the tools feature on"
+        );
+    }
+
+    /// If none of the request's tool specs match the allowlist, narrowing
+    /// leaves nothing -- which must strip the `tools` feature too, exactly
+    /// like an explicit empty `allowedTools`, rather than leaving the
+    /// feature on with no tools behind it.
+    #[tokio::test]
+    async fn a_nonempty_allowlist_matching_nothing_strips_the_tools_feature() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (application_state, application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_1",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundestøtte",
+                "status": "active",
+                "triggerModes": ["mention"],
+                "allowedTools": ["records.read"],
+                "approvalMode": "auto",
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:agentPersonaForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"name": "Kundestøtte", "systemPrompt": "Answer briefly."}
+            })))
+            .mount(&application)
+            .await;
+
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+            "plan_mode": true,
+            "features": ["tools", "agentic", "memory"],
+            "tools": [{"name": "web_search"}],
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &application_state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(
+            result.is_ok(),
+            "a mention-enabled binding must be authorized"
+        );
+        assert_eq!(body["tools"], json!([]), "nothing matched the allowlist");
+        assert_eq!(
+            body["features"],
+            json!(["agentic", "memory"]),
+            "tools feature must be stripped when narrowing leaves nothing"
+        );
+    }
+
     /// A mention naming an agent with no Control membership, or no Application
     /// binding, is rejected rather than silently answered by an unauthorized
     /// agent or silently ignored — either would let a mention grant reach
@@ -5202,7 +5362,9 @@ mod tests {
             .and(wm_body_partial_json(
                 json!({"path": "spaces:instructionsForGateway"}),
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": space_response})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"value": space_response})),
+            )
             .mount(&application)
             .await;
         std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
@@ -5285,7 +5447,10 @@ mod tests {
         std::env::remove_var("APPLICATION_CONVEX_URL");
         std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
-        assert!(result.is_err(), "a non-member's Space read must fail closed");
+        assert!(
+            result.is_err(),
+            "a non-member's Space read must fail closed"
+        );
         assert!(
             body.get("space_instructions").is_none(),
             "no Space content may leak to a caller Control never confirmed as a member"
@@ -5318,11 +5483,9 @@ mod tests {
     #[tokio::test]
     async fn empty_org_id_injects_nothing() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (state, _application, _user_core) = authored_instructions_test_state(
-            json!({"instructions": "Org rule."}),
-            Value::Null,
-        )
-        .await;
+        let (state, _application, _user_core) =
+            authored_instructions_test_state(json!({"instructions": "Org rule."}), Value::Null)
+                .await;
         let mut body = json!({"content": "hello"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "", &mut body).await;

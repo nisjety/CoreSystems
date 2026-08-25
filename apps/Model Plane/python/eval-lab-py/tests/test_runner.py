@@ -11,6 +11,7 @@ from eval_lab import metrics
 from eval_lab.cases import CASES_DIR, load_cases
 from eval_lab.client import parse_sse_lines, _assemble_outcome
 from eval_lab.report import render_report
+from eval_lab.runner import _run_turns
 from eval_lab.types import (
     CaseResult,
     CaseSpec,
@@ -27,8 +28,8 @@ from eval_lab.types import (
 
 def test_baseline_suite_loads_and_validates() -> None:
     cases = load_cases(CASES_DIR)
-    assert len(cases) == 12, f"baseline suite must hold 12 cases, got {len(cases)}"
-    assert len({case.id for case in cases}) == 12
+    assert len(cases) == 14, f"suite must hold 14 cases (12 baseline + 2 compaction), got {len(cases)}"
+    assert len({case.id for case in cases}) == 14
 
 
 def test_deployed_agent_cases_request_the_agentic_feature() -> None:
@@ -55,6 +56,101 @@ def test_vendor_dependent_cases_declare_requirements() -> None:
     assert "knowledge-fixtures" in cases["02-knowledge-crawled-fact"].requires
     assert "image-fixture" in cases["05-cross-modal-retrieval"].requires
     assert "zdr-fixture" in cases["12-zdr-restricted-grounding"].requires
+
+
+def test_compaction_cases_seed_enough_history_to_actually_force_it() -> None:
+    # model-gateway/src/sse.rs's MAX_THREAD_CONTEXT_MESSAGES is 24: compaction
+    # only fires once the thread holds MORE than 24 messages. Each seed turn
+    # contributes 2 (the user turn + its assistant reply), so a case that
+    # doesn't clear 12 seed turns cannot actually force compaction.rs to run
+    # at all — it would pass vacuously on an untouched transcript, exactly
+    # the class of bug `test_deployed_agent_cases_request_the_agentic_feature`
+    # already guards against for a different feature.
+    for case in load_cases(CASES_DIR):
+        if not case.seed_turns:
+            continue
+        assert len(case.seed_turns) >= 12, (
+            f"{case.id}: only {len(case.seed_turns)} seed turns — too few to "
+            "clear model-gateway's 24-message compaction threshold"
+        )
+
+
+# ── multi-turn (compaction eval) runner mechanism ───────────────────────────
+
+
+class _FakeClient:
+    """Records every invoke_stream call; never touches the network. Mirrors
+    only the subset of VerevonClient's signature `_run_turns` actually uses."""
+
+    def __init__(self, outcomes: list[InvokeOutcome]) -> None:
+        self._outcomes = list(outcomes)
+        self.calls: list[dict[str, object]] = []
+
+    def invoke_stream(
+        self,
+        token,  # noqa: ANN001
+        case,  # noqa: ANN001
+        *,
+        idempotency_key=None,  # noqa: ANN001
+        content=None,  # noqa: ANN001
+        session_key=None,  # noqa: ANN001
+    ) -> InvokeOutcome:
+        self.calls.append(
+            {
+                "content": content if content is not None else case.prompt,
+                "idempotency_key": idempotency_key,
+                "session_key": session_key,
+            }
+        )
+        return self._outcomes.pop(0)
+
+
+def test_run_turns_is_a_single_call_when_there_are_no_seed_turns() -> None:
+    fake = _FakeClient([InvokeOutcome(text="pong")])
+    case = spec(prompt="ping")
+    outcome = _run_turns(fake, "tok", case)
+    assert outcome.text == "pong"
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["content"] == "ping"
+    assert fake.calls[0]["session_key"] is None
+
+
+def test_run_turns_sends_every_seed_turn_then_the_recall_question_in_one_session() -> None:
+    fake = _FakeClient(
+        [InvokeOutcome(text="ok 1"), InvokeOutcome(text="ok 2"), InvokeOutcome(text="42750")]
+    )
+    case = spec(
+        prompt="what was the number?",
+        seed_turns=["turn one", "turn two"],
+    )
+    outcome = _run_turns(fake, "tok", case)
+
+    assert outcome.text == "42750", "only the LAST call's outcome is returned/scored"
+    assert [call["content"] for call in fake.calls] == [
+        "turn one",
+        "turn two",
+        "what was the number?",
+    ]
+    session_keys = {call["session_key"] for call in fake.calls}
+    assert len(session_keys) == 1 and None not in session_keys, (
+        "every turn, including the recall question, must share ONE session "
+        f"key so they land in the same thread: {fake.calls}"
+    )
+    idempotency_keys = [call["idempotency_key"] for call in fake.calls]
+    assert len(set(idempotency_keys)) == 3, (
+        f"each turn needs its own idempotency key or the gateway would treat "
+        f"later ones as a replay: {idempotency_keys}"
+    )
+
+
+def test_run_turns_stops_at_the_first_failed_seed_turn() -> None:
+    fake = _FakeClient(
+        [InvokeOutcome(transport_error="boom"), InvokeOutcome(text="never reached")]
+    )
+    case = spec(prompt="recall question", seed_turns=["turn one", "turn two"])
+    outcome = _run_turns(fake, "tok", case)
+    assert outcome.transport_error == "boom"
+    assert len(fake.calls) == 1, "a failed seed turn must not be followed by more calls"
 
 
 # ── SSE parsing ──────────────────────────────────────────────────────────

@@ -3112,7 +3112,6 @@ mod tests {
     use super::*;
     use quarry_core::ids::kinds;
     use quarry_core::lease::{BrowserLease, Capability, ProxyAffinity};
-    use wiremock::MockServer;
 
     fn make_lease() -> BrowserLease {
         BrowserLease {
@@ -3189,31 +3188,40 @@ mod tests {
         assert_eq!(options.timeout_ms, 100);
     }
 
-    #[tokio::test]
-    async fn blocks_loopback_subresources_before_they_reach_the_server() {
-        let target = MockServer::start().await;
-        let driver = ChromiumoxideDriver::new();
-        let session = driver.acquire(&make_lease()).await.expect("acquire");
-        driver
-            .new_tab(&session, None)
-            .await
-            .expect("open blank tab");
-        let page = driver.current_page(&session).await.expect("current page");
-
-        page.set_content(format!("<img src=\"{}/private.png\">", target.uri()))
-            .await
-            .expect("inject page-controlled subresource");
-        tokio::time::sleep(Duration::from_millis(250)).await;
-
+    /// The loopback-egress proof lives in
+    /// `quarry-runtime/tests/browser_egress_boundary.rs`, not here.
+    ///
+    /// A version of it used to sit in this module and **failed on every machine**
+    /// with `"chromium browser navigation requires a pinned egress proxy"`. It
+    /// could not have worked here: `require_configured_egress` needs a real
+    /// `BrowserEgressProxyProvider`, the only real one is
+    /// `quarry_runtime::PinnedBrowserEgressProxy`, and quarry-runtime depends on
+    /// this crate — so importing it would be circular. It also lacked the
+    /// `CHROMIUMOXIDE_TEST=1` guard its sibling browser tests carry, so it ran
+    /// unconditionally and failed without a browser too.
+    ///
+    /// What replaced it is strictly more: a live Chromium refusing a loopback
+    /// navigation behind the real pinned proxy, AND a real TCP request through
+    /// that proxy proving the transport half — the half CDP interception is only
+    /// defence in depth for. Both carry positive controls, because an
+    /// "assert the request log is empty" test also passes when the witness is
+    /// broken.
+    ///
+    /// The decision functions themselves stay unit-tested next to where they
+    /// live: see `navigation::tests` for `guard_page_request_target` and
+    /// `guard_navigation_target` against loopback and RFC1918 targets.
+    #[test]
+    fn loopback_egress_is_proven_in_quarry_runtime() {
+        // A marker, deliberately: the moved coverage is easy to lose track of,
+        // and a comment alone would not survive a file-wide search for the old
+        // test name.
         assert!(
-            target
-                .received_requests()
-                .await
-                .expect("request log")
-                .is_empty(),
-            "the browser must never contact a loopback subresource"
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../quarry-runtime/tests/browser_egress_boundary.rs")
+                .exists(),
+            "the live browser-egress proof has moved or been deleted; it is the \
+             only end-to-end evidence that Chromium cannot reach loopback"
         );
-        driver.release(session).await.expect("release");
     }
 
     /// Integration test that requires a local Chromium/Chrome binary.

@@ -23,9 +23,11 @@
 //!
 //! SECURITY: the `AllowDomains` network policy is not self-enforcing (see
 //! `sandbox.rs`) — a caller using it MUST also run behind a configured egress
-//! proxy or the process gets unrestricted egress. `execute_sandboxed` surfaces
-//! a process is never spawned when the requested local policy requires
-//! isolation but the runtime cannot provide it.
+//! proxy or the process gets unrestricted egress. `execute_sandboxed` fails
+//! closed on both of the ways a policy can go unenforced: the requested local
+//! filesystem isolation being unavailable, and `AllowDomains` with no egress
+//! proxy (`HTTPS_PROXY`/`ALL_PROXY`) configured to actually enforce it — see
+//! `require_requested_isolation`. Neither ever spawns the process.
 
 use crate::policy::MpSandboxPolicy;
 use crate::{sandbox, scrub};
@@ -98,13 +100,48 @@ fn scrub_and_cap(raw: &[u8]) -> String {
     capped
 }
 
+/// Pure check, split out from the environment read so it's unit-testable
+/// without mutating real process env vars (forbidden in this crate — see
+/// `parse_timeout_secs`/`timeout_from_env`). True if any candidate value is
+/// present and non-blank.
+fn any_proxy_var_set(candidates: &[Option<&str>]) -> bool {
+    candidates
+        .iter()
+        .any(|value| value.is_some_and(|v| !v.trim().is_empty()))
+}
+
+/// Whether an egress proxy is configured for this process, by the same
+/// convention curl/most HTTP clients honor: `HTTPS_PROXY` or `ALL_PROXY`,
+/// either case.
+fn egress_proxy_configured() -> bool {
+    any_proxy_var_set(&[
+        std::env::var("HTTPS_PROXY").ok().as_deref(),
+        std::env::var("https_proxy").ok().as_deref(),
+        std::env::var("ALL_PROXY").ok().as_deref(),
+        std::env::var("all_proxy").ok().as_deref(),
+    ])
+}
+
 /// A model-authored execution policy must never silently become a host command
 /// just because the local sandbox substrate is unavailable. `DangerFullAccess`
 /// is the explicit operator-authored escape hatch; `External` delegates its
 /// isolation contract to a separately attested provisioner and is therefore not
 /// a local Bubblewrap request. Every other policy names local filesystem and/or
 /// egress restrictions and has to fail closed when they cannot be enforced.
-fn require_requested_isolation(policy: &MpSandboxPolicy, sandboxed: bool) -> std::io::Result<()> {
+///
+/// `AllowDomains` gets its own check, not just `sandboxed`: `build_bwrap_argv`
+/// deliberately keeps the network namespace up for it (the allowlist lives at
+/// an external egress proxy, not in bwrap itself — see `sandbox.rs`'s own
+/// SECURITY note, tracked as `capability-ownership-matrix.md` §G1's recorded
+/// requirement). A process can come back `sandboxed: true` — real filesystem
+/// isolation — while still having FULLY UNRESTRICTED network egress, because
+/// bwrap alone cannot enforce a domain allowlist. Without this check, that gap
+/// was silent: `sandboxed` reported success while the allowlist was a no-op.
+fn require_requested_isolation(
+    policy: &MpSandboxPolicy,
+    sandboxed: bool,
+    egress_proxy_configured: bool,
+) -> std::io::Result<()> {
     let requires_local_isolation = matches!(
         policy,
         MpSandboxPolicy::ReadOnly { .. } | MpSandboxPolicy::WorkspaceWrite { .. }
@@ -113,6 +150,17 @@ fn require_requested_isolation(policy: &MpSandboxPolicy, sandboxed: bool) -> std
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "requested sandbox isolation is unavailable; refusing unsandboxed execution",
+        ));
+    }
+    if matches!(
+        policy.network(),
+        crate::policy::MpNetworkPolicy::AllowDomains(_)
+    ) && !egress_proxy_configured
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "AllowDomains egress policy requires an egress proxy (HTTPS_PROXY/ALL_PROXY); \
+             none is configured, refusing to grant unrestricted network egress",
         ));
     }
     Ok(())
@@ -159,7 +207,7 @@ async fn execute_sandboxed_with_timeout(
     timeout: Duration,
 ) -> std::io::Result<ExecOutcome> {
     let cmd = sandbox::wrap_command(policy, program, args);
-    require_requested_isolation(policy, cmd.sandboxed)?;
+    require_requested_isolation(policy, cmd.sandboxed, egress_proxy_configured())?;
     spawn_capture(&cmd, None, None, timeout).await
 }
 
@@ -196,7 +244,7 @@ pub async fn execute_sandboxed_in_dir(
         env: sandbox::SandboxEnv::Only(env),
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
-    require_requested_isolation(policy, cmd.sandboxed)?;
+    require_requested_isolation(policy, cmd.sandboxed, egress_proxy_configured())?;
     spawn_capture(&cmd, Some(cwd), Some(env), timeout).await
 }
 
@@ -262,18 +310,95 @@ mod tests {
                 network: crate::policy::MpNetworkPolicy::Disabled,
             },
         ] {
-            let err = require_requested_isolation(&policy, false)
+            let err = require_requested_isolation(&policy, false, false)
                 .expect_err("restricted policy must never run as a host command");
             assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         }
-        assert!(require_requested_isolation(&MpSandboxPolicy::DangerFullAccess, false).is_ok());
+        assert!(
+            require_requested_isolation(&MpSandboxPolicy::DangerFullAccess, false, false).is_ok()
+        );
         assert!(require_requested_isolation(
             &MpSandboxPolicy::External {
                 network: crate::policy::MpNetworkPolicy::Disabled,
             },
             false,
+            false,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn allow_domains_without_an_egress_proxy_fails_closed() {
+        // `sandboxed: true` alone is not enough: bwrap keeps the network
+        // namespace up for `AllowDomains` (the allowlist lives at an external
+        // proxy, not in bwrap), so without a configured proxy this policy
+        // would silently grant unrestricted egress despite reporting real
+        // filesystem isolation. Both ReadOnly and WorkspaceWrite carry it.
+        for policy in [
+            MpSandboxPolicy::ReadOnly {
+                network: crate::policy::MpNetworkPolicy::AllowDomains(vec![
+                    "api.openai.com".to_owned()
+                ]),
+            },
+            MpSandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network: crate::policy::MpNetworkPolicy::AllowDomains(vec![
+                    "api.openai.com".to_owned()
+                ]),
+            },
+        ] {
+            let err = require_requested_isolation(&policy, true, false).expect_err(
+                "AllowDomains without a configured proxy must refuse, even though sandboxed=true",
+            );
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+            assert!(err.to_string().contains("egress proxy"));
+        }
+    }
+
+    #[test]
+    fn allow_domains_with_an_egress_proxy_configured_is_accepted() {
+        let policy = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![],
+            network: crate::policy::MpNetworkPolicy::AllowDomains(
+                vec!["api.openai.com".to_owned()],
+            ),
+        };
+        assert!(require_requested_isolation(&policy, true, true).is_ok());
+    }
+
+    #[test]
+    fn a_disabled_or_allow_all_network_policy_never_needs_a_proxy() {
+        // The proxy requirement is specific to AllowDomains -- Disabled is
+        // enforced by bwrap itself (`--unshare-net`), and AllowAll never
+        // claimed a restriction a proxy would need to back up.
+        assert!(require_requested_isolation(
+            &MpSandboxPolicy::ReadOnly {
+                network: crate::policy::MpNetworkPolicy::Disabled,
+            },
+            true,
+            false,
+        )
+        .is_ok());
+        assert!(require_requested_isolation(
+            &MpSandboxPolicy::ReadOnly {
+                network: crate::policy::MpNetworkPolicy::AllowAll,
+            },
+            true,
+            false,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn any_proxy_var_set_is_true_only_for_a_non_blank_candidate() {
+        assert!(!any_proxy_var_set(&[None, None, None, None]));
+        assert!(!any_proxy_var_set(&[Some(""), Some("   "), None, None]));
+        assert!(any_proxy_var_set(&[
+            None,
+            None,
+            Some("http://proxy:3128"),
+            None
+        ]));
     }
 
     // DangerFullAccess => wrap_command returns a transparent passthrough, so

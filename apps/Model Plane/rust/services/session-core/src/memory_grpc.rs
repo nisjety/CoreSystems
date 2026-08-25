@@ -18,7 +18,10 @@ use tonic::{Request, Response, Status};
 
 const MEMORY_READ_SCOPE: &str = "memory:read";
 const MEMORY_WRITE_SCOPE: &str = "memory:write";
-const LETTA_NOT_CONFIGURED: &str = "DEGRADED_LETTA_NOT_CONFIGURED";
+/// Reported when this process has no letta endpoint at all. Shared with
+/// [`crate::memory_erasure`] so the two surfaces cannot drift into two
+/// different spellings of the same posture.
+pub(crate) const LETTA_NOT_CONFIGURED: &str = "DEGRADED_LETTA_NOT_CONFIGURED";
 
 #[tonic::async_trait]
 trait ThreadOwnership: Send + Sync {
@@ -268,6 +271,7 @@ impl MemoryService for MemoryGrpc {
                     .search_detailed(
                         req.org_id.trim(),
                         req.thread_id.trim(),
+                        &owner_user_id,
                         &req.query,
                         &topic_filter,
                         remaining,

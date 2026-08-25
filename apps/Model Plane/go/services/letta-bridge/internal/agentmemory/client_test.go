@@ -65,7 +65,7 @@ func TestSearch_MapsResultsToHits(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(Config{BaseURL: srv.URL})
-	hits, err := c.Search(context.Background(), "org1", "thread1", "brown", []string{"MEMORY"}, time.Time{}, 5)
+	hits, err := c.Search(context.Background(), "org1", "thread1", "", "brown", []string{"MEMORY"}, time.Time{}, 5)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}

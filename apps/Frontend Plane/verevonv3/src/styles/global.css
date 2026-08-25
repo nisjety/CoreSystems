@@ -23964,6 +23964,47 @@ textarea:focus-visible {
   flex-shrink: 0;
 }
 
+/* Memory-recall indicator: memory was genuinely used on this turn. Neutral
+   informational tone on purpose — recall is normal and good, unlike the
+   low-confidence notice above which warns. Shares that notice's pill geometry
+   so the two read as one family when both appear. */
+.verevon-chat-memory-recall-notice {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  border: 1px solid #d7e2f0;
+  border-radius: 999px;
+  background: #f4f8fc;
+  padding: 4px 10px;
+  color: #3f5c7d;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+/* Truncated/incomplete answer. Warning tone — the reply LOOKED finished and
+   was not, so this must read as something to act on, not as metadata. */
+.verevon-chat-truncated-notice {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  border: 1px solid #f0e4d0;
+  border-radius: 999px;
+  background: #fdf8f0;
+  padding: 4px 10px;
+  color: #8a5f22;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.verevon-chat-memory-recall-notice svg,
+.verevon-chat-truncated-notice svg {
+  flex-shrink: 0;
+}
+
 /* Follow-up suggestion chips (ChatGPT-style "what to ask next"), rendered
    below a completed answer. Reuses the same token set as
    `.verevon-chat-metrics-badge__panel` (no `.dark` overrides — the transcript
@@ -41988,4 +42029,545 @@ textarea:focus-visible {
   .verevon-space-view { padding: 22px 16px; }
   .verevon-space-view__heading { gap: 12px; }
   .verevon-space-fresh-conversation { min-height: 260px; padding: 24px 16px; }
+}
+
+/* Run console — plan and todo list.
+   Inherits .verevon-run-panel's frame; only the list needs styling. State is a
+   monospace badge so provider enum names (DRAFT / EXECUTING / COMPLETED) line
+   up down the column and stay scannable at a glance. */
+.verevon-run-plan__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-run-plan__list + .verevon-run-plan__list {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--verevon-border);
+}
+
+.verevon-run-plan__item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.verevon-run-plan__state {
+  flex: 0 0 auto;
+  min-width: 88px;
+  font-family: var(--verevon-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-run-plan__summary {
+  flex: 1 1 auto;
+  color: var(--verevon-text);
+  overflow-wrap: anywhere;
+}
+
+.verevon-run-plan__empty {
+  margin: 0;
+  font-size: 13px;
+  color: var(--verevon-text-muted);
+}
+
+/* Chat steps panel — tool-call evidence.
+   The intent badge and truncation flag live in the collapsed header so a step's
+   outcome is readable without expanding it. `data-intent` is a hook for future
+   per-intent styling; the icon already differentiates them today. */
+.verevon-chat-steps-tools {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--verevon-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.verevon-chat-steps-tools > h3 {
+  margin: 0 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-tool-call__count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--verevon-text-muted);
+  font-style: normal;
+}
+
+/* Truncation is a warning, not a neutral count: the model did not see all of it. */
+.verevon-chat-tool-call__truncated {
+  font-size: 11px;
+  font-style: normal;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--verevon-warning-text, #8a5300);
+  background: var(--verevon-warning-surface, rgb(255 196 87 / 18%));
+}
+
+/* Chat steps panel — context inspector.
+   Collapsed by default: diagnostic, not part of reading an answer. The token
+   figures are tabular so segment sizes line up down the column. */
+.verevon-chat-context-window {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--verevon-border);
+}
+
+.verevon-chat-context-window__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--verevon-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.verevon-chat-context-window__toggle > span {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.verevon-chat-context-window__toggle > em {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-context-window__note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-context-window__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-chat-context-window__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.verevon-chat-context-window__kind {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--verevon-text);
+}
+
+.verevon-chat-context-window__tokens {
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--verevon-text-muted);
+}
+
+/* Capped and scrollable: a system prompt or grounding block can be thousands of
+   characters, and letting one segment push the rest off-screen defeats an
+   inspector whose job is showing the whole window. */
+.verevon-chat-context-window__content {
+  margin: 4px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--verevon-surface-muted, rgb(20 21 24 / 4%));
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Agent run console — browser-observation screenshot.
+   Capped and object-fit so a full-page capture (which can be very tall) becomes a
+   readable thumbnail in the timeline instead of pushing every later step off
+   screen. The anchor opens the full image. */
+.verevon-run-timeline__shot {
+  display: block;
+  margin-top: 8px;
+  max-width: 320px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.verevon-run-timeline__shot:focus-visible {
+  outline: 2px solid var(--verevon-accent, #2563eb);
+  outline-offset: 2px;
+}
+
+.verevon-run-timeline__shot img {
+  display: block;
+  width: 100%;
+  max-height: 200px;
+  object-fit: cover;
+  object-position: top center;
+}
+
+.verevon-run-timeline__shot-error {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+}
+
+/* Unified diff — shared by tool-output patches and artifact revision diffs.
+   Monospace with a fixed sigil column so +/- lines align; colour is a tint plus
+   the sigil, never colour alone (the sigil carries the meaning for anyone who
+   cannot distinguish the tints). */
+.verevon-chat-diff {
+  font-family: var(--verevon-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.verevon-chat-diff__stat {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-chat-diff__added {
+  color: var(--verevon-diff-added-text, #1a7f37);
+}
+
+.verevon-chat-diff__removed {
+  color: var(--verevon-diff-removed-text, #b3261e);
+}
+
+.verevon-chat-diff__truncated {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-diff__hunk {
+  margin-top: 8px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.verevon-chat-diff__hunk-head {
+  padding: 4px 8px;
+  background: var(--verevon-surface-muted, rgb(20 21 24 / 4%));
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+}
+
+.verevon-chat-diff__line {
+  display: flex;
+  gap: 0;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-diff__sigil {
+  flex: 0 0 auto;
+  width: 1.25em;
+  user-select: none;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-diff__text {
+  flex: 1 1 auto;
+}
+
+.verevon-chat-diff__line--added {
+  background: var(--verevon-diff-added-surface, rgb(26 127 55 / 10%));
+}
+
+.verevon-chat-diff__line--removed {
+  background: var(--verevon-diff-removed-surface, rgb(179 38 30 / 10%));
+}
+
+.dark .verevon-chat-diff__added {
+  color: #56d364;
+}
+
+.dark .verevon-chat-diff__removed {
+  color: #ff7b72;
+}
+
+/* Chat — recalled-memory disclosure.
+   The collapsed row keeps the original notice styling; the expansion is a list
+   of what was actually recalled. The origin badge is tinted AND labelled, never
+   tinted alone: "you asked me to remember this" vs "I inferred this" is the
+   distinction that decides whether to trust a remembered fact, so it must not
+   depend on telling two colours apart. */
+.verevon-chat-memory-recall__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-chat-memory-recall__hint {
+  margin-left: auto;
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.verevon-chat-memory-recall__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  list-style: none;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface-muted, rgb(20 21 24 / 3%));
+}
+
+.verevon-chat-memory-recall__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.verevon-chat-memory-recall__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--verevon-text);
+}
+
+.verevon-chat-memory-recall__badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  border: 1px solid var(--verevon-border);
+  color: var(--verevon-text-muted);
+}
+
+/* Stated is the only origin the user themselves authored, so it is the only one
+   given an affirmative tint. Inferred and unrecorded stay neutral — a confident
+   colour on a guess is exactly the wrong signal. */
+.verevon-chat-memory-recall__badge[data-origin='stated'] {
+  color: var(--verevon-diff-added-text, #1a7f37);
+  border-color: color-mix(in srgb, var(--verevon-diff-added-text, #1a7f37) 35%, transparent);
+}
+
+.verevon-chat-memory-recall__scope {
+  font-size: 10px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-memory-recall__preview {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--verevon-text);
+  overflow-wrap: anywhere;
+}
+
+/* Chat — messages the user sent WHILE the agent was working.
+   Every state is labelled in words as well as tinted: "venter", "levert til
+   agenten" and "ikke levert" are the difference between a message the agent has
+   and one it never will, and that must not depend on telling two shades apart.
+   The strip sits under the in-progress answer, so it reads as the newest thing
+   the user did rather than as part of the reply. */
+.verevon-chat-queued {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-chat-queued-item {
+  padding: 8px 10px;
+  border: 1px dashed var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface-muted, rgb(20 21 24 / 3%));
+}
+
+/* Delivered is settled: a solid edge, because the agent has it and there is
+   nothing left in flight. */
+.verevon-chat-queued-item[data-state='delivered'] {
+  border-style: solid;
+}
+
+/* Refused is the one state that costs the user something — it is the only one
+   given a warning colour. */
+.verevon-chat-queued-item[data-state='refused'] {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--verevon-diff-removed-text, #cf222e) 45%, transparent);
+}
+
+.verevon-chat-queued-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--verevon-text);
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-queued-state {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-queued-item[data-state='refused'] .verevon-chat-queued-state {
+  color: var(--verevon-diff-removed-text, #cf222e);
+}
+
+.verevon-chat-queued-note {
+  font-style: italic;
+}
+
+/* Chat — the plan-approval control.
+   A plan-mode turn described what it would do; this is where a person decides
+   how much of it the agent may actually do, and says why. The rung buttons are
+   labelled in plain words rather than by the ladder's internal names, because
+   the person approving is choosing a consequence, not a constant. */
+.verevon-chat-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface-muted, rgb(20 21 24 / 3%));
+}
+
+.verevon-chat-plan__lead {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--verevon-text);
+}
+
+.verevon-chat-plan__rungs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-chat-plan__rung {
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+/* The chosen rung is marked by border AND text weight, not by fill alone: this
+   is a consequential choice and it must read as chosen at a glance. */
+.verevon-chat-plan__rung[data-selected='true'] {
+  font-weight: 600;
+  color: var(--verevon-text);
+  border-color: var(--verevon-text-muted);
+}
+
+.verevon-chat-plan__reason {
+  width: 100%;
+  padding: 8px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--verevon-text);
+  background: var(--verevon-surface);
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  resize: vertical;
+}
+
+.verevon-chat-plan__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.verevon-chat-plan__hint {
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-plan__error {
+  font-size: 11px;
+  color: var(--verevon-diff-removed-text, #cf222e);
+}
+
+.verevon-chat-plan__approve {
+  margin-left: auto;
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  cursor: pointer;
+}
+
+.verevon-chat-plan__approve:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* After the grant, the control collapses to what was granted. Kept visible
+   rather than removed: "the agent may now do X" is the fact a reader needs on
+   the turn where the decision was made. */
+.verevon-chat-plan-granted {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--verevon-text-muted);
 }

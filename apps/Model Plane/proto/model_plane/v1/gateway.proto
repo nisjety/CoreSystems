@@ -8,6 +8,8 @@ import "google/protobuf/struct.proto";
 // ToolDefinition (name/description/parameters_json) — reused by ListMcpTools so
 // the governed agent loop (execution-core) can offer registered MCP tools.
 import "model_plane/v1/inference.proto";
+// AutonomyRung — the shared autonomy ladder a plan approval grants.
+import "model_plane/v1/runs.proto";
 
 // ModelGateway — public boundary for HTTP/gRPC/SSE/WebSocket.
 // Owns: auth verification, request normalization, rate limiting, usage envelopes.
@@ -334,6 +336,13 @@ message InvokeChunk {
   // Token counts (populated on final chunk).
   int32 input_tokens = 5;
   int32 output_tokens = 6;
+
+  // Why generation stopped (populated on the final chunk): "end_turn",
+  // "max_tokens"/"length", "stop_sequence", or "stream_incomplete" when the
+  // provider connection broke before any proper termination signal arrived —
+  // see model_plane.v1.InferChunk's field doc for the full contract this
+  // mirrors. Empty on every non-final chunk.
+  string stop_reason = 7;
 }
 
 message HealthRequest {}
@@ -631,6 +640,19 @@ message ExitPlanModeRequest {
   string org_id = 2;
   string run_id = 3;
   string session_id = 4;
+
+  // The rung being granted. Must be strictly WIDER than the rung the run is
+  // leaving, or the request is not an escalation and is refused. Leaving plan
+  // mode without naming what is granted is how a run silently becomes
+  // unbounded.
+  AutonomyRung granted_rung = 5;
+
+  // Why this grant is being made. Required, and required to be substantive: an
+  // approval with no reason, or a reason granting nothing, is a malformed ask
+  // and is refused rather than recorded as an empty justification. An oversized
+  // one is refused too — never silently truncated, because a truncated reason
+  // reads as a complete one.
+  string justification = 6;
 }
 
 message ExitPlanModeResponse {

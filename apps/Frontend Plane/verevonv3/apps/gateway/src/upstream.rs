@@ -2606,3 +2606,159 @@ mod tests {
         assert_eq!(browser_origin(&headers), None);
     }
 }
+
+/// Largest artifact this gateway will relay to a browser.
+///
+/// A screenshot is tens to hundreds of KB; a full-page one can be a few MB. The
+/// cap exists so a browser-run artifact of unexpected size cannot be pulled
+/// through the SPA's origin in one response.
+const ARTIFACT_RELAY_MAX_BYTES: usize = 12 * 1024 * 1024;
+
+/// Content types this gateway will let a browser render from the SPA's OWN
+/// origin.
+///
+/// # Why an allowlist and not a passthrough
+///
+/// quarry-edge reports the artifact's real type now, and its artifact kinds
+/// include `text/html` (a captured page) and `application/json`. Relaying
+/// `text/html` from the SPA's origin would make any stored page a same-origin
+/// document — a stored-XSS vector with the user's session attached, reachable by
+/// anyone who can get a page captured. So renderable types are allowlisted and
+/// everything else is downgraded to an opaque attachment: still retrievable,
+/// never executable.
+const RENDERABLE_ARTIFACT_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp"];
+
+/// Relay an artifact's BYTES from an upstream plane to the browser.
+///
+/// The caller supplies a token minted for the upstream's audience **on behalf of
+/// the end user**, never a service credential: the upstream (Quarry-v2) decides
+/// access from the token's own org claim, so a service identity would collapse
+/// every tenant's artifacts into one readable set.
+pub(crate) async fn proxy_artifact_bytes(
+    state: &AppState,
+    url: &str,
+    bearer_token: Option<&str>,
+    user_id: &str,
+) -> Response {
+    let mut req = state.client.get(url).header("x-user-id", user_id);
+    if let Some(token) = bearer_token {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = match send_with_retry(req).await {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::warn!(error = %err, %url, "artifact relay upstream request failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(error("artifact_unavailable", "Could not load the artifact.")),
+            )
+                .into_response();
+        }
+    };
+
+    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    // The upstream's type, before any decision about whether to honour it.
+    let upstream_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().unwrap_or(value).trim().to_owned())
+        .unwrap_or_default();
+
+    if !status.is_success() {
+        // Do not relay an upstream error BODY: it is the other plane's prose and
+        // may name internal paths. The status is the useful part.
+        return (
+            status,
+            Json(error("artifact_unavailable", "Could not load the artifact.")),
+        )
+            .into_response();
+    }
+
+    let bytes = match resp.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(error = %err, %url, "artifact relay body read failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(error("artifact_unavailable", "Could not load the artifact.")),
+            )
+                .into_response();
+        }
+    };
+    if bytes.len() > ARTIFACT_RELAY_MAX_BYTES {
+        tracing::warn!(
+            bytes = bytes.len(),
+            cap = ARTIFACT_RELAY_MAX_BYTES,
+            "artifact exceeds the relay cap"
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(error("artifact_too_large", "That artifact is too large to display.")),
+        )
+            .into_response();
+    }
+
+    let renderable = RENDERABLE_ARTIFACT_TYPES.contains(&upstream_type.as_str());
+    let (content_type, disposition) = if renderable {
+        (upstream_type.clone(), "inline")
+    } else {
+        // Retrievable, never executable from this origin.
+        ("application/octet-stream".to_owned(), "attachment")
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        // Belt and braces with the allowlist: the declared type is now accurate,
+        // and the browser is still forbidden from guessing a different one.
+        .header("x-content-type-options", "nosniff")
+        .header("content-disposition", disposition)
+        // Private: an artifact is tenant-scoped, so no shared cache may keep it.
+        .header(reqwest::header::CACHE_CONTROL, "private, max-age=30")
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(error("artifact_unavailable", "Could not load the artifact.")),
+            )
+                .into_response()
+        })
+}
+
+#[cfg(test)]
+mod artifact_relay_tests {
+    use super::{RENDERABLE_ARTIFACT_TYPES, ARTIFACT_RELAY_MAX_BYTES};
+
+    /// The guard that matters: a captured HTML page must never be renderable
+    /// from the SPA's own origin, because that is stored XSS with the user's
+    /// session attached.
+    #[test]
+    fn html_and_json_are_never_renderable() {
+        for hostile in ["text/html", "application/xhtml+xml", "image/svg+xml", "application/json"] {
+            assert!(
+                !RENDERABLE_ARTIFACT_TYPES.contains(&hostile),
+                "{hostile} must not be served inline from this origin"
+            );
+        }
+    }
+
+    /// SVG deserves its own note: it IS an image, and it can carry script. It is
+    /// deliberately absent above; this pins that decision so a future "add the
+    /// other image types" change cannot quietly include it.
+    #[test]
+    fn svg_is_excluded_on_purpose() {
+        assert!(!RENDERABLE_ARTIFACT_TYPES.contains(&"image/svg+xml"));
+    }
+
+    #[test]
+    fn screenshots_are_renderable() {
+        assert!(RENDERABLE_ARTIFACT_TYPES.contains(&"image/png"));
+    }
+
+    #[test]
+    fn the_relay_cap_is_sane_for_a_full_page_screenshot() {
+        assert!(ARTIFACT_RELAY_MAX_BYTES >= 4 * 1024 * 1024);
+    }
+}

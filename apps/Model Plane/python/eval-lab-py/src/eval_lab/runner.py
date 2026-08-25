@@ -8,11 +8,12 @@ harness (docs/EVAL_HARNESS_MVP.md).
 from __future__ import annotations
 
 import os
+import uuid
 
 from eval_lab import metrics
 from eval_lab.client import VerevonClient
 from eval_lab.judge import make_judge
-from eval_lab.types import CaseResult, CaseSpec, MetricOutcome
+from eval_lab.types import CaseResult, CaseSpec, InvokeOutcome, MetricOutcome
 
 # Fixture org registry: org_fixture key → (org_id, user_id). The eval orgs
 # are dedicated, seeded tenants — never real customer orgs. Overridable via
@@ -36,6 +37,41 @@ def available_capabilities() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _run_turns(client: VerevonClient, token: str, case: CaseSpec) -> InvokeOutcome:
+    """Send `case.seed_turns` (if any) then `case.prompt`, all in one session,
+    and return only the LAST turn's outcome -- that is the one every metric
+    scores. A one-shot case (`seed_turns` empty) is exactly today's single
+    call, byte-for-byte, so nothing about the existing 12 baseline cases
+    changes.
+
+    A fresh session key per RUN (not per case id) so repeated eval runs of
+    the same compaction case do not collide onto one durable thread.
+    """
+    if not case.seed_turns:
+        return client.invoke_stream(token, case, idempotency_key=f"eval:{case.id}")
+
+    session_key = f"eval:{case.id}:{uuid.uuid4().hex[:12]}"
+    for index, turn in enumerate(case.seed_turns):
+        seed_outcome = client.invoke_stream(
+            token,
+            case,
+            content=turn,
+            session_key=session_key,
+            idempotency_key=f"{session_key}:seed:{index}",
+        )
+        if seed_outcome.transport_error:
+            # Fail fast and honestly: a seed turn that never reached the
+            # gateway means the history this case depends on was never
+            # built, so scoring the recall question would test nothing.
+            return seed_outcome
+    return client.invoke_stream(
+        token,
+        case,
+        session_key=session_key,
+        idempotency_key=f"{session_key}:recall",
+    )
+
+
 def run_case(client: VerevonClient, case: CaseSpec) -> CaseResult:
     missing = [r for r in case.requires if r not in available_capabilities()]
     if missing:
@@ -56,7 +92,7 @@ def run_case(client: VerevonClient, case: CaseSpec) -> CaseResult:
         )
 
     token = client.mint_token(*org)
-    outcome = client.invoke_stream(token, case, idempotency_key=f"eval:{case.id}")
+    outcome = _run_turns(client, token, case)
     if outcome.transport_error:
         return CaseResult(
             case_id=case.id,

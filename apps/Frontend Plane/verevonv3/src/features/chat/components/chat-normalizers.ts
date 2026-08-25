@@ -8,6 +8,7 @@ import {
 import {
   type ChatAction,
   type ChatMessage,
+  type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
   blobToDataUrl,
@@ -94,6 +95,9 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       artifacts: turn.artifacts,
       files: turn.files,
       grounding: turn.grounding,
+      memoryRecallCount: turn.memoryRecallCount,
+      recalledMemories: turn.recalledMemories,
+      stopReason: turn.stopReason,
       tools: turn.tools,
       attachments: turn.attachments,
     }))
@@ -135,6 +139,9 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     artifacts: (turn.artifacts ?? []).filter(isChatArtifact),
     files: (turn.files ?? []).filter(isGeneratedFile),
     grounding: isChatKnowledgeGrounding(turn.grounding) ? turn.grounding : undefined,
+    memoryRecallCount: turn.memoryRecallCount,
+    recalledMemories: (turn.recalledMemories ?? []).filter(isRecalledMemory),
+    stopReason: turn.stopReason,
     tools: (turn.tools ?? []).filter(isComposerToolId),
     attachments: (turn.attachments ?? []).filter(isComposerAttachment),
   }
@@ -220,6 +227,13 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
       artifacts: metadataArray(serverTurn.artifacts, cachedTurn.artifacts),
       files: metadataArray(serverTurn.files, cachedTurn.files),
       grounding: serverTurn.grounding ?? cachedTurn.grounding,
+      // Both are session-derived: the server's persisted message carries
+      // neither, so without falling back to the cache a thread refresh would
+      // drop the recall chip and — worse — the truncation warning, turning a
+      // "may be cut off" answer into one that looks complete.
+      memoryRecallCount: serverTurn.memoryRecallCount ?? cachedTurn.memoryRecallCount,
+      recalledMemories: metadataArray(serverTurn.recalledMemories, cachedTurn.recalledMemories),
+      stopReason: serverTurn.stopReason ?? cachedTurn.stopReason,
       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,
       attachments: serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
     }
@@ -294,6 +308,27 @@ export function hasCachedTurnMetadata(turn: ChatTurn): boolean {
 
 export function isComposerToolId(value: string): value is ComposerToolId {
   return value === 'image' || value === 'reason' || value === 'research' || value === 'search'
+}
+
+/**
+ * A persisted recalled-memory row, validated on the way back in.
+ *
+ * `origin` is re-narrowed here rather than trusted: a stored transcript may have
+ * been written by a build whose vocabulary was wider, and an unrecognised value
+ * must read as `unrecorded` rather than as `stated` — the same rule the wire
+ * normalizer applies, for the same reason.
+ */
+export function isRecalledMemory(value: unknown): value is RecalledMemory {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return (
+    typeof record.memoryId === 'string' &&
+    record.memoryId.length > 0 &&
+    typeof record.label === 'string' &&
+    typeof record.preview === 'string' &&
+    (record.role === 'recall' || record.role === 'inject') &&
+    (record.origin === 'stated' || record.origin === 'inferred' || record.origin === 'unrecorded')
+  )
 }
 
 export function isCitation(value: unknown): value is Citation {

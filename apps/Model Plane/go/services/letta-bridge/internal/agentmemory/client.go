@@ -144,7 +144,7 @@ func (c *Client) Put(ctx context.Context, orgID, threadID, topic, memoryID, user
 
 // Search runs a semantic search over long-term memory, scoped to the org
 // (namespace) and optionally the thread and topics.
-func (c *Client) Search(ctx context.Context, orgID, threadID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error) {
+func (c *Client) Search(ctx context.Context, orgID, threadID, userID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error) {
 	body := searchRequest{
 		Text:       query,
 		Namespace:  &eqFilter{Eq: orgID},
@@ -155,6 +155,24 @@ func (c *Client) Search(ctx context.Context, orgID, threadID, query string, topi
 	}
 	if threadID != "" {
 		body.SessionID = &eqFilter{Eq: threadID}
+	}
+	if userID != "" {
+		// NARROWER than the rule pgstore and session-core apply.
+		//
+		// The correct rule is "memories owned by this user OR owned by nobody"
+		// (org/workspace/policy scope). The upstream filter is equality-only, and
+		// the search response carries no `user_id`, so neither the request nor a
+		// client-side pass can express the OR.
+		//
+		// So this narrows: only the user's own memories come back, and org-level
+		// ones are lost from the semantic tier. That is the correct direction to
+		// fail for a scoping filter -- under-recall is a quality regression,
+		// over-recall would be another user's private memory in someone's chat --
+		// but it is a real gap, and it is a PROMOTION BLOCKER for this backend
+		// (plan item 2.3): it cannot replace pgstore until the OR is
+		// expressible, either by an upstream filter that supports it or by the
+		// response carrying `user_id` so this client can filter.
+		body.UserID = &eqFilter{Eq: userID}
 	}
 	if len(topicFilter) > 0 {
 		body.Topics = &anyFilter{Any: topicFilter}

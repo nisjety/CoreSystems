@@ -1,5 +1,7 @@
 //! Permission policy evaluation for tool execution.
 
+use mp_contracts::model_plane::v1::AutonomyRung;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
     Auto,
@@ -48,7 +50,7 @@ pub fn evaluate_call(
     // human-approval requirement selected by the owner plane. `Deny` remains
     // the stricter caller posture; otherwise the runtime must pause before an
     // adapter can make any Control/owner-plane request.
-    if requires_durable_owner_approval(tool_name) {
+    if requires_durable_owner_approval(tool_name) || requires_consent_to_disclose(tool_name) {
         return if mode == PermissionMode::Deny {
             PermissionDecision::Deny
         } else {
@@ -76,9 +78,109 @@ pub fn requires_durable_owner_approval(tool_name: &str) -> bool {
     tool_name.trim() == crate::ticket_tools::TOOL_NAME
 }
 
+/// The autonomy rung a specific call requires.
+///
+/// The per-call half of the ladder. Deliberately derived from the SAME
+/// classifiers the posture gates already use, rather than a second table:
+///
+/// * a destructive or outbound action ([`is_risky_call`]) reaches outside the
+///   run's own workspace, so it needs the widest rung;
+/// * a durable write confined to the run's own context
+///   ([`is_restricted_context_write`]) needs the middle rung;
+/// * everything else is a read.
+///
+/// Two tables would let a call be "risky" to one gate and "read-only" to the
+/// other, which is the kind of disagreement that only shows up as a bypass.
+///
+/// Called at execution with the actual arguments — never consulted when building
+/// a tool schema. A schema is registry-global while this answer is per call: the
+/// same `execute_provider_action` is a read on one call and a write on the next,
+/// and only the arguments say which.
+#[must_use]
+pub fn rung_required_for(tool_name: &str, tool_input: &str) -> AutonomyRung {
+    if is_risky_call(tool_name, tool_input) {
+        return AutonomyRung::DangerFullAccess;
+    }
+    if is_restricted_context_write(tool_name) {
+        return AutonomyRung::WorkspaceWrite;
+    }
+    AutonomyRung::ReadOnly
+}
+
+/// Whether a run holding `granted` may make this call, and the refusal if not.
+///
+/// `AUTONOMY_RUNG_UNSPECIFIED` means **no graded constraint was stated**, not
+/// "read-only": a caller that predates the ladder must keep behaving exactly as
+/// it did. That is why this returns `Ok` for an unstated rung rather than
+/// deferring to [`mp_contracts::autonomy::permits`], whose `Unspecified` is
+/// correctly the narrowest — the two answer different questions, and conflating
+/// them would either break every existing run or turn an unset field into a
+/// grant.
+///
+/// # Errors
+///
+/// Returns the sentence the model reads, naming the rung it has, the rung the
+/// call needs, and that widening requires a person.
+pub fn check_autonomy_rung(
+    granted: AutonomyRung,
+    tool_name: &str,
+    tool_input: &str,
+) -> Result<(), String> {
+    if granted == AutonomyRung::Unspecified {
+        return Ok(());
+    }
+    let needed = rung_required_for(tool_name, tool_input);
+    if mp_contracts::autonomy::permits(granted, needed) {
+        return Ok(());
+    }
+    Err(format!(
+        "tool '{tool_name}' needs the '{}' autonomy rung and this run was granted '{}'. \
+         Widening it requires a person to approve a plan that says why — describe what you \
+         would do and why the current rung cannot do it, rather than retrying.",
+        mp_contracts::autonomy::label(needed),
+        mp_contracts::autonomy::label(granted),
+    ))
+}
+
+/// Reads whose approval is about **disclosure**, not danger — gated on every
+/// posture, including `auto`.
+///
+/// `read_subagent_result` returns what a delegated subagent concluded. Nothing
+/// about the read is destructive, so [`is_risky_tool`] correctly does not match
+/// it — and that is exactly why it needs its own predicate: under the `auto`
+/// posture that ordinary chat runs use, a risk-based gate would auto-allow it,
+/// and the answer would flow into the parent's context with no one asked.
+///
+/// The product rule this encodes: a resumed parent learns *that* its child
+/// finished; it learns *what* it concluded only when the person allows it. The
+/// content-free half of the pair (`list_subagent_results`) is deliberately NOT
+/// here — the whole point of splitting them is that orienting after a restart
+/// needs no permission.
+#[must_use]
+pub fn requires_consent_to_disclose(tool_name: &str) -> bool {
+    tool_name.trim() == crate::runtime_loop::subagent_results::READ_TOOL
+}
+
 /// Tool name for the provider-action bridge (`integration_tools`). Its risk is
 /// operation-dependent, so it is classified by argument, not by name.
 const EXECUTE_PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
+
+/// Writes that restricted contexts (plan mode, delegated subagents) must
+/// refuse even though they are NOT approval-gated on a normal run.
+///
+/// `save_memory` is the case in point: a durable memory write is low-risk
+/// enough that gating every save behind a human approval would kill the
+/// feature (it is the user's own org-scoped memory), so it is deliberately
+/// absent from [`is_risky_tool`]'s keyword list. But it is still a durable
+/// side effect — plan mode promises "investigate, never act", and
+/// hermes-agent's `DELEGATE_BLOCKED_TOOLS` (the pattern our leaf/orchestrator
+/// split adopted, MIT) explicitly blocks memory-write for child agents: a
+/// delegated context should report findings, not quietly rewrite what the
+/// parent's user will be remembered as having said.
+#[must_use]
+pub fn is_restricted_context_write(tool_name: &str) -> bool {
+    tool_name.trim() == "save_memory"
+}
 
 /// Operation-aware risk classification for a specific tool call. Extends
 /// [`is_risky_tool`] (name-based) with argument inspection for tools whose risk
@@ -192,6 +294,24 @@ mod tests {
             evaluate(PermissionMode::Deny, "read_doc"),
             PermissionDecision::Deny
         );
+    }
+
+    #[test]
+    fn restricted_context_writes_are_exactly_the_memory_write() {
+        // save_memory must NOT be approval-gated on a normal run (that would
+        // kill the feature) but MUST be refused in plan mode and delegated
+        // subagents — the two-classifier split this function exists for.
+        assert!(is_restricted_context_write("save_memory"));
+        assert!(is_restricted_context_write(" save_memory "));
+        assert!(
+            !is_risky_tool("save_memory"),
+            "must not need human approval"
+        );
+        assert!(
+            !is_restricted_context_write("recall_memory"),
+            "reads are fine anywhere"
+        );
+        assert!(!is_restricted_context_write("knowledge_search"));
     }
 
     #[test]
@@ -366,5 +486,216 @@ mod tests {
             evaluate_call(PermissionMode::Auto, EXECUTE_PROVIDER_ACTION_TOOL, write),
             PermissionDecision::Allow
         );
+    }
+
+    // --- Disclosure consent: read_subagent_result -------------------------
+    //
+    // The gate that is NOT about danger. These tests exist because the obvious
+    // implementation — add the tool to `is_risky_tool` — silently does nothing
+    // on the posture that matters most.
+
+    /// THE property. Ordinary chat runs use `auto`, where a risk-based gate
+    /// never fires. If this tool were gated by risk, reading a subagent's
+    /// conclusion into the parent's context would happen with nobody asked —
+    /// which is precisely the decision this encodes: the parent learns *that*
+    /// its child finished, and *what* it concluded only with permission.
+    #[test]
+    fn reading_a_subagent_result_needs_approval_on_every_posture() {
+        for mode in [PermissionMode::Auto, PermissionMode::Ask] {
+            assert_eq!(
+                evaluate(mode, crate::runtime_loop::subagent_results::READ_TOOL),
+                PermissionDecision::AwaitApproval,
+                "{mode:?} must still ask before disclosing a subagent's conclusion"
+            );
+        }
+        // `deny` stays the stricter posture — consent cannot upgrade a refusal.
+        assert_eq!(
+            evaluate(
+                PermissionMode::Deny,
+                crate::runtime_loop::subagent_results::READ_TOOL
+            ),
+            PermissionDecision::Deny
+        );
+    }
+
+    /// And the reason a risk-based gate would not have worked: the tool is
+    /// genuinely not risky. If it ever starts matching `is_risky_tool`, the
+    /// consent predicate would be doing nothing on `ask` and this test says so.
+    #[test]
+    fn the_consent_gate_is_not_a_risk_gate_in_disguise() {
+        assert!(
+            !is_risky_tool(crate::runtime_loop::subagent_results::READ_TOOL),
+            "a read is not destructive; the gate is about disclosure, and a risk \
+             classification here would make `auto` auto-allow it"
+        );
+        assert!(requires_consent_to_disclose(
+            crate::runtime_loop::subagent_results::READ_TOOL
+        ));
+    }
+
+    /// The content-free half must stay ungated, or a resumed run cannot even
+    /// orient itself without interrupting the user — which would push the model
+    /// toward guessing at what it delegated instead of looking.
+    #[test]
+    fn listing_delegations_never_asks_for_permission() {
+        let list = crate::runtime_loop::subagent_results::LIST_TOOL;
+        assert!(!requires_consent_to_disclose(list));
+        assert!(!is_risky_tool(list));
+        for mode in [PermissionMode::Auto, PermissionMode::Ask] {
+            assert_eq!(
+                evaluate(mode, list),
+                PermissionDecision::Allow,
+                "{mode:?} must let a run see WHICH delegations it has"
+            );
+        }
+    }
+
+    /// The label the person actually reads. Calling a disclosure "destructive"
+    /// is how an approval prompt stops carrying information — and every pause
+    /// used to be labelled that way, including this one.
+    #[test]
+    fn a_disclosure_is_not_reported_as_a_destructive_operation() {
+        use crate::runtime_loop::agent::{approval_kind_for, approval_reason_for};
+        use mp_contracts::model_plane::v1::ApprovalKind;
+
+        let read = crate::runtime_loop::subagent_results::READ_TOOL;
+        assert_eq!(approval_kind_for(read), ApprovalKind::Permission);
+        assert_eq!(
+            approval_kind_for("book_shipment"),
+            ApprovalKind::Destructive,
+            "a real side effect keeps the label it earned"
+        );
+
+        let reason = approval_reason_for(read);
+        assert!(
+            reason.contains("into this conversation"),
+            "the reason must state what would be disclosed and where it would go, \
+             not just name the mechanism: {reason}"
+        );
+        assert!(
+            !reason.contains("requires approval"),
+            "the generic mechanism sentence tells the person nothing about the \
+             choice they are making: {reason}"
+        );
+    }
+
+    // --- The graded autonomy ladder, checked per call -----------------------
+
+    /// The rung a call needs comes from the SAME classifiers the posture gates
+    /// use. A second table would let one call be "risky" here and "read-only"
+    /// there, and that disagreement is a bypass, not an inconsistency.
+    #[test]
+    fn the_required_rung_follows_the_existing_risk_classification() {
+        assert_eq!(
+            rung_required_for("book_shipment", "{}"),
+            AutonomyRung::DangerFullAccess,
+            "an outbound action reaches outside the workspace"
+        );
+        assert_eq!(
+            rung_required_for("save_memory", "{}"),
+            AutonomyRung::WorkspaceWrite,
+            "a durable write confined to the run's own context is the middle rung"
+        );
+        assert_eq!(
+            rung_required_for("knowledge_search", "{}"),
+            AutonomyRung::ReadOnly
+        );
+    }
+
+    /// Per call, with the arguments — not per tool name. `execute_provider_action`
+    /// is a read on one call and a write on the next, and only the arguments say
+    /// which. This is why the check cannot live in a tool schema.
+    #[test]
+    fn the_same_tool_needs_different_rungs_on_different_calls() {
+        // Real catalogued operations — `operation_is_write` fails safe for an
+        // unknown one, so an invented name would have made this test pass for
+        // the wrong reason.
+        let read = r#"{"operation":"pages.list"}"#;
+        let write = r#"{"operation":"pages.post"}"#;
+        assert_eq!(
+            rung_required_for(EXECUTE_PROVIDER_ACTION_TOOL, read),
+            AutonomyRung::ReadOnly,
+            "a catalogued read does not need full access"
+        );
+        assert_eq!(
+            rung_required_for(EXECUTE_PROVIDER_ACTION_TOOL, write),
+            AutonomyRung::DangerFullAccess
+        );
+        // Which makes the same tool permitted and refused under one rung.
+        assert!(check_autonomy_rung(
+            AutonomyRung::WorkspaceWrite,
+            EXECUTE_PROVIDER_ACTION_TOOL,
+            read
+        )
+        .is_ok());
+        assert!(check_autonomy_rung(
+            AutonomyRung::WorkspaceWrite,
+            EXECUTE_PROVIDER_ACTION_TOOL,
+            write
+        )
+        .is_err());
+    }
+
+    /// The state plan mode cannot express, and the reason the ladder exists: a
+    /// run granted `workspace_write` by an approved plan may write its report
+    /// and still not send, publish, book or pay.
+    #[test]
+    fn workspace_write_permits_a_durable_write_and_still_refuses_an_outbound_action() {
+        check_autonomy_rung(AutonomyRung::WorkspaceWrite, "save_memory", "{}")
+            .expect("the granted rung covers a workspace write");
+        let refusal = check_autonomy_rung(AutonomyRung::WorkspaceWrite, "book_shipment", "{}")
+            .expect_err("an outbound action is above this rung");
+        assert!(
+            refusal.contains("danger_full_access") && refusal.contains("workspace_write"),
+            "the refusal must name BOTH rungs, or the model cannot tell how far short it is: {refusal}"
+        );
+        assert!(
+            refusal.contains("requires a person"),
+            "the model must be told that widening is not something it can do: {refusal}"
+        );
+    }
+
+    /// Non-regression, and the reason `UNSPECIFIED` is not treated as read-only
+    /// here even though `mp_contracts::autonomy::permits` correctly does: a
+    /// caller that predates the ladder must behave exactly as it did, and
+    /// reading its unset field as the narrowest rung would refuse every write on
+    /// every existing run.
+    #[test]
+    fn a_run_with_no_stated_rung_is_unconstrained_by_the_ladder() {
+        for tool in ["book_shipment", "save_memory", "knowledge_search"] {
+            check_autonomy_rung(AutonomyRung::Unspecified, tool, "{}")
+                .unwrap_or_else(|error| panic!("{tool} must be unaffected: {error}"));
+        }
+        // While the shared contract still treats an unset rung as no authority,
+        // which is the right answer to the DIFFERENT question of what a grant
+        // covers.
+        assert!(!mp_contracts::autonomy::permits(
+            AutonomyRung::Unspecified,
+            AutonomyRung::WorkspaceWrite
+        ));
+    }
+
+    /// `read_only` is what a plan-mode run is held to, so it must refuse exactly
+    /// what plan mode refuses — stated in the ladder's vocabulary instead of as
+    /// a boolean, so the two cannot drift.
+    #[test]
+    fn read_only_refuses_everything_plan_mode_refuses() {
+        for tool in [
+            "book_shipment",
+            "save_memory",
+            "publish_social_post",
+            "shell",
+        ] {
+            assert!(
+                check_autonomy_rung(AutonomyRung::ReadOnly, tool, "{}").is_err(),
+                "{tool} must be refused at read_only, as plan mode refuses it"
+            );
+            assert!(
+                is_risky_call(tool, "{}") || is_restricted_context_write(tool),
+                "{tool} is refused by plan mode too — the two gates must agree on the set"
+            );
+        }
+        check_autonomy_rung(AutonomyRung::ReadOnly, "knowledge_search", "{}")
+            .expect("reads still run at read_only, exactly as under plan mode");
     }
 }

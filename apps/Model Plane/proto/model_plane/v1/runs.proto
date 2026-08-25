@@ -7,6 +7,35 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 
+// AutonomyRung — how much a run is permitted to do, as a strictly ordered
+// ladder. Higher is wider; each rung includes everything below it.
+//
+// Shared vocabulary on purpose: model-gateway decides and records a grant, and
+// execution-core enforces it PER CALL at execution. Baking a rung into a tool
+// schema instead would be wrong — a schema is registry-global while the
+// effective rung is per-call truth, so the same tool can be permitted on one
+// call and refused on the next within one run.
+//
+// The names mirror execution-core's own `MpSandboxPolicy` rather than inventing
+// a second scale, so a granted rung and the isolation it implies cannot drift
+// apart.
+enum AutonomyRung {
+  // No rung stated. Treated as the NARROWEST, never as a default grant: an
+  // unset field on an old client must not read as permission.
+  AUTONOMY_RUNG_UNSPECIFIED = 0;
+
+  // Investigate only. Reads run; anything with a real effect is refused.
+  AUTONOMY_RUNG_READ_ONLY = 1;
+
+  // May write within the run's own workspace. Still refuses actions that reach
+  // outside it (sending, publishing, booking, paying).
+  AUTONOMY_RUNG_WORKSPACE_WRITE = 2;
+
+  // Full effect. Reserved for an explicit, justified, human-granted escalation
+  // — never a default and never inferred.
+  AUTONOMY_RUNG_DANGER_FULL_ACCESS = 3;
+}
+
 // RunService — query and manage run lifecycle.
 // Ownership: session-core owns run metadata; execution-core owns run state transitions.
 service RunService {
