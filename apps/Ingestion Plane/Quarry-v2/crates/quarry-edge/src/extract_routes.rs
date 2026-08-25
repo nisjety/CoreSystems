@@ -24,6 +24,7 @@ use quarry_runtime::driver::FetchHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
 use quarry_runtime::mp_client::ModelPlaneClient;
 
+use crate::api_error::ApiError;
 use crate::state::AppState;
 
 const DEFAULT_MAX_URLS: usize = 10;
@@ -72,12 +73,17 @@ pub struct ExtractResponse {
     pub requested: usize,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ErrorBody {
-    pub error: String,
-    pub code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
+// OSS-parity 3D — shared structured error envelope (extends the old
+// `{error, code, hint}` shape with optional rate-limit fields). All extract
+// error paths serialize through this type so clients parse one shape.
+type ErrorBody = ApiError;
+
+fn bad_request(message: impl Into<String>) -> ErrorBody {
+    ApiError::new("BAD_REQUEST", message)
+}
+
+fn unsupported(message: impl Into<String>, hint: impl Into<String>) -> ErrorBody {
+    ApiError::new("UNSUPPORTED", message).with_hint(hint)
 }
 
 /// Validate + dedup + cap the target URL list (bounded fan-out). Drops
@@ -144,11 +150,7 @@ pub async fn extract(
     if targets.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "no valid http(s) URLs in `urls`".into(),
-                code: "BAD_REQUEST".into(),
-                hint: None,
-            }),
+            Json(bad_request("no valid http(s) URLs in `urls`")),
         )
             .into_response();
     }
@@ -175,11 +177,10 @@ pub async fn extract(
     if req.schema.is_some() && runner.is_none() {
         return (
             StatusCode::NOT_IMPLEMENTED,
-            Json(ErrorBody {
-                error: "structured extraction requires a Model Plane".into(),
-                code: "UNSUPPORTED".into(),
-                hint: Some("set MODEL_PLANE_URL, or omit `schema` to receive markdown".into()),
-            }),
+            Json(unsupported(
+                "structured extraction requires a Model Plane",
+                "set MODEL_PLANE_URL, or omit `schema` to receive markdown",
+            )),
         )
             .into_response();
     }
@@ -296,5 +297,34 @@ mod tests {
     fn expand_empty_when_all_invalid() {
         let urls = vec!["nope".into(), "mailto:x@y.com".into()];
         assert!(expand_targets(&urls, 10).is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_valid_urls_returns_structured_envelope() {
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let response = extract(
+            State(state),
+            Extension(crate::test_support::claims_for_org("org_alpha")),
+            Json(ExtractRequest {
+                urls: vec!["nope".into()],
+                schema: None,
+                prompt: None,
+                max_urls: None,
+                zdr: None,
+                privacy: None,
+                signals: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        // Structured envelope: exactly {error, code} — no rate-limit fields.
+        assert_eq!(
+            crate::test_support::json_keys(&body),
+            vec!["code", "error"]
+        );
+        assert_eq!(body["code"], "BAD_REQUEST");
     }
 }

@@ -3110,6 +3110,7 @@ impl Drop for ChromiumoxideDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PinnedEgressProxyEndpoint;
     use quarry_core::ids::kinds;
     use quarry_core::lease::{BrowserLease, Capability, ProxyAffinity};
     use wiremock::MockServer;
@@ -3189,11 +3190,60 @@ mod tests {
         assert_eq!(options.timeout_ms, 100);
     }
 
+    /// Minimal stand-in for Quarry's real DNS-pinning egress authority: it
+    /// hands out a fixed endpoint and records nothing. The deny-all egress
+    /// policy installed below is what keeps the page from ever reaching the
+    /// network under test.
+    struct StubEgressProvider;
+
+    #[async_trait::async_trait]
+    impl BrowserEgressProxyProvider for StubEgressProvider {
+        async fn endpoint_for_session(
+            &self,
+            _session_key: &str,
+        ) -> QuarryResult<PinnedEgressProxyEndpoint> {
+            // Loopback shape required by the endpoint parser; never actually
+            // contacted because the CDP Fetch guard blocks every request.
+            PinnedEgressProxyEndpoint::parse("http://127.0.0.1:9")
+        }
+
+        async fn receipts_after(
+            &self,
+            _session_key: &str,
+            _after_sequence: u64,
+            _limit: usize,
+        ) -> QuarryResult<Vec<BrowserEgressReceipt>> {
+            Ok(Vec::new())
+        }
+
+        async fn configure_policy(
+            &self,
+            _session_key: &str,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+
+        async fn release_session(&self, _session_key: &str) {}
+    }
+
+    /// Page-initiated subresources must be refused by the CDP Fetch boundary
+    /// before Chromium opens any connection. `new_tab` now requires the full
+    /// egress half (pinned proxy + installed policy), so this test provisions
+    /// both — with a deliberately empty allow-list, matching a run whose
+    /// grant permits no domains.
     #[tokio::test]
     async fn blocks_loopback_subresources_before_they_reach_the_server() {
         let target = MockServer::start().await;
-        let driver = ChromiumoxideDriver::new();
+        let driver =
+            ChromiumoxideDriver::new().with_pinned_egress_proxy(Arc::new(StubEgressProvider));
         let session = driver.acquire(&make_lease()).await.expect("acquire");
+        // Deny-all policy: an absent or permissive policy would invalidate
+        // what this test proves.
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("install deny-all egress policy");
         driver
             .new_tab(&session, None)
             .await

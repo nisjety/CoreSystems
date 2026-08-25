@@ -320,6 +320,9 @@ pub trait StepReceiptStore: Send + Sync {
     }
 }
 
+type TimelineEventStream = Vec<BrowserTimelineEvent>;
+type TimelineEventIndex = HashMap<(String, String, String), TimelineEventStream>;
+
 /// In-process append-only store for tests and single-node dev. Receipts are
 /// keyed by `run_id` so `list()` is a single hash lookup.
 #[derive(Default, Clone)]
@@ -327,7 +330,7 @@ pub struct InMemoryStepReceiptStore {
     by_run: Arc<RwLock<HashMap<String, Vec<StepReceipt>>>>,
     by_id: Arc<RwLock<HashMap<String, StepReceipt>>>,
     checkpoints: Arc<RwLock<HashMap<(String, String), AgentRunCheckpoint>>>,
-    timeline_events: Arc<RwLock<HashMap<(String, String, String), Vec<BrowserTimelineEvent>>>>,
+    timeline_events: Arc<RwLock<TimelineEventIndex>>,
 }
 
 impl InMemoryStepReceiptStore {

@@ -15,6 +15,7 @@ use url::Url;
 
 use quarry_runtime::crawl_ranker::{CrawlRanker, LexicalRanker};
 
+use crate::api_error::ApiError;
 use crate::state::AppState;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -53,12 +54,21 @@ pub struct MapResponse {
     pub ranked: bool,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ErrorBody {
-    pub error: String,
-    pub code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
+// OSS-parity 3D — shared structured error envelope (extends the old
+// `{error, code, hint}` shape with optional rate-limit fields). All map
+// error paths serialize through this type so clients parse one shape.
+type ErrorBody = ApiError;
+
+fn bad_request(message: impl Into<String>) -> ErrorBody {
+    ApiError::new("BAD_REQUEST", message)
+}
+
+fn forbidden(message: impl Into<String>) -> ErrorBody {
+    ApiError::new("FORBIDDEN", message)
+}
+
+fn upstream_empty(message: impl Into<String>, hint: impl Into<String>) -> ErrorBody {
+    ApiError::new("UPSTREAM_EMPTY", message).with_hint(hint)
 }
 
 // ── pure helpers (unit-tested; no network) ──────────────────────────────────
@@ -105,12 +115,15 @@ fn clamp_limit(limit: Option<u32>) -> usize {
         .clamp(1, MAX_LIMIT)
 }
 
-async fn fetch_text(state: &AppState, url: &Url) -> Option<String> {
+async fn fetch_text(state: &AppState, url: &Url) -> Result<Option<String>, quarry_core::error::QuarryError> {
     match state.driver.fetch(url).await {
         Ok(resp) if (200..300).contains(&resp.status) => {
-            Some(String::from_utf8_lossy(&resp.body).into_owned())
+            Ok(Some(String::from_utf8_lossy(&resp.body).into_owned()))
         }
-        _ => None,
+        // Transport-level rate limit from the driver — surface as a typed
+        // error so the handler can answer with the structured 429 envelope.
+        Err(e) if matches!(e.code, quarry_core::error::ErrorCode::RateLimited) => Err(e),
+        _ => Ok(None),
     }
 }
 
@@ -124,22 +137,14 @@ pub async fn map(
     let Ok(base) = Url::parse(req.url.trim()) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "url must be a valid absolute http(s) URL".into(),
-                code: "BAD_REQUEST".into(),
-                hint: None,
-            }),
+            Json(bad_request("url must be a valid absolute http(s) URL")),
         )
             .into_response();
     };
     let Some(seed_host) = base.host_str().map(str::to_owned) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorBody {
-                error: "url has no host".into(),
-                code: "BAD_REQUEST".into(),
-                hint: None,
-            }),
+            Json(bad_request("url has no host")),
         )
             .into_response();
     };
@@ -151,11 +156,7 @@ pub async fn map(
     ) {
         return (
             StatusCode::FORBIDDEN,
-            Json(ErrorBody {
-                error: "url blocked by security policy".into(),
-                code: "FORBIDDEN".into(),
-                hint: None,
-            }),
+            Json(forbidden("url blocked by security policy")),
         )
             .into_response();
     }
@@ -166,23 +167,42 @@ pub async fn map(
         base.host_str().unwrap_or_default()
     );
 
-    // Best-effort robots for allow-filtering (never fatal).
+    // Best-effort robots for allow-filtering (never fatal), except a
+    // transport-level rate limit which fails the request with the typed
+    // 429 envelope instead of silently degrading to an empty map.
     let robots = match Url::parse(&format!("{origin}/robots.txt")) {
-        Ok(u) => fetch_text(&state, &u)
-            .await
-            .map(|t| quarry_transform::robots::RobotsTxt::parse(&t)),
+        Ok(u) => match fetch_text(&state, &u).await {
+            Ok(t) => t.map(|body| quarry_transform::robots::RobotsTxt::parse(&body)),
+            Err(e) => {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ApiError::rate_limited(e.message, 60)),
+                )
+                    .into_response()
+            }
+        },
         Err(_) => None,
     };
 
     // Sitemap URLs (best-effort, one level of nested index).
     let mut candidates: Vec<String> = Vec::new();
     if let Ok(sm_url) = Url::parse(&format!("{origin}/sitemap.xml")) {
-        if let Some(xml) = fetch_text(&state, &sm_url).await {
+        let xml = match fetch_text(&state, &sm_url).await {
+            Ok(x) => x,
+            Err(e) => {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ApiError::rate_limited(e.message, 60)),
+                )
+                    .into_response()
+            }
+        };
+        if let Some(xml) = xml {
             let sm = quarry_transform::sitemap::parse(&xml);
             candidates.extend(sm.urls.into_iter().map(|e| e.loc));
             for nested in sm.nested.into_iter().take(5) {
                 if let Ok(nu) = Url::parse(&nested) {
-                    if let Some(nx) = fetch_text(&state, &nu).await {
+                    if let Ok(Some(nx)) = fetch_text(&state, &nu).await {
                         candidates.extend(
                             quarry_transform::sitemap::parse(&nx)
                                 .urls
@@ -197,7 +217,17 @@ pub async fn map(
 
     // Page links + titles.
     let mut titles: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    if let Some(html) = fetch_text(&state, &base).await {
+    let base_html = match fetch_text(&state, &base).await {
+        Ok(html) => html,
+        Err(e) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ApiError::rate_limited(e.message, 60)),
+            )
+                .into_response()
+        }
+    };
+    if let Some(html) = base_html {
         for link in quarry_transform::links::extract(&html, &base) {
             if let Some(t) = &link.text {
                 titles.entry(link.href.clone()).or_insert_with(|| t.clone());
@@ -209,11 +239,10 @@ pub async fn map(
     if candidates.is_empty() {
         return (
             StatusCode::BAD_GATEWAY,
-            Json(ErrorBody {
-                error: "could not fetch sitemap or page to discover URLs".into(),
-                code: "UPSTREAM_EMPTY".into(),
-                hint: Some("the origin returned no sitemap.xml and the page had no links".into()),
-            }),
+            Json(upstream_empty(
+                "could not fetch sitemap or page to discover URLs",
+                "the origin returned no sitemap.xml and the page had no links",
+            )),
         )
             .into_response();
     }
@@ -310,6 +339,9 @@ fn to_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
+    use quarry_core::error::ErrorCode;
 
     #[test]
     fn same_host_in_scope() {
@@ -360,5 +392,68 @@ mod tests {
         assert_eq!(clamp_limit(Some(0)), 1);
         assert_eq!(clamp_limit(Some(99999)), MAX_LIMIT);
         assert_eq!(clamp_limit(Some(25)), 25);
+    }
+
+    #[tokio::test]
+    async fn bad_url_returns_structured_envelope_without_fetching() {
+        let driver = crate::test_support::StubDriver::ok();
+        let state = crate::test_support::test_state(driver.clone());
+        let response = map(
+            State(state),
+            Extension(crate::test_support::claims_for_org("org_alpha")),
+            Json(MapRequest {
+                url: "not a url".into(),
+                search: None,
+                limit: None,
+                include_subdomains: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(driver.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        // Structured envelope: exactly {error, code} — no rate-limit fields.
+        assert_eq!(
+            crate::test_support::json_keys(&body),
+            vec!["code", "error"]
+        );
+        assert_eq!(body["code"], "BAD_REQUEST");
+    }
+
+    #[tokio::test]
+    async fn rate_limited_driver_maps_to_api_error_envelope() {
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::err(
+            ErrorCode::RateLimited,
+        ));
+        let response = map(
+            State(state),
+            Extension(crate::test_support::claims_for_org("org_alpha")),
+            Json(MapRequest {
+                url: "https://example.com".into(),
+                search: None,
+                limit: None,
+                include_subdomains: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["code"], "RATE_LIMITED");
+        assert_eq!(body["retry_after_seconds"], 60);
+        assert_eq!(
+            crate::test_support::json_keys(&body),
+            vec![
+                "code",
+                "error",
+                "hint",
+                "next_actions",
+                "retry_after_seconds",
+                "window"
+            ]
+        );
     }
 }

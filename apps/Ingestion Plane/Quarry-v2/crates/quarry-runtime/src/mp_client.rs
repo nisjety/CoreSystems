@@ -122,11 +122,11 @@ impl ModelPlaneClient {
             ServiceTokenRequest::model_plane(["models:invoke"], "invoke bounded model primitive");
         let bearer = self.bearer_for_org(org_id, &token_request, false).await?;
         let mut resp = self.send_invoke(req, bearer.as_deref()).await?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            if matches!(self.auth, ModelPlaneAuth::Dynamic(_)) {
-                let refreshed = self.bearer_for_org(org_id, &token_request, true).await?;
-                resp = self.send_invoke(req, refreshed.as_deref()).await?;
-            }
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && matches!(self.auth, ModelPlaneAuth::Dynamic(_))
+        {
+            let refreshed = self.bearer_for_org(org_id, &token_request, true).await?;
+            resp = self.send_invoke(req, refreshed.as_deref()).await?;
         }
 
         self.decode_invoke(resp).await
@@ -230,11 +230,11 @@ impl ModelPlaneClient {
             ServiceTokenRequest::model_plane(["models:invoke"], "stream bounded model primitive");
         let bearer = self.bearer_for_org(org_id, &token_request, false).await?;
         let mut resp = self.send_invoke_stream(req, bearer.as_deref()).await?;
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            if matches!(self.auth, ModelPlaneAuth::Dynamic(_)) {
-                let refreshed = self.bearer_for_org(org_id, &token_request, true).await?;
-                resp = self.send_invoke_stream(req, refreshed.as_deref()).await?;
-            }
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
+            && matches!(self.auth, ModelPlaneAuth::Dynamic(_))
+        {
+            let refreshed = self.bearer_for_org(org_id, &token_request, true).await?;
+            resp = self.send_invoke_stream(req, refreshed.as_deref()).await?;
         }
         let status = resp.status();
         if !status.is_success() {
