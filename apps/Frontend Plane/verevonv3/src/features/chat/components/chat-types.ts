@@ -2,7 +2,9 @@ import {
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import {
+  type AutonomyRung,
   type ChatAction,
+  type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
   type PrivacyTier,
@@ -176,6 +178,17 @@ export type ChatTurn = {
   status?: 'waiting' | 'stopped' | 'error'
   model?: string
   requestId?: string
+  /**
+   * Highest SSE frame `id:` seen for this turn, sent as `Last-Event-ID` on
+   * resume so the server replays only what we missed.
+   *
+   * Without it a reconnect replays the stream from the beginning — which is why
+   * the resume path used to clear the cached partial answer on its first
+   * replayed delta. Not persisted in the thread snapshot: a cursor is only
+   * meaningful against a buffer that is still alive (10-minute TTL), and a stale
+   * one would skip frames a fresh resume needs.
+   */
+  lastFrameId?: string
   modelUsed?: string
   inputTokens?: number
   outputTokens?: number
@@ -189,6 +202,29 @@ export type ChatTurn = {
   files?: GeneratedFile[]
   grounding?: ChatKnowledgeGrounding
   /**
+   * How many long-term memories were injected into this turn's prompt, from
+   * the `memory_recall` SSE event. Absent means none were — the backend emits
+   * the event only when memory genuinely contributed, so there is no
+   * "recalled 0" state to render.
+   */
+  memoryRecallCount?: number
+  /**
+   * WHICH memories this turn recalled, with their provenance.
+   *
+   * The count alone tells a reader that memory was used; this tells them what
+   * was used, so a wrong remembered fact can actually be found and corrected.
+   * Persisted alongside the count so the record survives a reload — a notice
+   * that disappears on reopen reads as though the recall never happened.
+   */
+  recalledMemories?: RecalledMemory[]
+  /**
+   * Why generation stopped, when the backend reported it. `'stream_incomplete'`
+   * means the provider connection broke before any proper termination signal,
+   * so the answer may be cut off mid-thought — rendered as an honest notice
+   * rather than left to look like a complete reply.
+   */
+  stopReason?: string
+  /**
    * Orchestration run id. Captured from the `connected` SSE event on an
    * agentic / plan-mode turn (and, as a fallback, from a `paused` step). Drives
    * both the human-approval cards and the live agent panel's subscription to
@@ -197,6 +233,21 @@ export type ChatTurn = {
   runId?: string
   /** Pending human-approval requests gating this agentic run's next tool. */
   pendingApprovals?: Approval[]
+  /**
+   * This turn ran in plan mode — it described what it would do rather than
+   * doing it.
+   *
+   * Captured at SEND time, not read from the composer toggle later: a toggle
+   * flipped afterwards must not retroactively change what a finished turn was.
+   * Drives the plan-approval control, which is the only thing that grants a run
+   * the authority to execute.
+   */
+  planMode?: boolean
+  /**
+   * The rung a person granted this run, once they approved its plan. Absent
+   * means no grant has been made — never "granted everything".
+   */
+  grantedRung?: AutonomyRung
   /**
    * AI-generated follow-up question suggestions (composer chips), from the
    * `follow_ups` SSE event. Session-only by design — not persisted into the
@@ -234,6 +285,26 @@ export type AgentTaskStepSection = {
 
 export type ChatStatus = 'idle' | 'streaming' | 'error'
 
+/**
+ * A message the user typed while a run was streaming.
+ *
+ * Session-only and deliberately not persisted: the durable record of the message
+ * is written by the Model Plane at enqueue time, on the thread itself. This is
+ * only the live status of a delivery in flight, which is meaningless after a
+ * reload — by then it either arrived (and is in the transcript) or it did not.
+ */
+export type QueuedInput = {
+  id: string
+  content: string
+  /**
+   * `pending` — accepted, not yet handed to the agent.
+   * `delivered` — the agent has it (the `queued_input` SSE event arrived).
+   * `refused` — it was not accepted, and `note` says why. Never silent.
+   */
+  state: 'pending' | 'delivered' | 'refused'
+  note?: string
+}
+
 export type ChatState = {
   turns: ChatTurn[]
   taskSteps: AgentTaskStep[]
@@ -243,6 +314,8 @@ export type ChatState = {
   threadId: string | null
   activeModel: string
   branchCount: number
+  /** Mid-run messages for the CURRENT run, cleared when a new turn starts. */
+  queuedInputs: QueuedInput[]
 }
 
 export type StreamAttachment = {

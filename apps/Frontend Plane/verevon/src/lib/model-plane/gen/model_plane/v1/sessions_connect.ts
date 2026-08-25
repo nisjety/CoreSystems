@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -395,6 +395,24 @@ export const ManagedRunLifecycle = {
       name: "HeartbeatManagedRun",
       I: HeartbeatManagedRunRequest,
       O: HeartbeatManagedRunResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Persist a completed run's final answer, so a caller that restarts can still
+     * read what the run concluded.
+     *
+     * Deliberately SEPARATE from RecordTerminalOutcome, which is metadata-only by
+     * design: that receipt must stay content-free so it is safe on every run,
+     * including a zero-retention one. This call is the explicit, separately
+     * authorized, separately auditable act of writing content — and it is refused
+     * outright for a zero-retention caller, which was promised no durable trace.
+     *
+     * @generated from rpc model_plane.v1.ManagedRunLifecycle.RecordRunOutput
+     */
+    recordRunOutput: {
+      name: "RecordRunOutput",
+      I: RecordRunOutputRequest,
+      O: RecordRunOutputResponse,
       kind: MethodKind.Unary,
     },
   }

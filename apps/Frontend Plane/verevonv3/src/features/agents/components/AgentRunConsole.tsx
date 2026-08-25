@@ -69,9 +69,13 @@ import {
   cancelRun,
   decideApproval,
   listApprovals,
+  listPlans,
+  listTodos,
   resumeRun,
   type Approval,
   type ApprovalDecision,
+  type Plan,
+  type Todo,
 } from '@/shared/api/orchestration-client'
 import {
   getRun,
@@ -117,6 +121,15 @@ type TimelineEntry = {
   detail: string
   status?: string
   at: string
+  /**
+   * Quarry-v2 artifact id for a browser observation's screenshot.
+   *
+   * A REFERENCE, never bytes — Quarry stores the image and authorizes the read
+   * from the caller's own org claim. Absent for a ZDR run, where Quarry declines
+   * to persist the artifact at all (`put_artifact_if_allowed`), so "no
+   * screenshot" is a correct and expected state rather than a failure.
+   */
+  screenshotRef?: string
 }
 
 type Citation = {
@@ -206,6 +219,31 @@ export default function AgentRunConsole() {
   // created them and live in threads it owns, so no thread_id a person has can
   // reach them — the org-scoped endpoint is the only way they are visible at all.
   const [historySource, setHistorySource] = createSignal<'thread' | 'system'>('thread')
+  // Bumped by every plan/todo transition so the plan panel re-reads the CURRENT
+  // plan rather than inferring it from the transition stream. The timeline
+  // already shows the transitions; what it cannot show is the plan's content —
+  // `listPlans`/`listTodos` carry the summary and titles, and until now nothing
+  // in the app called either, so the console showed "DRAFT -> EXECUTING" with no
+  // way to see what the plan actually was.
+  const [planTick, setPlanTick] = createSignal(0)
+  const [plan] = createResource(
+    () => {
+      const runId = state.runId
+      if (!runId) return null
+      return { runId, threadId: state.threadId, tick: planTick() }
+    },
+    async (key) => {
+      // Independent failure: a run always has plans, but todos are
+      // thread-scoped and a run reached without a thread id has none to read.
+      // One missing half must not blank the other.
+      const [plans, todos] = await Promise.all([
+        listPlans(key.runId).catch(() => [] as Plan[]),
+        key.threadId ? listTodos(key.threadId).catch(() => [] as Todo[]) : Promise.resolve([]),
+      ])
+      return { plans, todos }
+    },
+  )
+
   const [runs] = createResource(
     () => {
       const source = historySource()
@@ -438,6 +476,7 @@ export default function AgentRunConsole() {
         })
       },
       onPlan: (event) => {
+        setPlanTick((tick) => tick + 1)
         append({
           id: `plan-${event.planId ?? state.timeline.length}-${event.to ?? ''}`,
           kind: 'plan',
@@ -448,6 +487,7 @@ export default function AgentRunConsole() {
         })
       },
       onTodo: (event) => {
+        setPlanTick((tick) => tick + 1)
         append({
           id: `todo-${event.todoId ?? state.timeline.length}-${event.to ?? ''}`,
           kind: 'todo',
@@ -509,6 +549,7 @@ export default function AgentRunConsole() {
           detail: event.pageUrl ?? '',
           status: event.status ?? 'received',
           at: event.at ?? new Date().toISOString(),
+          screenshotRef: event.screenshotRef,
         })
       },
       onSubagentAttached: (event) => {
@@ -717,6 +758,10 @@ export default function AgentRunConsole() {
         planMode: true,
         browseWeb: browseWeb(),
         actions: presetActions,
+        // Marks this thread as agent-run-owned so model-gateway/session-core
+        // classify its origin as "agent_run" instead of the "chat" default —
+        // see support-chat-thread.ts's `support_` prefix for the precedent.
+        sessionKey: `agent_run/${globalThis.crypto.randomUUID()}`,
       },
       chatHandlers,
       controller.signal,
@@ -872,6 +917,11 @@ export default function AgentRunConsole() {
               />
             </Show>
 
+            <PlanPanel
+              plans={plan()?.plans ?? []}
+              todos={plan()?.todos ?? []}
+              loading={plan.loading}
+            />
             <TimelinePanel entries={state.timeline} status={state.status} />
 
             <Show when={state.error}>
@@ -1823,6 +1873,67 @@ function statusLabel(i18n: ReturnType<typeof useI18n>, status: string): string {
   return status
 }
 
+/**
+ * The run's CURRENT plan and todos, as opposed to the transitions the timeline
+ * shows.
+ *
+ * `listPlans`/`listTodos` existed in the API client with no caller anywhere in
+ * the app, so the console could report "Plan: DRAFT → EXECUTING" and never show
+ * what the plan was or which todos it had. State strings are rendered as-is —
+ * they are provider enum names and inventing friendlier labels here would drift
+ * from whatever the backend actually said.
+ */
+export function PlanPanel(props: { plans: Plan[]; todos: Todo[]; loading: boolean }) {
+  const i18n = useI18n()
+  const isEmpty = () => props.plans.length === 0 && props.todos.length === 0
+  return (
+    <div class="verevon-run-panel verevon-run-plan">
+      <div class="verevon-run-panel__head">
+        <h3>{i18n.tr('Plan og oppgaver', 'Plan and todos')}</h3>
+      </div>
+      <Show when={props.loading && isEmpty()}>
+        <p class="verevon-run-plan__empty">{i18n.tr('Laster …', 'Loading …')}</p>
+      </Show>
+      <Show when={!props.loading && isEmpty()}>
+        {/* Absence is stated, not left blank: a run with no plan is a real and
+            ordinary outcome, and an empty panel reads as a loading failure. */}
+        <p class="verevon-run-plan__empty">
+          {i18n.tr('Ingen plan registrert for denne kjøringen.', 'No plan recorded for this run.')}
+        </p>
+      </Show>
+      <Show when={props.plans.length > 0}>
+        <ul class="verevon-run-plan__list">
+          <For each={props.plans}>
+            {(item) => (
+              <li class="verevon-run-plan__item">
+                <span class="verevon-run-plan__state">{item.state ?? '—'}</span>
+                <span class="verevon-run-plan__summary">
+                  {item.summary?.trim() ||
+                    i18n.tr('(ingen sammendrag)', '(no summary)')}
+                </span>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+      <Show when={props.todos.length > 0}>
+        <ul class="verevon-run-plan__list">
+          <For each={props.todos}>
+            {(item) => (
+              <li class="verevon-run-plan__item">
+                <span class="verevon-run-plan__state">{item.state ?? '—'}</span>
+                <span class="verevon-run-plan__summary">
+                  {item.title?.trim() || i18n.tr('(uten tittel)', '(untitled)')}
+                </span>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </div>
+  )
+}
+
 function TimelinePanel(props: { entries: TimelineEntry[]; status: RunStatus }) {
   const i18n = useI18n()
   return (
@@ -1893,8 +2004,59 @@ function TimelineRow(props: { entry: TimelineEntry }) {
         <Show when={props.entry.detail}>
           <p class="verevon-run-timeline__detail">{props.entry.detail}</p>
         </Show>
+        <Show when={props.entry.screenshotRef}>
+          {(ref) => <BrowserObservationShot artifactId={ref()} pageUrl={props.entry.detail} />}
+        </Show>
       </div>
     </li>
+  )
+}
+
+/**
+ * The screenshot Quarry-v2 captured for a browser observation.
+ *
+ * Loaded lazily and from a REFERENCE: Quarry stores the bytes and authorizes the
+ * read from the caller's own org claim, so the console never holds image data and
+ * possession of an id is not authority to see it. Absent on a ZDR run, where
+ * Quarry declines to persist the artifact at all — which is why "no screenshot"
+ * renders as nothing rather than as an error.
+ */
+export function BrowserObservationShot(props: { artifactId: string; pageUrl?: string }) {
+  const i18n = useI18n()
+  const [failed, setFailed] = createSignal(false)
+  const src = () =>
+    `/api/v1/chat/browser-artifacts/${encodeURIComponent(props.artifactId)}`
+  return (
+    <Show
+      when={!failed()}
+      fallback={
+        // Named, not blank: a screenshot that existed and could not be loaded is
+        // different from a step that never had one.
+        <p class="verevon-run-timeline__shot-error">
+          {i18n.tr('Kunne ikke laste skjermbildet.', 'Could not load the screenshot.')}
+        </p>
+      }
+    >
+      <a
+        class="verevon-run-timeline__shot"
+        href={src()}
+        target="_blank"
+        rel="noreferrer"
+        aria-label={i18n.tr('Åpne skjermbildet i full størrelse', 'Open the screenshot full size')}
+      >
+        <img
+          src={src()}
+          alt={
+            props.pageUrl
+              ? i18n.tr(`Skjermbilde av ${props.pageUrl}`, `Screenshot of ${props.pageUrl}`)
+              : i18n.tr('Skjermbilde fra nettleserkjøringen', 'Screenshot from the browser run')
+          }
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
+      </a>
+    </Show>
   )
 }
 

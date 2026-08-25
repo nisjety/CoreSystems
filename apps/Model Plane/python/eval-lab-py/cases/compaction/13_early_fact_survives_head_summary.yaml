@@ -1,0 +1,30 @@
+id: "13-compaction-preserves-an-early-fact"
+name: "Head-summary compaction must not lose a fact stated early in the thread"
+# Scores the recall ANSWER exactly like any other case's `checks` — the "gold
+# recall question" is `prompt` + `checks`, nothing special. `seed_turns` is
+# what makes this a compaction case: enough history (>24 messages once
+# assistant replies are counted, past MAX_THREAD_CONTEXT_MESSAGES in
+# model-gateway/src/sse.rs) that compaction.rs's plan_head_summary must fire
+# and summarize the reference code below out of the raw transcript before the
+# recall question is asked.
+profile: chat
+seed_turns:
+  - "I'm going to give you some background before we start. My internal reference code for this project is ZX-88214-NOVA. Please remember it, I'll need it later."
+  - "Good. Now, separately: what's a reasonable strategy for reducing food waste in a school cafeteria?"
+  - "Thanks. Now list three ways a small logistics company could cut fuel costs."
+  - "Okay, switching topics again: what are common causes of mold growth in a walk-in cooler?"
+  - "Good answer. Now, what's the difference between HACCP and ISO 22000?"
+  - "Interesting. What are typical shelf-life extensions from modified atmosphere packaging?"
+  - "Noted. What safety checks matter most for a commercial dishwasher?"
+  - "Understood. What's a simple way to explain FIFO stock rotation to new staff?"
+  - "Got it. What are the main risks of cross-contamination in a shared prep area?"
+  - "Thanks. What temperature range is considered the 'danger zone' for bacterial growth?"
+  - "Good. What's a reasonable cadence for pest control inspections in a food warehouse?"
+  - "Okay. What documentation is usually required for a food safety audit?"
+  - "Understood. What's the general purpose of a HACCP plan's critical control points?"
+  - "Thanks — last one before my real question: what's a common cause of listeria contamination in fresh produce?"
+prompt: "Before we started all these food-safety questions, I gave you an internal reference code to remember. What was it?"
+checks:
+  contains: ["ZX-88214-NOVA"]
+tags: [compaction, recall]
+timeout_s: 240.0

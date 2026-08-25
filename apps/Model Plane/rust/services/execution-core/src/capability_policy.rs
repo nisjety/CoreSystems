@@ -756,6 +756,34 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "browser_agent" | "browser.observe" | "browser.act" => "cap.browser.open",
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
         "knowledge_search" => "cap.retrieval.query",
+        // The two context-memory tools. `cap.memory.index`/`cap.memory.search`
+        // are the registry's own seeded ids (capability-core's
+        // `registry.go`, both `RiskLow`, scope `workspace`) — not new names
+        // minted here, which would evaluate against nothing and fail closed.
+        //
+        // Low risk, and deliberately so: a memory write is durable but
+        // reversible, org- and thread-scoped, and refused outright under ZDR
+        // before it reaches this gate. Classing it high would put an approval
+        // prompt in front of every remembered fact, which is how the feature
+        // stops being used at all. The narrower restriction it DOES carry is
+        // `permission::is_restricted_context_write` — blocked in plan mode and
+        // for delegated subagents — which is orthogonal to capability risk.
+        "save_memory" => "cap.memory.index",
+        "recall_memory" => "cap.memory.search",
+        // Reading this run's own delegation records. `cap.agent.lineage.read`
+        // covers both: the content-free listing and the approval-gated answer
+        // read are the same authority over the same records, and the difference
+        // between them is the human consent gate
+        // (`permission::requires_consent_to_disclose`), not a second capability.
+        // Low risk — it is a read of the tenant's own runs — and seeded in
+        // capability-core's `registry.go` plus its migration, so it evaluates
+        // against a real row rather than failing closed against nothing.
+        "list_subagent_results" | "read_subagent_result" => "cap.agent.lineage.read",
+        // Reading one of the org's own skill instructions back in full. Bound to
+        // the SAME id as the summarize skill surface — it is the same authority
+        // over the same operator-authored assets, and minting a new id here
+        // would evaluate against nothing and fail closed.
+        "reattach_skill" => "cap.skill.summarize",
         "yr_weather" | "traffic" | "news" | "company_lookup" => "cap.tool.information.read",
         "track_shipment" => "cap.tool.shipping.track",
         "get_shipping_quotes" | "shipping_carriers" => "cap.tool.shipping.read",

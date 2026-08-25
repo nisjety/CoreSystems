@@ -330,10 +330,31 @@ async fn authorize_thread_deletion_owner(
 /// remove in replay, checkpoints, approvals, task artifacts, or the learning
 /// outbox. It does not touch org/user-level memory, skills, billing, or other
 /// threads.
+/// Removes every content-bearing row hanging off one thread.
+///
+/// Returns the `agent_memory` rows that were deleted, because each has a
+/// semantic twin on letta-bridge keyed by the same id, and once the durable row
+/// is gone there is nothing left in Postgres to find that twin by. The caller
+/// propagates after commit — see [`crate::memory_erasure`] for why this is not
+/// done inside the transaction.
 async fn delete_thread_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     thread_id: &str,
-) -> Result<(), Status> {
+) -> Result<Vec<crate::memory_erasure::ErasedMemory>, Status> {
+    // Captured before the row is gone; `owner` is the user_id the semantic copy
+    // was tagged with (memory_grpc::index_memory).
+    let erased_memories: Vec<crate::memory_erasure::ErasedMemory> =
+        sqlx::query_as::<_, (String, String)>(
+            "DELETE FROM agent_memory WHERE session_id = $1 RETURNING id, owner",
+        )
+        .bind(thread_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?
+        .into_iter()
+        .map(|(memory_id, owner)| crate::memory_erasure::ErasedMemory { memory_id, owner })
+        .collect();
+
     // Direct thread evidence and content-bearing side ledgers.
     for query in [
         "DELETE FROM events
@@ -347,7 +368,6 @@ async fn delete_thread_rows(
             OR payload ->> 'subject' IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM dream_runs WHERE thread_id = $1
             OR run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
-        "DELETE FROM agent_memory WHERE session_id = $1",
         "DELETE FROM memory_index WHERE thread_id = $1",
     ] {
         sqlx::query(query)
@@ -454,7 +474,7 @@ async fn delete_thread_rows(
             .map_err(|error| Status::internal(error.to_string()))?;
     }
 
-    Ok(())
+    Ok(erased_memories)
 }
 
 /// Require that `thread_id` is owned by EXACTLY `owner` in the caller's org.
@@ -1832,10 +1852,11 @@ async fn create_thread_inner_preverified(
         .map(str::to_owned)
         .unwrap_or_else(new_ulid);
     let now = Utc::now();
+    let origin = resolve_thread_origin(&req)?;
 
     sqlx::query(
-        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision)
-         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0))",
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin)
+         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14)",
     )
     .bind(&thread_id)
     .bind(&req.session_key)
@@ -1854,6 +1875,7 @@ async fn create_thread_inner_preverified(
     .bind(i64::try_from(req.authority_revision).map_err(|_| {
         Status::invalid_argument("authority_revision exceeds PostgreSQL BIGINT range")
     })?)
+    .bind(origin)
     .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -1873,6 +1895,73 @@ async fn create_thread_inner_preverified(
             nanos: nanos_to_i32(now.timestamp_subsec_nanos()),
         }),
     }))
+}
+
+/// Every value `origin` is allowed to hold. Kept as a single source rather
+/// than repeating the list in the CHECK constraint, the proto comment, and
+/// this validator.
+const THREAD_ORIGINS: [&str; 5] = ["chat", "space", "agent_run", "support", "system"];
+
+/// Resolve and validate `origin` for a thread about to be created.
+///
+/// A caller that declares `origin` gets it validated against
+/// [`THREAD_ORIGINS`] and checked for consistency with `space_id` -- the two
+/// columns state one fact between them (see migration 0034's
+/// `threads_origin_space_consistency_chk`), so `origin="space"` without a
+/// `space_id`, or a `space_id` under any other origin, is a contradiction
+/// rejected at the RPC boundary rather than left for the CHECK constraint to
+/// catch after the fact.
+///
+/// A caller that leaves `origin` empty predates this field, and gets the same
+/// classification the backfill migration used: `space_id` set means "space";
+/// the `support_` session-key convention means "support"; an `agent_run/`
+/// session-key prefix (see [`agent_run_thread_key`]) means "agent_run";
+/// anything else means "chat". This is a real default, not a placeholder --
+/// it closes both the Support-assist and Agent Run Console leaks with zero
+/// change to the `CreateThread` wire contract, as long as each surface's own
+/// session-key convention is actually in place at the call site.
+fn resolve_thread_origin(req: &pb::CreateThreadRequest) -> Result<&'static str, Status> {
+    let declared = req.origin.trim();
+    if !declared.is_empty() {
+        let Some(origin) = THREAD_ORIGINS.iter().find(|allowed| **allowed == declared) else {
+            return Err(Status::invalid_argument(format!(
+                "origin {declared:?} is not one of {THREAD_ORIGINS:?}"
+            )));
+        };
+        let declares_space = *origin == "space";
+        let has_space_id = !req.space_id.trim().is_empty();
+        if declares_space != has_space_id {
+            return Err(Status::invalid_argument(
+                "origin=\"space\" requires space_id to be set, and space_id requires \
+                 origin=\"space\" -- the two must agree",
+            ));
+        }
+        return Ok(origin);
+    }
+    if !req.space_id.trim().is_empty() {
+        return Ok("space");
+    }
+    if support_thread_id(&req.session_key).is_some() {
+        return Ok("support");
+    }
+    if agent_run_thread_key(&req.session_key) {
+        return Ok("agent_run");
+    }
+    Ok("chat")
+}
+
+/// Session-key convention for a thread the Agent Run Console started with no
+/// explicit thread/session key of its own -- the exact situation that used to
+/// leak, since the resulting create-thread call was otherwise indistinguishable
+/// from an ordinary new chat.
+///
+/// Deliberately looser than [`support_thread_id`]: a support session key must
+/// survive as the thread's own id (it is the external channel's continuity
+/// key), so its shape is validated strictly. An agent-run session key carries
+/// no such requirement -- the thread id is still server-minted -- so only the
+/// prefix the console actually sends is checked.
+fn agent_run_thread_key(session_key: &str) -> bool {
+    session_key.trim().starts_with("agent_run/")
 }
 
 fn support_thread_id(session_key: &str) -> Option<&str> {
@@ -3214,6 +3303,10 @@ async fn append_letta_memory_rows(
     retention: MemoryRetention,
     org_id: Option<&str>,
     thread_id: &str,
+    // The thread's owner, so the semantic tier scopes per user the same way the
+    // durable query does. `None` means no user filter, which is org-wide —
+    // acceptable only because this path always also passes a thread id.
+    owner_user_id: Option<&str>,
     thread_messages: &[(String, String)],
     memory_rows: &mut Vec<(String, String)>,
 ) -> Option<SemanticContextSearchStatus> {
@@ -3233,7 +3326,14 @@ async fn append_letta_memory_rows(
 
     let query = semantic_memory_query(thread_messages);
     let outcome = letta
-        .search_detailed(org_id, thread_id, &query, &[], 8)
+        .search_detailed(
+            org_id,
+            thread_id,
+            owner_user_id.unwrap_or_default(),
+            &query,
+            &[],
+            8,
+        )
         .await;
     Some(append_letta_search_outcome(memory_rows, outcome, 8))
 }
@@ -3279,6 +3379,7 @@ async fn load_context_memory_rows(
         retention,
         thread_org_id.as_deref(),
         thread_id,
+        user_id,
         thread_messages,
         &mut rows,
     )
@@ -4021,17 +4122,59 @@ impl SessionCore for SessionService {
                     )));
                 }
             };
+            // An autonomy grant rides along on the mode change, because leaving
+            // plan mode IS the grant. It is validated HERE as well as at the
+            // gateway: the gateway is the caller that should have checked, and a
+            // server that trusts its caller to have checked has no rule at all.
+            //
+            // The floor is READ_ONLY rather than the run's current rung on
+            // purpose — this call cannot widen an existing grant incrementally,
+            // it can only state the grant a fresh approval made, so validating
+            // against the narrowest rung is the honest comparison.
+            let granted = pb::AutonomyRung::try_from(req.granted_rung)
+                .unwrap_or(pb::AutonomyRung::Unspecified);
+            let grant = if granted == pb::AutonomyRung::Unspecified {
+                // No grant stated: an ordinary mode change. Leaves whatever the
+                // run already carried rather than revoking it silently.
+                None
+            } else {
+                Some(
+                    mp_contracts::autonomy::AutonomyEscalation::request(
+                        pb::AutonomyRung::ReadOnly,
+                        granted,
+                        &req.justification,
+                    )
+                    .map_err(|refusal| Status::invalid_argument(refusal.message()))?,
+                )
+            };
+            // Merged into `metadata` rather than written to a new column: the
+            // JSONB is already there, already returned by GetRun, and already
+            // carries per-run facts. `||` merges so an unrelated key is not
+            // dropped by a mode change.
+            let grant_patch = grant.as_ref().map_or_else(
+                || serde_json::json!({}),
+                |grant| {
+                    serde_json::json!({
+                        "autonomy_rung": mp_contracts::autonomy::label(grant.to()),
+                        "autonomy_justification": grant.justification(),
+                    })
+                },
+            );
             // Org-scoped UPDATE: a run is only mutable by its owning org, so a
             // caller can never flip the mode of another org's run (per-org
             // isolation invariant). A missing row ⟺ wrong org OR unknown run;
             // both surface as not_found without leaking which.
             let row: Option<(String, String)> = sqlx::query_as(
-                "UPDATE runs SET mode = $2, updated_at = now()
-                 WHERE id = $1 AND org_id = $3 RETURNING id, mode",
+                "UPDATE runs
+                    SET mode = $2,
+                        metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
+                        updated_at = now()
+                  WHERE id = $1 AND org_id = $3 RETURNING id, mode",
             )
             .bind(&req.run_id)
             .bind(mode)
             .bind(&req.org_id)
+            .bind(&grant_patch)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| {
@@ -4040,7 +4183,11 @@ impl SessionCore for SessionService {
             })?;
             let (run_id, mode) =
                 row.ok_or_else(|| Status::not_found(format!("run {} not found", req.run_id)))?;
-            Ok(Response::new(pb::SetRunModeResponse { run_id, mode }))
+            Ok(Response::new(pb::SetRunModeResponse {
+                run_id,
+                mode,
+                granted_rung: granted as i32,
+            }))
         }
         .await;
         record_metrics("set_run_mode", started, result.is_ok());
@@ -4258,6 +4405,7 @@ impl SessionCore for SessionService {
                 Option<String>,
                 Option<String>,
                 Option<DateTime<Utc>>,
+                String,
             )> = sqlx::query_as(
                 "SELECT
                     t.id,
@@ -4270,7 +4418,8 @@ impl SessionCore for SessionService {
                     t.space_id,
                     latest_run.id AS latest_run_id,
                     latest_run.status AS latest_run_status,
-                    latest_run.updated_at AS latest_run_updated_at
+                    latest_run.updated_at AS latest_run_updated_at,
+                    t.origin
                  FROM threads t
                  LEFT JOIN LATERAL (
                     SELECT content
@@ -4295,13 +4444,15 @@ impl SessionCore for SessionService {
                  ) latest_run ON TRUE
                  WHERE t.org_id = $1 AND t.user_id = $2 AND t.archived_at IS NULL
                    AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
+                   AND (NULLIF($5, '') IS NULL OR t.origin = $5)
                  ORDER BY (t.pinned_at IS NOT NULL) DESC, COALESCE(last_message.created_at, t.created_at) DESC, t.created_at DESC, t.id DESC
                  LIMIT $3",
             )
             .bind(&req.org_id)
             .bind(&req.user_id)
             .bind(limit)
-			.bind(&req.space_id)
+            .bind(&req.space_id)
+            .bind(&req.origin)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -4312,7 +4463,7 @@ impl SessionCore for SessionService {
             let threads = rows
                 .into_iter()
                 .map(
-                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at)| {
+                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin)| {
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
                         } else {
@@ -4334,6 +4485,7 @@ impl SessionCore for SessionService {
                             latest_run_id: latest_run_id.unwrap_or_default(),
                             latest_run_status: latest_run_status.unwrap_or_default(),
                             latest_run_updated_at: latest_run_updated_at.map(to_proto_timestamp),
+                            origin,
                         }
                     },
                 )
@@ -4666,7 +4818,7 @@ impl SessionCore for SessionService {
             if owner_org != req.org_id || owner_user != caller_owner {
                 return Err(Status::permission_denied("thread owner required"));
             }
-            delete_thread_rows(&mut tx, &req.thread_id).await?;
+            let erased_memories = delete_thread_rows(&mut tx, &req.thread_id).await?;
             let deleted = sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2")
                 .bind(&req.thread_id)
                 .bind(&req.org_id)
@@ -4681,6 +4833,12 @@ impl SessionCore for SessionService {
             tx.commit()
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
+
+            // The durable rows are gone; their semantic twins are not, and
+            // after the commit there is no id left in Postgres to find them by.
+            // Best-effort by necessity, but never silent.
+            self.propagate_semantic_erasure("delete_thread", &req.org_id, &erased_memories)
+                .await;
 
             Ok(Response::new(pb::DeleteThreadResponse {
                 thread_id: req.thread_id,
@@ -4723,8 +4881,9 @@ impl SessionCore for SessionService {
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
 
+            let mut erased_memories: Vec<crate::memory_erasure::ErasedMemory> = Vec::new();
             for (thread_id,) in &thread_ids {
-                delete_thread_rows(&mut tx, thread_id).await?;
+                erased_memories.extend(delete_thread_rows(&mut tx, thread_id).await?);
                 sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3")
                     .bind(thread_id)
                     .bind(&req.org_id)
@@ -4736,6 +4895,9 @@ impl SessionCore for SessionService {
             tx.commit()
                 .await
                 .map_err(|error| Status::internal(error.to_string()))?;
+
+            self.propagate_semantic_erasure("delete_threads", &req.org_id, &erased_memories)
+                .await;
 
             Ok(Response::new(pb::DeleteThreadsResponse {
                 deleted_count: u32::try_from(thread_ids.len()).unwrap_or(u32::MAX),
@@ -4818,7 +4980,13 @@ impl SessionCore for SessionService {
                     .await
                     .map_err(|error| Status::internal(error.to_string()))?;
                 }
-                delete_thread_rows(&mut tx, thread_id).await?;
+                // Return value intentionally dropped: this path already
+                // reconciles its semantic twins durably through
+                // space_deletion_semantic_memory_receipts below, which survives
+                // a crash and an idempotent retry. Routing it through the
+                // best-effort helper as well would double-delete and could
+                // downgrade a `confirmed` receipt to `unconfirmed`.
+                let _ = delete_thread_rows(&mut tx, thread_id).await?;
                 sqlx::query(
                     "DELETE FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3 AND space_id = $4",
                 )
@@ -5033,7 +5201,65 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
         record_metrics("heartbeat_managed_run", started, result.is_ok());
         result
     }
+
+    /// Persist a completed run's final answer on that run's own record.
+    ///
+    /// The only content-carrying call on this service, and gated accordingly:
+    ///
+    /// * **ZDR is refused, not silently skipped.** A zero-retention run was
+    ///   promised no durable trace, and a caller that believes it stored an
+    ///   answer would later report a conclusion nobody can read. Refusing says
+    ///   so at the only moment the caller can still act on it.
+    /// * **Owner-checked.** `runs.org_id`/`user_id` must match the caller, so a
+    ///   run id cannot be used to write into another tenant's record.
+    /// * **Server-bounded.** The response reports what was actually stored, so
+    ///   truncation is reported rather than assumed away.
+    async fn record_run_output(
+        &self,
+        request: Request<pb::RecordRunOutputRequest>,
+    ) -> Result<Response<pb::RecordRunOutputResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            if caller.zdr() {
+                return Err(Status::permission_denied(
+                    "a zero-retention run has no durable output",
+                ));
+            }
+            authorize_operation(&caller, "session:write")?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            let output = req.output.trim();
+            if output.is_empty() {
+                return Err(Status::invalid_argument("output is required"));
+            }
+            let stored: String = output.chars().take(MAX_RUN_OUTPUT_CHARS).collect();
+            let affected =
+                sqlx::query("UPDATE runs SET final_output = $2, updated_at = now() WHERE id = $1")
+                    .bind(&req.run_id)
+                    .bind(&stored)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?
+                    .rows_affected();
+            if affected == 0 {
+                return Err(Status::not_found("run not found"));
+            }
+            Ok(Response::new(pb::RecordRunOutputResponse {
+                run_id: req.run_id,
+                stored_chars: u32::try_from(stored.chars().count()).unwrap_or(u32::MAX),
+            }))
+        }
+        .await;
+        record_metrics("record_run_output", started, result.is_ok());
+        result
+    }
 }
+
+/// Ceiling on a stored run answer. A run's conclusion, not its transcript — an
+/// unbounded write here would turn `runs` into a second message store with none
+/// of the retention machinery a thread has.
+const MAX_RUN_OUTPUT_CHARS: usize = 16_384;
 
 const RETRIEVAL_BUDGET_FRACTION: u32 = 4;
 const RETRIEVAL_DEFAULT_TOP_K: i32 = 10;
@@ -5120,6 +5346,51 @@ fn map_retrieve_response(
 }
 
 impl SessionService {
+    /// Erase the semantic twins of memory rows a bulk delete just removed, and
+    /// report honestly when it could not be established.
+    ///
+    /// Called AFTER the transaction commits, deliberately: the durable rows are
+    /// the source of truth for existence and authorization, and a slow or
+    /// degraded semantic tier must never hold a user's delete transaction open
+    /// or roll it back. The consequence — a delete that Postgres completed and
+    /// the vector store did not — is exactly what the warning and the
+    /// `mp_session_semantic_erasure_unconfirmed_total` counter exist to make
+    /// visible, rather than the silent orphaning this replaced.
+    async fn propagate_semantic_erasure(
+        &self,
+        operation: &'static str,
+        org_id: &str,
+        erased: &[crate::memory_erasure::ErasedMemory],
+    ) {
+        if erased.is_empty() {
+            return;
+        }
+        let outcome = crate::memory_erasure::erase_semantic_copies(
+            self.letta_memory.as_ref(),
+            org_id,
+            erased,
+        )
+        .await;
+        if outcome.is_complete() {
+            return;
+        }
+        metrics::counter!(
+            "mp_session_semantic_erasure_unconfirmed_total",
+            "operation" => operation
+        )
+        .increment(outcome.unconfirmed);
+        warn!(
+            operation,
+            org_id,
+            considered = outcome.considered(),
+            confirmed = outcome.confirmed,
+            unconfirmed = outcome.unconfirmed,
+            degradation = ?outcome.degradation_reason,
+            "semantic memory erasure incomplete: durable rows are gone but their \
+             semantic twins could not be confirmed erased"
+        );
+    }
+
     /// Re-verify the caller's delegated Data Plane credential, if any.
     ///
     /// # Errors
@@ -5843,24 +6114,25 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_letta_memory_rows, assemble_segments, assistant_reply_slot_is_open,
-        authorize_dataplane, claim_scheduled_step_inner, complete_step_inner,
-        derive_idempotency_hash, finalize_tool_action_inner, normalize_thread_presentation_text,
-        pb, record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
-        resolve_residency, scheduled_run_execution_payload_digest, semantic_context_search_status,
-        support_thread_id, thread_append_payload_digest, thread_create_payload_digest,
-        valid_scheduled_run_identifier, validate_append_space_context_shape,
-        validate_scheduled_step_request, validate_thread_space_context_shape,
-        validate_user_checkpoint, verify_append_space_decision_with_key,
-        verify_scheduled_run_decision_with_keys, verify_scheduled_run_execution_decision_with_keys,
-        verify_thread_space_decision_with_key, verify_thread_space_decision_with_keys,
-        AssemblyInputs, DelegatedDataPlaneBearer, LettaMemoryAdapter, MemoryRetention,
-        ScheduledRunThreadContext, SemanticContextSearchStatus, VerifiedIdentity,
-        CONTROL_SPACE_DECISION_AUDIENCE, CONTROL_SPACE_DECISION_VERSION,
-        CONTROL_THREAD_APPEND_ACTION, CONTROL_THREAD_CREATE_ACTION, DEFAULT_RESIDENCY,
-        HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES, MAX_USER_CHECKPOINT_STATE_BYTES,
-        MESSAGE_APPENDED_TYPE_URL, STEP_COMPLETED_TYPE_URL, THREAD_TITLE_MAX_CHARS,
-        ZDR_MEMORY_READ_SUPPRESSED,
+        agent_run_thread_key, append_letta_memory_rows, assemble_segments,
+        assistant_reply_slot_is_open, authorize_dataplane, claim_scheduled_step_inner,
+        complete_step_inner, derive_idempotency_hash, finalize_tool_action_inner,
+        normalize_thread_presentation_text, pb, record_scheduled_step_receipt_inner,
+        reserve_tool_action_inner, resolve_dataplane_addr, resolve_residency,
+        resolve_thread_origin, scheduled_run_execution_payload_digest,
+        semantic_context_search_status, support_thread_id, thread_append_payload_digest,
+        thread_create_payload_digest, valid_scheduled_run_identifier,
+        validate_append_space_context_shape, validate_scheduled_step_request,
+        validate_thread_space_context_shape, validate_user_checkpoint,
+        verify_append_space_decision_with_key, verify_scheduled_run_decision_with_keys,
+        verify_scheduled_run_execution_decision_with_keys, verify_thread_space_decision_with_key,
+        verify_thread_space_decision_with_keys, AssemblyInputs, DelegatedDataPlaneBearer,
+        LettaMemoryAdapter, MemoryRetention, ScheduledRunThreadContext,
+        SemanticContextSearchStatus, VerifiedIdentity, CONTROL_SPACE_DECISION_AUDIENCE,
+        CONTROL_SPACE_DECISION_VERSION, CONTROL_THREAD_APPEND_ACTION, CONTROL_THREAD_CREATE_ACTION,
+        DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
+        MAX_USER_CHECKPOINT_STATE_BYTES, MESSAGE_APPENDED_TYPE_URL, STEP_COMPLETED_TYPE_URL,
+        THREAD_TITLE_MAX_CHARS, ZDR_MEMORY_READ_SUPPRESSED,
     };
     use crate::auth::{SPACE_DELETION_SCOPE, SPACE_DELETION_SERVICE};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -6466,6 +6738,134 @@ mod tests {
     }
 
     #[test]
+    fn origin_defaults_to_chat_when_undeclared_and_unscoped() {
+        let req = pb::CreateThreadRequest {
+            session_key: "ordinary-session-key".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "chat");
+    }
+
+    /// This is the case that closes the Support-assist leak with zero caller
+    /// changes: the existing `support_` session-key convention now also
+    /// determines origin, rather than being read for the thread id alone.
+    #[test]
+    fn agent_run_thread_key_recognizes_the_console_prefix() {
+        assert!(agent_run_thread_key("agent_run/01J8Z0Y1"));
+        assert!(agent_run_thread_key("  agent_run/anything  "));
+        assert!(!agent_run_thread_key("ordinary-session-key"));
+        assert!(!agent_run_thread_key(
+            "support_123e4567-e89b-12d3-a456-426614174000"
+        ));
+    }
+
+    /// The Agent Run Console leak: it invokes with no thread/session key of its
+    /// own, which used to be indistinguishable from an ordinary new chat. Once
+    /// the console sends an `agent_run/`-prefixed session key, this closes it
+    /// with no wire contract change.
+    #[test]
+    fn origin_defaults_to_agent_run_from_the_session_key_convention() {
+        let req = pb::CreateThreadRequest {
+            session_key: "agent_run/01J8Z0Y1QK3R7VZC9WYX8H6N2P".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "agent_run");
+    }
+
+    #[test]
+    fn origin_defaults_to_support_from_the_session_key_convention() {
+        let req = pb::CreateThreadRequest {
+            session_key: "support_123e4567-e89b-12d3-a456-426614174000".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "support");
+    }
+
+    #[test]
+    fn origin_defaults_to_space_when_space_id_is_set_and_origin_undeclared() {
+        let req = pb::CreateThreadRequest {
+            space_id: "space-1".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "space");
+    }
+
+    #[test]
+    fn declared_origin_is_validated_against_the_allowed_set() {
+        let req = pb::CreateThreadRequest {
+            origin: "literally-anything".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert!(resolve_thread_origin(&req).is_err());
+    }
+
+    #[test]
+    fn declared_origin_is_trimmed_before_matching() {
+        let req = pb::CreateThreadRequest {
+            origin: "  agent_run  ".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "agent_run");
+    }
+
+    /// The regression this whole change targets: the Agent Run Console (and
+    /// Support-assist before it used the session-key convention) invoked with
+    /// no space_id, so a caller declaring origin="space" without one -- or the
+    /// reverse, space_id set under any other origin -- is exactly the
+    /// contradiction that let an unscoped thread masquerade as something it
+    /// was not. Both directions must be rejected, not just one.
+    #[test]
+    fn declared_space_origin_requires_a_space_id() {
+        let req = pb::CreateThreadRequest {
+            origin: "space".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert!(resolve_thread_origin(&req).is_err());
+    }
+
+    #[test]
+    fn a_space_id_requires_declared_space_origin() {
+        let req = pb::CreateThreadRequest {
+            origin: "agent_run".to_owned(),
+            space_id: "space-1".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert!(resolve_thread_origin(&req).is_err());
+    }
+
+    #[test]
+    fn declared_space_origin_with_a_space_id_is_consistent() {
+        let req = pb::CreateThreadRequest {
+            origin: "space".to_owned(),
+            space_id: "space-1".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "space");
+    }
+
+    /// The other regression this closes: the Agent Run Console invokes with no
+    /// thread/session key at all, so origin cannot be inferred for it the way
+    /// support threads can be -- it can only be closed by the caller declaring
+    /// origin explicitly. Confirm the declaration path actually accepts it.
+    #[test]
+    fn declared_agent_run_origin_is_accepted_with_no_other_signal() {
+        let req = pb::CreateThreadRequest {
+            origin: "agent_run".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "agent_run");
+    }
+
+    #[test]
+    fn declared_system_origin_is_accepted() {
+        let req = pb::CreateThreadRequest {
+            origin: "system".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "system");
+    }
+
+    #[test]
     fn memory_retention_follows_only_the_issuer_zdr_claim() {
         assert_eq!(
             MemoryRetention::of(&VerifiedIdentity::user_for_test_with_zdr(
@@ -6499,6 +6899,7 @@ mod tests {
                 )),
                 Some("org-1"),
                 "thread-1",
+                Some("user-1"),
                 &thread_messages,
                 &mut rows,
             )
@@ -6523,6 +6924,7 @@ mod tests {
             MemoryRetention::of(&VerifiedIdentity::user_for_test("org-1", "user-1")),
             Some("org-1"),
             "thread-1",
+            Some("user-1"),
             &thread_messages,
             &mut rows,
         )
@@ -7439,6 +7841,8 @@ mod tests {
                 run_id: run_id.to_owned(),
                 mode: "plan".into(),
                 org_id: org.to_owned(),
+                granted_rung: 0,
+                justification: String::new(),
             }))
             .await
             .expect("set_run_mode")
@@ -7449,6 +7853,8 @@ mod tests {
                 run_id: run_id.to_owned(),
                 mode: "bogus".into(),
                 org_id: org.to_owned(),
+                granted_rung: 0,
+                justification: String::new(),
             }))
             .await
             .is_err());
@@ -7458,6 +7864,8 @@ mod tests {
                 run_id: run_id.to_owned(),
                 mode: "execute".into(),
                 org_id: format!("attacker-{sfx}"),
+                granted_rung: 0,
+                justification: String::new(),
             }))
             .await;
         assert_eq!(
@@ -8873,6 +9281,8 @@ mod tests {
                 run_id: run_id.clone(),
                 mode: "plan".into(),
                 org_id: org.clone(),
+                granted_rung: 0,
+                justification: String::new(),
             })
             .await
             .expect("set_run_mode rpc over wire")

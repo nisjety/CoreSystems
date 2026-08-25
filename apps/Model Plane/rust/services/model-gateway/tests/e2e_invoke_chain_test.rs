@@ -157,22 +157,26 @@ impl InferenceCore for MockOk {
         self.capture(&request);
         Ok(Response::new(Box::pin(futures::stream::iter(vec![
             Ok(InferChunk {
+                reasoning_delta: String::new(),
                 request_id: "req-stream-ok".into(),
                 delta: "hel".into(),
                 done: false,
                 model_used: "mock".into(),
                 input_tokens: 0,
                 output_tokens: 0,
+                stop_reason: String::new(),
                 provider_used: String::new(),
                 residency: String::new(),
             }),
             Ok(InferChunk {
+                reasoning_delta: String::new(),
                 request_id: "req-stream-ok".into(),
                 delta: "lo".into(),
                 done: true,
                 model_used: "mock".into(),
                 input_tokens: 3,
                 output_tokens: 2,
+                stop_reason: "end_turn".to_owned(),
                 provider_used: String::new(),
                 residency: String::new(),
             }),
@@ -1238,6 +1242,18 @@ impl ManagedRunLifecycle for MockManagedRunLifecycle {
             already_applied: false,
             reconciliation_required: false,
         }))
+    }
+
+    // Only execution-core's delegation path records a run answer; the gateway
+    // chain never should. Unimplemented rather than a stub success, so a caller
+    // that starts doing it fails loudly instead of silently storing nothing.
+    async fn record_run_output(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::RecordRunOutputRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::RecordRunOutputResponse>, Status> {
+        Err(Status::unimplemented(
+            "the gateway chain does not record run answers",
+        ))
     }
 
     async fn heartbeat_managed_run(
@@ -2534,10 +2550,30 @@ async fn invoke_stream_completes_and_persists_after_the_client_disconnects_mid_s
     );
     let replay = stream_buffers.replay_after(&buffer_key, None).await;
     assert!(replay.found, "the disconnected run must still be resumable");
-    let full: String = replay.deltas.iter().map(|d| d.delta.as_str()).collect();
+    // Reconstruct the answer the way a resuming client does: each buffered
+    // frame carries the SSE event name plus its `data:` payload verbatim, so the
+    // text comes out of the `chunk` frames' JSON rather than a raw text field.
+    // (The buffer used to store bare text, which is why a reconnect replayed the
+    // answer and lost every rich event — parity doc §4.1.)
+    let full: String = replay
+        .deltas
+        .iter()
+        .filter(|frame| frame.event == "chunk")
+        .filter_map(|frame| serde_json::from_str::<serde_json::Value>(&frame.data).ok())
+        .filter_map(|payload| {
+            payload
+                .get("delta")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
     assert_eq!(
         full, "hello",
         "every delta must have buffered even though the reader was gone"
+    );
+    assert!(
+        replay.deltas.iter().all(|frame| !frame.event.is_empty()),
+        "every buffered frame must carry its event name, or a resume cannot          replay it as anything but a chunk"
     );
     assert!(
         replay.done.is_some(),

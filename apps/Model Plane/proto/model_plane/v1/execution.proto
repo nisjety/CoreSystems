@@ -123,6 +123,35 @@ message RunAgentRequest {
   // never be lost by routing a constrained chat turn through the agent loop.
   // UNSPECIFIED imposes no constraint.
   PrivacyTier min_privacy_tier = 11;
+  // When true, this run must never take a real side-effecting action,
+  // regardless of `mode` -- the human asked to see what the agent WOULD do
+  // before letting it act. Read-only tools (knowledge_search, yr_weather,
+  // ...) still run; anything `permission::is_risky_call` classifies as
+  // risky is refused outright, the same way a delegated subagent already
+  // refuses one (see runtime_loop::agent's leaf/orchestrator role split).
+  // Sourced from the chat request's `plan_mode` flag (model-gateway).
+  // Before this field existed, the request carried NO way to express this at
+  // all -- `plan_mode` was tracked only as a durable status flag
+  // (session-core `run.mode` / `PlanModeStore.is_plan_mode`) for the UI to
+  // query, with no code path that ever consulted it before dispatching a
+  // tool. A run a human believed was "planning" could still execute a real
+  // action if its `mode` happened to be `auto`.
+  // Field number 13, not 11: `min_privacy_tier` took 11 on the integration
+  // line before this field merged. Renumbered here rather than there because
+  // this one had not shipped yet — moving a field number that is already on a
+  // deployed wire is how two builds disagree about what a byte means.
+  bool plan_mode = 13;
+
+  // The rung this run is permitted to operate at, checked PER CALL by the
+  // runtime loop. Unset reads as the narrowest rung, never as a grant — an
+  // older caller that does not set it must not accidentally authorize
+  // everything.
+  //
+  // Distinct from `plan_mode` and from `mode`: plan_mode is the binary "show me
+  // what you would do" gate, while this is the graded authority a human granted
+  // when they approved the plan. A run can be out of plan mode and still be
+  // held at `WORKSPACE_WRITE`.
+  AutonomyRung autonomy_rung = 12;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.
@@ -142,6 +171,16 @@ message RunAgentResponse {
   // "awaiting_approval" (run not finished) and when no knowledge_search
   // call succeeded with real results.
   bool grounded = 4;
+
+  // True when the loop cleared tool-result payloads to stay inside the context
+  // window during this run.
+  //
+  // Reported because compaction is LOSSY and otherwise invisible: an answer
+  // built on a prompt whose earlier tool results were cleared can be worse for a
+  // reason nothing in the response explains. `StepOutcome` carries the same flag
+  // for the single-step surface, where it is correctly always false — one step
+  // accumulates no history to compact.
+  bool compaction_triggered = 5;
 }
 
 // ExecuteStepRequest — request to execute one step in the agent loop.

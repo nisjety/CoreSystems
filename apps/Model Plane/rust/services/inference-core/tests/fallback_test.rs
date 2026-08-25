@@ -60,12 +60,14 @@ impl ProviderRouterDyn for MockProvider {
         tokio::spawn(async move {
             let _ = tx
                 .send(InferChunk {
+                    reasoning_delta: String::new(),
                     request_id,
                     delta: format!("stream from {name}"),
                     done: true,
                     model_used: model,
                     input_tokens: 0,
                     output_tokens: 0,
+                    stop_reason: "end_turn".to_owned(),
                     provider_used: String::new(),
                     residency: String::new(),
                 })

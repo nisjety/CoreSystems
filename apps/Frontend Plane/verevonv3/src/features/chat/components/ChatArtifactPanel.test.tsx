@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { render, screen } from '@solidjs/testing-library'
+import { fireEvent, render, screen } from '@solidjs/testing-library'
 import { describe, expect, it, vi } from 'vitest'
 import { ArtifactsPanel } from './ChatArtifactPanel'
 import { mergeArtifactVersion } from './chat-artifacts'
@@ -214,5 +214,59 @@ describe('ArtifactsPanel', () => {
     screen.getByText('query.sql').click()
     expect(container.querySelector('.verevon-chat-artifact-code')).toBeTruthy()
     expect(container.querySelector('.verevon-chat-artifact-document')).toBeNull()
+  })
+})
+
+/**
+ * The revision diff — the one patch this app can genuinely produce, because
+ * `ChatArtifact.history` already retains every version's full content.
+ */
+describe('artifact revision diff', () => {
+  const revised = () =>
+    versioned([
+      { content: 'Intro\nGammel setning\nSlutt', title: 'Notat', version: 1 },
+      { content: 'Intro\nNy setning\nSlutt', title: 'Notat', version: 2 },
+    ])
+
+  it('offers a changes toggle with the add/remove counts once there is a previous version', () => {
+    const { container, unmount } = render(() => <ArtifactsPanel items={[item(revised())]} />)
+    const toggle = [...container.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Vis endringer'),
+    )
+    expect(toggle, 'the changes toggle should be offered').toBeTruthy()
+    // Counts are on the button so the size of the change is visible before opening.
+    expect(toggle?.textContent).toContain('+1')
+    unmount()
+  })
+
+  it('renders the patch when toggled, and the content again when toggled back', () => {
+    const { container, unmount } = render(() => <ArtifactsPanel items={[item(revised())]} />)
+    const toggle = [...container.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Vis endringer'),
+    )!
+    fireEvent.click(toggle)
+    expect(container.querySelector('.verevon-chat-diff')).toBeTruthy()
+    expect(container.textContent).toContain('Ny setning')
+    expect(container.textContent).toContain('Gammel setning')
+
+    fireEvent.click(
+      [...container.querySelectorAll('button')].find((button) =>
+        button.textContent?.includes('Vis versjonen'),
+      )!,
+    )
+    expect(container.querySelector('.verevon-chat-diff')).toBeNull()
+    unmount()
+  })
+
+  it('offers no changes toggle for a single-version artifact', () => {
+    // Nothing to compare against: a toggle here would open an empty diff, which
+    // reads as "nothing changed" rather than "there is no previous version".
+    const single = versioned([{ content: 'Bare én', title: 'Notat', version: 1 }])
+    const { container, unmount } = render(() => <ArtifactsPanel items={[item(single)]} />)
+    const toggle = [...container.querySelectorAll('button')].find((button) =>
+      button.textContent?.includes('Vis endringer'),
+    )
+    expect(toggle).toBeUndefined()
+    unmount()
   })
 })

@@ -23,6 +23,77 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// AutonomyRung — how much a run is permitted to do, as a strictly ordered
+// ladder. Higher is wider; each rung includes everything below it.
+//
+// Shared vocabulary on purpose: model-gateway decides and records a grant, and
+// execution-core enforces it PER CALL at execution. Baking a rung into a tool
+// schema instead would be wrong — a schema is registry-global while the
+// effective rung is per-call truth, so the same tool can be permitted on one
+// call and refused on the next within one run.
+//
+// The names mirror execution-core's own `MpSandboxPolicy` rather than inventing
+// a second scale, so a granted rung and the isolation it implies cannot drift
+// apart.
+type AutonomyRung int32
+
+const (
+	// No rung stated. Treated as the NARROWEST, never as a default grant: an
+	// unset field on an old client must not read as permission.
+	AutonomyRung_AUTONOMY_RUNG_UNSPECIFIED AutonomyRung = 0
+	// Investigate only. Reads run; anything with a real effect is refused.
+	AutonomyRung_AUTONOMY_RUNG_READ_ONLY AutonomyRung = 1
+	// May write within the run's own workspace. Still refuses actions that reach
+	// outside it (sending, publishing, booking, paying).
+	AutonomyRung_AUTONOMY_RUNG_WORKSPACE_WRITE AutonomyRung = 2
+	// Full effect. Reserved for an explicit, justified, human-granted escalation
+	// — never a default and never inferred.
+	AutonomyRung_AUTONOMY_RUNG_DANGER_FULL_ACCESS AutonomyRung = 3
+)
+
+// Enum value maps for AutonomyRung.
+var (
+	AutonomyRung_name = map[int32]string{
+		0: "AUTONOMY_RUNG_UNSPECIFIED",
+		1: "AUTONOMY_RUNG_READ_ONLY",
+		2: "AUTONOMY_RUNG_WORKSPACE_WRITE",
+		3: "AUTONOMY_RUNG_DANGER_FULL_ACCESS",
+	}
+	AutonomyRung_value = map[string]int32{
+		"AUTONOMY_RUNG_UNSPECIFIED":        0,
+		"AUTONOMY_RUNG_READ_ONLY":          1,
+		"AUTONOMY_RUNG_WORKSPACE_WRITE":    2,
+		"AUTONOMY_RUNG_DANGER_FULL_ACCESS": 3,
+	}
+)
+
+func (x AutonomyRung) Enum() *AutonomyRung {
+	p := new(AutonomyRung)
+	*p = x
+	return p
+}
+
+func (x AutonomyRung) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (AutonomyRung) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_runs_proto_enumTypes[0].Descriptor()
+}
+
+func (AutonomyRung) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_runs_proto_enumTypes[0]
+}
+
+func (x AutonomyRung) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use AutonomyRung.Descriptor instead.
+func (AutonomyRung) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{0}
+}
+
 type GetRunRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Run identifier (ULID).
@@ -1482,7 +1553,12 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"created_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"updated_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x123\n" +
-	"\bmetadata\x18\x10 \x01(\v2\x17.google.protobuf.StructR\bmetadata2\xa0\a\n" +
+	"\bmetadata\x18\x10 \x01(\v2\x17.google.protobuf.StructR\bmetadata*\x93\x01\n" +
+	"\fAutonomyRung\x12\x1d\n" +
+	"\x19AUTONOMY_RUNG_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17AUTONOMY_RUNG_READ_ONLY\x10\x01\x12!\n" +
+	"\x1dAUTONOMY_RUNG_WORKSPACE_WRITE\x10\x02\x12$\n" +
+	" AUTONOMY_RUNG_DANGER_FULL_ACCESS\x10\x032\xa0\a\n" +
 	"\n" +
 	"RunService\x12B\n" +
 	"\x06GetRun\x12\x1d.model_plane.v1.GetRunRequest\x1a\x19.model_plane.v1.RunDetail\x12o\n" +
@@ -1508,51 +1584,53 @@ func file_model_plane_v1_runs_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_runs_proto_rawDescData
 }
 
+var file_model_plane_v1_runs_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_model_plane_v1_runs_proto_goTypes = []any{
-	(*GetRunRequest)(nil),                         // 0: model_plane.v1.GetRunRequest
-	(*GetScheduledStepContextRequest)(nil),        // 1: model_plane.v1.GetScheduledStepContextRequest
-	(*ScheduledStepContext)(nil),                  // 2: model_plane.v1.ScheduledStepContext
-	(*ListRunsRequest)(nil),                       // 3: model_plane.v1.ListRunsRequest
-	(*ListRunsResponse)(nil),                      // 4: model_plane.v1.ListRunsResponse
-	(*ListSystemRunsRequest)(nil),                 // 5: model_plane.v1.ListSystemRunsRequest
-	(*CancelRunRequest)(nil),                      // 6: model_plane.v1.CancelRunRequest
-	(*CancelRunResponse)(nil),                     // 7: model_plane.v1.CancelRunResponse
-	(*ResolveRunOwnerRequest)(nil),                // 8: model_plane.v1.ResolveRunOwnerRequest
-	(*ResolveRunOwnerResponse)(nil),               // 9: model_plane.v1.ResolveRunOwnerResponse
-	(*ResolveThreadOwnerRequest)(nil),             // 10: model_plane.v1.ResolveThreadOwnerRequest
-	(*ResolveThreadOwnerResponse)(nil),            // 11: model_plane.v1.ResolveThreadOwnerResponse
-	(*ResolveRunActionAuthorityRequest)(nil),      // 12: model_plane.v1.ResolveRunActionAuthorityRequest
-	(*ResolveRunActionAuthorityResponse)(nil),     // 13: model_plane.v1.ResolveRunActionAuthorityResponse
-	(*ResolveScheduledStepAuthorityRequest)(nil),  // 14: model_plane.v1.ResolveScheduledStepAuthorityRequest
-	(*ResolveScheduledStepAuthorityResponse)(nil), // 15: model_plane.v1.ResolveScheduledStepAuthorityResponse
-	(*RunDetail)(nil),                             // 16: model_plane.v1.RunDetail
-	(*timestamppb.Timestamp)(nil),                 // 17: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                       // 18: google.protobuf.Struct
+	(AutonomyRung)(0),                             // 0: model_plane.v1.AutonomyRung
+	(*GetRunRequest)(nil),                         // 1: model_plane.v1.GetRunRequest
+	(*GetScheduledStepContextRequest)(nil),        // 2: model_plane.v1.GetScheduledStepContextRequest
+	(*ScheduledStepContext)(nil),                  // 3: model_plane.v1.ScheduledStepContext
+	(*ListRunsRequest)(nil),                       // 4: model_plane.v1.ListRunsRequest
+	(*ListRunsResponse)(nil),                      // 5: model_plane.v1.ListRunsResponse
+	(*ListSystemRunsRequest)(nil),                 // 6: model_plane.v1.ListSystemRunsRequest
+	(*CancelRunRequest)(nil),                      // 7: model_plane.v1.CancelRunRequest
+	(*CancelRunResponse)(nil),                     // 8: model_plane.v1.CancelRunResponse
+	(*ResolveRunOwnerRequest)(nil),                // 9: model_plane.v1.ResolveRunOwnerRequest
+	(*ResolveRunOwnerResponse)(nil),               // 10: model_plane.v1.ResolveRunOwnerResponse
+	(*ResolveThreadOwnerRequest)(nil),             // 11: model_plane.v1.ResolveThreadOwnerRequest
+	(*ResolveThreadOwnerResponse)(nil),            // 12: model_plane.v1.ResolveThreadOwnerResponse
+	(*ResolveRunActionAuthorityRequest)(nil),      // 13: model_plane.v1.ResolveRunActionAuthorityRequest
+	(*ResolveRunActionAuthorityResponse)(nil),     // 14: model_plane.v1.ResolveRunActionAuthorityResponse
+	(*ResolveScheduledStepAuthorityRequest)(nil),  // 15: model_plane.v1.ResolveScheduledStepAuthorityRequest
+	(*ResolveScheduledStepAuthorityResponse)(nil), // 16: model_plane.v1.ResolveScheduledStepAuthorityResponse
+	(*RunDetail)(nil),                             // 17: model_plane.v1.RunDetail
+	(*timestamppb.Timestamp)(nil),                 // 18: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                       // 19: google.protobuf.Struct
 }
 var file_model_plane_v1_runs_proto_depIdxs = []int32{
-	16, // 0: model_plane.v1.ListRunsResponse.runs:type_name -> model_plane.v1.RunDetail
-	17, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
-	17, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
-	18, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
-	0,  // 4: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
-	1,  // 5: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
-	3,  // 6: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
-	6,  // 7: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	5,  // 8: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
-	8,  // 9: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
-	10, // 10: model_plane.v1.RunService.ResolveThreadOwner:input_type -> model_plane.v1.ResolveThreadOwnerRequest
-	12, // 11: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
-	14, // 12: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
-	16, // 13: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
-	2,  // 14: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
-	4,  // 15: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
-	7,  // 16: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	4,  // 17: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
-	9,  // 18: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
-	11, // 19: model_plane.v1.RunService.ResolveThreadOwner:output_type -> model_plane.v1.ResolveThreadOwnerResponse
-	13, // 20: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
-	15, // 21: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
+	17, // 0: model_plane.v1.ListRunsResponse.runs:type_name -> model_plane.v1.RunDetail
+	18, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
+	18, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
+	19, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
+	1,  // 4: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
+	2,  // 5: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
+	4,  // 6: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
+	7,  // 7: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	6,  // 8: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
+	9,  // 9: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
+	11, // 10: model_plane.v1.RunService.ResolveThreadOwner:input_type -> model_plane.v1.ResolveThreadOwnerRequest
+	13, // 11: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
+	15, // 12: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
+	17, // 13: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
+	3,  // 14: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
+	5,  // 15: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
+	8,  // 16: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	5,  // 17: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
+	10, // 18: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
+	12, // 19: model_plane.v1.RunService.ResolveThreadOwner:output_type -> model_plane.v1.ResolveThreadOwnerResponse
+	14, // 20: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
+	16, // 21: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
 	13, // [13:22] is the sub-list for method output_type
 	4,  // [4:13] is the sub-list for method input_type
 	4,  // [4:4] is the sub-list for extension type_name
@@ -1570,13 +1648,14 @@ func file_model_plane_v1_runs_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_runs_proto_rawDesc), len(file_model_plane_v1_runs_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_model_plane_v1_runs_proto_goTypes,
 		DependencyIndexes: file_model_plane_v1_runs_proto_depIdxs,
+		EnumInfos:         file_model_plane_v1_runs_proto_enumTypes,
 		MessageInfos:      file_model_plane_v1_runs_proto_msgTypes,
 	}.Build()
 	File_model_plane_v1_runs_proto = out.File

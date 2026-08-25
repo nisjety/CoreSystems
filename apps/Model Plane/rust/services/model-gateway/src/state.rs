@@ -219,6 +219,10 @@ pub struct AppState {
     /// chat-parity §4 — active in-flight stream cancellation registry. Populated
     /// by `/v1/invoke/stream`; flipped by `POST /v1/invoke/{id}/cancel`.
     pub cancels: crate::cancel_registry::CancelRegistry,
+    /// Mid-run user input, delivered at the next tool-round boundary. Populated
+    /// by `/v1/invoke/stream`; appended to by `POST /v1/invoke/{id}/queue`.
+    /// Replaces the SPA silently discarding anything typed while streaming.
+    pub queued_inputs: crate::queued_input::QueuedInputRegistry,
     /// chat-parity §1 — idempotent-regenerate guard for `/v1/invoke`. Keyed by
     /// a client-supplied `idempotency_key`; dedupes double-submit / regenerate
     /// retries so they neither re-run inference nor re-charge budget.
@@ -376,6 +380,7 @@ impl AppState {
             // consumer is spawned against this same instance in `main.rs`.
             doc_ready: crate::doc_indexed_consumer::DocReadyRegistry::new(),
             cancels: crate::cancel_registry::CancelRegistry::new(),
+            queued_inputs: crate::queued_input::QueuedInputRegistry::new(),
             idempotency: crate::idempotency_registry::IdempotencyRegistry::new(),
             // `Client::new` with empty base_url returns an Unavailable
             // client; the gRPC handlers degrade to Unimplemented in

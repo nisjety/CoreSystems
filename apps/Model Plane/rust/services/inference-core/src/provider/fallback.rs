@@ -387,6 +387,35 @@ fn provider_serves_model(
     catalog.is_some_and(|models| models.iter().any(|known| known.eq_ignore_ascii_case(model)))
 }
 
+/// Validates `req.min_residency` before any provider is tried. Fails loud on
+/// an unrecognized token rather than silently treating a typo as "no floor"
+/// — the same reasoning as `Residency::parse`'s own doc comment. Empty is
+/// always valid (no floor requested).
+fn validate_min_residency(req: &InferRequest) -> Result<(), ProviderError> {
+    let requested = req.min_residency.trim();
+    if requested.is_empty() || Residency::parse(requested).is_some() {
+        return Ok(());
+    }
+    Err(ProviderError::ResidencyViolation(format!(
+        "unrecognized min_residency token `{requested}`"
+    )))
+}
+
+/// Whether `caps_residency` fails to meet the request's residency floor.
+/// Called once per candidate provider, the way the ZDR gate already is.
+///
+/// An unparseable token cannot reach here in production: `infer`/`infer_stream`
+/// both call [`validate_min_residency`] before trying any provider. Treating it
+/// as "no floor" here rather than panicking is a defensive fallback only, not
+/// a second enforcement path.
+fn residency_gate_blocks(req: &InferRequest, caps_residency: Residency) -> bool {
+    let requested = req.min_residency.trim();
+    if requested.is_empty() {
+        return false;
+    }
+    Residency::parse(requested).is_some_and(|required| caps_residency < required)
+}
+
 impl FallbackChain {
     /// Build a fallback chain from configuration.
     ///
@@ -742,12 +771,12 @@ impl FallbackChain {
         // and nothing is silently misrepresented: `Global` is what gets recorded
         // and logged.
         //
-        // Real enforcement belongs on the request path, where a caller asks for a
-        // minimum residency and a provider that cannot meet it is skipped the way
-        // a non-ZDR provider already is. That needs a residency field on
-        // InferRequest, which needs the proto, and is deferred with the rest of the
-        // request-side work (strategy doc Phase 2). Until then this is disclosure,
-        // not a control -- and it is labelled as such rather than dressed up.
+        // Request-side enforcement now exists too (`InferRequest.min_residency`,
+        // gated in `infer_one_model`/`stream_one_model` via `residency_gate_blocks`
+        // exactly the way a non-ZDR provider is skipped). This boot-time block
+        // stays disclosure-only on purpose: it reports the STATIC fleet's posture
+        // once at startup for operator visibility, independent of whether any
+        // given request asks for a floor at all.
         for (name, provider) in &providers {
             let declared = provider.capabilities_dyn().residency;
             if declared > Residency::Global {
@@ -999,6 +1028,7 @@ impl FallbackChain {
             .as_ref()
             .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+        validate_min_residency(req)?;
 
         // Check cache first
         if let Some(cached) = self.cache.get(req) {
@@ -1058,6 +1088,11 @@ impl FallbackChain {
             Err(ProviderError::ZdrUnavailable(
                 "no matching provider deployment has verified ZDR support".to_owned(),
             ))
+        } else if !req.min_residency.trim().is_empty() && total_attempts == 0 {
+            Err(ProviderError::ResidencyViolation(format!(
+                "no matching provider deployment meets the requested `{}` residency floor",
+                req.min_residency.trim()
+            )))
         } else {
             Err(throttle.exhausted_error(total_attempts))
         }
@@ -1124,6 +1159,20 @@ impl FallbackChain {
                     required_tier = req.min_privacy_tier.label(),
                     provider_tier = PrivacyTier::classify(&caps).label(),
                     "provider skipped: privacy tier below the requested minimum"
+                );
+                continue;
+            }
+            // Residency-floor gate: the tier gate above answers "is this
+            // deployment's posture strong enough"; this one answers the
+            // caller's explicit `min_residency` token. Both run before any
+            // network call, and a provider must clear BOTH to be tried.
+            if residency_gate_blocks(req, caps.residency) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    required = %req.min_residency,
+                    declared = caps.residency.as_str(),
+                    "provider skipped: residency floor not met"
                 );
                 continue;
             }
@@ -1284,6 +1333,7 @@ impl FallbackChain {
             .as_ref()
             .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+        validate_min_residency(req)?;
 
         let mut total_attempts: u32 = 0;
         let mut throttle = ThrottleState::default();
@@ -1333,6 +1383,11 @@ impl FallbackChain {
             Err(ProviderError::ZdrUnavailable(
                 "no matching streaming provider deployment has verified ZDR support".to_owned(),
             ))
+        } else if !req.min_residency.trim().is_empty() && total_attempts == 0 {
+            Err(ProviderError::ResidencyViolation(format!(
+                "no matching streaming provider deployment meets the requested `{}` residency floor",
+                req.min_residency.trim()
+            )))
         } else {
             Err(throttle.exhausted_error(total_attempts))
         }
@@ -1370,6 +1425,19 @@ impl FallbackChain {
                     required_tier = req.min_privacy_tier.label(),
                     provider_tier = PrivacyTier::classify(&caps).label(),
                     "stream provider skipped: privacy tier below the requested minimum"
+                );
+                continue;
+            }
+            // Residency-floor gate on the streaming path, same as unary: an
+            // operator-declared residency weaker than the requested floor is
+            // skipped before any stream is opened.
+            if residency_gate_blocks(req, caps.residency) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    required = %req.min_residency,
+                    declared = caps.residency.as_str(),
+                    "stream provider skipped: residency floor not met"
                 );
                 continue;
             }
@@ -1860,8 +1928,9 @@ mod resolution_tests {
     struct RecordingProvider {
         seen_model: Arc<Mutex<Option<String>>>,
         zdr_supported: bool,
-        /// Declared residency; defaults to EU so the pre-existing tests exercise
-        /// routing, never the residency registration posture.
+        /// Declared residency. `Default` gives `Eu` so the pre-existing tests
+        /// exercise routing, never the residency registration posture; the
+        /// residency-floor and privacy-tier tests override it explicitly.
         residency: Residency,
         /// Which family this double stands in for.
         ///
@@ -1911,8 +1980,9 @@ mod resolution_tests {
 
         async fn infer_stream(
             &self,
-            _req: &InferRequest,
+            req: &InferRequest,
         ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            *self.seen_model.lock().unwrap() = Some(req.model.clone());
             let (_tx, rx) = mpsc::channel(1);
             Ok(rx)
         }
@@ -1921,9 +1991,8 @@ mod resolution_tests {
     fn chain_with(seen: Arc<Mutex<Option<String>>>) -> FallbackChain {
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen,
-            zdr_supported: false,
-            residency: Residency::Eu,
             family: ModelFamily::Anthropic,
+            ..RecordingProvider::default()
         });
         FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
     }
@@ -1933,6 +2002,7 @@ mod resolution_tests {
         let seen = Arc::new(Mutex::new(None));
         let chain = chain_with(seen.clone());
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "r1".to_owned(),
             model: String::new(),
             ..Default::default()
@@ -1954,6 +2024,7 @@ mod resolution_tests {
         let seen = Arc::new(Mutex::new(None));
         let chain = chain_with(seen.clone());
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "r2".to_owned(),
             model: "claude-opus-4-20250514".to_owned(),
             ..Default::default()
@@ -1982,6 +2053,7 @@ mod resolution_tests {
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1)
                 .with_intent_enabled(true);
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "r3".to_owned(),
             model: "verevon-budget".to_owned(),
             messages: vec![crate::provider::ChatMessage {
@@ -2011,6 +2083,7 @@ mod resolution_tests {
         let chain =
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "r4".to_owned(),
             model: "verevon-genius".to_owned(),
             ..Default::default()
@@ -2041,6 +2114,7 @@ mod resolution_tests {
             1,
         );
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "zdr-1".to_owned(),
             model: "gpt-4o-mini".to_owned(),
             zdr: true,
@@ -2190,6 +2264,10 @@ mod resolution_tests {
                 model_used: req.model.clone(),
                 input_tokens: 1,
                 output_tokens: 1,
+                // A final chunk on the merged contract carries the honest
+                // termination signal and the (empty) reasoning channel too.
+                stop_reason: "end_turn".to_owned(),
+                reasoning_delta: String::new(),
                 provider_used: String::new(),
                 residency: String::new(),
             };
@@ -2293,6 +2371,137 @@ mod resolution_tests {
         };
         chain.create_embedding(&unconstrained).await.expect("Unspecified imposes no constraint");
         assert!(*reached.lock().unwrap());
+    }
+
+    // ---------------------------------------------------------------------
+    // Residency-floor gating — the `min_residency` half of the same
+    // provider-selection contract as the tier tests above. Kept as its own
+    // section because the floor is expressed as an operator TOKEN (parsed,
+    // typo-rejecting) rather than as a tier enum, and it fails closed with
+    // `ResidencyViolation` instead of `TierUnavailable`.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn residency_floor_skips_a_provider_declaring_weaker_residency() {
+        let global_seen = Arc::new(Mutex::new(None));
+        let eu_seen = Arc::new(Mutex::new(None));
+        let global: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: global_seen.clone(),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let eu: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: eu_seen.clone(),
+            residency: Residency::Eu,
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                ("openai".to_owned(), global),
+                ("azure-openai".to_owned(), eu),
+            ],
+            1,
+        );
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "res-1".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_residency: "eu".to_owned(),
+            ..Default::default()
+        };
+
+        chain
+            .infer(&req)
+            .await
+            .expect("EU provider meets the floor");
+        assert!(
+            global_seen.lock().unwrap().is_none(),
+            "the Global provider must never be reached once an EU floor is requested"
+        );
+        assert!(eu_seen.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn residency_floor_fails_closed_without_a_compliant_route() {
+        let seen = Arc::new(Mutex::new(None));
+        let global: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(vec![("openai".to_owned(), global)], 1);
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "res-2".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_residency: "norway".to_owned(),
+            ..Default::default()
+        };
+
+        let error = chain.infer(&req).await.unwrap_err();
+        assert!(matches!(error, ProviderError::ResidencyViolation(_)));
+        assert!(seen.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unrecognized_residency_token_is_rejected_before_any_provider_is_tried() {
+        let seen = Arc::new(Mutex::new(None));
+        let provider: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(vec![("openai".to_owned(), provider)], 1);
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "res-3".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_residency: "atlantis".to_owned(),
+            ..Default::default()
+        };
+
+        let error = chain.infer(&req).await.unwrap_err();
+        assert!(matches!(error, ProviderError::ResidencyViolation(_)));
+        assert!(
+            seen.lock().unwrap().is_none(),
+            "a typo'd token must fail before any provider is even tried"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_streaming_path_also_honors_the_residency_floor() {
+        let global_seen = Arc::new(Mutex::new(None));
+        let norway_seen = Arc::new(Mutex::new(None));
+        let global: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: global_seen.clone(),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let norway: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: norway_seen.clone(),
+            residency: Residency::Norway,
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                ("openai".to_owned(), global),
+                ("azure-openai".to_owned(), norway),
+            ],
+            1,
+        );
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "res-4".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_residency: "sovereign".to_owned(),
+            ..Default::default()
+        };
+
+        chain
+            .infer_stream(&req)
+            .await
+            .expect("the Norway-resident provider meets a sovereign floor");
+        assert!(global_seen.lock().unwrap().is_none());
+        assert!(norway_seen.lock().unwrap().is_some());
     }
 
     /// An embedding provider that records whether it was reached. Used to prove
@@ -2634,6 +2843,7 @@ mod resolution_tests {
     /// `Complex` and therefore resolves to `claude-sonnet-4-6`.
     fn tool_turn(request_id: &str, model: &str) -> InferRequest {
         InferRequest {
+            thinking_budget_tokens: 0,
             request_id: request_id.to_owned(),
             model: model.to_owned(),
             messages: vec![crate::provider::ChatMessage {
@@ -2687,6 +2897,8 @@ mod resolution_tests {
                         model_used: String::new(),
                         input_tokens: 0,
                         output_tokens: 0,
+                        stop_reason: String::new(),
+                        reasoning_delta: String::new(),
                         provider_used: String::new(),
                         residency: String::new(),
                     })
@@ -2699,6 +2911,8 @@ mod resolution_tests {
                         model_used: versioned,
                         input_tokens: 3,
                         output_tokens: 1,
+                        stop_reason: "end_turn".to_owned(),
+                        reasoning_delta: String::new(),
                         provider_used: String::new(),
                         residency: String::new(),
                     })
@@ -2722,6 +2936,7 @@ mod resolution_tests {
         // a caller can safely request again.
         let response = version_echo_chain()
             .infer(&InferRequest {
+                thinking_budget_tokens: 0,
                 request_id: "norm-1".to_owned(),
                 model: "gpt-4o-mini".to_owned(),
                 ..Default::default()
@@ -2736,6 +2951,7 @@ mod resolution_tests {
     async fn streamed_chunks_carry_the_requested_id_and_keep_their_shape() {
         let mut rx = version_echo_chain()
             .infer_stream(&InferRequest {
+                thinking_budget_tokens: 0,
                 request_id: "norm-2".to_owned(),
                 model: "gpt-4o-mini".to_owned(),
                 ..Default::default()
@@ -2978,6 +3194,7 @@ mod resolution_tests {
             azure_anthropic: "claude-haiku-4-5".to_owned(),
         };
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "cfg-default-1".to_owned(),
             model: String::new(),
             ..Default::default()

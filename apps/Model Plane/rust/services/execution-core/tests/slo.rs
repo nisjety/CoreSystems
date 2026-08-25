@@ -56,6 +56,7 @@ async fn bench_step() -> runtime_loop::StepOutcome {
         "",   // empty user id → noop tool path does not use it
         "",   // empty run id → noop tool path does not use it
         "",   // empty step id → noop tool path does not use it
+        "",   // empty thread id → memory tools fail closed, unused here
         None, // no session channel → noop tool path does not use it
         None, // no browser event sink → noop tool path does not use it
         None, // no state store → noop tool path does not use it

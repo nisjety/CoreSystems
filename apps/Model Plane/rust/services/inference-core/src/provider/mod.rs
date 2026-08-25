@@ -1,5 +1,7 @@
 //! Provider routing traits and implementations.
 
+use tracing::warn;
+
 pub mod anthropic;
 pub mod artifact_ref;
 pub mod doc_intel;
@@ -7,6 +9,7 @@ pub mod fallback;
 pub mod intent;
 pub mod language;
 pub mod openai;
+pub mod overflow;
 pub mod policy_client;
 pub mod realtime;
 pub mod routing_policy;
@@ -129,6 +132,19 @@ pub struct InferRequest {
     pub tools: Vec<ToolDefinition>,
     /// Tool selection policy: "auto" | "none" | "required" | a tool name.
     pub tool_choice: String,
+    /// Requested minimum residency floor (e.g. "eu", "norway"). Enforced
+    /// deny-by-default in `provider::fallback`: a provider whose declared
+    /// [`Residency`] is weaker than this floor is skipped, mirroring how a
+    /// non-ZDR provider is skipped when `zdr` is true. Empty means no floor.
+    pub min_residency: String,
+    /// Extended-thinking budget in tokens. 0 requests no thinking, which is the
+    /// pre-existing behaviour byte-for-byte.
+    ///
+    /// Advisory: a provider forwards it only when the resolved model actually
+    /// accepts a thinking parameter, because sending one to a model that does
+    /// not is a hard 400 rather than a silent no-op. See
+    /// `anthropic::supports_extended_thinking`.
+    pub thinking_budget_tokens: i32,
     /// Tenant scope for the Verevon intent layer's budget check (from gRPC
     /// metadata `x-org-id`; empty when the caller doesn't forward it).
     pub org_id: String,
@@ -202,6 +218,17 @@ pub struct InferChunk {
     pub model_used: String,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    /// Why generation stopped. Populated on the final chunk only; see the
+    /// proto field's doc for the full vocabulary, including
+    /// `"stream_incomplete"` for a connection that broke before any proper
+    /// termination signal arrived.
+    pub stop_reason: String,
+    /// Incremental extended-thinking text, when the model produced any.
+    ///
+    /// Kept separate from `delta` rather than merged: reasoning is not part of
+    /// the answer, and a consumer that appended it would put the model's
+    /// scratchpad into the user's reply. A chunk carries one or the other.
+    pub reasoning_delta: String,
     /// Serving-provider provenance (populated on final chunks; same semantics
     /// as [`InferResponse::provider_used`]). Empty when unknown.
     pub provider_used: String,
@@ -806,6 +833,16 @@ pub enum ProviderError {
     #[error("provider unavailable: {0}")]
     Unavailable(String),
 
+    /// The prompt exceeded the provider's input limit. Distinguished from
+    /// [`ProviderError::Http`] so callers can shed history and retry instead of
+    /// re-deriving the intent from provider prose — see
+    /// [`crate::provider::overflow`] for why that classification lives here and
+    /// not downstream.
+    ///
+    /// `detail` is the provider's original `"<status>: <body>"` text, unchanged.
+    #[error("prompt too long for the provider: {detail}")]
+    TooLong { detail: String },
+
     #[error("all providers exhausted after {attempts} total attempts")]
     AllExhausted { attempts: u32 },
 
@@ -911,6 +948,61 @@ pub(crate) fn endpoint_region_is_non_eu(endpoint: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    // --- tool_parameters: a malformed schema must be LOUD, never silent -------
+
+    /// The bug this replaces: a bare `unwrap_or_else` turned an unparseable
+    /// schema into `{"type":"object","properties":{}}`, which tells the provider
+    /// "this function accepts anything". The model then invents argument names,
+    /// the executor rejects them, and the visible symptom is a tool that
+    /// mysteriously never works — with nothing anywhere naming the real cause.
+    #[test]
+    fn an_unparseable_schema_still_degrades_but_is_reported() {
+        let open = serde_json::json!({ "type": "object", "properties": {} });
+        // Invalid JSON.
+        assert_eq!(tool_parameters("broken_tool", "{not json"), open);
+        // Valid JSON that is not an object — a schema has to be an object.
+        assert_eq!(tool_parameters("array_tool", "[1,2,3]"), open);
+        assert_eq!(tool_parameters("string_tool", "\"nope\""), open);
+        assert_eq!(tool_parameters("null_tool", "null"), open);
+    }
+
+    /// An ABSENT schema is a legitimate "this tool takes no arguments" — the
+    /// same output, but not a fault, and it must not be reported as one or the
+    /// warning becomes noise every caller learns to ignore.
+    #[test]
+    fn an_absent_schema_is_not_treated_as_a_malformation() {
+        let open = serde_json::json!({ "type": "object", "properties": {} });
+        for empty in ["", "   ", "\n"] {
+            assert_eq!(tool_parameters("no_args_tool", empty), open);
+        }
+    }
+
+    /// A good schema passes through byte-for-byte. Degrading a valid schema
+    /// would be strictly worse than the bug being fixed.
+    #[test]
+    fn a_valid_schema_is_passed_through_untouched() {
+        let raw =
+            r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#;
+        let parsed = tool_parameters("knowledge_search", raw);
+        assert_eq!(
+            parsed,
+            serde_json::from_str::<serde_json::Value>(raw).unwrap()
+        );
+        assert_eq!(parsed["required"][0], "query");
+    }
+
+    /// The log line has to say WHICH tool, or an operator with twenty tools
+    /// learns only that one of them is broken.
+    #[test]
+    fn the_kind_of_the_wrong_value_is_named() {
+        assert_eq!(json_kind(&serde_json::json!([])), "array");
+        assert_eq!(json_kind(&serde_json::json!("x")), "string");
+        assert_eq!(json_kind(&serde_json::json!(null)), "null");
+        assert_eq!(json_kind(&serde_json::json!(1)), "number");
+        assert_eq!(json_kind(&serde_json::json!(true)), "bool");
+        assert_eq!(json_kind(&serde_json::json!({})), "object");
+    }
     use super::*;
 
     #[test]
@@ -1012,5 +1104,72 @@ mod tests {
         assert!(!endpoint_region_is_non_eu(
             "https://my-swedencentral-res.openai.azure.com"
         ));
+    }
+}
+
+/// Parse a tool's declared JSON-Schema parameters, or fall back to an open
+/// object — **loudly**.
+///
+/// # Why the fallback is kept, and why it must not be silent
+///
+/// This used to be a bare `.unwrap_or_else(...)` producing
+/// `{"type":"object","properties":{}}` with no signal at all. That is the worst
+/// possible failure to hide: an open schema tells the provider "this function
+/// takes anything", so the model invents argument names, the call reaches an
+/// executor that rejects it, and the only visible symptom is a tool that
+/// mysteriously never works. The schema was malformed the whole time and nothing
+/// said so.
+///
+/// The fallback itself stays, deliberately. Rejecting the request would fail the
+/// entire turn because *one* of possibly twenty tools has a bad schema — a
+/// caller's authoring mistake would become an outage. Degrading one tool and
+/// naming it is the proportionate response.
+///
+/// Callers that own the schema (`builtin_tool_defs`, `offered_tool_defs`) should
+/// never trip this; a client-declared or MCP-registered tool can.
+///
+/// Lives here rather than in one provider because BOTH the `OpenAI` and Anthropic
+/// paths had the same silent `unwrap_or_else` — the identical bug twice is what
+/// a shared concern looks like before it is shared.
+pub(crate) fn tool_parameters(tool_name: &str, parameters_json: &str) -> serde_json::Value {
+    let trimmed = parameters_json.trim();
+    // An absent schema is a legitimate "no arguments", not a malformation. Only
+    // a *present but unparseable* one is a fault worth reporting.
+    if trimmed.is_empty() {
+        return serde_json::json!({ "type": "object", "properties": {} });
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) if value.is_object() => value,
+        Ok(other) => {
+            warn!(
+                tool = tool_name,
+                kind = json_kind(&other),
+                "tool parameter schema is not a JSON object; the provider will be told this \
+                 tool accepts any arguments, so its calls will likely be rejected downstream"
+            );
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        Err(error) => {
+            warn!(
+                tool = tool_name,
+                %error,
+                "tool parameter schema is not valid JSON; the provider will be told this tool \
+                 accepts any arguments, so its calls will likely be rejected downstream"
+            );
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+    }
+}
+
+/// Name of a JSON value's type, for a log line that says what arrived instead of
+/// an object.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }

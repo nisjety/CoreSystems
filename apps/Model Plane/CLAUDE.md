@@ -21,8 +21,9 @@ product-surface parity with `claude-code-fork` and selectively adopt ideas from
 ## Code Style
 - Rust owns anything on the request-hot-path; Go owns anything long-running/durable. Don't cross this line casually.
 - Cross-service invariants that can't be a build dependency (two independently deployed services) are asserted at runtime and mutation-tested, not just commented — see `cross_service_loop_contract.rs`. Follow this pattern for any other cross-service constant/behavior coupling.
-- Two tool-dispatch loops exist on purpose and must **stay separate**: model-gateway's `dispatch_tool` (read-only router, refuses side effects — the "plain chat" loop) and execution-core's `execute_step_inner` (capability/hook/permission pipeline around sandboxed execution — the "deployed agent" loop). Do not merge them; the refusal boundary between them **is** the authority boundary (see the 2026-08-14 HARN-1/2 withdrawal in git history for the full reasoning).
-- Prefer the smallest correct abstraction. A registry/interface for one implementation is premature — see the `letta-bridge` memory-adapter deferral (`capability-ownership-matrix.md` §4.4): build the seam when the second real backend lands, not before.
+- Two tool-dispatch loops exist on purpose and must **stay separate**: model-gateway's `dispatch_tool` (read-only router, refuses side effects — the "plain chat" loop) and execution-core's `execute_step_inner` (capability/hook/permission pipeline around sandboxed execution — the "deployed agent" loop). Do not merge them; the refusal boundary between them **is** the authority boundary (see `docs/postmortem/0001-harn-1-2-tool-dispatch-unification.md` for the full reasoning).
+- Prefer the smallest correct abstraction. A registry/interface for one implementation is premature — see the `letta-bridge` memory-adapter deferral and the sandbox-backend-trait deferral it set the precedent for, both in `docs/decisions/ledger.md`: build the seam when the second real backend lands, not before.
+- Before proposing to merge, unify, or add a new registry/interface for something that already exists in two places: check `docs/decisions/ledger.md` first — it may already be a settled "rejected" or "deferred" call, not an oversight. Add new decisions there rather than letting them live only in a commit message.
 - One canonical owner per capability — check `docs/capability-ownership-matrix.md` before adding anything that might duplicate an existing registry/store.
 
 ## Testing
@@ -48,8 +49,9 @@ cd go && go build ./... && go vet ./...
 - `docs/capability-ownership-matrix.md` — one-owner-per-capability rulings; the authoritative de-duplication reference.
 - `docs/core-research/*.md` — per-service "research dive" audits (source-grounded, dated — check the date before trusting a claim).
 - `MODEL_PLANE_STATUS.md` / `MODEL_PLANE_ROADMAP.md` (repo root) — current production-readiness truth, supersedes older docs/ROADMAP.md claims.
+- `docs/decisions/ledger.md` — settled design tradeoffs (proposed/implemented/rejected/deferred), so a rejected approach doesn't get silently re-proposed. `docs/postmortem/NNNN-*.md` holds the deeper root-cause write-ups the ledger's bigger entries point to.
 
 ## Conventions
 - Commits: Conventional Commits (`feat(model-gateway): ...`, `fix(inference-core): ...`, `docs(model-plane): ...`).
-- Commit messages explain **why**, often narrating what was measured and what didn't hold (see HARN-1/2 withdrawal) — this repo values documenting rejected approaches, not just shipped ones.
+- Commit messages explain **why**, often narrating what was measured and what didn't hold (see `docs/decisions/ledger.md`) — this repo values documenting rejected approaches, not just shipped ones.
 - Never claim a feature is "done" without source + test evidence; the team has a documented history of correcting stale ❌/✅ claims (see ROADMAP.md's 2026-05-30 and 2026-07-11 correction notes).

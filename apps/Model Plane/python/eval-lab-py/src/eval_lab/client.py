@@ -91,11 +91,26 @@ class VerevonClient:
     # ── invoke ──────────────────────────────────────────────────────────────
 
     def invoke_stream(
-        self, token: str, case: CaseSpec, *, idempotency_key: str | None = None
+        self,
+        token: str,
+        case: CaseSpec,
+        *,
+        idempotency_key: str | None = None,
+        content: str | None = None,
+        session_key: str | None = None,
     ) -> InvokeOutcome:
-        """Drive one case against /v1/invoke/stream and capture the outcome."""
+        """Drive one turn against /v1/invoke/stream and capture the outcome.
+
+        `content` overrides `case.prompt` for one call without needing a new
+        CaseSpec — how a multi-turn (`seed_turns`) case sends each seed turn
+        and then the recall question through the same client method.
+        `session_key`, sent verbatim on the wire, is what keeps a sequence of
+        calls in the SAME thread so history actually accumulates instead of
+        each call starting a fresh one (model-gateway's `InvokeRequest`
+        field — see http_routes.rs).
+        """
         request: dict[str, object] = {
-            "content": case.prompt,
+            "content": content if content is not None else case.prompt,
             "profile": case.profile,
             "features": case.features,
             "zdr": case.zdr,
@@ -106,6 +121,8 @@ class VerevonClient:
             request["max_cost_usd"] = case.max_cost_usd
         if idempotency_key:
             request["idempotency_key"] = idempotency_key
+        if session_key:
+            request["session_key"] = session_key
 
         started = time.perf_counter()
         try:

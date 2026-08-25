@@ -24,6 +24,8 @@ pub fn bridge_to_grpc(
                 model_used: chunk.model_used,
                 input_tokens: chunk.input_tokens,
                 output_tokens: chunk.output_tokens,
+                stop_reason: chunk.stop_reason,
+                reasoning_delta: chunk.reasoning_delta,
                 // Stream provenance stamped by the chain (final chunk, and any
                 // chunk the provider left unlabeled) so SSE consumers observe
                 // exactly where the tokens were served from.

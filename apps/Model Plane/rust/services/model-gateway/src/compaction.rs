@@ -42,14 +42,17 @@ pub const CLEARED_TOOL_RESULT_NOTICE: &str =
 /// surviving tail for the whole conversation.
 pub const DROPPED_HISTORY_NOTICE: &str =
     "[Earlier messages in this conversation were dropped because the prompt exceeded the model's \
-     input limit. If the user refers to something you cannot see here, say so instead of \
-     guessing.]";
+     input limit. They still exist. If the user refers to something you cannot see here, call \
+     reattach_context to read it back before answering — and if that returns nothing, say so \
+     instead of guessing.]";
 
 /// Framing for a retained tier-2 summary, so the model reads it as compacted
 /// history rather than as instructions from the user.
 pub const SUMMARY_PREFIX: &str =
     "Summary of the earlier part of this conversation (compacted to fit the model's context \
-     window; treat it as history, not as a new request):";
+     window; treat it as history, not as a new request). A summary loses detail: if the user \
+     asks about something this summary only gestures at, call reattach_context to read the \
+     original messages before answering.";
 
 /// How much tool-result payload a turn may carry before tier 1 starts clearing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,13 +191,47 @@ pub fn render_head_transcript(messages: &[ChatMessage], head: HeadSummary) -> St
 /// an ERP or inbox thread is judged against.
 #[must_use]
 pub fn summary_prompt(transcript: &str) -> String {
+    summary_prompt_with_memory(transcript, "")
+}
+
+/// [`summary_prompt`] plus a memory contribution — the `on_pre_compress` hook,
+/// adapted from `hermes-agent`'s `MemoryProvider.on_pre_compress` (MIT).
+///
+/// # Why memory gets a say in what a summary keeps
+///
+/// Compaction is the one place the system *deliberately* destroys detail, and
+/// it decides what to keep knowing only this thread. Memory knows what has
+/// mattered to this user before. Without this hook, a standing constraint the
+/// user stated three sessions ago — and that memory has durably recorded — is
+/// summarized away here on its own merits, because the summarizer has no way
+/// to know it is load-bearing.
+///
+/// `directive` is advisory context for the summarizer, NOT content to copy: an
+/// empty or whitespace-only value produces byte-identical output to
+/// [`summary_prompt`], so a memory outage degrades to exactly today's
+/// behaviour rather than a degraded prompt. The framing tells the model to
+/// treat it as a *salience hint about the excerpt*, never as facts to merge in
+/// — otherwise a summary of a conversation could start asserting things the
+/// conversation never said, which is precisely the fabrication the base prompt
+/// already forbids in its last clause.
+#[must_use]
+pub fn summary_prompt_with_memory(transcript: &str, directive: &str) -> String {
+    let base = "Summarize the following conversation excerpt so a later turn can continue \
+         without it. Preserve, verbatim where possible: constraints and preferences the user \
+         stated, decisions already made, identifiers (names, order/invoice/customer numbers, \
+         dates, amounts), and anything still unresolved. Omit pleasantries and restating of \
+         tool mechanics. Write it as compact factual notes, not prose, and do not add anything \
+         the excerpt does not say.";
+    let directive = directive.trim();
+    if directive.is_empty() {
+        return format!("{base}\n\nEXCERPT:\n{transcript}");
+    }
     format!(
-        "Summarize the following conversation excerpt so a later turn can continue without it. \
-         Preserve, verbatim where possible: constraints and preferences the user stated, \
-         decisions already made, identifiers (names, order/invoice/customer numbers, dates, \
-         amounts), and anything still unresolved. Omit pleasantries and restating of tool \
-         mechanics. Write it as compact factual notes, not prose, and do not add anything the \
-         excerpt does not say.\n\nEXCERPT:\n{transcript}"
+        "{base}\n\nThe user has previously established the topics below. If — and only if — \
+         the excerpt touches any of them, preserve what it says about them verbatim. These are \
+         a hint about what matters, NOT facts to add: never state anything from this list that \
+         the excerpt itself does not say.\n\nPREVIOUSLY ESTABLISHED:\n{directive}\
+         \n\nEXCERPT:\n{transcript}"
     )
 }
 
@@ -277,19 +314,45 @@ pub fn drop_oldest_group(messages: &mut Vec<ChatMessage>, group: usize, keep_tai
 
 /// Substrings that unambiguously mean "this prompt is longer than the model's
 /// input limit", across the provider wordings this gateway fronts.
+///
+/// # This is the FALLBACK table, not the authoritative one
+///
+/// inference-core sees the raw provider body and now classifies overflow there
+/// (`provider::overflow`), signalling it on the gRPC trailer
+/// `x-mp-provider-error: too_long`. Prefer that signal — see
+/// [`is_context_length_status`].
+///
+/// This table remains because a rolling deploy can pair a new gateway with an
+/// old inference-core that sends no trailer, and during that window the gateway
+/// must still recognise an overflow in order to shed history and retry rather
+/// than handing the user a hard error. A contract test pins that this table
+/// covers everything the authoritative one knows.
 const LENGTH_MARKERS: &[&str] = &[
     "context_length_exceeded",
     "context length exceeded",
     "maximum context length",
+    "this model supports at most",
+    "reduce the length of the messages",
+    "reduce the length of your prompt",
+    "reduce your prompt",
+    "prompt is too long",
+    "prompt too long",
+    "input length and `max_tokens` exceed context limit",
+    "input length and max_tokens exceed context limit",
+    "request_too_large",
+    "request too large",
     "maximum context window",
     "context window exceeded",
     "exceeds the context window",
-    "prompt is too long",
-    "prompt too long",
+    "exceeds model context",
+    "maximum prompt length",
+    "prompt exceeds",
     "input is too long",
     "too many input tokens",
-    "reduce the length of the messages",
-    "reduce your prompt",
+    "too many tokens",
+    "token limit exceeded",
+    "exceeds the maximum number of tokens",
+    "reduce the amount of context",
 ];
 
 /// Wordings that also mention tokens and limits but mean something else.
@@ -299,10 +362,41 @@ const NOT_LENGTH_MARKERS: &[&str] = &[
     "rate limit",
     "rate_limit",
     "per minute",
+    "per day",
     "tokens per",
     "quota",
     "insufficient_quota",
 ];
+
+/// Trailer inference-core sets to declare its own classification of a provider
+/// failure. Duplicated as a literal rather than imported: model-gateway and
+/// inference-core are separately deployed crates with no dependency either way,
+/// exactly as with the tool-retry vocabularies. A contract test pins the two
+/// spellings together.
+const PROVIDER_ERROR_KIND_TRAILER: &str = "x-mp-provider-error";
+
+/// Trailer value meaning "the prompt exceeded the provider's input limit".
+const PROVIDER_ERROR_TOO_LONG: &str = "too_long";
+
+/// Whether a failed inference call means the prompt was too long — reading
+/// inference-core's typed signal first and falling back to its message text.
+///
+/// Type before prose: the trailer is set by the only layer that saw the raw
+/// provider body, so it cannot be defeated by a provider rewording its error.
+/// The text fallback covers a rolling deploy against an older inference-core
+/// and is otherwise redundant.
+#[must_use]
+pub fn is_context_length_status(status: &tonic::Status) -> bool {
+    if status
+        .metadata()
+        .get(PROVIDER_ERROR_KIND_TRAILER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|kind| kind.eq_ignore_ascii_case(PROVIDER_ERROR_TOO_LONG))
+    {
+        return true;
+    }
+    is_context_length_error(status.message())
+}
 
 /// Whether an inference error means the prompt was too long for the provider.
 ///
@@ -462,6 +556,55 @@ mod tests {
             compacted.last().map(|m| m.content.as_str()),
             Some("turn 29"),
             "the user's current turn must survive compaction"
+        );
+    }
+
+    #[test]
+    fn an_absent_memory_contribution_leaves_the_prompt_byte_identical() {
+        // The degradation contract: a memory outage must not change the
+        // summarization prompt at all, so compaction quality on a bad day is
+        // exactly compaction quality before this hook existed.
+        let transcript = "user: hei\nassistant: hallo\n";
+        assert_eq!(
+            summary_prompt_with_memory(transcript, ""),
+            summary_prompt(transcript)
+        );
+        // Whitespace-only is the same as absent — a backend returning blank
+        // entries must not inject an empty "PREVIOUSLY ESTABLISHED:" heading
+        // the model would then try to interpret.
+        assert_eq!(
+            summary_prompt_with_memory(transcript, "  \n\t "),
+            summary_prompt(transcript)
+        );
+    }
+
+    #[test]
+    fn a_memory_contribution_is_framed_as_salience_never_as_facts_to_add() {
+        // The safety property. A summary that starts asserting things the
+        // conversation never said is a fabrication — the base prompt already
+        // forbids it, and the memory block must not create a loophole by
+        // reading as source material.
+        let prompt = summary_prompt_with_memory(
+            "user: what about the Bergen order?\n",
+            "- prefers invoices in NOK\n",
+        );
+        assert!(prompt.contains("PREVIOUSLY ESTABLISHED:"));
+        assert!(prompt.contains("prefers invoices in NOK"));
+        assert!(
+            prompt.contains("NOT facts to add"),
+            "the block must be explicitly marked as non-source: {prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "never state anything from this list that the excerpt itself does not say"
+            ),
+            "the anti-fabrication instruction must survive: {prompt}"
+        );
+        // The excerpt still has to be present and clearly delimited from it.
+        assert!(prompt.contains("EXCERPT:\nuser: what about the Bergen order?"));
+        assert!(
+            prompt.find("PREVIOUSLY ESTABLISHED:") < prompt.find("EXCERPT:"),
+            "the hint must precede the excerpt, not trail it as an afterthought"
         );
     }
 

@@ -570,6 +570,699 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
 
+  /v1/artifacts:
+    get:
+      operationId: list_artifacts
+      summary: List stored artifacts (served locally by edge)
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 }, description: Page size }
+        - { name: cursor, in: query, schema: { type: string }, description: Opaque cursor from a prior page }
+        - { name: kind, in: query, schema: { type: string, enum: [markdown, html, raw, pdf, screenshot, extract] } }
+      responses:
+        "200":
+          description: Artifact page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/ArtifactSummary" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/artifacts/{artifact_id}:
+    get:
+      operationId: get_artifact
+      summary: Fetch artifact bytes or metadata
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: artifact_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Artifact bytes or metadata envelope
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: {}
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "404":
+          description: Unknown artifact id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/sources:
+    get:
+      operationId: list_sources
+      summary: List ingestion sources
+      description: Forwarded to the control plane; durable per-org resource.
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Source page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/Source" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+    post:
+      operationId: create_source
+      summary: Register an ingestion source
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSourceRequest" }
+      responses:
+        "200":
+          description: Created source (control-plane wire shape)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { type: object, additionalProperties: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "400":
+          description: Invalid body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/sources/{source_id}:
+    delete:
+      operationId: delete_source
+      summary: Soft-delete an ingestion source
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: source_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Deletion accepted (untyped control response)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { type: object, additionalProperties: true, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "404":
+          description: Unknown source for this org
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/snapshots:
+    get:
+      operationId: list_snapshots
+      summary: List captured page snapshots
+      description: Forwarded to the control plane.
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: url, in: query, schema: { type: string }, description: Filter to one tracked URL }
+      responses:
+        "200":
+          description: Snapshot page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/Snapshot" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/{kind}/jobs:
+    get:
+      operationId: list_jobs_by_kind
+      summary: List jobs of one kind
+      description: Forwarded to the control plane. `kind` is validated server-side; unknown segments 404.
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema: { type: string, enum: [crawl, search, extract, research, agent, batch, scrape] }
+        - { name: org_id, in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Job page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/JobSummary" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "400":
+          description: Missing org_id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/request-queues:
+    get:
+      operationId: list_request_queues
+      summary: List request queues with live stats
+      description: Forwarded to the control plane; aggregates over quarry_queue_items.
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Request queue page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/RequestQueueSummary" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/benchmarks:
+    get:
+      operationId: list_benchmarks
+      summary: List benchmark runs (placeholder)
+      description: |
+        Live benchmark corpus placeholder — currently returns an empty page
+        until the benchmark corpus ships.
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Benchmark page (empty placeholder today)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/BenchmarkSummary" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/team/credit-usage:
+    get:
+      operationId: team_credit_usage
+      summary: Team credit usage for a window
+      tags: [team]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: period, in: query, schema: { type: string, default: 7d }, description: '"today" | "7d" | "30d" | YYYY-MM-DD' }
+      responses:
+        "200":
+          description: Credit usage window
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { $ref: "#/components/schemas/TeamCreditUsage" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/team/token-usage:
+    get:
+      operationId: team_token_usage
+      summary: Team token usage for a window
+      tags: [team]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: period, in: query, schema: { type: string, default: 7d } }
+      responses:
+        "200":
+          description: Token usage window
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { $ref: "#/components/schemas/TeamTokenUsage" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/team/concurrency:
+    get:
+      operationId: team_concurrency
+      summary: Per-org concurrency snapshot
+      tags: [team]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Concurrency snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { $ref: "#/components/schemas/TeamConcurrency" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/team/queue-status:
+    get:
+      operationId: team_queue_status
+      summary: Aggregate queue snapshot for the org
+      tags: [team]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Queue status aggregate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { $ref: "#/components/schemas/TeamQueueStatus" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/team/activity:
+    get:
+      operationId: team_activity
+      summary: Recent activity feed
+      tags: [team]
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Activity page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/TeamActivityEntry" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/runs/{run_id}/events:
+    get:
+      operationId: list_run_events
+      summary: Durable event history for one run
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: run_id, in: path, required: true, schema: { type: string }, description: Temporal run id (job_summary.run_id), never job_id }
+        - { name: after_seq, in: query, schema: { type: integer }, description: Return events strictly after this seq (gap recovery) }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 1000 } }
+      responses:
+        "200":
+          description: Ordered job-history page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/JobHistoryEvent" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "400":
+          description: Invalid run_id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/jobs/{job_id}/events:
+    get:
+      operationId: list_job_events
+      summary: Durable events keyed by handoff job_id
+      description: Forwards to control's /v1/jobs/{id}/events and re-emits as JSON (or SSE for the SPA gateway).
+      tags: [resources]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: job_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: JSON event array or SSE re-emission
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/JobHistoryEvent" }
+            text/event-stream:
+              schema: { type: string }
+  /v1/change/check:
+    post:
+      operationId: change_check
+      summary: Re-fetch a URL and compare against its baseline
+      tags: [change-tracking]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+      responses:
+        "200":
+          description: Change record (new | unchanged | changed | unreachable)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { $ref: "#/components/schemas/ChangeRecord" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/change/latest:
+    get:
+      operationId: change_latest
+      summary: Most recent baseline for a tracked URL
+      tags: [change-tracking]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: url, in: query, required: true, schema: { type: string, format: uri } }
+      responses:
+        "200":
+          description: Latest baseline snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { $ref: "#/components/schemas/BaselineSnapshot" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "404":
+          description: No baseline for this org+URL
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/change/history:
+    get:
+      operationId: change_history
+      summary: Ordered baseline chain for a tracked URL
+      tags: [change-tracking]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: url, in: query, required: true, schema: { type: string, format: uri } }
+        - { name: limit, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        "200":
+          description: Baseline chain (most recent first)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/BaselineSnapshot" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+  /v1/change/snapshot:
+    post:
+      operationId: promote_tracked_result_to_snapshot
+      summary: Promote the latest baseline to the public Snapshot shape
+      description: Requires postgres-queue + DATABASE_URL; 501 with a hint otherwise.
+      tags: [change-tracking]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: url, in: query, required: true, schema: { type: string, format: uri } }
+      responses:
+        "200":
+          description: Promoted snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { $ref: "#/components/schemas/Snapshot" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "404":
+          description: No baseline for this URL/org
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+        "501":
+          description: postgres-queue feature disabled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/change/refresh:
+    post:
+      operationId: schedule_refresh_run
+      summary: Enqueue an immediate re-check onto the durable frontier
+      description: |
+        ScheduleRefreshRun — enqueues a `change_refresh` request on the org-scoped
+        Postgres queue (SKIP LOCKED bridge). Idempotent enqueue: `accepted=false`
+        when an identical request was already queued. Requires postgres-queue.
+      tags: [change-tracking]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+                priority: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Enqueue result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    required: [request_id, accepted]
+                    properties:
+                      request_id: { type: string }
+                      accepted: { type: boolean }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "501":
+          description: postgres-queue feature disabled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/schedules:
+    get:
+      operationId: list_schedules
+      summary: List schedules
+      description: Forwarded to the control plane; vendor-neutral schedule wire shape.
+      tags: [schedules]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Schedule page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/ScheduleSummary" } }
+                      next_cursor: { type: string, nullable: true }
+                      total_estimated: { type: integer, nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+    post:
+      operationId: create_schedule
+      summary: Create a cron / one-shot / change-monitor schedule
+      tags: [schedules]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateScheduleRequest" }
+      responses:
+        "200":
+          description: Created schedule
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { $ref: "#/components/schemas/ScheduleSummary" }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "400":
+          description: Invalid schedule definition
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/schedules/{schedule_id}:
+    delete:
+      operationId: delete_schedule
+      summary: Delete a schedule
+      tags: [schedules]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: schedule_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta]
+                properties:
+                  data: { nullable: true }
+                  meta: { $ref: "#/components/schemas/ResponseMeta" }
+                  error: { $ref: "#/components/schemas/ErrorDetail" }
+        "404":
+          description: Unknown schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/schedules/{schedule_id}/pause:
+    post:
+      operationId: pause_schedule
+      summary: Pause a schedule
+      tags: [schedules]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: schedule_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Paused
+  /v1/schedules/{schedule_id}/unpause:
+    post:
+      operationId: unpause_schedule
+      summary: Unpause a schedule
+      tags: [schedules]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: schedule_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Unpaused
+  /v1/schedules/{schedule_id}/trigger:
+    post:
+      operationId: trigger_schedule
+      summary: Trigger an immediate scheduled run
+      description: |
+        Currently a stub — returns 202 with `status: trigger-accepted` and a note
+        that the Temporal SDK is not yet wired.
+      tags: [schedules]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: schedule_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "202":
+          description: Trigger accepted (stub while Temporal SDK pending)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedule_id: { type: string }
+                  status: { type: string }
+                  note: { type: string }
+        "404":
+          description: Unknown schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+  /v1/schedules/{schedule_id}/backfill:
+    post:
+      operationId: backfill_schedule
+      summary: Backfill missed runs
+      description: Currently a stub — returns 202 with a Temporal-pending note.
+      tags: [schedules]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: schedule_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "202":
+          description: Backfill accepted (stub while Temporal SDK pending)
+        "404":
+          description: Unknown schedule
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorBody" }
+
 components:
   parameters:
     AgentRunId:
@@ -580,6 +1273,259 @@ components:
         type: string
       description: Tenant-owned Quarry run identifier
   schemas:
+    ResponseMeta:
+      type: object
+      required: [request_id]
+      properties:
+        request_id: { type: string }
+        page:
+          type: object
+          nullable: true
+          properties:
+            cursor: { type: string, nullable: true }
+            next: { type: string, nullable: true }
+            limit: { type: integer }
+    ErrorDetail:
+      type: object
+      nullable: true
+      properties:
+        code: { type: string }
+        message: { type: string }
+        hint: { type: string, nullable: true }
+    Source:
+      type: object
+      required: [source_id, org_id, name, url, kind, status, created_at, updated_at]
+      properties:
+        source_id: { type: string, description: src_<ulid> }
+        org_id: { type: string }
+        name: { type: string }
+        url: { type: string, format: uri }
+        kind: { type: string, enum: [crawl, scrape, search] }
+        status: { type: string, enum: [active, paused, deleted] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        config: { description: Free-form per-source configuration }
+    Snapshot:
+      type: object
+      required: [snapshot_id, org_id, url, fingerprint, change_status, captured_at]
+      properties:
+        snapshot_id: { type: string, description: snp_<ulid> }
+        org_id: { type: string }
+        source_id: { type: string, nullable: true, description: Present when produced by a source refresh; omitted otherwise }
+        url: { type: string, format: uri }
+        fingerprint: { type: string, description: blake3 of canonicalized content }
+        prev_fingerprint: { type: string, nullable: true }
+        change_status: { type: string, enum: [unchanged, modified, new] }
+        captured_at: { type: string, format: date-time }
+        artifact_id: { type: string, nullable: true }
+    ArtifactSummary:
+      type: object
+      required: [artifact_id, org_id, kind, bytes, created_at]
+      properties:
+        artifact_id: { type: string }
+        org_id: { type: string }
+        kind: { type: string, enum: [markdown, html, raw, pdf, screenshot, extract] }
+        bytes: { type: integer, format: int64 }
+        sha256: { type: string, nullable: true, description: blake3:<hex> content hash }
+        created_at: { type: string, format: date-time }
+        source_url: { type: string, nullable: true }
+    JobSummary:
+      type: object
+      required: [job_id, kind, org_id, status, created_at]
+      properties:
+        job_id: { type: string, description: job_<ulid> — addresses GET /v1/jobs/:id, not the Temporal run id }
+        kind: { type: string, enum: [crawl, search, extract, research, agent, batch, scrape] }
+        org_id: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        run_id: { type: string, nullable: true, description: Populated once dispatched; required for GET /v1/runs/:id/events }
+        started_at: { type: string, format: date-time, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+        stats: { description: Kind-specific counters }
+    RequestQueueSummary:
+      type: object
+      required: [queue_id, org_id, name, kind, status, created_at, stats]
+      properties:
+        queue_id: { type: string }
+        org_id: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [crawl, batch, scrape, search] }
+        status: { type: string, enum: [active, draining, deleted] }
+        created_at: { type: string, format: date-time }
+        stats:
+          type: object
+          required: [queued, in_flight, acked, failed]
+          properties:
+            queued: { type: integer, format: int64 }
+            in_flight: { type: integer, format: int64 }
+            acked: { type: integer, format: int64 }
+            failed: { type: integer, format: int64 }
+    BenchmarkSummary:
+      type: object
+      required: [benchmark_id, org_id, name, suite, status]
+      properties:
+        benchmark_id: { type: string }
+        org_id: { type: string }
+        name: { type: string }
+        suite: { type: string }
+        baseline: { type: string, nullable: true }
+        status: { type: string }
+        last_run_at: { type: string, format: date-time, nullable: true }
+        latest_score: { type: number, nullable: true }
+    CreateSourceRequest:
+      type: object
+      required: [name, url, kind]
+      properties:
+        name: { type: string }
+        url: { type: string, format: uri }
+        kind: { type: string, enum: [crawl, scrape, search] }
+        monitor: { type: boolean, default: false, description: Also registers a recurring change_monitor schedule }
+        preset: { type: string, enum: [hourly, daily, weekly], description: Required when monitor=true }
+        config: { type: object, additionalProperties: true }
+    TeamCreditUsage:
+      type: object
+      required: [org_id, period, credits_used, utilization_percent]
+      properties:
+        org_id: { type: string }
+        period: { type: string }
+        credits_used: { type: number }
+        credits_limit: { type: number, nullable: true, description: null = uncapped (enterprise tier) }
+        utilization_percent: { type: number }
+    TeamTokenUsage:
+      type: object
+      required: [org_id, period, input_tokens, output_tokens, total_tokens]
+      properties:
+        org_id: { type: string }
+        period: { type: string }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        total_tokens: { type: integer, format: int64 }
+        cost_micro_usd: { type: integer, format: int64, nullable: true }
+    HostConcurrency:
+      type: object
+      required: [host, current, ceiling]
+      properties:
+        host: { type: string }
+        current: { type: integer }
+        ceiling: { type: integer }
+        ewma_latency_ms: { type: number, nullable: true }
+    TeamConcurrency:
+      type: object
+      required: [org_id, current, ceiling]
+      properties:
+        org_id: { type: string }
+        current: { type: integer }
+        ceiling: { type: integer }
+        by_host: { type: array, items: { $ref: "#/components/schemas/HostConcurrency" } }
+    QueueStatusEntry:
+      type: object
+      required: [queue_id, name, queued, in_flight]
+      properties:
+        queue_id: { type: string }
+        name: { type: string }
+        queued: { type: integer, format: int64 }
+        in_flight: { type: integer, format: int64 }
+    TeamQueueStatus:
+      type: object
+      required: [org_id, queued_total, in_flight_total]
+      properties:
+        org_id: { type: string }
+        queued_total: { type: integer, format: int64 }
+        in_flight_total: { type: integer, format: int64 }
+        by_queue: { type: array, items: { $ref: "#/components/schemas/QueueStatusEntry" } }
+    TeamActivityEntry:
+      type: object
+      required: [event_id, org_id, event_type, ts, summary]
+      properties:
+        event_id: { type: string }
+        org_id: { type: string }
+        event_type: { type: string }
+        run_id: { type: string, nullable: true }
+        ts: { type: string, format: date-time }
+        summary: { type: string }
+    JobStage:
+      type: string
+      enum: [queued, running, finished]
+      description: Job stage token emitted by the orchestrator
+    JobStatus:
+      type: string
+      description: Stage-specific status token
+    JobHistoryEvent:
+      type: object
+      required: [run_id, org_id, kind, stage, status, seq, completed, discovered, queued, retries, blocks, timestamp]
+      properties:
+        run_id: { type: string }
+        org_id: { type: string }
+        kind: { type: string, enum: [crawl, search, extract, research, agent, batch, scrape] }
+        stage: { $ref: "#/components/schemas/JobStage" }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        seq: { type: integer, format: int64, description: Monotonically increasing per run_id; gap detection key }
+        completed: { type: integer }
+        total: { type: integer, nullable: true }
+        discovered: { type: integer }
+        queued: { type: integer }
+        retries: { type: integer }
+        blocks: { type: integer }
+        eta: { type: string, format: date-time, nullable: true }
+        timestamp: { type: string, format: date-time }
+    BaselineSnapshot:
+      type: object
+      required: [baseline_id, org_id, source_url, fingerprint, captured_at]
+      properties:
+        baseline_id: { type: string, description: bln_<ulid> }
+        org_id: { type: string }
+        source_url: { type: string, format: uri }
+        fingerprint: { type: string, description: blake3 of canonicalized content }
+        artifact_id: { type: string, nullable: true }
+        prev_baseline_id: { type: string, nullable: true, description: Singly-linked chain pointer }
+        captured_at: { type: string, format: date-time }
+        run_id: { type: string, nullable: true }
+    ChangeRecord:
+      type: object
+      required: [source_url, org_id, status, checked_at]
+      properties:
+        source_url: { type: string, format: uri }
+        org_id: { type: string }
+        status: { type: string, enum: [new, unchanged, changed, unreachable] }
+        new_baseline: { $ref: "#/components/schemas/BaselineSnapshot" }
+        prev_baseline: { $ref: "#/components/schemas/BaselineSnapshot" }
+        diff_id: { type: string, nullable: true, description: Present only for status=changed }
+        checked_at: { type: string, format: date-time }
+    OverlapPolicy:
+      type: string
+      enum: [cancel, skip, allow]
+      default: skip
+    ScheduleSummary:
+      type: object
+      required: [schedule_id, org_id, name, kind, overlap_policy, catchup_window_s, pause_on_failure, status, created_at]
+      properties:
+        schedule_id: { type: string }
+        org_id: { type: string }
+        name: { type: string }
+        kind: { type: string, enum: [crawl, search, extract, research, agent, batch, scrape] }
+        cron: { type: string, nullable: true, description: Standard 5-field cron; absent for one-shot schedules }
+        schedule_at: { type: string, format: date-time, nullable: true, description: One-shot trigger time; mutually exclusive with cron }
+        overlap_policy: { $ref: "#/components/schemas/OverlapPolicy" }
+        catchup_window_s: { type: integer, format: int64 }
+        pause_on_failure: { type: boolean }
+        status: { type: string, enum: [active, paused, deleted] }
+        created_at: { type: string, format: date-time }
+        last_run_at: { type: string, format: date-time, nullable: true }
+        next_run_at: { type: string, format: date-time, nullable: true }
+        config: { description: Per-kind payload the schedule was created with }
+    CreateScheduleRequest:
+      type: object
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [crawl, search, extract, research, agent, batch, scrape], description: Optional when preset-driven (W2 change-monitor create) }
+        cron: { type: string, nullable: true }
+        schedule_at: { type: string, format: date-time, nullable: true }
+        overlap_policy: { $ref: "#/components/schemas/OverlapPolicy" }
+        catchup_window_s: { type: integer, format: int64, default: 0 }
+        pause_on_failure: { type: boolean, default: false }
+        preset: { type: string, nullable: true, description: When set, this is a W2 change-monitor create; target_ref becomes required }
+        target_ref: { type: string, nullable: true, description: URL to watch for change-monitor schedules }
+        config: { type: object, additionalProperties: true }
     StartAgentRunRequest:
       type: object
       properties:
@@ -1873,3 +2819,11 @@ tags:
     description: Internal plane-to-plane endpoints
   - name: ops
     description: Health and readiness probes
+  - name: resources
+    description: Durable org resources — artifacts, sources, snapshots, jobs, queues, run history
+  - name: team
+    description: Per-org usage, concurrency, queue, and activity aggregates
+  - name: change-tracking
+    description: Versioned URL change tracking — baselines, checks, promotion, refresh
+  - name: schedules
+    description: Cron / one-shot / change-monitor schedules

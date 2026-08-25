@@ -62,9 +62,13 @@ pub(super) async fn stream_chat(
     // ADR-0003 — same ordering requirement as the mention persona above: this
     // only peeks at `space_ref` for the Space layer, so it must run before
     // `inject_personal_thread_context` consumes it.
-    if let Err((status, body)) =
-        crate::domains::spaces::inject_authored_instructions(&state, &user, &org_id, &mut outbound_body)
-            .await
+    if let Err((status, body)) = crate::domains::spaces::inject_authored_instructions(
+        &state,
+        &user,
+        &org_id,
+        &mut outbound_body,
+    )
+    .await
     {
         return (status, body).into_response();
     }

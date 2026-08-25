@@ -63,6 +63,19 @@ export type ChatThreadTranscriptTurn = {
   id: string
   inputTokens?: number
   latencyMs?: number
+  /**
+   * How many long-term memories this turn recalled. Persisted so the notice
+   * survives a reload — without it the chip appeared live and vanished on
+   * reopen, which reads as the recall not having happened.
+   */
+  memoryRecallCount?: number
+  /**
+   * Which memories the turn recalled. Persisted for the same reason the count
+   * is: a disclosure that vanishes on reopen reads as though the recall never
+   * happened, and the whole point is being able to go back and correct a wrong
+   * remembered fact.
+   */
+  recalledMemories?: unknown[]
   model?: string
   modelUsed?: string
   outputTokens?: number
@@ -70,6 +83,13 @@ export type ChatThreadTranscriptTurn = {
   requestId?: string
   role: 'assistant' | 'user'
   status?: 'error' | 'stopped' | 'waiting'
+  /**
+   * Why generation stopped. Persisted because the truncation notice is a
+   * CORRECTNESS warning about the content: an answer that "may be cut off"
+   * silently becoming a normal-looking answer on reload is the worst version of
+   * losing it.
+   */
+  stopReason?: string
   toolCalls?: unknown[]
   tools?: string[]
 }

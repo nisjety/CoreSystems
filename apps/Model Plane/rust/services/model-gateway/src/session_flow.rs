@@ -186,6 +186,12 @@ async fn create_thread(
                 action_schema_hash: space.action_schema_hash,
                 payload_digest: space.payload_digest,
                 idempotency_key: space.idempotency_key,
+                // Left for session-core to derive from space_id/session_key
+                // conventions (see resolve_thread_origin) -- space context above
+                // already yields "space", the support_* and agent_run/ session
+                // key prefixes yield "support"/"agent_run", and everything else
+                // is "chat". No caller here has a reason to override that.
+                origin: String::new(),
             },
             bearer,
         )?)
@@ -1050,6 +1056,44 @@ async fn append_assistant_message_with_bearer(
     Ok(())
 }
 
+/// Persist a user message the caller sent MID-RUN, so the durable thread
+/// records what the user actually said and when.
+///
+/// Without this the assistant's reply to a queued message would appear in
+/// history with nothing prompting it — the answer to a question the transcript
+/// does not contain.
+///
+/// `space` carries the fresh, content-bound `thread:append` decision the gateway
+/// minted for THIS message. It is required for a Space-scoped thread and absent
+/// for an ordinary one; the empty default below is what an ordinary thread's
+/// append has always sent, so this path grants no authority the normal send
+/// path does not.
+///
+/// # Errors
+/// Returns an error when the credential cannot be forwarded, or Session Core
+/// rejects or cannot complete the append.
+pub async fn append_queued_user_message(
+    state: &AppState,
+    thread_id: &str,
+    content: &str,
+    bearer: &VerifiedSessionBearer,
+    space: Option<&ThreadSpaceContext>,
+) -> Result<(), tonic::Status> {
+    let mut client = state.session_client.clone();
+    append_user_message(
+        &mut client,
+        thread_id,
+        content,
+        Some(bearer.as_str()),
+        space,
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, %thread_id, "session-core append_message(queued user) failed");
+        error
+    })
+}
+
 trait StringExt {
     fn if_empty_then(self, fallback: String) -> String;
 }
@@ -1115,6 +1159,14 @@ mod tests {
             &self,
             _: Request<HeartbeatManagedRunRequest>,
         ) -> Result<Response<HeartbeatManagedRunResponse>, Status> {
+            Err(Status::unimplemented("not needed by managed-start test"))
+        }
+
+        async fn record_run_output(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::RecordRunOutputRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::RecordRunOutputResponse>, Status>
+        {
             Err(Status::unimplemented("not needed by managed-start test"))
         }
     }

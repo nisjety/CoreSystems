@@ -36,6 +36,12 @@ struct ChatThreadSummary {
     /// bearer and Control still resolves current authority.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     space_ref: String,
+    /// Which surface created this thread -- see session-core's
+    /// `ThreadSummary.origin`. Exposed so a future client affordance (a
+    /// "this came from Support" badge, say) does not need a new field; today
+    /// nothing on the client reads it, only `chat_history_sessions` below does.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    origin: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +111,8 @@ struct DurableThreadSummary {
     pinned: bool,
     #[serde(default, alias = "spaceId")]
     space_id: String,
+    #[serde(default)]
+    origin: String,
 }
 
 pub(super) async fn list_threads(
@@ -126,14 +134,28 @@ pub(super) async fn list_threads(
 }
 
 /// Space-scoped conversations are the room's shared record and render in the
-/// room's own timeline; Chat's history lists only Verevon's own, unscoped
-/// conversations. Filtered at the LISTING and not in `read_durable_threads`:
-/// that read also authorizes transcript fetches, which is exactly how the
-/// room timeline reads its posts' content.
+/// room's own timeline; Support-assist and the Agent Run Console mint their own
+/// unscoped threads that must not appear here either. Chat's history lists
+/// only threads Chat itself created. Filtered at the LISTING and not in
+/// `read_durable_threads`: that read also authorizes transcript fetches, which
+/// is exactly how the room timeline reads its posts' content.
+///
+/// This used to filter on `space_ref.trim().is_empty()` -- which distinguishes
+/// Space-scoped threads from everything else, but says nothing about *why* an
+/// unscoped thread exists. That let Agent Run Console and Support-assist
+/// threads (both unscoped, since they invoke with no thread/session key) leak
+/// into this list. `origin` is a declared fact set once at creation, not an
+/// inference from an unrelated column, and closes both leaks at once.
+///
+/// A blank `origin` is treated as non-chat (excluded) rather than as "unknown,
+/// assume chat": the upstream request already asked for `origin=chat`, so a
+/// blank value here means the field did not survive the round trip, and
+/// failing closed is safer than including a thread this filter cannot
+/// classify.
 fn chat_history_sessions(sessions: Vec<ChatThreadSummary>) -> Vec<ChatThreadSummary> {
     sessions
         .into_iter()
-        .filter(|session| session.space_ref.trim().is_empty())
+        .filter(|session| session.origin == "chat")
         .collect()
 }
 
@@ -281,7 +303,15 @@ async fn read_durable_threads(
         Ok(token) => token,
         Err(error) => return Err(shared::delegated_auth_unavailable(error).into_response()),
     };
-    let url = format!("{}/v1/threads?limit={MAX_THREADS}", state.model_gateway_url);
+    // origin=chat is requested here AND re-checked in chat_history_sessions
+    // below: the request-side filter is the efficient path, the response-side
+    // check is what actually enforces the invariant if session-core or
+    // model-gateway ever ignores the query parameter -- the same
+    // belt-and-braces shape this codebase already uses for ZDR.
+    let url = format!(
+        "{}/v1/threads?limit={MAX_THREADS}&origin=chat",
+        state.model_gateway_url
+    );
     let (status, Json(payload)) = shared::proxy_model_json_with_session(
         state,
         Method::GET,
@@ -332,6 +362,7 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         updated_at,
         pinned: item.pinned,
         space_ref: item.space_id.trim().to_owned(),
+        origin: item.origin.trim().to_owned(),
     })
 }
 
@@ -651,6 +682,7 @@ mod tests {
                 created_at: now.to_owned(),
                 pinned: false,
                 space_id: "space_room_1".to_owned(),
+                origin: "space".to_owned(),
             },
             now,
         )
@@ -664,6 +696,7 @@ mod tests {
                 created_at: now.to_owned(),
                 pinned: false,
                 space_id: String::new(),
+                origin: "chat".to_owned(),
             },
             now,
         )
@@ -672,9 +705,75 @@ mod tests {
         let sessions = chat_history_sessions(vec![space_thread, chat_thread]);
 
         // The room's shared record belongs to the room's timeline; Chat's own
-        // history must list only Verevon's unscoped conversations.
+        // history must list only threads Chat itself created.
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].thread_id, "thread_chat");
+    }
+
+    /// The regression this whole change targets: an unscoped thread (empty
+    /// `space_id`) minted by the Agent Run Console or Support-assist used to be
+    /// indistinguishable from an ordinary chat thread by this filter, because it
+    /// only ever looked at `space_id`. `origin` now carries the declared fact
+    /// directly, so both leak into the sidebar until it is checked and neither
+    /// does once it is.
+    #[test]
+    fn chat_history_excludes_unscoped_non_chat_origins() {
+        let now = "2026-08-16T12:00:00Z";
+        let fixture = |thread_id: &str, origin: &str| {
+            durable_to_summary(
+                DurableThreadSummary {
+                    thread_id: thread_id.to_owned(),
+                    title: "untitled".to_owned(),
+                    preview: String::new(),
+                    updated_at: now.to_owned(),
+                    created_at: now.to_owned(),
+                    pinned: false,
+                    space_id: String::new(),
+                    origin: origin.to_owned(),
+                },
+                now,
+            )
+            .expect("valid record")
+        };
+
+        let agent_run_thread = fixture("thread_agent_run", "agent_run");
+        let support_thread = fixture("thread_support", "support");
+        let system_thread = fixture("thread_system", "system");
+        let chat_thread = fixture("thread_chat", "chat");
+
+        let sessions = chat_history_sessions(vec![
+            agent_run_thread,
+            support_thread,
+            system_thread,
+            chat_thread,
+        ]);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].thread_id, "thread_chat");
+    }
+
+    /// A blank origin must fail closed (excluded), not fail open as an assumed
+    /// chat thread -- the request-side `origin=chat` filter is defense in
+    /// depth, not the only check, and this is what makes that meaningful.
+    #[test]
+    fn chat_history_excludes_a_blank_origin_rather_than_assuming_chat() {
+        let now = "2026-08-16T12:00:00Z";
+        let unclassified = durable_to_summary(
+            DurableThreadSummary {
+                thread_id: "thread_unclassified".to_owned(),
+                title: "untitled".to_owned(),
+                preview: String::new(),
+                updated_at: now.to_owned(),
+                created_at: now.to_owned(),
+                pinned: false,
+                space_id: String::new(),
+                origin: String::new(),
+            },
+            now,
+        )
+        .expect("valid record");
+
+        assert_eq!(chat_history_sessions(vec![unclassified]).len(), 0);
     }
 
     #[test]
@@ -688,6 +787,7 @@ mod tests {
                 created_at: "2026-08-10T10:00:00Z".to_owned(),
                 pinned: true,
                 space_id: "space_1".to_owned(),
+                origin: "space".to_owned(),
             },
             "2026-08-11T12:00:00Z",
         )
@@ -697,6 +797,7 @@ mod tests {
         assert_eq!(summary.preview, "Waiting on the carrier receipt");
         assert!(summary.pinned);
         assert_eq!(summary.space_ref, "space_1");
+        assert_eq!(summary.origin, "space");
     }
 
     #[test]

@@ -88,6 +88,31 @@ pub enum ChatEvent {
     /// suggestions were generated they must reach the client, and an older
     /// client ignores the unknown event name.
     FollowUps { suggestions: Vec<String> },
+    /// Deterministic "memory was used" indicator (harness-adoption §7.9,
+    /// hermes-agent's `RecallStatus`, MIT): emitted once per turn, before the
+    /// answer streams, when long-term memory was actually injected into the
+    /// prompt. `count` is the number of discrete memories injected — never 0;
+    /// a turn that recalled nothing emits no event at all, so the UI can
+    /// render the indicator without an "0 memories" special case. Opt-in via
+    /// the `memory` feature family: the injection itself is unconditional
+    /// (prompt quality is not a client choice), only this VISIBILITY signal
+    /// is gated, so older clients and plain chat are byte-identical.
+    MemoryRecall {
+        count: u32,
+        latency_ms: u64,
+        /// What was recalled, so a reader can see and correct it — not just how
+        /// much. Bounded and previewed by `memory_provenance`.
+        memories: Vec<crate::memory_provenance::RecalledMemoryView>,
+    },
+    /// A message the user sent MID-RUN has been delivered to the agent at a
+    /// tool-round boundary (`queued_input`). Emitted at delivery, not at
+    /// enqueue: the POST already told the client its message was accepted, and
+    /// what the client cannot otherwise know is when the agent actually saw it.
+    ///
+    /// A control event, deliberately ungated: the user typed this and is
+    /// watching for it. Hiding it behind a feature family would reproduce the
+    /// exact bug it exists to fix — a message that seems to have vanished.
+    QueuedInput { messages: Vec<String> },
     /// Terminal control: generation stopped/cancelled by the user.
     Stopped { reason: String },
     /// Terminal control: a structured error (chat-parity §20). `code` is a
@@ -111,12 +136,16 @@ impl ChatEvent {
             ChatEvent::Citation { .. } | ChatEvent::Grounding { .. } => Some("citations"),
             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
             ChatEvent::Usage { .. } => Some("usage"),
+            ChatEvent::MemoryRecall { .. } => Some("memory"),
             // control events — always allowed (Title/FollowUps only exist when
             // the gateway actually generated them; gating on a feature family
             // would silently drop them for the plain `chat` profile, which is
             // exactly the surface the sidebar title / composer chips are for)
             ChatEvent::Title { .. }
             | ChatEvent::FollowUps { .. }
+            // The user typed this and is watching for it — gating it would
+            // reproduce the vanishing-message bug it exists to fix.
+            | ChatEvent::QueuedInput { .. }
             | ChatEvent::Stopped { .. }
             | ChatEvent::Error { .. } => None,
         }
@@ -147,8 +176,10 @@ impl ChatEvent {
             ChatEvent::Artifact { .. } => "artifact",
             ChatEvent::Attachment { .. } => "attachment",
             ChatEvent::Usage { .. } => "usage",
+            ChatEvent::MemoryRecall { .. } => "memory_recall",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
+            ChatEvent::QueuedInput { .. } => "queued_input",
             ChatEvent::Stopped { .. } => "stopped",
             ChatEvent::Error { .. } => "error",
         }
@@ -222,9 +253,35 @@ impl ChatEvent {
                 "latency_ms": latency_ms,
                 "confidence": confidence,
             }),
+            ChatEvent::MemoryRecall {
+                count,
+                latency_ms,
+                memories,
+            } => json!({
+                "count": count,
+                "latency_ms": latency_ms,
+                // `role`/`origin` go out as their own strings rather than as
+                // booleans: `origin` has THREE states, and the third
+                // ("unrecorded") must never collapse into "stated". See
+                // `memory_provenance`.
+                "memories": memories
+                    .iter()
+                    .map(|memory| json!({
+                        "memory_id": memory.memory_id,
+                        "role": memory.role.as_str(),
+                        "origin": memory.origin.as_str(),
+                        "label": memory.label,
+                        "preview": memory.preview,
+                    }))
+                    .collect::<Vec<_>>(),
+                "request_id": request_id,
+            }),
             ChatEvent::Title { title } => json!({ "title": title, "request_id": request_id }),
             ChatEvent::FollowUps { suggestions } => {
                 json!({ "suggestions": suggestions, "request_id": request_id })
+            }
+            ChatEvent::QueuedInput { messages } => {
+                json!({ "messages": messages, "request_id": request_id })
             }
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
             ChatEvent::Error {
@@ -481,5 +538,75 @@ mod tests {
             size: 99,
         };
         assert_eq!(att.payload("r")["type"], "image/png");
+    }
+}
+
+#[cfg(test)]
+mod memory_recall_payload_tests {
+    use super::ChatEvent;
+    use crate::memory_provenance::{MemoryOrigin, MemoryRole, RecalledMemoryView};
+
+    fn view(origin: MemoryOrigin, role: MemoryRole) -> RecalledMemoryView {
+        RecalledMemoryView {
+            memory_id: "mem-1".to_owned(),
+            role,
+            origin,
+            label: "USER".to_owned(),
+            preview: "Prefers metric units".to_owned(),
+        }
+    }
+
+    fn payload(memories: Vec<RecalledMemoryView>) -> serde_json::Value {
+        ChatEvent::MemoryRecall {
+            count: memories.len() as u32,
+            latency_ms: 12,
+            memories,
+        }
+        .payload("req-1")
+    }
+
+    #[test]
+    fn the_wire_carries_what_was_recalled_not_only_how_much() {
+        let body = payload(vec![view(MemoryOrigin::Stated, MemoryRole::Recall)]);
+        assert_eq!(body["count"], 1);
+        let memory = &body["memories"][0];
+        assert_eq!(memory["memory_id"], "mem-1");
+        assert_eq!(memory["label"], "USER");
+        assert_eq!(memory["preview"], "Prefers metric units");
+        // The id is on the wire so a reader can act on the exact row.
+        assert!(memory["memory_id"].is_string());
+    }
+
+    /// The honesty rule, asserted at the boundary a client reads: three origin
+    /// states, and "unrecorded" must never serialize as "stated".
+    #[test]
+    fn unrecorded_origin_is_distinguishable_on_the_wire() {
+        for (origin, expected) in [
+            (MemoryOrigin::Stated, "stated"),
+            (MemoryOrigin::Inferred, "inferred"),
+            (MemoryOrigin::Unrecorded, "unrecorded"),
+        ] {
+            let body = payload(vec![view(origin, MemoryRole::Recall)]);
+            assert_eq!(body["memories"][0]["origin"], expected);
+        }
+    }
+
+    #[test]
+    fn the_role_split_survives_serialization() {
+        let body = payload(vec![
+            view(MemoryOrigin::Stated, MemoryRole::Recall),
+            view(MemoryOrigin::Stated, MemoryRole::Inject),
+        ]);
+        assert_eq!(body["memories"][0]["role"], "recall");
+        assert_eq!(body["memories"][1]["role"], "inject");
+    }
+
+    /// A turn that recalled nothing describable still reports its count, so an
+    /// empty list never reads as "memory was not used".
+    #[test]
+    fn an_empty_description_list_is_still_a_valid_event() {
+        let body = payload(Vec::new());
+        assert_eq!(body["memories"].as_array().map(Vec::len), Some(0));
+        assert!(body["latency_ms"].is_number());
     }
 }

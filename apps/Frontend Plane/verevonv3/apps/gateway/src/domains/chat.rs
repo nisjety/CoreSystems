@@ -36,9 +36,25 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/invocations/{request_id}/cancel",
             post(json_handlers::cancel_invocation),
         )
+        // A message typed while a run is streaming. Delivered to the running
+        // agent at its next tool-round boundary instead of being dropped.
+        .route(
+            "/api/v1/chat/invocations/{request_id}/queue",
+            post(json_handlers::queue_invocation_input),
+        )
         .route(
             "/api/v1/chat/threads/{thread_id}/messages",
             get(json_handlers::get_thread_messages),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/context",
+            get(json_handlers::get_thread_context),
+        )
+        // Browser-run screenshots. The id is Quarry-v2's artifact id, which the
+        // Model Plane already carries on BrowserObservationReceived.
+        .route(
+            "/api/v1/chat/browser-artifacts/{artifact_id}",
+            get(json_handlers::get_browser_artifact),
         )
         .route("/api/v1/models", get(json_handlers::list_models))
         .route(

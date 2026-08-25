@@ -186,6 +186,7 @@ mod tests {
 
     fn make_request(content: &str, model: Option<&str>) -> InvokeRequest {
         InvokeRequest {
+            effort: None,
             regenerated: false,
             edited_resubmit: false,
             content: content.to_owned(),

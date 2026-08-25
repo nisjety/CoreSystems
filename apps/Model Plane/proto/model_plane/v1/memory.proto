@@ -48,6 +48,20 @@ message SearchMemoryRequest {
 
   // Optional lower bound for updated_at.
   google.protobuf.Timestamp updated_after = 6;
+
+  // The user this search is on behalf of, for per-user scoping.
+  //
+  // When set, results are limited to memories owned by this user plus those
+  // owned by nobody (org/workspace/policy scope) -- the same rule session-core's
+  // durable query applies (`scope = 'user' AND owner = $3`).
+  //
+  // Empty means no user filter, which is org-wide. That was the ONLY behaviour
+  // before this field existed, and it was safe only because the single caller
+  // always passed a `thread_id` and a thread has one owner. This boundary did
+  // not enforce that itself: a caller omitting `thread_id` got every user's
+  // personal memories in the org. Callers acting for a user should always set
+  // this.
+  string user_id = 7;
 }
 
 message SearchMemoryResponse {

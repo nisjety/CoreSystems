@@ -8,6 +8,7 @@ pub mod browser_agent;
 pub mod browser_events;
 pub mod capability_policy;
 pub mod code_interpreter;
+mod compaction_budget;
 pub mod executor;
 pub mod grpc;
 pub mod health_attest;

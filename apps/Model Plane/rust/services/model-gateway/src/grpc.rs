@@ -371,6 +371,10 @@ async fn fetch_memory_context(
 ) -> Vec<String> {
     let mut client = state.memory_client.clone();
     let request = SearchMemoryRequest {
+        // Left empty deliberately: session-core derives the owner
+        // from the VERIFIED thread, so a caller-supplied user id
+        // would be forgeable scoping.
+        user_id: String::new(),
         thread_id: thread_id.to_owned(),
         query: query.to_owned(),
         topic_filter: Vec::new(),
@@ -435,6 +439,11 @@ fn build_infer_request(
         ))
     })?;
     Ok(InferRequest {
+        // Extended thinking is not exposed on the legacy gRPC `InvokeRequest`
+        // surface, so this path never asks for a reasoning budget. Pinned
+        // explicitly rather than left to `Default` so the zero reads as a
+        // decision: `sse.rs` is the transport that threads a real budget.
+        thinking_budget_tokens: 0,
         request_id: request_id.to_owned(),
         org_id: org_id.to_owned(),
         model: model.to_owned(),
@@ -1028,10 +1037,18 @@ impl ModelGateway for GatewayService {
                     Ok(InferChunk {
                         request_id: chunk_request_id,
                         delta,
+                        // Dropped deliberately, not by oversight: `InvokeChunk`
+                        // has no reasoning field, and adding one with no
+                        // consumer would be exactly the dead-but-visible
+                        // surface this plan rejects. Bound and ignored so the
+                        // decision is visible at the site — the SSE chat path
+                        // (`sse.rs`) is where reasoning is delivered today.
+                        reasoning_delta: _,
                         done,
                         model_used,
                         input_tokens,
                         output_tokens,
+                        stop_reason,
                         // Newer contract fields (provider_used/residency) are
                         // deliberately not surfaced on the legacy gRPC chunk
                         // shape; the unary envelope carries the receipt.
@@ -1050,6 +1067,14 @@ impl ModelGateway for GatewayService {
                         } else {
                             model_used
                         };
+                        if done && stop_reason == "stream_incomplete" {
+                            warn!(
+                                request_id = %rid,
+                                run_id = %managed_run.run_id,
+                                "inference stream ended without a proper termination signal; \
+                                 the answer may be truncated"
+                            );
+                        }
                         let chunk = InvokeChunk {
                             request_id: rid,
                             delta,
@@ -1057,6 +1082,7 @@ impl ModelGateway for GatewayService {
                             model_used: mu,
                             input_tokens,
                             output_tokens,
+                            stop_reason,
                         };
                         if chunk.done {
                             // A terminal chunk is not externally observable
@@ -1265,6 +1291,12 @@ impl ModelGateway for GatewayService {
                         run_id,
                         mode: "plan".to_owned(),
                         org_id,
+                        // Entering plan mode grants nothing — it narrows. An
+                        // unset rung leaves whatever the run carried rather
+                        // than revoking it, and plan mode's own gate is what
+                        // holds the run to investigation meanwhile.
+                        granted_rung: 0,
+                        justification: String::new(),
                     },
                 )?)
                 .await
@@ -1284,6 +1316,12 @@ impl ModelGateway for GatewayService {
         require_durable_run_owner(&self.state, &identity, &req.run_id).await?;
         let run_id = req.run_id.clone();
         let org_id = req.org_id.clone();
+        // Captured before `handle_exit_plan_mode` consumes the request: the
+        // grant it validated has to reach the durable write below, or the run
+        // would leave plan mode carrying no recorded authority — the exact state
+        // this pair exists to remove.
+        let granted_rung = req.granted_rung;
+        let justification = req.justification.clone();
         let resp =
             coordinator::handle_exit_plan_mode(&self.state.plan_mode, &*self.state.publisher, req)
                 .await?;
@@ -1297,6 +1335,12 @@ impl ModelGateway for GatewayService {
                         run_id,
                         mode: "execute".to_owned(),
                         org_id,
+                        // The grant `handle_exit_plan_mode` already validated,
+                        // persisted so it outlives this request: the next
+                        // RunAgentRequest reads it back and execution-core
+                        // enforces it per call.
+                        granted_rung,
+                        justification,
                     },
                 )?)
                 .await
@@ -2504,6 +2548,7 @@ impl ModelGateway for GatewayService {
         );
 
         let infer_req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: req.request_id.clone(),
             org_id: req.org_id.clone(),
             model: req.model.clone(),
@@ -2867,6 +2912,8 @@ mod tests {
                     model_used: "mock".to_owned(),
                     input_tokens: 0,
                     output_tokens: 0,
+                    stop_reason: String::new(),
+                    reasoning_delta: String::new(),
                     provider_used: String::new(),
                     residency: String::new(),
                 }),
@@ -2877,6 +2924,8 @@ mod tests {
                     model_used: "mock".to_owned(),
                     input_tokens: 2,
                     output_tokens: 3,
+                    stop_reason: "end_turn".to_owned(),
+                    reasoning_delta: String::new(),
                     provider_used: String::new(),
                     residency: String::new(),
                 }),
@@ -3739,6 +3788,19 @@ mod tests {
             }))
         }
 
+        // The gateway never records a run answer — that is execution-core's
+        // delegation path. Unimplemented rather than a stub success, so a future
+        // gateway caller fails loudly instead of believing it stored something.
+        async fn record_run_output(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::RecordRunOutputRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::RecordRunOutputResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "the gateway does not record run answers",
+            ))
+        }
+
         async fn heartbeat_managed_run(
             &self,
             request: Request<HeartbeatManagedRunRequest>,
@@ -4075,6 +4137,8 @@ mod tests {
             org_id: "org_test".to_owned(),
             run_id: run_id.to_owned(),
             session_id: "session-test".to_owned(),
+            granted_rung: mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite as i32,
+            justification: "the approved plan writes its report into the workspace".to_owned(),
         }
     }
 

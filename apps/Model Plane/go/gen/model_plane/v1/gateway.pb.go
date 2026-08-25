@@ -670,8 +670,14 @@ type InvokeChunk struct {
 	// Model that served the request (populated on final chunk).
 	ModelUsed string `protobuf:"bytes,4,opt,name=model_used,json=modelUsed,proto3" json:"model_used,omitempty"`
 	// Token counts (populated on final chunk).
-	InputTokens   int32 `protobuf:"varint,5,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
-	OutputTokens  int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	InputTokens  int32 `protobuf:"varint,5,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// Why generation stopped (populated on the final chunk): "end_turn",
+	// "max_tokens"/"length", "stop_sequence", or "stream_incomplete" when the
+	// provider connection broke before any proper termination signal arrived —
+	// see model_plane.v1.InferChunk's field doc for the full contract this
+	// mirrors. Empty on every non-final chunk.
+	StopReason    string `protobuf:"bytes,7,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -746,6 +752,13 @@ func (x *InvokeChunk) GetOutputTokens() int32 {
 		return x.OutputTokens
 	}
 	return 0
+}
+
+func (x *InvokeChunk) GetStopReason() string {
+	if x != nil {
+		return x.StopReason
+	}
+	return ""
 }
 
 type HealthRequest struct {
@@ -2299,11 +2312,22 @@ func (x *EnterPlanModeResponse) GetExpiresAtUnix() int64 {
 }
 
 type ExitPlanModeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
-	OrgId         string                 `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	RunId         string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	SessionId     string                 `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	OrgId     string                 `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	RunId     string                 `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	SessionId string                 `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	// The rung being granted. Must be strictly WIDER than the rung the run is
+	// leaving, or the request is not an escalation and is refused. Leaving plan
+	// mode without naming what is granted is how a run silently becomes
+	// unbounded.
+	GrantedRung AutonomyRung `protobuf:"varint,5,opt,name=granted_rung,json=grantedRung,proto3,enum=model_plane.v1.AutonomyRung" json:"granted_rung,omitempty"`
+	// Why this grant is being made. Required, and required to be substantive: an
+	// approval with no reason, or a reason granting nothing, is a malformed ask
+	// and is refused rather than recorded as an empty justification. An oversized
+	// one is refused too — never silently truncated, because a truncated reason
+	// reads as a complete one.
+	Justification string `protobuf:"bytes,6,opt,name=justification,proto3" json:"justification,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2362,6 +2386,20 @@ func (x *ExitPlanModeRequest) GetRunId() string {
 func (x *ExitPlanModeRequest) GetSessionId() string {
 	if x != nil {
 		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ExitPlanModeRequest) GetGrantedRung() AutonomyRung {
+	if x != nil {
+		return x.GrantedRung
+	}
+	return AutonomyRung_AUTONOMY_RUNG_UNSPECIFIED
+}
+
+func (x *ExitPlanModeRequest) GetJustification() string {
+	if x != nil {
+		return x.Justification
 	}
 	return ""
 }
@@ -8676,7 +8714,7 @@ var File_model_plane_v1_gateway_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/gateway.proto\x12\x0emodel_plane.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1emodel_plane/v1/inference.proto\"\xe2\x06\n" +
+	"\x1cmodel_plane/v1/gateway.proto\x12\x0emodel_plane.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1emodel_plane/v1/inference.proto\x1a\x19model_plane/v1/runs.proto\"\xe2\x06\n" +
 	"\rInvokeRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -8737,7 +8775,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"stopReason\x12!\n" +
 	"\finput_tokens\x18\x05 \x01(\x05R\vinputTokens\x12#\n" +
 	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\x125\n" +
-	"\asources\x18\a \x03(\v2\x1b.model_plane.v1.SourceTraceR\asources\"\xbd\x01\n" +
+	"\asources\x18\a \x03(\v2\x1b.model_plane.v1.SourceTraceR\asources\"\xde\x01\n" +
 	"\vInvokeChunk\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x14\n" +
@@ -8746,7 +8784,9 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\n" +
 	"model_used\x18\x04 \x01(\tR\tmodelUsed\x12!\n" +
 	"\finput_tokens\x18\x05 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\"\x0f\n" +
+	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\x12\x1f\n" +
+	"\vstop_reason\x18\a \x01(\tR\n" +
+	"stopReason\"\x0f\n" +
 	"\rHealthRequest\"(\n" +
 	"\x0eHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"h\n" +
@@ -8882,14 +8922,16 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\x15EnterPlanModeResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12&\n" +
-	"\x0fexpires_at_unix\x18\x02 \x01(\x03R\rexpiresAtUnix\"\x81\x01\n" +
+	"\x0fexpires_at_unix\x18\x02 \x01(\x03R\rexpiresAtUnix\"\xe8\x01\n" +
 	"\x13ExitPlanModeRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x15\n" +
 	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x04 \x01(\tR\tsessionId\"T\n" +
+	"session_id\x18\x04 \x01(\tR\tsessionId\x12?\n" +
+	"\fgranted_rung\x18\x05 \x01(\x0e2\x1c.model_plane.v1.AutonomyRungR\vgrantedRung\x12$\n" +
+	"\rjustification\x18\x06 \x01(\tR\rjustification\"T\n" +
 	"\x14ExitPlanModeResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1d\n" +
@@ -9644,7 +9686,8 @@ var file_model_plane_v1_gateway_proto_goTypes = []any{
 	(*ListTasksResponse)(nil),            // 119: model_plane.v1.ListTasksResponse
 	(*structpb.Struct)(nil),              // 120: google.protobuf.Struct
 	(PrivacyTier)(0),                     // 121: model_plane.v1.PrivacyTier
-	(*ToolDefinition)(nil),               // 122: model_plane.v1.ToolDefinition
+	(AutonomyRung)(0),                    // 122: model_plane.v1.AutonomyRung
+	(*ToolDefinition)(nil),               // 123: model_plane.v1.ToolDefinition
 }
 var file_model_plane_v1_gateway_proto_depIdxs = []int32{
 	120, // 0: model_plane.v1.InvokeRequest.metadata:type_name -> google.protobuf.Struct
@@ -9657,147 +9700,148 @@ var file_model_plane_v1_gateway_proto_depIdxs = []int32{
 	9,   // 7: model_plane.v1.FetchRequest.render:type_name -> model_plane.v1.RenderHints
 	9,   // 8: model_plane.v1.ExtractStructuredRequest.render:type_name -> model_plane.v1.RenderHints
 	15,  // 9: model_plane.v1.WebSearchResponse.results:type_name -> model_plane.v1.WebSearchResult
-	32,  // 10: model_plane.v1.TeamCreateResponse.worker:type_name -> model_plane.v1.TeamWorker
-	32,  // 11: model_plane.v1.TeamDeleteResponse.worker:type_name -> model_plane.v1.TeamWorker
-	32,  // 12: model_plane.v1.TeamListResponse.workers:type_name -> model_plane.v1.TeamWorker
-	39,  // 13: model_plane.v1.LspQueryResponse.diagnostics:type_name -> model_plane.v1.LspDiagnostic
-	40,  // 14: model_plane.v1.LspQueryResponse.locations:type_name -> model_plane.v1.LspLocation
-	41,  // 15: model_plane.v1.LspQueryResponse.completions:type_name -> model_plane.v1.LspCompletion
-	43,  // 16: model_plane.v1.RequestApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
-	43,  // 17: model_plane.v1.ApproveApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
-	43,  // 18: model_plane.v1.DenyApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
-	43,  // 19: model_plane.v1.ListPendingApprovalsResponse.approvals:type_name -> model_plane.v1.GatewayApproval
-	52,  // 20: model_plane.v1.Trajectory.planned_actions:type_name -> model_plane.v1.TrajectoryAction
-	52,  // 21: model_plane.v1.Trajectory.executed_actions:type_name -> model_plane.v1.TrajectoryAction
-	53,  // 22: model_plane.v1.RecordTrajectoryRequest.trajectory:type_name -> model_plane.v1.Trajectory
-	53,  // 23: model_plane.v1.ListTrajectoriesResponse.trajectories:type_name -> model_plane.v1.Trajectory
-	60,  // 24: model_plane.v1.ListSkillsResponse.skills:type_name -> model_plane.v1.Skill
-	60,  // 25: model_plane.v1.GetSkillResponse.skill:type_name -> model_plane.v1.Skill
-	60,  // 26: model_plane.v1.SkillMatch.skill:type_name -> model_plane.v1.Skill
-	66,  // 27: model_plane.v1.MatchSkillsResponse.matches:type_name -> model_plane.v1.SkillMatch
-	68,  // 28: model_plane.v1.RegisterMcpServerRequest.server:type_name -> model_plane.v1.McpServer
-	68,  // 29: model_plane.v1.RegisterMcpServerResponse.server:type_name -> model_plane.v1.McpServer
-	68,  // 30: model_plane.v1.ListMcpServersResponse.servers:type_name -> model_plane.v1.McpServer
-	122, // 31: model_plane.v1.ListMcpToolsResponse.tools:type_name -> model_plane.v1.ToolDefinition
-	77,  // 32: model_plane.v1.RegisterPluginRequest.plugin:type_name -> model_plane.v1.Plugin
-	77,  // 33: model_plane.v1.RegisterPluginResponse.plugin:type_name -> model_plane.v1.Plugin
-	77,  // 34: model_plane.v1.ListPluginsResponse.plugins:type_name -> model_plane.v1.Plugin
-	77,  // 35: model_plane.v1.SetPluginEnabledResponse.plugin:type_name -> model_plane.v1.Plugin
-	84,  // 36: model_plane.v1.ListCommandsResponse.commands:type_name -> model_plane.v1.Command
-	89,  // 37: model_plane.v1.RegisterHookRequest.hook:type_name -> model_plane.v1.Hook
-	89,  // 38: model_plane.v1.RegisterHookResponse.hook:type_name -> model_plane.v1.Hook
-	89,  // 39: model_plane.v1.ListHooksResponse.hooks:type_name -> model_plane.v1.Hook
-	98,  // 40: model_plane.v1.GetPolicyResponse.policy:type_name -> model_plane.v1.OrgPolicy
-	98,  // 41: model_plane.v1.SetPolicyRequest.policy:type_name -> model_plane.v1.OrgPolicy
-	98,  // 42: model_plane.v1.SetPolicyResponse.policy:type_name -> model_plane.v1.OrgPolicy
-	103, // 43: model_plane.v1.AppendThreadMessageResponse.message:type_name -> model_plane.v1.ThreadMessage
-	103, // 44: model_plane.v1.ListThreadMessagesResponse.messages:type_name -> model_plane.v1.ThreadMessage
-	109, // 45: model_plane.v1.GetAnalyticsResponse.tool_calls:type_name -> model_plane.v1.ToolCallCount
-	116, // 46: model_plane.v1.CreateTaskResponse.task:type_name -> model_plane.v1.TaskRecord
-	116, // 47: model_plane.v1.ListTasksResponse.tasks:type_name -> model_plane.v1.TaskRecord
-	0,   // 48: model_plane.v1.ModelGateway.Invoke:input_type -> model_plane.v1.InvokeRequest
-	0,   // 49: model_plane.v1.ModelGateway.InvokeStream:input_type -> model_plane.v1.InvokeRequest
-	10,  // 50: model_plane.v1.ModelGateway.Fetch:input_type -> model_plane.v1.FetchRequest
-	12,  // 51: model_plane.v1.ModelGateway.ExtractStructured:input_type -> model_plane.v1.ExtractStructuredRequest
-	14,  // 52: model_plane.v1.ModelGateway.WebSearch:input_type -> model_plane.v1.WebSearchRequest
-	17,  // 53: model_plane.v1.ModelGateway.Sleep:input_type -> model_plane.v1.SleepRequest
-	19,  // 54: model_plane.v1.ModelGateway.RemoteTrigger:input_type -> model_plane.v1.RemoteTriggerRequest
-	21,  // 55: model_plane.v1.ModelGateway.SendMessage:input_type -> model_plane.v1.SendMessageRequest
-	23,  // 56: model_plane.v1.ModelGateway.SyntheticOutput:input_type -> model_plane.v1.SyntheticOutputRequest
-	25,  // 57: model_plane.v1.ModelGateway.EnterPlanMode:input_type -> model_plane.v1.EnterPlanModeRequest
-	27,  // 58: model_plane.v1.ModelGateway.ExitPlanMode:input_type -> model_plane.v1.ExitPlanModeRequest
-	29,  // 59: model_plane.v1.ModelGateway.IsPlanMode:input_type -> model_plane.v1.IsPlanModeRequest
-	31,  // 60: model_plane.v1.ModelGateway.TeamCreate:input_type -> model_plane.v1.TeamCreateRequest
-	34,  // 61: model_plane.v1.ModelGateway.TeamDelete:input_type -> model_plane.v1.TeamDeleteRequest
-	36,  // 62: model_plane.v1.ModelGateway.TeamList:input_type -> model_plane.v1.TeamListRequest
-	38,  // 63: model_plane.v1.ModelGateway.LspQuery:input_type -> model_plane.v1.LspQueryRequest
-	44,  // 64: model_plane.v1.ModelGateway.RequestApproval:input_type -> model_plane.v1.RequestApprovalRequest
-	46,  // 65: model_plane.v1.ModelGateway.ApproveApproval:input_type -> model_plane.v1.ApproveApprovalRequest
-	48,  // 66: model_plane.v1.ModelGateway.DenyApproval:input_type -> model_plane.v1.DenyApprovalRequest
-	50,  // 67: model_plane.v1.ModelGateway.ListPendingApprovals:input_type -> model_plane.v1.ListPendingApprovalsRequest
-	54,  // 68: model_plane.v1.ModelGateway.RecordTrajectory:input_type -> model_plane.v1.RecordTrajectoryRequest
-	56,  // 69: model_plane.v1.ModelGateway.ListTrajectories:input_type -> model_plane.v1.ListTrajectoriesRequest
-	58,  // 70: model_plane.v1.ModelGateway.ExportTrajectories:input_type -> model_plane.v1.ExportTrajectoriesRequest
-	61,  // 71: model_plane.v1.ModelGateway.ListSkills:input_type -> model_plane.v1.ListSkillsRequest
-	63,  // 72: model_plane.v1.ModelGateway.GetSkill:input_type -> model_plane.v1.GetSkillRequest
-	65,  // 73: model_plane.v1.ModelGateway.MatchSkills:input_type -> model_plane.v1.MatchSkillsRequest
-	69,  // 74: model_plane.v1.ModelGateway.RegisterMcpServer:input_type -> model_plane.v1.RegisterMcpServerRequest
-	71,  // 75: model_plane.v1.ModelGateway.ListMcpServers:input_type -> model_plane.v1.ListMcpServersRequest
-	75,  // 76: model_plane.v1.ModelGateway.ProxyMcpTool:input_type -> model_plane.v1.ProxyMcpToolRequest
-	73,  // 77: model_plane.v1.ModelGateway.ListMcpTools:input_type -> model_plane.v1.ListMcpToolsRequest
-	78,  // 78: model_plane.v1.ModelGateway.RegisterPlugin:input_type -> model_plane.v1.RegisterPluginRequest
-	80,  // 79: model_plane.v1.ModelGateway.ListPlugins:input_type -> model_plane.v1.ListPluginsRequest
-	82,  // 80: model_plane.v1.ModelGateway.SetPluginEnabled:input_type -> model_plane.v1.SetPluginEnabledRequest
-	85,  // 81: model_plane.v1.ModelGateway.ListCommands:input_type -> model_plane.v1.ListCommandsRequest
-	87,  // 82: model_plane.v1.ModelGateway.ExecuteCommand:input_type -> model_plane.v1.ExecuteCommandRequest
-	90,  // 83: model_plane.v1.ModelGateway.RegisterHook:input_type -> model_plane.v1.RegisterHookRequest
-	92,  // 84: model_plane.v1.ModelGateway.ListHooks:input_type -> model_plane.v1.ListHooksRequest
-	94,  // 85: model_plane.v1.ModelGateway.CheckPermission:input_type -> model_plane.v1.CheckPermissionRequest
-	96,  // 86: model_plane.v1.ModelGateway.SetPermission:input_type -> model_plane.v1.SetPermissionRequest
-	99,  // 87: model_plane.v1.ModelGateway.GetPolicy:input_type -> model_plane.v1.GetPolicyRequest
-	101, // 88: model_plane.v1.ModelGateway.SetPolicy:input_type -> model_plane.v1.SetPolicyRequest
-	104, // 89: model_plane.v1.ModelGateway.AppendThreadMessage:input_type -> model_plane.v1.AppendThreadMessageRequest
-	106, // 90: model_plane.v1.ModelGateway.ListThreadMessages:input_type -> model_plane.v1.ListThreadMessagesRequest
-	108, // 91: model_plane.v1.ModelGateway.GetAnalytics:input_type -> model_plane.v1.GetAnalyticsRequest
-	111, // 92: model_plane.v1.ModelGateway.TextToSpeech:input_type -> model_plane.v1.TextToSpeechRequest
-	113, // 93: model_plane.v1.ModelGateway.SpeechToText:input_type -> model_plane.v1.SpeechToTextRequest
-	115, // 94: model_plane.v1.ModelGateway.CreateTask:input_type -> model_plane.v1.CreateTaskRequest
-	118, // 95: model_plane.v1.ModelGateway.ListTasks:input_type -> model_plane.v1.ListTasksRequest
-	7,   // 96: model_plane.v1.ModelGateway.Health:input_type -> model_plane.v1.HealthRequest
-	5,   // 97: model_plane.v1.ModelGateway.Invoke:output_type -> model_plane.v1.InvokeResponse
-	6,   // 98: model_plane.v1.ModelGateway.InvokeStream:output_type -> model_plane.v1.InvokeChunk
-	11,  // 99: model_plane.v1.ModelGateway.Fetch:output_type -> model_plane.v1.FetchResponse
-	13,  // 100: model_plane.v1.ModelGateway.ExtractStructured:output_type -> model_plane.v1.ExtractStructuredResponse
-	16,  // 101: model_plane.v1.ModelGateway.WebSearch:output_type -> model_plane.v1.WebSearchResponse
-	18,  // 102: model_plane.v1.ModelGateway.Sleep:output_type -> model_plane.v1.SleepResponse
-	20,  // 103: model_plane.v1.ModelGateway.RemoteTrigger:output_type -> model_plane.v1.RemoteTriggerResponse
-	22,  // 104: model_plane.v1.ModelGateway.SendMessage:output_type -> model_plane.v1.SendMessageResponse
-	24,  // 105: model_plane.v1.ModelGateway.SyntheticOutput:output_type -> model_plane.v1.SyntheticOutputResponse
-	26,  // 106: model_plane.v1.ModelGateway.EnterPlanMode:output_type -> model_plane.v1.EnterPlanModeResponse
-	28,  // 107: model_plane.v1.ModelGateway.ExitPlanMode:output_type -> model_plane.v1.ExitPlanModeResponse
-	30,  // 108: model_plane.v1.ModelGateway.IsPlanMode:output_type -> model_plane.v1.IsPlanModeResponse
-	33,  // 109: model_plane.v1.ModelGateway.TeamCreate:output_type -> model_plane.v1.TeamCreateResponse
-	35,  // 110: model_plane.v1.ModelGateway.TeamDelete:output_type -> model_plane.v1.TeamDeleteResponse
-	37,  // 111: model_plane.v1.ModelGateway.TeamList:output_type -> model_plane.v1.TeamListResponse
-	42,  // 112: model_plane.v1.ModelGateway.LspQuery:output_type -> model_plane.v1.LspQueryResponse
-	45,  // 113: model_plane.v1.ModelGateway.RequestApproval:output_type -> model_plane.v1.RequestApprovalResponse
-	47,  // 114: model_plane.v1.ModelGateway.ApproveApproval:output_type -> model_plane.v1.ApproveApprovalResponse
-	49,  // 115: model_plane.v1.ModelGateway.DenyApproval:output_type -> model_plane.v1.DenyApprovalResponse
-	51,  // 116: model_plane.v1.ModelGateway.ListPendingApprovals:output_type -> model_plane.v1.ListPendingApprovalsResponse
-	55,  // 117: model_plane.v1.ModelGateway.RecordTrajectory:output_type -> model_plane.v1.RecordTrajectoryResponse
-	57,  // 118: model_plane.v1.ModelGateway.ListTrajectories:output_type -> model_plane.v1.ListTrajectoriesResponse
-	59,  // 119: model_plane.v1.ModelGateway.ExportTrajectories:output_type -> model_plane.v1.ExportTrajectoriesResponse
-	62,  // 120: model_plane.v1.ModelGateway.ListSkills:output_type -> model_plane.v1.ListSkillsResponse
-	64,  // 121: model_plane.v1.ModelGateway.GetSkill:output_type -> model_plane.v1.GetSkillResponse
-	67,  // 122: model_plane.v1.ModelGateway.MatchSkills:output_type -> model_plane.v1.MatchSkillsResponse
-	70,  // 123: model_plane.v1.ModelGateway.RegisterMcpServer:output_type -> model_plane.v1.RegisterMcpServerResponse
-	72,  // 124: model_plane.v1.ModelGateway.ListMcpServers:output_type -> model_plane.v1.ListMcpServersResponse
-	76,  // 125: model_plane.v1.ModelGateway.ProxyMcpTool:output_type -> model_plane.v1.ProxyMcpToolResponse
-	74,  // 126: model_plane.v1.ModelGateway.ListMcpTools:output_type -> model_plane.v1.ListMcpToolsResponse
-	79,  // 127: model_plane.v1.ModelGateway.RegisterPlugin:output_type -> model_plane.v1.RegisterPluginResponse
-	81,  // 128: model_plane.v1.ModelGateway.ListPlugins:output_type -> model_plane.v1.ListPluginsResponse
-	83,  // 129: model_plane.v1.ModelGateway.SetPluginEnabled:output_type -> model_plane.v1.SetPluginEnabledResponse
-	86,  // 130: model_plane.v1.ModelGateway.ListCommands:output_type -> model_plane.v1.ListCommandsResponse
-	88,  // 131: model_plane.v1.ModelGateway.ExecuteCommand:output_type -> model_plane.v1.ExecuteCommandResponse
-	91,  // 132: model_plane.v1.ModelGateway.RegisterHook:output_type -> model_plane.v1.RegisterHookResponse
-	93,  // 133: model_plane.v1.ModelGateway.ListHooks:output_type -> model_plane.v1.ListHooksResponse
-	95,  // 134: model_plane.v1.ModelGateway.CheckPermission:output_type -> model_plane.v1.CheckPermissionResponse
-	97,  // 135: model_plane.v1.ModelGateway.SetPermission:output_type -> model_plane.v1.SetPermissionResponse
-	100, // 136: model_plane.v1.ModelGateway.GetPolicy:output_type -> model_plane.v1.GetPolicyResponse
-	102, // 137: model_plane.v1.ModelGateway.SetPolicy:output_type -> model_plane.v1.SetPolicyResponse
-	105, // 138: model_plane.v1.ModelGateway.AppendThreadMessage:output_type -> model_plane.v1.AppendThreadMessageResponse
-	107, // 139: model_plane.v1.ModelGateway.ListThreadMessages:output_type -> model_plane.v1.ListThreadMessagesResponse
-	110, // 140: model_plane.v1.ModelGateway.GetAnalytics:output_type -> model_plane.v1.GetAnalyticsResponse
-	112, // 141: model_plane.v1.ModelGateway.TextToSpeech:output_type -> model_plane.v1.TextToSpeechResponse
-	114, // 142: model_plane.v1.ModelGateway.SpeechToText:output_type -> model_plane.v1.SpeechToTextResponse
-	117, // 143: model_plane.v1.ModelGateway.CreateTask:output_type -> model_plane.v1.CreateTaskResponse
-	119, // 144: model_plane.v1.ModelGateway.ListTasks:output_type -> model_plane.v1.ListTasksResponse
-	8,   // 145: model_plane.v1.ModelGateway.Health:output_type -> model_plane.v1.HealthResponse
-	97,  // [97:146] is the sub-list for method output_type
-	48,  // [48:97] is the sub-list for method input_type
-	48,  // [48:48] is the sub-list for extension type_name
-	48,  // [48:48] is the sub-list for extension extendee
-	0,   // [0:48] is the sub-list for field type_name
+	122, // 10: model_plane.v1.ExitPlanModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	32,  // 11: model_plane.v1.TeamCreateResponse.worker:type_name -> model_plane.v1.TeamWorker
+	32,  // 12: model_plane.v1.TeamDeleteResponse.worker:type_name -> model_plane.v1.TeamWorker
+	32,  // 13: model_plane.v1.TeamListResponse.workers:type_name -> model_plane.v1.TeamWorker
+	39,  // 14: model_plane.v1.LspQueryResponse.diagnostics:type_name -> model_plane.v1.LspDiagnostic
+	40,  // 15: model_plane.v1.LspQueryResponse.locations:type_name -> model_plane.v1.LspLocation
+	41,  // 16: model_plane.v1.LspQueryResponse.completions:type_name -> model_plane.v1.LspCompletion
+	43,  // 17: model_plane.v1.RequestApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
+	43,  // 18: model_plane.v1.ApproveApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
+	43,  // 19: model_plane.v1.DenyApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
+	43,  // 20: model_plane.v1.ListPendingApprovalsResponse.approvals:type_name -> model_plane.v1.GatewayApproval
+	52,  // 21: model_plane.v1.Trajectory.planned_actions:type_name -> model_plane.v1.TrajectoryAction
+	52,  // 22: model_plane.v1.Trajectory.executed_actions:type_name -> model_plane.v1.TrajectoryAction
+	53,  // 23: model_plane.v1.RecordTrajectoryRequest.trajectory:type_name -> model_plane.v1.Trajectory
+	53,  // 24: model_plane.v1.ListTrajectoriesResponse.trajectories:type_name -> model_plane.v1.Trajectory
+	60,  // 25: model_plane.v1.ListSkillsResponse.skills:type_name -> model_plane.v1.Skill
+	60,  // 26: model_plane.v1.GetSkillResponse.skill:type_name -> model_plane.v1.Skill
+	60,  // 27: model_plane.v1.SkillMatch.skill:type_name -> model_plane.v1.Skill
+	66,  // 28: model_plane.v1.MatchSkillsResponse.matches:type_name -> model_plane.v1.SkillMatch
+	68,  // 29: model_plane.v1.RegisterMcpServerRequest.server:type_name -> model_plane.v1.McpServer
+	68,  // 30: model_plane.v1.RegisterMcpServerResponse.server:type_name -> model_plane.v1.McpServer
+	68,  // 31: model_plane.v1.ListMcpServersResponse.servers:type_name -> model_plane.v1.McpServer
+	123, // 32: model_plane.v1.ListMcpToolsResponse.tools:type_name -> model_plane.v1.ToolDefinition
+	77,  // 33: model_plane.v1.RegisterPluginRequest.plugin:type_name -> model_plane.v1.Plugin
+	77,  // 34: model_plane.v1.RegisterPluginResponse.plugin:type_name -> model_plane.v1.Plugin
+	77,  // 35: model_plane.v1.ListPluginsResponse.plugins:type_name -> model_plane.v1.Plugin
+	77,  // 36: model_plane.v1.SetPluginEnabledResponse.plugin:type_name -> model_plane.v1.Plugin
+	84,  // 37: model_plane.v1.ListCommandsResponse.commands:type_name -> model_plane.v1.Command
+	89,  // 38: model_plane.v1.RegisterHookRequest.hook:type_name -> model_plane.v1.Hook
+	89,  // 39: model_plane.v1.RegisterHookResponse.hook:type_name -> model_plane.v1.Hook
+	89,  // 40: model_plane.v1.ListHooksResponse.hooks:type_name -> model_plane.v1.Hook
+	98,  // 41: model_plane.v1.GetPolicyResponse.policy:type_name -> model_plane.v1.OrgPolicy
+	98,  // 42: model_plane.v1.SetPolicyRequest.policy:type_name -> model_plane.v1.OrgPolicy
+	98,  // 43: model_plane.v1.SetPolicyResponse.policy:type_name -> model_plane.v1.OrgPolicy
+	103, // 44: model_plane.v1.AppendThreadMessageResponse.message:type_name -> model_plane.v1.ThreadMessage
+	103, // 45: model_plane.v1.ListThreadMessagesResponse.messages:type_name -> model_plane.v1.ThreadMessage
+	109, // 46: model_plane.v1.GetAnalyticsResponse.tool_calls:type_name -> model_plane.v1.ToolCallCount
+	116, // 47: model_plane.v1.CreateTaskResponse.task:type_name -> model_plane.v1.TaskRecord
+	116, // 48: model_plane.v1.ListTasksResponse.tasks:type_name -> model_plane.v1.TaskRecord
+	0,   // 49: model_plane.v1.ModelGateway.Invoke:input_type -> model_plane.v1.InvokeRequest
+	0,   // 50: model_plane.v1.ModelGateway.InvokeStream:input_type -> model_plane.v1.InvokeRequest
+	10,  // 51: model_plane.v1.ModelGateway.Fetch:input_type -> model_plane.v1.FetchRequest
+	12,  // 52: model_plane.v1.ModelGateway.ExtractStructured:input_type -> model_plane.v1.ExtractStructuredRequest
+	14,  // 53: model_plane.v1.ModelGateway.WebSearch:input_type -> model_plane.v1.WebSearchRequest
+	17,  // 54: model_plane.v1.ModelGateway.Sleep:input_type -> model_plane.v1.SleepRequest
+	19,  // 55: model_plane.v1.ModelGateway.RemoteTrigger:input_type -> model_plane.v1.RemoteTriggerRequest
+	21,  // 56: model_plane.v1.ModelGateway.SendMessage:input_type -> model_plane.v1.SendMessageRequest
+	23,  // 57: model_plane.v1.ModelGateway.SyntheticOutput:input_type -> model_plane.v1.SyntheticOutputRequest
+	25,  // 58: model_plane.v1.ModelGateway.EnterPlanMode:input_type -> model_plane.v1.EnterPlanModeRequest
+	27,  // 59: model_plane.v1.ModelGateway.ExitPlanMode:input_type -> model_plane.v1.ExitPlanModeRequest
+	29,  // 60: model_plane.v1.ModelGateway.IsPlanMode:input_type -> model_plane.v1.IsPlanModeRequest
+	31,  // 61: model_plane.v1.ModelGateway.TeamCreate:input_type -> model_plane.v1.TeamCreateRequest
+	34,  // 62: model_plane.v1.ModelGateway.TeamDelete:input_type -> model_plane.v1.TeamDeleteRequest
+	36,  // 63: model_plane.v1.ModelGateway.TeamList:input_type -> model_plane.v1.TeamListRequest
+	38,  // 64: model_plane.v1.ModelGateway.LspQuery:input_type -> model_plane.v1.LspQueryRequest
+	44,  // 65: model_plane.v1.ModelGateway.RequestApproval:input_type -> model_plane.v1.RequestApprovalRequest
+	46,  // 66: model_plane.v1.ModelGateway.ApproveApproval:input_type -> model_plane.v1.ApproveApprovalRequest
+	48,  // 67: model_plane.v1.ModelGateway.DenyApproval:input_type -> model_plane.v1.DenyApprovalRequest
+	50,  // 68: model_plane.v1.ModelGateway.ListPendingApprovals:input_type -> model_plane.v1.ListPendingApprovalsRequest
+	54,  // 69: model_plane.v1.ModelGateway.RecordTrajectory:input_type -> model_plane.v1.RecordTrajectoryRequest
+	56,  // 70: model_plane.v1.ModelGateway.ListTrajectories:input_type -> model_plane.v1.ListTrajectoriesRequest
+	58,  // 71: model_plane.v1.ModelGateway.ExportTrajectories:input_type -> model_plane.v1.ExportTrajectoriesRequest
+	61,  // 72: model_plane.v1.ModelGateway.ListSkills:input_type -> model_plane.v1.ListSkillsRequest
+	63,  // 73: model_plane.v1.ModelGateway.GetSkill:input_type -> model_plane.v1.GetSkillRequest
+	65,  // 74: model_plane.v1.ModelGateway.MatchSkills:input_type -> model_plane.v1.MatchSkillsRequest
+	69,  // 75: model_plane.v1.ModelGateway.RegisterMcpServer:input_type -> model_plane.v1.RegisterMcpServerRequest
+	71,  // 76: model_plane.v1.ModelGateway.ListMcpServers:input_type -> model_plane.v1.ListMcpServersRequest
+	75,  // 77: model_plane.v1.ModelGateway.ProxyMcpTool:input_type -> model_plane.v1.ProxyMcpToolRequest
+	73,  // 78: model_plane.v1.ModelGateway.ListMcpTools:input_type -> model_plane.v1.ListMcpToolsRequest
+	78,  // 79: model_plane.v1.ModelGateway.RegisterPlugin:input_type -> model_plane.v1.RegisterPluginRequest
+	80,  // 80: model_plane.v1.ModelGateway.ListPlugins:input_type -> model_plane.v1.ListPluginsRequest
+	82,  // 81: model_plane.v1.ModelGateway.SetPluginEnabled:input_type -> model_plane.v1.SetPluginEnabledRequest
+	85,  // 82: model_plane.v1.ModelGateway.ListCommands:input_type -> model_plane.v1.ListCommandsRequest
+	87,  // 83: model_plane.v1.ModelGateway.ExecuteCommand:input_type -> model_plane.v1.ExecuteCommandRequest
+	90,  // 84: model_plane.v1.ModelGateway.RegisterHook:input_type -> model_plane.v1.RegisterHookRequest
+	92,  // 85: model_plane.v1.ModelGateway.ListHooks:input_type -> model_plane.v1.ListHooksRequest
+	94,  // 86: model_plane.v1.ModelGateway.CheckPermission:input_type -> model_plane.v1.CheckPermissionRequest
+	96,  // 87: model_plane.v1.ModelGateway.SetPermission:input_type -> model_plane.v1.SetPermissionRequest
+	99,  // 88: model_plane.v1.ModelGateway.GetPolicy:input_type -> model_plane.v1.GetPolicyRequest
+	101, // 89: model_plane.v1.ModelGateway.SetPolicy:input_type -> model_plane.v1.SetPolicyRequest
+	104, // 90: model_plane.v1.ModelGateway.AppendThreadMessage:input_type -> model_plane.v1.AppendThreadMessageRequest
+	106, // 91: model_plane.v1.ModelGateway.ListThreadMessages:input_type -> model_plane.v1.ListThreadMessagesRequest
+	108, // 92: model_plane.v1.ModelGateway.GetAnalytics:input_type -> model_plane.v1.GetAnalyticsRequest
+	111, // 93: model_plane.v1.ModelGateway.TextToSpeech:input_type -> model_plane.v1.TextToSpeechRequest
+	113, // 94: model_plane.v1.ModelGateway.SpeechToText:input_type -> model_plane.v1.SpeechToTextRequest
+	115, // 95: model_plane.v1.ModelGateway.CreateTask:input_type -> model_plane.v1.CreateTaskRequest
+	118, // 96: model_plane.v1.ModelGateway.ListTasks:input_type -> model_plane.v1.ListTasksRequest
+	7,   // 97: model_plane.v1.ModelGateway.Health:input_type -> model_plane.v1.HealthRequest
+	5,   // 98: model_plane.v1.ModelGateway.Invoke:output_type -> model_plane.v1.InvokeResponse
+	6,   // 99: model_plane.v1.ModelGateway.InvokeStream:output_type -> model_plane.v1.InvokeChunk
+	11,  // 100: model_plane.v1.ModelGateway.Fetch:output_type -> model_plane.v1.FetchResponse
+	13,  // 101: model_plane.v1.ModelGateway.ExtractStructured:output_type -> model_plane.v1.ExtractStructuredResponse
+	16,  // 102: model_plane.v1.ModelGateway.WebSearch:output_type -> model_plane.v1.WebSearchResponse
+	18,  // 103: model_plane.v1.ModelGateway.Sleep:output_type -> model_plane.v1.SleepResponse
+	20,  // 104: model_plane.v1.ModelGateway.RemoteTrigger:output_type -> model_plane.v1.RemoteTriggerResponse
+	22,  // 105: model_plane.v1.ModelGateway.SendMessage:output_type -> model_plane.v1.SendMessageResponse
+	24,  // 106: model_plane.v1.ModelGateway.SyntheticOutput:output_type -> model_plane.v1.SyntheticOutputResponse
+	26,  // 107: model_plane.v1.ModelGateway.EnterPlanMode:output_type -> model_plane.v1.EnterPlanModeResponse
+	28,  // 108: model_plane.v1.ModelGateway.ExitPlanMode:output_type -> model_plane.v1.ExitPlanModeResponse
+	30,  // 109: model_plane.v1.ModelGateway.IsPlanMode:output_type -> model_plane.v1.IsPlanModeResponse
+	33,  // 110: model_plane.v1.ModelGateway.TeamCreate:output_type -> model_plane.v1.TeamCreateResponse
+	35,  // 111: model_plane.v1.ModelGateway.TeamDelete:output_type -> model_plane.v1.TeamDeleteResponse
+	37,  // 112: model_plane.v1.ModelGateway.TeamList:output_type -> model_plane.v1.TeamListResponse
+	42,  // 113: model_plane.v1.ModelGateway.LspQuery:output_type -> model_plane.v1.LspQueryResponse
+	45,  // 114: model_plane.v1.ModelGateway.RequestApproval:output_type -> model_plane.v1.RequestApprovalResponse
+	47,  // 115: model_plane.v1.ModelGateway.ApproveApproval:output_type -> model_plane.v1.ApproveApprovalResponse
+	49,  // 116: model_plane.v1.ModelGateway.DenyApproval:output_type -> model_plane.v1.DenyApprovalResponse
+	51,  // 117: model_plane.v1.ModelGateway.ListPendingApprovals:output_type -> model_plane.v1.ListPendingApprovalsResponse
+	55,  // 118: model_plane.v1.ModelGateway.RecordTrajectory:output_type -> model_plane.v1.RecordTrajectoryResponse
+	57,  // 119: model_plane.v1.ModelGateway.ListTrajectories:output_type -> model_plane.v1.ListTrajectoriesResponse
+	59,  // 120: model_plane.v1.ModelGateway.ExportTrajectories:output_type -> model_plane.v1.ExportTrajectoriesResponse
+	62,  // 121: model_plane.v1.ModelGateway.ListSkills:output_type -> model_plane.v1.ListSkillsResponse
+	64,  // 122: model_plane.v1.ModelGateway.GetSkill:output_type -> model_plane.v1.GetSkillResponse
+	67,  // 123: model_plane.v1.ModelGateway.MatchSkills:output_type -> model_plane.v1.MatchSkillsResponse
+	70,  // 124: model_plane.v1.ModelGateway.RegisterMcpServer:output_type -> model_plane.v1.RegisterMcpServerResponse
+	72,  // 125: model_plane.v1.ModelGateway.ListMcpServers:output_type -> model_plane.v1.ListMcpServersResponse
+	76,  // 126: model_plane.v1.ModelGateway.ProxyMcpTool:output_type -> model_plane.v1.ProxyMcpToolResponse
+	74,  // 127: model_plane.v1.ModelGateway.ListMcpTools:output_type -> model_plane.v1.ListMcpToolsResponse
+	79,  // 128: model_plane.v1.ModelGateway.RegisterPlugin:output_type -> model_plane.v1.RegisterPluginResponse
+	81,  // 129: model_plane.v1.ModelGateway.ListPlugins:output_type -> model_plane.v1.ListPluginsResponse
+	83,  // 130: model_plane.v1.ModelGateway.SetPluginEnabled:output_type -> model_plane.v1.SetPluginEnabledResponse
+	86,  // 131: model_plane.v1.ModelGateway.ListCommands:output_type -> model_plane.v1.ListCommandsResponse
+	88,  // 132: model_plane.v1.ModelGateway.ExecuteCommand:output_type -> model_plane.v1.ExecuteCommandResponse
+	91,  // 133: model_plane.v1.ModelGateway.RegisterHook:output_type -> model_plane.v1.RegisterHookResponse
+	93,  // 134: model_plane.v1.ModelGateway.ListHooks:output_type -> model_plane.v1.ListHooksResponse
+	95,  // 135: model_plane.v1.ModelGateway.CheckPermission:output_type -> model_plane.v1.CheckPermissionResponse
+	97,  // 136: model_plane.v1.ModelGateway.SetPermission:output_type -> model_plane.v1.SetPermissionResponse
+	100, // 137: model_plane.v1.ModelGateway.GetPolicy:output_type -> model_plane.v1.GetPolicyResponse
+	102, // 138: model_plane.v1.ModelGateway.SetPolicy:output_type -> model_plane.v1.SetPolicyResponse
+	105, // 139: model_plane.v1.ModelGateway.AppendThreadMessage:output_type -> model_plane.v1.AppendThreadMessageResponse
+	107, // 140: model_plane.v1.ModelGateway.ListThreadMessages:output_type -> model_plane.v1.ListThreadMessagesResponse
+	110, // 141: model_plane.v1.ModelGateway.GetAnalytics:output_type -> model_plane.v1.GetAnalyticsResponse
+	112, // 142: model_plane.v1.ModelGateway.TextToSpeech:output_type -> model_plane.v1.TextToSpeechResponse
+	114, // 143: model_plane.v1.ModelGateway.SpeechToText:output_type -> model_plane.v1.SpeechToTextResponse
+	117, // 144: model_plane.v1.ModelGateway.CreateTask:output_type -> model_plane.v1.CreateTaskResponse
+	119, // 145: model_plane.v1.ModelGateway.ListTasks:output_type -> model_plane.v1.ListTasksResponse
+	8,   // 146: model_plane.v1.ModelGateway.Health:output_type -> model_plane.v1.HealthResponse
+	98,  // [98:147] is the sub-list for method output_type
+	49,  // [49:98] is the sub-list for method input_type
+	49,  // [49:49] is the sub-list for extension type_name
+	49,  // [49:49] is the sub-list for extension extendee
+	0,   // [0:49] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_gateway_proto_init() }
@@ -9806,6 +9850,7 @@ func file_model_plane_v1_gateway_proto_init() {
 		return
 	}
 	file_model_plane_v1_inference_proto_init()
+	file_model_plane_v1_runs_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

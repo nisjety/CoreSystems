@@ -3194,6 +3194,11 @@ mod tests {
     /// hands out a fixed endpoint and records nothing. The deny-all egress
     /// policy installed below is what keeps the page from ever reaching the
     /// network under test.
+    ///
+    /// It exists so this crate can exercise `require_configured_egress`
+    /// without importing `quarry_runtime::PinnedBrowserEgressProxy`: that
+    /// would be a circular dependency, because quarry-runtime depends on this
+    /// crate.
     struct StubEgressProvider;
 
     #[async_trait::async_trait]
@@ -3232,8 +3237,24 @@ mod tests {
     /// egress half (pinned proxy + installed policy), so this test provisions
     /// both — with a deliberately empty allow-list, matching a run whose
     /// grant permits no domains.
+    ///
+    /// This covers the CDP half only, and an "assert the request log is empty"
+    /// assertion also passes when the witness is broken — so treat it as
+    /// defence-in-depth evidence, not as the proof. The positive-controlled,
+    /// real-pinned-proxy proof lives in quarry-runtime; see
+    /// `loopback_egress_is_proven_in_quarry_runtime` below.
+    ///
+    /// Requires a local Chromium/Chrome binary, so it carries the same
+    /// `CHROMIUMOXIDE_TEST=1` guard as its sibling browser tests. Without that
+    /// guard it launches a browser unconditionally and fails on every machine
+    /// that has none.
     #[tokio::test]
     async fn blocks_loopback_subresources_before_they_reach_the_server() {
+        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+            return;
+        }
+
         let target = MockServer::start().await;
         let driver =
             ChromiumoxideDriver::new().with_pinned_egress_proxy(Arc::new(StubEgressProvider));
@@ -3264,6 +3285,44 @@ mod tests {
             "the browser must never contact a loopback subresource"
         );
         driver.release(session).await.expect("release");
+    }
+
+    /// The end-to-end loopback-egress proof lives in
+    /// `quarry-runtime/tests/browser_egress_boundary.rs`, not here.
+    ///
+    /// An earlier in-module version of it **failed on every machine** with
+    /// `"chromium browser navigation requires a pinned egress proxy"`:
+    /// `require_configured_egress` needs a real `BrowserEgressProxyProvider`,
+    /// the only production one is `quarry_runtime::PinnedBrowserEgressProxy`,
+    /// and quarry-runtime depends on this crate — so importing it would be
+    /// circular. It also lacked the `CHROMIUMOXIDE_TEST=1` guard its sibling
+    /// browser tests carry, so it ran unconditionally and failed without a
+    /// browser too. The CDP-boundary test above clears both objections:
+    /// `StubEgressProvider` satisfies the provider requirement without the
+    /// circular dependency, and the guard is now in place.
+    ///
+    /// What lives in quarry-runtime is still strictly more than any in-module
+    /// test can be: a live Chromium refusing a loopback navigation behind the
+    /// real pinned proxy, AND a real TCP request through that proxy proving the
+    /// transport half — the half CDP interception is only defence in depth for.
+    /// Both carry positive controls, because an "assert the request log is
+    /// empty" test also passes when the witness is broken.
+    ///
+    /// The decision functions themselves stay unit-tested next to where they
+    /// live: see `navigation::tests` for `guard_page_request_target` and
+    /// `guard_navigation_target` against loopback and RFC1918 targets.
+    #[test]
+    fn loopback_egress_is_proven_in_quarry_runtime() {
+        // A marker, deliberately: the moved coverage is easy to lose track of,
+        // and a comment alone would not survive a file-wide search for the old
+        // test name.
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../quarry-runtime/tests/browser_egress_boundary.rs")
+                .exists(),
+            "the live browser-egress proof has moved or been deleted; it is the \
+             only end-to-end evidence that Chromium cannot reach loopback"
+        );
     }
 
     /// Integration test that requires a local Chromium/Chrome binary.

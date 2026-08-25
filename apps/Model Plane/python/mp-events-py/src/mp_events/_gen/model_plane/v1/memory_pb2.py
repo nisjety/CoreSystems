@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1bmodel_plane/v1/memory.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd9\x01\n\x13SearchMemoryRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12\x14\n\x05query\x18\x02 \x01(\tR\x05query\x12!\n\x0ctopic_filter\x18\x03 \x03(\tR\x0btopicFilter\x12\x14\n\x05limit\x18\x04 \x01(\rR\x05limit\x12\x15\n\x06org_id\x18\x05 \x01(\tR\x05orgId\x12?\n\rupdated_after\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x0cupdatedAfter\"\x98\x01\n\x14SearchMemoryResponse\x12\x35\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1b.model_plane.v1.MemoryEntryR\x07\x65ntries\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason\"\xa3\x02\n\x0bMemoryEntry\x12\x1b\n\tmemory_id\x18\x01 \x01(\tR\x08memoryId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\x14\n\x05topic\x18\x03 \x01(\tR\x05topic\x12\x18\n\x07\x63ontent\x18\x04 \x01(\tR\x07\x63ontent\x12\x14\n\x05score\x18\x05 \x01(\x02R\x05score\x12\x39\n\nupdated_at\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x17\n\x07user_id\x18\x07 \x01(\tR\x06userId\x12@\n\nprovenance\x18\x08 \x01(\x0e\x32 .model_plane.v1.MemoryProvenanceR\nprovenance\"\xae\x01\n\x12IndexMemoryRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12\x14\n\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n\x07\x63ontent\x18\x03 \x01(\tR\x07\x63ontent\x12\x15\n\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x05 \x01(\tR\x06userId\x12\x1b\n\tmemory_id\x18\x06 \x01(\tR\x08memoryId\"}\n\x13IndexMemoryResponse\x12\x1b\n\tmemory_id\x18\x01 \x01(\tR\x08memoryId\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason\"\x15\n\x13MemoryHealthRequest\"i\n\x14MemoryHealthResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n\x05ready\x18\x02 \x01(\x08R\x05ready\x12#\n\rmemory_status\x18\x03 \x01(\tR\x0cmemoryStatus\"Y\n\x11ListMemoryRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x02 \x01(\tR\x06userId\x12\x14\n\x05limit\x18\x03 \x01(\rR\x05limit\"\x96\x01\n\x12ListMemoryResponse\x12\x35\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1b.model_plane.v1.MemoryEntryR\x07\x65ntries\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason\"b\n\x13\x44\x65leteMemoryRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n\tmemory_id\x18\x03 \x01(\tR\x08memoryId\"{\n\x14\x44\x65leteMemoryResponse\x12\x18\n\x07\x64\x65leted\x18\x01 \x01(\x08R\x07\x64\x65leted\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason*s\n\x10MemoryProvenance\x12!\n\x1dMEMORY_PROVENANCE_UNSPECIFIED\x10\x00\x12\x1c\n\x18MEMORY_PROVENANCE_STATED\x10\x01\x12\x1e\n\x1aMEMORY_PROVENANCE_INFERRED\x10\x02\x32\xc7\x03\n\rMemoryService\x12Y\n\x0cSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n\x0bIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n\nListMemory\x12!.model_plane.v1.ListMemoryRequest\x1a\".model_plane.v1.ListMemoryResponse\x12Y\n\x0c\x44\x65leteMemory\x12#.model_plane.v1.DeleteMemoryRequest\x1a$.model_plane.v1.DeleteMemoryResponse\x12S\n\x06Health\x12#.model_plane.v1.MemoryHealthRequest\x1a$.model_plane.v1.MemoryHealthResponseB\xb3\x01\n\x12\x63om.model_plane.v1B\x0bMemoryProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1bmodel_plane/v1/memory.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf2\x01\n\x13SearchMemoryRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12\x14\n\x05query\x18\x02 \x01(\tR\x05query\x12!\n\x0ctopic_filter\x18\x03 \x03(\tR\x0btopicFilter\x12\x14\n\x05limit\x18\x04 \x01(\rR\x05limit\x12\x15\n\x06org_id\x18\x05 \x01(\tR\x05orgId\x12?\n\rupdated_after\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\x0cupdatedAfter\x12\x17\n\x07user_id\x18\x07 \x01(\tR\x06userId\"\x98\x01\n\x14SearchMemoryResponse\x12\x35\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1b.model_plane.v1.MemoryEntryR\x07\x65ntries\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason\"\xa3\x02\n\x0bMemoryEntry\x12\x1b\n\tmemory_id\x18\x01 \x01(\tR\x08memoryId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\x14\n\x05topic\x18\x03 \x01(\tR\x05topic\x12\x18\n\x07\x63ontent\x18\x04 \x01(\tR\x07\x63ontent\x12\x14\n\x05score\x18\x05 \x01(\x02R\x05score\x12\x39\n\nupdated_at\x18\x06 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x17\n\x07user_id\x18\x07 \x01(\tR\x06userId\x12@\n\nprovenance\x18\x08 \x01(\x0e\x32 .model_plane.v1.MemoryProvenanceR\nprovenance\"\xae\x01\n\x12IndexMemoryRequest\x12\x1b\n\tthread_id\x18\x01 \x01(\tR\x08threadId\x12\x14\n\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n\x07\x63ontent\x18\x03 \x01(\tR\x07\x63ontent\x12\x15\n\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x05 \x01(\tR\x06userId\x12\x1b\n\tmemory_id\x18\x06 \x01(\tR\x08memoryId\"}\n\x13IndexMemoryResponse\x12\x1b\n\tmemory_id\x18\x01 \x01(\tR\x08memoryId\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason\"\x15\n\x13MemoryHealthRequest\"i\n\x14MemoryHealthResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n\x05ready\x18\x02 \x01(\x08R\x05ready\x12#\n\rmemory_status\x18\x03 \x01(\tR\x0cmemoryStatus\"Y\n\x11ListMemoryRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x02 \x01(\tR\x06userId\x12\x14\n\x05limit\x18\x03 \x01(\rR\x05limit\"\x96\x01\n\x12ListMemoryResponse\x12\x35\n\x07\x65ntries\x18\x01 \x03(\x0b\x32\x1b.model_plane.v1.MemoryEntryR\x07\x65ntries\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason\"b\n\x13\x44\x65leteMemoryRequest\x12\x15\n\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n\tmemory_id\x18\x03 \x01(\tR\x08memoryId\"{\n\x14\x44\x65leteMemoryResponse\x12\x18\n\x07\x64\x65leted\x18\x01 \x01(\x08R\x07\x64\x65leted\x12\x1a\n\x08\x64\x65graded\x18\x02 \x01(\x08R\x08\x64\x65graded\x12-\n\x12\x64\x65gradation_reason\x18\x03 \x01(\tR\x11\x64\x65gradationReason*s\n\x10MemoryProvenance\x12!\n\x1dMEMORY_PROVENANCE_UNSPECIFIED\x10\x00\x12\x1c\n\x18MEMORY_PROVENANCE_STATED\x10\x01\x12\x1e\n\x1aMEMORY_PROVENANCE_INFERRED\x10\x02\x32\xc7\x03\n\rMemoryService\x12Y\n\x0cSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n\x0bIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n\nListMemory\x12!.model_plane.v1.ListMemoryRequest\x1a\".model_plane.v1.ListMemoryResponse\x12Y\n\x0c\x44\x65leteMemory\x12#.model_plane.v1.DeleteMemoryRequest\x1a$.model_plane.v1.DeleteMemoryResponse\x12S\n\x06Health\x12#.model_plane.v1.MemoryHealthRequest\x1a$.model_plane.v1.MemoryHealthResponseB\xb3\x01\n\x12\x63om.model_plane.v1B\x0bMemoryProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,30 +33,30 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'model_plane.v1.memory_pb2',
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\022com.model_plane.v1B\013MemoryProtoP\001Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\242\002\003MXX\252\002\rModelPlane.V1\312\002\rModelPlane\\V1\342\002\031ModelPlane\\V1\\GPBMetadata\352\002\016ModelPlane::V1'
-  _globals['_MEMORYPROVENANCE']._serialized_start=1652
-  _globals['_MEMORYPROVENANCE']._serialized_end=1767
+  _globals['_MEMORYPROVENANCE']._serialized_start=1677
+  _globals['_MEMORYPROVENANCE']._serialized_end=1792
   _globals['_SEARCHMEMORYREQUEST']._serialized_start=81
-  _globals['_SEARCHMEMORYREQUEST']._serialized_end=298
-  _globals['_SEARCHMEMORYRESPONSE']._serialized_start=301
-  _globals['_SEARCHMEMORYRESPONSE']._serialized_end=453
-  _globals['_MEMORYENTRY']._serialized_start=456
-  _globals['_MEMORYENTRY']._serialized_end=747
-  _globals['_INDEXMEMORYREQUEST']._serialized_start=750
-  _globals['_INDEXMEMORYREQUEST']._serialized_end=924
-  _globals['_INDEXMEMORYRESPONSE']._serialized_start=926
-  _globals['_INDEXMEMORYRESPONSE']._serialized_end=1051
-  _globals['_MEMORYHEALTHREQUEST']._serialized_start=1053
-  _globals['_MEMORYHEALTHREQUEST']._serialized_end=1074
-  _globals['_MEMORYHEALTHRESPONSE']._serialized_start=1076
-  _globals['_MEMORYHEALTHRESPONSE']._serialized_end=1181
-  _globals['_LISTMEMORYREQUEST']._serialized_start=1183
-  _globals['_LISTMEMORYREQUEST']._serialized_end=1272
-  _globals['_LISTMEMORYRESPONSE']._serialized_start=1275
-  _globals['_LISTMEMORYRESPONSE']._serialized_end=1425
-  _globals['_DELETEMEMORYREQUEST']._serialized_start=1427
-  _globals['_DELETEMEMORYREQUEST']._serialized_end=1525
-  _globals['_DELETEMEMORYRESPONSE']._serialized_start=1527
-  _globals['_DELETEMEMORYRESPONSE']._serialized_end=1650
-  _globals['_MEMORYSERVICE']._serialized_start=1770
-  _globals['_MEMORYSERVICE']._serialized_end=2225
+  _globals['_SEARCHMEMORYREQUEST']._serialized_end=323
+  _globals['_SEARCHMEMORYRESPONSE']._serialized_start=326
+  _globals['_SEARCHMEMORYRESPONSE']._serialized_end=478
+  _globals['_MEMORYENTRY']._serialized_start=481
+  _globals['_MEMORYENTRY']._serialized_end=772
+  _globals['_INDEXMEMORYREQUEST']._serialized_start=775
+  _globals['_INDEXMEMORYREQUEST']._serialized_end=949
+  _globals['_INDEXMEMORYRESPONSE']._serialized_start=951
+  _globals['_INDEXMEMORYRESPONSE']._serialized_end=1076
+  _globals['_MEMORYHEALTHREQUEST']._serialized_start=1078
+  _globals['_MEMORYHEALTHREQUEST']._serialized_end=1099
+  _globals['_MEMORYHEALTHRESPONSE']._serialized_start=1101
+  _globals['_MEMORYHEALTHRESPONSE']._serialized_end=1206
+  _globals['_LISTMEMORYREQUEST']._serialized_start=1208
+  _globals['_LISTMEMORYREQUEST']._serialized_end=1297
+  _globals['_LISTMEMORYRESPONSE']._serialized_start=1300
+  _globals['_LISTMEMORYRESPONSE']._serialized_end=1450
+  _globals['_DELETEMEMORYREQUEST']._serialized_start=1452
+  _globals['_DELETEMEMORYREQUEST']._serialized_end=1550
+  _globals['_DELETEMEMORYRESPONSE']._serialized_start=1552
+  _globals['_DELETEMEMORYRESPONSE']._serialized_end=1675
+  _globals['_MEMORYSERVICE']._serialized_start=1795
+  _globals['_MEMORYSERVICE']._serialized_end=2250
 # @@protoc_insertion_point(module_scope)

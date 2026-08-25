@@ -397,9 +397,21 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
   // re-sort is needed here.
   const pinnedSessions = createMemo(() => visibleSessions().filter((item) => item.pinned))
   const unpinnedSessions = createMemo(() => visibleSessions().filter((item) => !item.pinned))
+  // Pin is server-owned (see `ChatThreadSession.pinned` in chat-client.ts) so
+  // it follows the user across devices -- DashboardComposer's history panel
+  // already round-trips it via `saveChatThreadSnapshot`. The local flip via
+  // `togglePinnedChatThread` is optimistic UI only: without the write-through,
+  // `refreshServerSessions` (onMount, or any later resync) reads the server's
+  // untouched value and silently reverts the toggle the next time this panel
+  // refreshes -- so the server call is load-bearing, not decorative.
   const togglePin = (event: MouseEvent, threadId: string) => {
     event.stopPropagation()
+    const next = !sessions().find((item) => item.threadId === threadId)?.pinned
     setSessions(togglePinnedChatThread(threadId))
+    void saveChatThreadSnapshot(threadId, { pinned: next }).catch(() => {
+      setSessions(togglePinnedChatThread(threadId))
+      setError(i18n.tr('Kunne ikke feste samtalen.', 'Could not pin the conversation.'))
+    })
   }
 
   const sessionRow = (item: ChatThreadHistoryItem) => (

@@ -53,40 +53,199 @@ use crate::permission::PermissionMode;
 use crate::runtime_loop::{self, StepOutcome};
 use crate::session_terminal_auth::ManagedRunTokenProvider;
 
-/// Short agent preamble used as the system message. Names the bound scope so
-/// the model stays on the offered tools — including the WRITE-capable ones,
-/// which earlier wording omitted entirely (it described the toolset as
-/// exclusively "read-only fact-gathering," a leftover from before
-/// `book_shipment`/`execute_provider_action`/`publish_social_post` existed). That
-/// framing measurably suppressed real tool use: models defaulted to a
-/// generic "I cannot post on your behalf" refusal and drafted copy-paste
-/// text instead of calling the tool, even with a genuinely connected
-/// account (observed 2026-07-08 calibrating the eval harness's HITL case).
-const AGENT_PREAMBLE: &str = "You are Verevon, a concise and helpful assistant for a Norwegian \
-business. You have two kinds of tools: READ tools to gather facts (weather, traffic, news, \
-shipment tracking, the Brønnøysund company registry, the organization's own knowledge base, and \
-the public web), and ACTION tools that take REAL effect for this organization — booking a \
-shipment, running a connected provider's operation (e.g. posting to Meta/LinkedIn/Slack), or \
-publishing a social media post. You DO have genuine capability to take these actions through the \
-listed tools; you are not limited to suggesting text for the user to act on themselves. When the \
-user asks you to do something an action tool covers, CALL the tool — do not default to 'I cannot \
-access your accounts' or offer copy-paste text instead, and do not ask the user to do it manually \
-unless the tool call itself reports that it cannot proceed (e.g. no connected account). Risky \
-action tools require human approval before they run; that pause is expected and is not a reason \
-to avoid calling the tool — say what you are attempting and let the approval step do its job. \
-Prefer calling a tool over answering from memory whenever a listed tool could give a more \
-current, accurate, or actionable result — even when the user phrases the request casually, \
+/// Tool-agnostic core of the system prompt.
+///
+/// # Why this is composed rather than one string (pi parity, §4.4)
+///
+/// This was a single monolithic preamble that described `knowledge_search`'s
+/// JSON status semantics, shipment booking and social publishing
+/// **unconditionally** — including on runs where none of those tools were
+/// offered. Two costs: tokens spent on rules that cannot apply, and, worse, the
+/// model told it can take actions this run has no tool for. That is the exact
+/// inverse of the regression the old comment recorded (a prompt that
+/// *understated* capability and measurably suppressed real tool use, observed
+/// 2026-07-08 while calibrating the eval harness's HITL case) — and it fails the
+/// same way, by describing a toolset that is not the one in front of the model.
+///
+/// Every measured phrasing is preserved verbatim; what changed is that each
+/// piece now appears only when its tool is actually offered. Adding a tool means
+/// adding its snippet next to the tool, not editing an unrelated paragraph.
+const PREAMBLE_CORE: &str = "You are Verevon, a concise and helpful assistant for a Norwegian \
+business. Prefer calling a tool over answering from memory whenever a listed tool could give a \
+more current, accurate, or actionable result — even when the user phrases the request casually, \
 indirectly, or as a question rather than a command. Do not ask whether the user wants you to \
 proceed before making a read-only tool call, and do not reply that you 'cannot' do something a \
-listed tool covers; call the tool and let its result (or the approval step for an action tool) \
-decide the outcome. A knowledge_search result is JSON: when status is no_results or \
-low_confidence, reformulate with materially different terms and retry within the round budget; \
-never repeat the exact same retrieval, and never invent graph, SQL, structured, vector-only, or \
-MCP retrieval when the tool says that route is not configured. If knowledge_search still finds \
-nothing relevant after reformulating, say plainly that the organization's knowledge base has \
-nothing on this — never present a guess as an organization-specific fact. Only use the tools you \
-have been given. When you have enough information or \
-have taken the requested action, answer the user's request directly and clearly.";
+listed tool covers; call the tool and let its result decide the outcome. Only use the tools you \
+have been given. When you have enough information or have taken the requested action, answer the \
+user's request directly and clearly.";
+
+/// Appended when at least one READ tool is offered.
+const SNIPPET_READ_TOOLS: &str = "You have READ tools to gather facts. Use them to ground your \
+answer rather than recalling from memory.";
+
+/// Appended when at least one real-effect ACTION tool is offered.
+///
+/// This is the wording whose absence was *measured* to suppress tool use:
+/// models defaulted to "I cannot post on your behalf" and drafted copy-paste
+/// text instead of calling the tool, even with a genuinely connected account.
+/// It must appear whenever an action tool is present — and must NOT appear when
+/// none is, which is the half that was wrong before.
+const SNIPPET_ACTION_TOOLS: &str = "You also have ACTION tools that take REAL effect for this \
+organization. You DO have genuine capability to take these actions through the listed tools; you \
+are not limited to suggesting text for the user to act on themselves. When the user asks you to \
+do something an action tool covers, CALL the tool — do not default to 'I cannot access your \
+accounts' or offer copy-paste text instead, and do not ask the user to do it manually unless the \
+tool call itself reports that it cannot proceed (e.g. no connected account). Risky action tools \
+require human approval before they run; that pause is expected and is not a reason to avoid \
+calling the tool — say what you are attempting and let the approval step do its job.";
+
+/// Appended only when `knowledge_search` is offered. Describing this protocol
+/// without the tool taught the model a retrieval vocabulary it had no way to
+/// use, and invited it to claim organization-specific grounding it never had.
+const SNIPPET_KNOWLEDGE_SEARCH: &str = "A knowledge_search result is JSON: when status is \
+no_results or low_confidence, reformulate with materially different terms and retry within the \
+round budget; never repeat the exact same retrieval, and never invent graph, SQL, structured, \
+vector-only, or MCP retrieval when the tool says that route is not configured. If \
+knowledge_search still finds nothing relevant after reformulating, say plainly that the \
+organization's knowledge base has nothing on this — never present a guess as an \
+organization-specific fact.";
+
+/// Appended when the memory tools are offered.
+///
+/// These shipped with **no** prompt guidance at all, so the model was handed two
+/// tools and no account of when either is worth calling — a tool the model never
+/// reaches for is indistinguishable from one that does not exist.
+const SNIPPET_MEMORY_TOOLS: &str = "You can remember durable facts across conversations. Call \
+save_memory for something that will still be true and useful in a later conversation — a \
+preference, a decision, a stable fact about the organization — not for the content of this turn \
+and not for anything the user asked you to keep private. Call recall_memory when the request \
+plausibly depends on something established earlier that is not in this conversation. Do not \
+narrate either call; just use what you find.";
+
+/// Appended when delegation is offered.
+const SNIPPET_SUBAGENT: &str = "You can delegate a self-contained sub-task to a subagent. A \
+subagent starts with no view of this conversation, so state its goal completely; delegate only \
+work that is genuinely separable, and do the rest yourself.";
+
+/// Appended when the delegation-record tools are offered.
+///
+/// Says the quiet part out loud: after a restart the answers are NOT in this
+/// conversation, and getting one back costs the user an approval. A model that
+/// does not know the first will claim a delegation produced nothing; one that
+/// does not know the second will call the read reflexively and stall the run.
+const SNIPPET_SUBAGENT_RESULTS: &str = "If you delegated work earlier in this run and cannot see \
+what it concluded, the record still exists even though this conversation no longer holds it: list \
+your delegations, then read one if you need its finding. Reading a finding asks the user for \
+permission each time, so read one when the user asks about it or when you genuinely need it to \
+continue — never speculatively.";
+
+/// Appended when a tool is offered whose required arguments include values only
+/// the user can supply.
+///
+/// # Why this is a snippet and not a per-tool description line
+///
+/// `get_shipping_quotes` has carried "Ask the user for sender address, recipient
+/// address and package weight/dimensions before calling; never guess them" in
+/// its own description all along. Measured 2026-08-25 on the full catalogue: it
+/// invented the values anyway in **19 of 20** samples — postal codes it could
+/// not know, dimensions nobody stated. Per-tool prose was already tried and
+/// already failed, so repeating it on more tools would be cargo-culting a
+/// measured non-fix.
+///
+/// What the same run showed working: the model resolves *discoverable* missing
+/// values correctly and unprompted — it called `list_subagent_results` to find a
+/// `child_run_id` and `list_social_accounts` to find a `connection_id`, 10/10
+/// each. The gap is specific to values no tool can discover because only the
+/// user holds them.
+///
+/// The last sentence exists because [`PREAMBLE_CORE`] forbids asking permission
+/// before a read-only call, and that wording suppressed real tool use when it
+/// was absent (see its doc comment). Asking for a missing *fact* is a different
+/// act from asking permission, and the distinction has to be stated or this
+/// snippet reads as a licence to stall.
+const SNIPPET_USER_SUPPLIED_ARGS: &str = "Some offered tools require values only the user can \
+supply — a street address, a postal code, package dimensions, a price. Fill required arguments \
+freely when the request states them or when they are public fact (a Norwegian city's coordinates, \
+a registered company's name), but never invent a user-only value: a call built on a guessed postal \
+code or guessed dimensions still succeeds, and returns a real, plausible, wrong answer that nobody \
+can tell apart from a correct one. When such a value is missing, ask one short question naming \
+exactly what you need — that is asking for a fact, not asking permission, and the rule against \
+asking permission does not apply to it.";
+
+/// Tools whose required arguments include values only the user can supply, so a
+/// missing one must be asked for rather than filled.
+///
+/// Deliberately short. It is **not** "every tool with required parameters" —
+/// that would be 19 of 25, and most of those requireds are restatable from the
+/// request (`web_search.query`, `code_interpreter.code`) or public fact
+/// (`yr_weather.lat/lon`). Telling the model to ask for those would manufacture
+/// the under-calling regression [`PREAMBLE_CORE`] exists to prevent. Nor does it
+/// include tools whose missing values are *discoverable* by another offered tool
+/// (`read_subagent_result`, `execute_provider_action`); those were measured
+/// correct without any prompt help.
+const USER_SUPPLIED_ARG_TOOLS: &[&str] = &["get_shipping_quotes", "book_shipment"];
+
+/// Tools whose presence means a real-effect action is available. Kept explicit
+/// rather than derived from `permission::is_risky_call`: that classifier answers
+/// "does this call need a gate", which is a per-call question about arguments,
+/// while this answers "should the prompt describe action capability at all",
+/// which is about the offered set. Conflating them would make the prompt vary
+/// with tool *arguments*.
+const ACTION_TOOL_NAMES: &[&str] = &[
+    "book_shipment",
+    "execute_provider_action",
+    "publish_social_post",
+    "browser_agent",
+    "shell",
+    "tickets.create",
+];
+
+/// Assemble the system prompt from the tools actually offered this run.
+///
+/// Order is fixed and snippets are independent, so the prompt is a pure function
+/// of the offered set — the property the test asserts, and what makes a prompt
+/// diff reviewable.
+fn compose_system_prompt(offered: &BTreeSet<String>) -> String {
+    let mut parts: Vec<&str> = vec![PREAMBLE_CORE];
+
+    let has_action = offered
+        .iter()
+        .any(|name| ACTION_TOOL_NAMES.contains(&name.as_str()));
+    // Anything that is not an action tool is, for prompt purposes, a read tool.
+    if offered
+        .iter()
+        .any(|name| !ACTION_TOOL_NAMES.contains(&name.as_str()))
+    {
+        parts.push(SNIPPET_READ_TOOLS);
+    }
+    if has_action {
+        parts.push(SNIPPET_ACTION_TOOLS);
+    }
+    if offered
+        .iter()
+        .any(|name| USER_SUPPLIED_ARG_TOOLS.contains(&name.as_str()))
+    {
+        parts.push(SNIPPET_USER_SUPPLIED_ARGS);
+    }
+    if offered.contains("knowledge_search") {
+        parts.push(SNIPPET_KNOWLEDGE_SEARCH);
+    }
+    if offered.contains(runtime_loop::SAVE_MEMORY_TOOL)
+        || offered.contains(runtime_loop::RECALL_MEMORY_TOOL)
+    {
+        parts.push(SNIPPET_MEMORY_TOOLS);
+    }
+    if offered
+        .iter()
+        .any(|name| crate::subagent::is_subagent_tool(name))
+    {
+        parts.push(SNIPPET_SUBAGENT);
+    }
+    if offered.contains(runtime_loop::subagent_results::LIST_TOOL) {
+        parts.push(SNIPPET_SUBAGENT_RESULTS);
+    }
+    parts.join(" ")
+}
 
 /// Temperature for each inference round.
 const TEMPERATURE: f32 = 0.7;
@@ -153,6 +312,25 @@ struct ToolStepResult {
     error: Option<String>,
 }
 
+/// One requested tool call's pre-dispatch fate, computed by `run_rounds`'
+/// sequential pre-pass before the surviving calls are dispatched concurrently.
+enum CallSlot<'r> {
+    Rejected(ToolStepResult),
+    ToDispatch {
+        call: &'r pb::ToolCall,
+        step_id: String,
+    },
+}
+
+/// The first (by array order) approval-needing call in a batch, captured so
+/// `run_rounds` can finish recording every OTHER call's outcome before
+/// actually pausing on this one.
+struct PendingPause {
+    step_id: String,
+    name: String,
+    arguments_json: String,
+}
+
 /// Everything a round loop needs that does not change between its rounds.
 ///
 /// Extracted so [`run_rounds`] is REENTRANT: the user-facing run and every
@@ -199,6 +377,10 @@ enum RoundsOutcome {
 }
 
 struct RoundsResult {
+    /// Whether tier-1 compaction cleared anything during this loop. Carried out
+    /// rather than logged only: compaction is lossy and otherwise invisible in
+    /// the response.
+    compaction_triggered: bool,
     outcome: RoundsOutcome,
     /// Inference rounds this loop drove itself.
     rounds_executed: u32,
@@ -449,6 +631,8 @@ async fn run_agent_with_tools(
     // 2. The governed ReAct loop.
     let rounds = run_rounds(&context, &req.goal, max_rounds).await?;
     let total_rounds = rounds.total_rounds();
+    // Captured before `rounds.outcome` is moved out below.
+    let compaction_triggered = rounds.compaction_triggered;
     let (final_answer, success) = match rounds.outcome {
         // Paused, not finished: the approval is already durable and the run
         // stays non-terminal. Resume re-invokes `run_agent`.
@@ -468,6 +652,7 @@ async fn run_agent_with_tools(
         success,
         total_rounds,
         rounds.grounded,
+        compaction_triggered,
         session_bearer.as_deref(),
         terminal_tokens,
     )
@@ -552,10 +737,27 @@ async fn fetch_skill_context(
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(MAX_INJECTED_SKILLS);
-    scored
-        .into_iter()
-        .map(|(_, s)| format!("## Skill: {}\n{}", s.name, s.content))
-        .collect()
+
+    // Bounded by SIZE as well as count. Skill content is operator-authored free
+    // text with no length limit, so three long skills could take more of the
+    // prompt than the conversation they exist to steer — and nothing would fail,
+    // the model would just have less room and answer worse.
+    let fitted = runtime_loop::skill_budget::fit_skill_blocks(
+        scored
+            .into_iter()
+            .map(|(_, skill)| format!("## Skill: {}\n{}", skill.name, skill.content))
+            .collect(),
+    );
+    if fitted.truncated > 0 || fitted.dropped > 0 {
+        warn!(
+            org_id,
+            truncated = fitted.truncated,
+            dropped = fitted.dropped,
+            budget_chars = runtime_loop::skill_budget::SKILL_CONTEXT_BUDGET_CHARS,
+            "skill guidance exceeded its context budget; degraded to fit"
+        );
+    }
+    fitted.blocks
 }
 
 /// The governed ReAct-style round loop: offer tools → `Infer` → dispatch requested
@@ -570,6 +772,61 @@ async fn fetch_skill_context(
 /// exactly once per run (plan transitions, the managed terminal receipt, the
 /// assistant message) stays in the caller.
 ///
+/// The repair message for a tool call whose arguments do not match the schema the
+/// model was shown, or `None` when there is nothing to say.
+///
+/// `offered` is the merged set this run advertised — builtin plus client-declared
+/// plus MCP — which is the same list the purpose-lock admits from, so a call can
+/// never be validated against a schema other than the one it was offered. A tool
+/// absent from it is left alone; it will be refused by the purpose-lock anyway,
+/// and inventing a schema for it would be guessing.
+fn argument_problem(
+    offered: &[pb::ToolDefinition],
+    tool_name: &str,
+    arguments_json: &str,
+    conversation: &str,
+) -> Option<String> {
+    let def = offered.iter().find(|def| def.name == tool_name)?;
+    let errors =
+        mp_contracts::tool_arguments::validate_arguments(&def.parameters_json, arguments_json);
+    if !errors.is_empty() {
+        return Some(mp_contracts::tool_arguments::repair_message(
+            tool_name,
+            &errors,
+            &def.parameters_json,
+        ));
+    }
+    // Schema-shaped is not the same as true. A required value the user never
+    // gave is well-formed and passes every check above it, which is exactly how
+    // an invented postal code reached a live carrier. Checked second because a
+    // malformed call should hear about its shape first.
+    let ungrounded =
+        mp_contracts::tool_arguments::ungrounded_arguments(tool_name, arguments_json, conversation);
+    if !ungrounded.is_empty() {
+        return Some(mp_contracts::tool_arguments::grounding_message(
+            tool_name,
+            &ungrounded,
+        ));
+    }
+    None
+}
+
+/// The text a supplied argument may be grounded in.
+///
+/// Every turn **except** the system prompt. That exclusion is the whole point:
+/// the measured fabrications included `from.name: "Verevon"`, a string that
+/// appears only in the preamble, and tool descriptions carry example values that
+/// would ground themselves. Grounding means "the user or a tool said this", and
+/// the system prompt is neither.
+fn grounding_conversation(messages: &[pb::ChatMessage]) -> String {
+    messages
+        .iter()
+        .filter(|message| message.role != "system")
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Mirrors model-gateway's `run_tool_rounds`.
 #[allow(clippy::too_many_lines)]
 async fn run_rounds(
@@ -591,7 +848,7 @@ async fn run_rounds(
     let mut messages = vec![
         pb::ChatMessage {
             role: "system".to_owned(),
-            content: AGENT_PREAMBLE.to_owned(),
+            content: compose_system_prompt(&ctx.allowlist),
             name: String::new(),
         },
         pb::ChatMessage {
@@ -630,6 +887,15 @@ async fn run_rounds(
     let mut delegated_rounds: u32 = 0;
     let mut step_seq: u32 = 0;
     let mut attempted_retrievals = BTreeSet::new();
+    // Run-scoped, NOT round-scoped: the ceiling bounds how many delegations this
+    // run opens in TOTAL, so three per round for four rounds is bounded exactly
+    // like twelve at once. Deliberately independent of the round budget — see
+    // `subagent::MAX_TOTAL_CHILDREN` on why one cannot express the other.
+    let children_started = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    // Reported on the step outcome. Was a hardcoded `false` at every
+    // construction site while being surfaced over gRPC — a dead-but-visible
+    // field, the pattern §13.3 rejects.
+    let mut compaction_triggered = false;
     // HONESTY_CONTRACT: true once any knowledge_search call in this run
     // actually returned org knowledge (JSON status "ok"), so the final
     // RunAgentResponse can report real grounding instead of a guess.
@@ -640,7 +906,33 @@ async fn run_rounds(
     while rounds_executed + delegated_rounds < max_rounds {
         heartbeat_managed_agent_run(ctx.session_channel, req, ctx.terminal_tokens).await?;
         rounds_executed += 1;
+        // Tier-1 compaction, in the loop that needed it most and did not have
+        // it. A 12-round agentic run accumulates far more tool-result payload
+        // than a chat turn, and this loop had NO compaction of any kind — an
+        // overflowing run simply failed with a graceful apology
+        // (`RoundsOutcome::InferFailed`).
+        //
+        // The budget and the notice are the chat loop's, not a second set:
+        // `tests/compaction_parity_contract.rs` pins them equal, for the same
+        // reason the skill budget is pinned — a deployed agent that compacts
+        // differently from chat answers differently for reasons nobody can see.
+        let cleared = crate::compaction_budget::clear_stale_tool_results(&mut messages);
+        if cleared > 0 {
+            compaction_triggered = true;
+            info!(
+                run_id = %req.run_id,
+                depth = ctx.depth,
+                cleared,
+                carried_chars = crate::compaction_budget::tool_result_payload_chars(&messages),
+                "run_agent: cleared stale tool-result payloads to stay within the context window"
+            );
+        }
+
         let mut infer_request = tonic::Request::new(pb::InferRequest {
+            // No extended thinking on the governed agent loop: the effort
+            // dial is a chat-surface control, and a deployed agent's budget
+            // is its round budget.
+            thinking_budget_tokens: 0,
             request_id: req.run_id.clone(),
             org_id: req.org_id.clone(),
             model: ctx.agent_model.clone(),
@@ -658,6 +950,9 @@ async fn run_rounds(
             min_privacy_tier: req.min_privacy_tier,
             tools: ctx.tools.clone(),
             tool_choice: "auto".to_owned(),
+            // No caller here has a residency floor to express yet; left for
+            // a future org-policy wiring (see inference.proto's field doc).
+            min_residency: String::new(),
         });
         infer_request.metadata_mut().insert(
             "authorization",
@@ -677,6 +972,7 @@ async fn run_rounds(
                     "run_agent: inference failed; finalizing run as failed (graceful reply)"
                 );
                 return Ok(RoundsResult {
+                    compaction_triggered,
                     outcome: RoundsOutcome::InferFailed,
                     rounds_executed,
                     delegated_rounds,
@@ -692,8 +988,85 @@ async fn run_rounds(
         }
 
         // Dispatch each requested tool call through the gated execute_step path.
-        let mut outcomes = Vec::with_capacity(response.tool_calls.len());
-        for call in &response.tool_calls {
+        //
+        // Three phases, replacing what used to be one strictly sequential
+        // `for call in &response.tool_calls` loop (harness-adoption pass,
+        // claude-hermes-deepseek.md §7.2 — "not everything needs to run in
+        // parallel, but independent calls should"):
+        //
+        // 1. Sequential pre-pass — purpose-lock and duplicate-retrieval
+        //    rejection, and step_id assignment, stay a strict walk over the
+        //    model's own array order. `attempted_retrievals.insert` and
+        //    `step_seq` are both mutated here; running this phase concurrently
+        //    would let a duplicate knowledge_search slip through or hand out a
+        //    colliding step id.
+        // 2. Concurrent dispatch — every surviving call goes through the SAME
+        //    gated `execute_step_with_subagent` path as before, now in-flight
+        //    together. The win is real because each call is dominated by I/O
+        //    wait (capability/hook evaluation, the tool's own execution), not
+        //    CPU work that would contend.
+        // 3. Sequential outcome processing, in ORIGINAL array order — identical
+        //    per-outcome handling to before (approval gating, step recording,
+        //    grounding detection), so the audit trail and HITL behavior are
+        //    unchanged in shape.
+        //
+        // Approval ordering, addressed directly: today's tie-break is still
+        // "the first call, by array order, that needs approval" — Phase 3
+        // preserves that by deferring the actual pause until after the full
+        // walk (`pending_pause`), rather than returning the instant it's found.
+        // That deferral matters because Phase 2 may have already run OTHER
+        // calls in the batch for real by the time a pause is discovered; every
+        // one of those still gets recorded via `record_tool_step` regardless of
+        // its position relative to the pausing call, so a call that genuinely
+        // executed is never missing from the run's own audit trail just
+        // because a sibling elsewhere in the batch needed approval. Nothing
+        // that requires approval ever performs its side effect early: the
+        // `Ask` capability decision short-circuits `execute_step_inner` before
+        // any tool body runs (see `runtime_loop::mod`'s dispatch gate), so
+        // concurrency cannot let a gated action slip through unapproved
+        // regardless of dispatch order.
+        // A round cut off at the output ceiling leaves its LAST tool call
+        // half-written: the provider returns the partial block with whatever
+        // argument keys it managed to emit, and nothing downstream can tell
+        // that apart from a call the model finished. Dispatching it anyway
+        // means acting on arguments that are an accident of where the ceiling
+        // fell. Mirrors model-gateway's inline loop exactly — including its
+        // insight that only the FINAL call can be partial, so earlier calls in
+        // the same round are complete and still run.
+        let truncated_index = runtime_loop::retry::truncated_tool_call_index(
+            &response.stop_reason,
+            response.tool_calls.len(),
+        );
+        if truncated_index.is_some() {
+            warn!(
+                run_id = %req.run_id,
+                stop_reason = %response.stop_reason,
+                tool = response.tool_calls.last().map_or("", |call| call.name.as_str()),
+                "run_agent: round hit the output token ceiling; the last tool call's arguments are truncated"
+            );
+        }
+
+        let mut slots = Vec::with_capacity(response.tool_calls.len());
+        for (call_index, call) in response.tool_calls.iter().enumerate() {
+            // Refused BEFORE the purpose-lock and duplicate checks: a
+            // truncated call's name and arguments are both unreliable, so
+            // classifying it on either would be reading noise. Reported as a
+            // tool error rather than skipped silently — the model reads tool
+            // errors and retries, and the user sees a failed step instead of
+            // watching a result never arrive.
+            if truncated_index == Some(call_index) {
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(format!(
+                        "tool '{}' was not run: this round hit the output token limit, so its \
+                         arguments are truncated and cannot be trusted. Re-issue the call with \
+                         complete arguments — ideally as the only call in the next round.",
+                        call.name
+                    )),
+                }));
+                continue;
+            }
             // Purpose-lock: reject any tool not in the offered allowlist.
             if !ctx.allowlist.contains(&call.name) {
                 warn!(
@@ -701,14 +1074,182 @@ async fn run_rounds(
                     tool = %call.name,
                     "run_agent: rejecting un-offered tool (purpose-lock)"
                 );
-                outcomes.push(ToolStepResult {
+                slots.push(CallSlot::Rejected(ToolStepResult {
                     name: call.name.clone(),
                     output: String::new(),
                     error: Some(format!(
                         "tool '{}' is not in this agent's allowed scope",
                         call.name
                     )),
-                });
+                }));
+                continue;
+            }
+
+            // Leaf/orchestrator role split (harness-adoption pass,
+            // claude-hermes-deepseek.md §7.3): a delegated subagent (depth > 0)
+            // may never attempt a risky/side-effecting tool, full stop —
+            // regardless of the run's own permission mode. This closes a real
+            // inconsistency, not a hypothetical one: a subagent already cannot
+            // request durable human approval (see the `awaiting_approval`
+            // refusal below), yet under `auto` mode it could otherwise run
+            // ANY tool, including the destructive ones `ask` mode would gate
+            // for the top-level run — no oversight AND a less-audited context
+            // is the worst combination, not a safe one. Delegation itself
+            // (`subagent.*`) is exempt: it is a control tool, not an action,
+            // and already has its own tailored refusal (`guard_depth`, fired
+            // deeper in the dispatch, with a message aimed at the model).
+            // `MAX_DEPTH == 1` means there is no depth-2+ "orchestrator" role
+            // to carve an exception for; the depth-0 run IS the orchestrator.
+            if ctx.depth > 0
+                && !crate::subagent::is_subagent_tool(&call.name)
+                && (crate::permission::is_risky_call(&call.name, &call.arguments_json)
+                    || crate::permission::is_restricted_context_write(&call.name))
+            {
+                warn!(
+                    run_id = %req.run_id,
+                    depth = ctx.depth,
+                    tool = %call.name,
+                    "run_agent: rejecting risky tool for a delegated subagent (leaf role blocklist)"
+                );
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(format!(
+                        "tool '{}' is a side-effecting/risky action, which a delegated subagent may \
+                         never run regardless of the run's permission mode; report that this step \
+                         needs the main agent to run it directly",
+                        call.name
+                    )),
+                }));
+                continue;
+            }
+
+            // The graded autonomy rung, checked PER CALL with the actual
+            // arguments (`permission::check_autonomy_rung`).
+            //
+            // This sits ALONGSIDE plan mode rather than replacing it, and the
+            // order matters for what the model reads: plan mode's refusal below
+            // says "this run may only investigate", which is the more specific
+            // and more actionable sentence when both apply. This one covers the
+            // states plan mode cannot express — a run granted `workspace_write`
+            // by an approved plan may write its report and still not send,
+            // publish, book or pay.
+            //
+            // A run with no stated rung is unaffected: `check_autonomy_rung`
+            // returns `Ok` for `UNSPECIFIED`, so a caller that predates the
+            // ladder behaves exactly as it did.
+            if !req.plan_mode && !crate::subagent::is_subagent_tool(&call.name) {
+                let granted = pb::AutonomyRung::try_from(req.autonomy_rung)
+                    .unwrap_or(pb::AutonomyRung::Unspecified);
+                if let Err(refusal) = crate::permission::check_autonomy_rung(
+                    granted,
+                    &call.name,
+                    &call.arguments_json,
+                ) {
+                    warn!(
+                        run_id = %req.run_id,
+                        tool = %call.name,
+                        granted = mp_contracts::autonomy::label(granted),
+                        "run_agent: rejecting a tool the run's autonomy rung does not cover"
+                    );
+                    slots.push(CallSlot::Rejected(ToolStepResult {
+                        name: call.name.clone(),
+                        output: String::new(),
+                        error: Some(refusal),
+                    }));
+                    continue;
+                }
+            }
+
+            // Arguments checked against the tool's OWN declared schema before
+            // dispatch (`mp_contracts::tool_arguments`), in the same pre-pass as
+            // the purpose-lock and the gates below.
+            //
+            // Wired here as well as in the chat loop deliberately: a validator
+            // only one loop runs is how a deployed agent starts accepting
+            // arguments chat would have refused. The schema source is the merged
+            // offered set — the same list the purpose-lock uses — so what is
+            // validated against is exactly what the model was shown.
+            //
+            // Fails OPEN by construction (see the module docs): no opinion on an
+            // unusual schema, an undeclared field, or a coercion executors accept.
+            // It cannot refuse a call that would have worked.
+            if let Some(problem) = argument_problem(
+                &ctx.tools,
+                &call.name,
+                &call.arguments_json,
+                &grounding_conversation(&messages),
+            ) {
+                warn!(
+                    run_id = %req.run_id,
+                    tool = %call.name,
+                    "run_agent: rejecting a tool call whose arguments do not match its schema"
+                );
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(problem),
+                }));
+                continue;
+            }
+
+            // Delegation-record reads belong to the run that did the
+            // delegating. A delegated subagent cannot delegate further
+            // (`MAX_DEPTH == 1`), so it has no children — an empty list would
+            // read to it as "my delegations found nothing", which is a
+            // fabrication about work it never did. Refused with its reason for
+            // the same reason the leaf blocklist above states its own.
+            if ctx.depth > 0
+                && crate::runtime_loop::subagent_results::is_main_agent_only(&call.name)
+            {
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(
+                        crate::runtime_loop::subagent_results::main_agent_only_refusal(&call.name),
+                    ),
+                }));
+                continue;
+            }
+
+            // Server-side plan-mode enforcement (harness-adoption pass,
+            // claude-hermes-deepseek.md §13.5 item 3 — the leaked Claude Code
+            // hole this avoids: plan mode enforced ONLY by a re-injected
+            // system-prompt reminder, with a bypass-capable context able to
+            // auto-allow every tool while still telling the model it is
+            // read-only). `req.plan_mode` used to reach no enforcement point
+            // at all: it was tracked purely as a durable status flag
+            // (session-core `run.mode` / `PlanModeStore`) for the UI to query,
+            // with a doc comment in model-gateway's coordinator.rs promising a
+            // "tool-dispatch middleware" that consulted it — a promise no code
+            // ever kept. A run a human believed was "planning" could still
+            // execute a real action if the run's own `mode` was `auto`. Reuses
+            // the SAME classifier and pattern as the leaf-role blocklist
+            // above: read-only tools still run, `subagent.*` is exempt (a
+            // delegated investigation is not an action either), and a
+            // delegated loop inherits `req` verbatim, so plan mode propagates
+            // to every subagent automatically with no extra wiring.
+            if req.plan_mode
+                && !crate::subagent::is_subagent_tool(&call.name)
+                && (crate::permission::is_risky_call(&call.name, &call.arguments_json)
+                    || crate::permission::is_restricted_context_write(&call.name))
+            {
+                warn!(
+                    run_id = %req.run_id,
+                    depth = ctx.depth,
+                    tool = %call.name,
+                    "run_agent: rejecting risky tool while the run is in plan mode"
+                );
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(format!(
+                        "tool '{}' is a side-effecting/risky action; this run is in plan mode and \
+                         may only investigate, never act. Describe what you would do instead of \
+                         doing it.",
+                        call.name
+                    )),
+                }));
                 continue;
             }
 
@@ -719,14 +1260,14 @@ async fn run_rounds(
             // through the same capability/permission policy at dispatch.
             if let Some(signature) = retrieval_signature(&call.name, &call.arguments_json) {
                 if !attempted_retrievals.insert(signature) {
-                    outcomes.push(ToolStepResult {
+                    slots.push(CallSlot::Rejected(ToolStepResult {
                         name: call.name.clone(),
                         output: String::new(),
                         error: Some(
                             "duplicate knowledge_search suppressed; reformulate the query with materially different terms before retrying"
                                 .to_owned(),
                         ),
-                    });
+                    }));
                     continue;
                 }
             }
@@ -736,62 +1277,149 @@ async fn run_rounds(
             // this step's real approval id), and the audit step record.
             step_seq += 1;
             let step_id = tool_step_id(&ctx.step_prefix, step_seq, call);
+            slots.push(CallSlot::ToDispatch { call, step_id });
+        }
 
-            // The delegated-subagent dispatch capability for THIS call: a value
-            // only this loop can construct, carrying the budget left right now.
-            // `execute_step` keeps the capability/hook/permission gates, so a
-            // subagent spawn is governed exactly like any other tool call.
-            let subagent_dispatch = LoopSubagentDispatch::new(
-                ctx,
-                &step_id,
-                max_rounds.saturating_sub(rounds_executed + delegated_rounds),
-            );
+        // Phase 2: concurrent dispatch. One shared budget pool for every
+        // delegation-capable call in this batch — see `LoopSubagentDispatch`.
+        let batch_budget = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
+            max_rounds.saturating_sub(rounds_executed + delegated_rounds),
+        ));
+        let outcomes_by_slot: Vec<Option<runtime_loop::StepOutcome>> = {
+            let dispatches: Vec<Option<LoopSubagentDispatch<'_, '_>>> = slots
+                .iter()
+                .map(|slot| match slot {
+                    CallSlot::ToDispatch { step_id, .. } => Some(LoopSubagentDispatch::new(
+                        ctx,
+                        step_id,
+                        std::sync::Arc::clone(&batch_budget),
+                        std::sync::Arc::clone(&children_started),
+                    )),
+                    CallSlot::Rejected(_) => None,
+                })
+                .collect();
 
-            let outcome = runtime_loop::execute_step_with_subagent(
-                &call.name,
-                &call.arguments_json,
-                ctx.permission_wire,
-                "",
-                &req.org_id,
-                &req.user_id,
-                &req.run_id,
-                &step_id,
-                Some(ctx.session_channel.clone()),
-                None,
-                None,
-                zdr,
-                ctx.data_plane_bearer,
-                ctx.session_bearer,
-                Some(ctx.inference_bearer),
-                ctx.capability_policy,
-                Some(&subagent_dispatch),
-            )
+            let results = futures::future::join_all(slots.iter().zip(dispatches.iter()).map(
+                |(slot, dispatch)| async move {
+                    let CallSlot::ToDispatch { call, step_id } = slot else {
+                        return None;
+                    };
+                    let dispatch = dispatch
+                        .as_ref()
+                        .expect("every ToDispatch slot has a matching dispatch");
+                    // Bounded transient-failure retry (harness-adoption pass:
+                    // the one capability every audited harness had and we had
+                    // on neither loop). `retry::tool_call_is_retryable` refuses
+                    // outright for any side-effecting tool — a timeout is
+                    // ambiguous, so replaying a write is how one booking
+                    // becomes two — and for any non-transient failure, where a
+                    // second identical attempt can only fail identically.
+                    let mut outcome = None;
+                    for attempt in 1..=runtime_loop::retry::MAX_TOOL_ATTEMPTS {
+                        if attempt > 1 {
+                            tokio::time::sleep(runtime_loop::retry::backoff_before_attempt(
+                                attempt,
+                            ))
+                            .await;
+                        }
+                        let result = runtime_loop::execute_step_with_subagent(
+                            &call.name,
+                            &call.arguments_json,
+                            ctx.permission_wire,
+                            "",
+                            &req.org_id,
+                            &req.user_id,
+                            &req.run_id,
+                            step_id,
+                            &req.thread_id,
+                            Some(ctx.session_channel.clone()),
+                            None,
+                            None,
+                            zdr,
+                            ctx.data_plane_bearer,
+                            ctx.session_bearer,
+                            Some(ctx.inference_bearer),
+                            ctx.capability_policy,
+                            Some(dispatch),
+                        )
+                        .await;
+                        let retryable = attempt < runtime_loop::retry::MAX_TOOL_ATTEMPTS
+                            && runtime_loop::retry::tool_call_is_retryable(
+                                &call.name,
+                                &call.arguments_json,
+                                &result.error,
+                            );
+                        if !retryable {
+                            outcome = Some(result);
+                            break;
+                        }
+                        warn!(
+                            run_id = %req.run_id,
+                            tool = %call.name,
+                            attempt,
+                            error = %result.error,
+                            "run_agent: retrying tool after a transient failure"
+                        );
+                        outcome = Some(result);
+                    }
+                    outcome
+                },
+            ))
             .await;
-            delegated_rounds = delegated_rounds.saturating_add(subagent_dispatch.rounds_consumed());
+
+            for dispatch in dispatches.iter().flatten() {
+                delegated_rounds = delegated_rounds.saturating_add(dispatch.rounds_consumed());
+            }
+            results
+        };
+
+        // Phase 3: sequential outcome processing, in original order.
+        let mut outcomes = Vec::with_capacity(response.tool_calls.len());
+        let mut pending_pause: Option<PendingPause> = None;
+
+        for (slot, outcome) in slots.into_iter().zip(outcomes_by_slot) {
+            let (call, step_id, outcome) = match (slot, outcome) {
+                (CallSlot::Rejected(result), _) => {
+                    outcomes.push(result);
+                    continue;
+                }
+                (CallSlot::ToDispatch { call, step_id }, Some(outcome)) => (call, step_id, outcome),
+                (CallSlot::ToDispatch { .. }, None) => {
+                    unreachable!("every ToDispatch slot produced an outcome in phase 2")
+                }
+            };
 
             // HITL: a gated tool may be reported as paused only after the
             // durable approval write succeeds. Otherwise propagate an explicit
             // unavailable error without a false AwaitingApproval state/event.
             if outcome.status == "awaiting_approval" {
                 if ctx.depth == 0 {
-                    let paused = pause_for_approval(
-                        ctx.state,
-                        ctx.session_channel,
-                        req,
-                        &step_id,
-                        &call.name,
-                        &call.arguments_json,
-                        ctx.permission_wire,
-                        rounds_executed.saturating_add(delegated_rounds),
-                        ctx.session_bearer,
-                    )
-                    .await?;
-                    return Ok(RoundsResult {
-                        outcome: RoundsOutcome::Paused(paused),
-                        rounds_executed,
-                        delegated_rounds,
-                        grounded,
-                    });
+                    // First one (by array order) wins the durable pause, matching
+                    // the pre-parallel-dispatch tie-break exactly. A second
+                    // approval-needing call in the same batch never ran its side
+                    // effect either (the `Ask` decision short-circuits before
+                    // that), so it is safe to simply not queue it here — the
+                    // model can ask for it again once the run resumes, same as
+                    // it would today with any call after the first pause.
+                    if pending_pause.is_none() {
+                        pending_pause = Some(PendingPause {
+                            step_id,
+                            name: call.name.clone(),
+                            arguments_json: call.arguments_json.clone(),
+                        });
+                    } else {
+                        outcomes.push(ToolStepResult {
+                            name: call.name.clone(),
+                            output: String::new(),
+                            error: Some(format!(
+                                "tool '{}' also requires human approval; only one approval can be \
+                                 queued per turn, so this one was not queued and can be requested \
+                                 again once the run resumes",
+                                call.name
+                            )),
+                        });
+                    }
+                    continue;
                 }
                 // A delegated loop cannot own the run's pause: the approval and
                 // its resume belong to the run, and resume replays the parent
@@ -850,6 +1478,28 @@ async fn run_rounds(
             });
         }
 
+        if let Some(pending) = pending_pause {
+            let paused = pause_for_approval(
+                ctx.state,
+                ctx.session_channel,
+                req,
+                &pending.step_id,
+                &pending.name,
+                &pending.arguments_json,
+                ctx.permission_wire,
+                rounds_executed.saturating_add(delegated_rounds),
+                ctx.session_bearer,
+            )
+            .await?;
+            return Ok(RoundsResult {
+                compaction_triggered,
+                outcome: RoundsOutcome::Paused(paused),
+                rounds_executed,
+                delegated_rounds,
+                grounded,
+            });
+        }
+
         // Carry the model's interim reasoning forward, then append the framed
         // tool outcomes so the next round can answer from them.
         if !response.content.trim().is_empty() {
@@ -879,6 +1529,7 @@ async fn run_rounds(
         RoundsOutcome::Exhausted
     };
     Ok(RoundsResult {
+        compaction_triggered,
         outcome,
         rounds_executed,
         delegated_rounds,
@@ -889,23 +1540,38 @@ async fn run_rounds(
 /// Bridges `execute_step`'s gated dispatch back into the loop for one
 /// `subagent.*` call.
 ///
-/// Constructed per tool call so the delegated loop inherits exactly the budget
-/// remaining at that point, and records what it actually spent — the parent
-/// charges those rounds to the run so repeated delegation shrinks the budget
-/// instead of resetting it.
+/// Constructed per tool call, but sharing ONE budget pool with every other
+/// call dispatched in the same round (see `run_rounds`'s concurrent dispatch
+/// phase) — never a fixed private snapshot. When a round's tool calls run
+/// concurrently, two sibling calls that BOTH decide to delegate must draw
+/// from the SAME remaining allowance instead of each independently seeing
+/// the full pre-round remainder and, combined, overspending it. Each records
+/// what it actually spent — the parent charges those rounds to the run so
+/// repeated delegation shrinks the budget instead of resetting it.
 struct LoopSubagentDispatch<'a, 'b> {
     parent: &'a LoopContext<'b>,
     parent_step_id: &'a str,
-    rounds_remaining: u32,
+    shared_rounds_remaining: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Delegations this RUN has started, across every round. Separate from
+    /// `shared_rounds_remaining` on purpose — see
+    /// `subagent::MAX_TOTAL_CHILDREN`: one bounds work, the other bounds
+    /// fan-out, and a run can hit either without the other.
+    children_started: std::sync::Arc<std::sync::atomic::AtomicU32>,
     consumed: std::sync::atomic::AtomicU32,
 }
 
 impl<'a, 'b> LoopSubagentDispatch<'a, 'b> {
-    fn new(parent: &'a LoopContext<'b>, parent_step_id: &'a str, rounds_remaining: u32) -> Self {
+    fn new(
+        parent: &'a LoopContext<'b>,
+        parent_step_id: &'a str,
+        shared_rounds_remaining: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        children_started: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
         Self {
             parent,
             parent_step_id,
-            rounds_remaining,
+            shared_rounds_remaining,
+            children_started,
             consumed: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -918,10 +1584,47 @@ impl<'a, 'b> LoopSubagentDispatch<'a, 'b> {
 #[tonic::async_trait]
 impl crate::subagent::SubagentDispatch for LoopSubagentDispatch<'_, '_> {
     async fn spawn(&self, tool_name: &str, tool_input: &str) -> Result<String, String> {
+        // Exclusive claim, not a load: `swap` atomically takes the ENTIRE
+        // remaining pool and leaves 0 behind, in one RMW with no gap a
+        // concurrent sibling could land in. A plain load-then-settle-later
+        // was tried first and does NOT work here — two siblings dispatched
+        // together both reach this point before either one's nested
+        // `run_rounds` (a real inference round-trip) resolves, so "settle
+        // after running" always settles too late. Whichever call's `spawn`
+        // executes first empties the pool for every later one this round;
+        // ties are broken by dispatch order, not "fairly" split, because we
+        // cannot know ahead of time which offered calls will even attempt to
+        // delegate. Verified by
+        // `two_concurrent_delegations_in_one_round_share_the_same_budget_pool`.
+        // Claim a child slot BEFORE the round pool. Order matters: the pool
+        // claim is a `swap(0)` that empties it for every sibling, so refusing
+        // after it would report "no budget left" for a delegation that was
+        // actually refused for fan-out — and would strand the pool as well.
+        //
+        // `fetch_add` returns the value BEFORE the increment, so concurrent
+        // siblings each get a distinct index and exactly
+        // `MAX_TOTAL_CHILDREN` of them win. A refused claim is not given back:
+        // handing the slot back would let an unbounded number of refused
+        // attempts keep retrying into the same slot within one round.
+        let claimed = self
+            .children_started
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Err(refusal) = crate::subagent::guard_child_ceiling(claimed) {
+            warn!(
+                run_id = %self.parent.req.run_id,
+                started = claimed,
+                limit = crate::subagent::MAX_TOTAL_CHILDREN,
+                "run_agent: delegation refused by the per-run child ceiling"
+            );
+            return Err(refusal);
+        }
+        let ceiling = self
+            .shared_rounds_remaining
+            .swap(0, std::sync::atomic::Ordering::Relaxed);
         let (result, rounds) = run_subagent(
             self.parent,
             self.parent_step_id,
-            self.rounds_remaining,
+            ceiling,
             tool_name,
             tool_input,
         )
@@ -929,6 +1632,312 @@ impl crate::subagent::SubagentDispatch for LoopSubagentDispatch<'_, '_> {
         self.consumed
             .fetch_add(rounds, std::sync::atomic::Ordering::Relaxed);
         result
+    }
+}
+
+/// Delegation role recorded on the lineage edge. Every in-loop subagent is
+/// `GENERIC` today: the narrower `SubagentRole` values (coder, reviewer,
+/// researcher, explorer) belong to the orchestration surface, where a caller
+/// declares the role. Deriving one from a free-text tool label — `subagent.foo`
+/// → "researcher"? — would be guessing at semantics the model never stated, and
+/// a wrong role on a lineage graph is worse than an honest unspecified one.
+const SUBAGENT_LINEAGE_ROLE: pb::SubagentRole = pb::SubagentRole::Generic;
+
+/// Mode recorded on a delegated child run.
+const SUBAGENT_RUN_MODE: &str = "execute";
+
+/// Register a delegation as a durable child run and record the lineage edge.
+///
+/// # Why the live path needed this
+///
+/// `subagent_edges` and `GetSubagentLineage` were real and served, but ONLY the
+/// orchestration surface ever wrote to them. In-loop delegation ran the child
+/// under the parent's own `run_id` with prefixed step ids, so for every subagent
+/// a real user actually triggered, the lineage endpoint returned nothing. The
+/// graph existed; the live path was not in it.
+///
+/// # Idempotency
+///
+/// `start_key` is `<parent_run_id>:<parent_step_id>` — stable across retries of
+/// the same delegating tool call, and derived from identifiers only. The
+/// contract requires it not be derived from prompt or tool content, which also
+/// means it is safe to log. A replayed start returns `already_started`, so a
+/// re-attempted parent step reuses its child run instead of minting a second
+/// one and forking the lineage.
+///
+/// # Failure posture
+///
+/// Returns the child run id, or `None` on any failure — the delegation then
+/// proceeds unrecorded. The
+/// subagent's work is what the user asked for; losing its lineage row is a
+/// bookkeeping regression, not a reason to refuse the task. Every failure is a
+/// warning with the parent run and step, so an unrecorded delegation is
+/// diagnosable rather than invisible.
+/// A delegation's durable child run, and whether this call created it.
+struct DelegatedChildRun {
+    run_id: String,
+    /// True when `StartManagedRun` replayed an existing run for this
+    /// `start_key`. The delegation has already happened once, so its recorded
+    /// outcome is the truth — see `resume_delegated_child_run`.
+    already_started: bool,
+}
+
+async fn register_delegated_child_run(
+    parent: &LoopContext<'_>,
+    parent_step_id: &str,
+    label: &str,
+    goal: &str,
+) -> Option<DelegatedChildRun> {
+    let token = match parent
+        .terminal_tokens
+        .terminalize_token(&parent.req.org_id)
+        .await
+    {
+        Ok(token) => token,
+        Err(error) => {
+            warn!(
+                run_id = %parent.req.run_id,
+                step_id = parent_step_id,
+                %error,
+                "run_agent: no managed credential to register the delegated child run; \
+                 delegation proceeds without a lineage record"
+            );
+            return None;
+        }
+    };
+
+    let start_key = format!("{}:{}", parent.req.run_id, parent_step_id);
+    let request = match authenticated_session_request(
+        pb::StartManagedRunRequest {
+            thread_id: parent.req.thread_id.clone(),
+            parent_run_id: parent.req.run_id.clone(),
+            agent_id: label.to_owned(),
+            goal: goal.to_owned(),
+            mode: SUBAGENT_RUN_MODE.to_owned(),
+            org_id: parent.req.org_id.clone(),
+            user_id: parent.req.user_id.clone(),
+            start_key: start_key.clone(),
+            terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+        },
+        Some(&token),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            warn!(run_id = %parent.req.run_id, %error, "run_agent: child-run request not forwardable");
+            return None;
+        }
+    };
+
+    let started = match ManagedRunLifecycleClient::new(parent.session_channel.clone())
+        .start_managed_run(request)
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            warn!(
+                run_id = %parent.req.run_id,
+                step_id = parent_step_id,
+                code = ?error.code(),
+                "run_agent: could not register the delegated child run; delegation \
+                 proceeds without a lineage record"
+            );
+            return None;
+        }
+    };
+
+    // The edge is recorded separately and best-effort: `runs.parent_run_id` and
+    // `subagent_edges` are two representations of the same relation, and the
+    // lineage endpoint reads only the latter. A child run without its edge is
+    // still durable and still terminalized; it is just missing from the graph.
+    match authenticated_session_request(
+        pb::AttachSubagentRequest {
+            thread_id: parent.req.thread_id.clone(),
+            parent_run_id: parent.req.run_id.clone(),
+            child_run_id: started.run_id.clone(),
+            role: SUBAGENT_LINEAGE_ROLE as i32,
+        },
+        parent.session_bearer,
+    ) {
+        Ok(request) => {
+            // `AttachSubagent` lives on OrchestrationCoreService, which
+            // session-core also serves — same channel, different stub.
+            if let Err(error) = OrchestrationCoreServiceClient::new(parent.session_channel.clone())
+                .attach_subagent(request)
+                .await
+            {
+                // An `already_started` replay re-attaches the same edge, which
+                // the composite primary key rejects. Expected, not a fault.
+                if !started.already_started {
+                    warn!(
+                        run_id = %parent.req.run_id,
+                        child_run_id = %started.run_id,
+                        code = ?error.code(),
+                        "run_agent: delegated child run registered but its lineage edge was not"
+                    );
+                }
+            }
+        }
+        Err(error) => warn!(
+            run_id = %parent.req.run_id,
+            %error,
+            "run_agent: lineage-edge request not forwardable"
+        ),
+    }
+
+    info!(
+        run_id = %parent.req.run_id,
+        child_run_id = %started.run_id,
+        subagent = label,
+        already_started = started.already_started,
+        "run_agent: delegation registered as a durable child run"
+    );
+    Some(DelegatedChildRun {
+        run_id: started.run_id,
+        already_started: started.already_started,
+    })
+}
+
+/// What a replayed delegation should return instead of running again.
+enum ReplayedDelegation {
+    /// The earlier attempt concluded and its answer is on the record.
+    Answer(String),
+    /// The earlier attempt is finished but there is nothing to hand back, or it
+    /// is still in flight. Either way, re-running is wrong.
+    Refused(String),
+}
+
+/// Honour a replayed delegation's recorded outcome instead of re-running it.
+///
+/// # Why a replay must not re-run
+///
+/// `start_key` is `<parent_run_id>:<parent_step_id>` — identifiers only — so a
+/// re-driven parent step (an approval resume, a redelivered request) reuses its
+/// child run rather than forking the lineage. That is the right identity
+/// behaviour, and it makes re-running the loop actively wrong: the child run
+/// already carries an **immutable** terminal receipt, so a second
+/// `RecordTerminalOutcome` returns the FIRST outcome. A replay that re-ran and
+/// succeeded would hand the parent a good answer while the ledger kept saying
+/// the child failed — and the ledger is what people audit.
+///
+/// So the recorded outcome is the answer, including when the recorded outcome is
+/// "it failed". A delegation is not idempotent at the run level, and pretending
+/// otherwise is what produces two truths.
+async fn resume_delegated_child_run(
+    parent: &LoopContext<'_>,
+    child_run_id: &str,
+    label: &str,
+) -> ReplayedDelegation {
+    use mp_contracts::model_plane::v1::{run_service_client::RunServiceClient, GetRunRequest};
+
+    let request = match authenticated_session_request(
+        GetRunRequest {
+            run_id: child_run_id.to_owned(),
+        },
+        parent.session_bearer,
+    ) {
+        Ok(request) => request,
+        Err(_) => {
+            return ReplayedDelegation::Refused(format!(
+                "subagent '{label}' already ran once for this step and its result could not be \
+                 read back (no forwardable credential). It is not re-run, because its recorded \
+                 outcome is the one that counts."
+            ))
+        }
+    };
+    let detail = match RunServiceClient::new(parent.session_channel.clone())
+        .get_run(request)
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            warn!(
+                child_run_id,
+                code = ?error.code(),
+                "run_agent: replayed delegation could not be read back"
+            );
+            return ReplayedDelegation::Refused(format!(
+                "subagent '{label}' already ran once for this step and its result could not be \
+                 read back right now. It is not re-run — that would produce an answer the run \
+                 ledger contradicts."
+            ));
+        }
+    };
+
+    let terminal = matches!(detail.status.as_str(), "completed" | "failed" | "cancelled");
+    let answer = detail.final_output.trim();
+    if terminal && !answer.is_empty() {
+        info!(
+            child_run_id,
+            subagent = label,
+            "run_agent: replayed delegation resumed from its recorded answer without re-running"
+        );
+        return ReplayedDelegation::Answer(answer.to_owned());
+    }
+    if terminal {
+        return ReplayedDelegation::Refused(format!(
+            "subagent '{label}' already ran once for this step and finished {} without a \
+             recorded conclusion. Do this part yourself rather than delegating it again.",
+            detail.status
+        ));
+    }
+    ReplayedDelegation::Refused(format!(
+        "subagent '{label}' for this step is still {} from an earlier attempt. Wait for it or do \
+         the work yourself; starting it again would fork one delegation into two.",
+        detail.status
+    ))
+}
+
+/// Settle a delegated child run's managed obligation.
+///
+/// A managed run is born with a terminalization obligation carrying a deadline;
+/// leaving one unsettled means a watchdog eventually force-fails it. So this
+/// runs on EVERY delegation outcome, including refusals and failures — the
+/// child run must reach a terminal state by the same path that created it.
+async fn settle_delegated_child_run(parent: &LoopContext<'_>, child_run_id: &str, success: bool) {
+    let token = match parent
+        .terminal_tokens
+        .terminalize_token(&parent.req.org_id)
+        .await
+    {
+        Ok(token) => token,
+        Err(error) => {
+            warn!(child_run_id, %error, "run_agent: no credential to settle the delegated child run");
+            return;
+        }
+    };
+    let request = match authenticated_session_request(
+        pb::RecordTerminalOutcomeRequest {
+            run_id: child_run_id.to_owned(),
+            source: pb::ManagedRunSource::ExecutionAgent as i32,
+            outcome: if success {
+                pb::TerminalOutcome::Completed as i32
+            } else {
+                pb::TerminalOutcome::Failed as i32
+            },
+            failure_code: if success {
+                String::new()
+            } else {
+                "subagent_failed".to_owned()
+            },
+        },
+        Some(&token),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            warn!(child_run_id, %error, "run_agent: child terminal receipt not forwardable");
+            return;
+        }
+    };
+    if let Err(error) = ManagedRunLifecycleClient::new(parent.session_channel.clone())
+        .record_terminal_outcome(request)
+        .await
+    {
+        warn!(
+            child_run_id,
+            code = ?error.code(),
+            "run_agent: delegated child run left unsettled; the managed deadline \
+             watchdog will terminalize it"
+        );
     }
 }
 
@@ -967,6 +1976,26 @@ async fn run_subagent(
         Err(error) => return (Err(error), 0),
     };
 
+    // Register the delegation as a durable child run BEFORE any work happens,
+    // so a lineage row exists even for a delegation that then fails. The child
+    // loop still executes under the parent's `run_id` (below): moving step
+    // attribution to the child run would relocate delegated steps out from
+    // under the prefix the Agent Run Console follows, which is a console-visible
+    // change and a separate decision. What the child run carries is the
+    // delegation's own identity, goal, parent edge and terminal outcome.
+    let delegation = register_delegated_child_run(parent, parent_step_id, label, &task.goal).await;
+
+    // A replay is a delegation that already happened. Its recorded outcome is
+    // the truth, and re-running it would fork the answer from the immutable
+    // receipt its child run already carries. Zero rounds are charged: no work is
+    // redone, which is the whole point.
+    if let Some(child) = delegation.as_ref().filter(|child| child.already_started) {
+        return match resume_delegated_child_run(parent, &child.run_id, label).await {
+            ReplayedDelegation::Answer(answer) => (Ok(answer), 0),
+            ReplayedDelegation::Refused(reason) => (Err(reason), 0),
+        };
+    }
+
     // The child inherits the run's identity, credentials, tools, posture and ZDR
     // flag verbatim (`req` and the bearers are passed through, never re-derived
     // from the tool JSON), so tenant isolation is exactly the parent's. What it
@@ -1000,11 +2029,21 @@ async fn run_subagent(
         "run_agent: delegating to subagent (isolated context)"
     );
 
-    match run_rounds(&child, &task.goal, budget).await {
+    let rounds_result = run_rounds(&child, &task.goal, budget).await;
+    let (outcome, rounds) = match rounds_result {
         Ok(result) => {
             let rounds = result.total_rounds();
             match result.outcome {
-                RoundsOutcome::Answered(text) if !text.trim().is_empty() => (Ok(text), rounds),
+                RoundsOutcome::Answered(text) if !text.trim().is_empty() => {
+                    // `on_delegation` (harness-adoption §7.9, hermes-agent's
+                    // parent-side delegation hook, MIT): record that this
+                    // delegation happened and what it concluded, so a later
+                    // conversation can recall "we already investigated X".
+                    // Fire-and-forget and non-ZDR only — the parent's answer
+                    // must never wait on, or fail because of, a memory write.
+                    record_delegation_memory(parent, &task.goal, &text);
+                    (Ok(text), rounds)
+                }
                 RoundsOutcome::Answered(_) => (
                     Err(format!("subagent '{label}' returned an empty answer")),
                     rounds,
@@ -1037,7 +2076,148 @@ async fn run_subagent(
             Err(format!("subagent '{label}' failed: {}", status.message())),
             0,
         ),
+    };
+
+    // Persist the answer on the CHILD run's own record before settling.
+    //
+    // This is what makes a cold resume possible: the parent's transcript
+    // deliberately does not keep it (a resumed parent learns *that* its child
+    // finished, and learns *what* it concluded only through an explicitly
+    // permitted read — `read_subagent_result`), and the terminal receipt is
+    // metadata-only by design. Ordered before the receipt so a run that is
+    // reported complete already has its answer readable.
+    if let (Some(child), Ok(answer)) = (delegation.as_ref(), outcome.as_ref()) {
+        record_delegated_child_answer(parent, &child.run_id, answer).await;
     }
+
+    // Always settle: a managed obligation left open is force-failed by the
+    // deadline watchdog, so every path that created a child run must close it.
+    if let Some(child) = delegation.as_ref() {
+        settle_delegated_child_run(parent, &child.run_id, outcome.is_ok()).await;
+    }
+    (outcome, rounds)
+}
+
+/// Write a completed delegation's answer to the child run's own record.
+///
+/// Best-effort by design: the delegated work is the product, and the parent must
+/// still receive its answer when the durable copy cannot be written. What is
+/// lost then is only the ability to read it back after a restart, which is
+/// exactly what the log line says.
+///
+/// ZDR skips this entirely rather than relying on the server's refusal. Both
+/// checks exist on purpose: the caller knows the run's posture without a round
+/// trip, and session-core fails closed for a zero-retention credential anyway —
+/// so neither side depends on the other being right.
+async fn record_delegated_child_answer(parent: &LoopContext<'_>, child_run_id: &str, answer: &str) {
+    if parent.req.zdr {
+        return;
+    }
+    if answer.trim().is_empty() {
+        return;
+    }
+    let token = match parent
+        .terminal_tokens
+        .terminalize_token(&parent.req.org_id)
+        .await
+    {
+        Ok(token) => token,
+        Err(error) => {
+            warn!(child_run_id, %error, "run_agent: no credential to record the delegated answer");
+            return;
+        }
+    };
+    let request = match authenticated_session_request(
+        pb::RecordRunOutputRequest {
+            run_id: child_run_id.to_owned(),
+            output: answer.to_owned(),
+        },
+        Some(&token),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            warn!(child_run_id, %error, "run_agent: delegated answer not forwardable");
+            return;
+        }
+    };
+    match ManagedRunLifecycleClient::new(parent.session_channel.clone())
+        .record_run_output(request)
+        .await
+    {
+        Ok(response) => {
+            let stored = response.into_inner().stored_chars;
+            info!(
+                child_run_id,
+                stored_chars = stored,
+                truncated = usize::try_from(stored).unwrap_or(usize::MAX) < answer.chars().count(),
+                "run_agent: delegated answer recorded on the child run"
+            );
+        }
+        Err(error) => warn!(
+            child_run_id,
+            code = ?error.code(),
+            "run_agent: delegated answer not durably recorded; a resumed parent will \
+             see that this child finished but not what it concluded"
+        ),
+    }
+}
+
+/// Ceilings on what one delegation memory may record. Memory is for durable
+/// facts, not transcripts — an unbounded subagent answer pasted into memory
+/// would dominate every later recall by sheer size.
+const DELEGATION_MEMORY_GOAL_CHARS: usize = 200;
+const DELEGATION_MEMORY_OUTCOME_CHARS: usize = 400;
+
+/// Best-effort, detached memory record of a completed delegation
+/// (`on_delegation`, §7.9). Spawned so the parent's turn never waits on it;
+/// every failure mode is a log line, never a tool error. ZDR runs record
+/// nothing — the run was promised no durable trace, and a "helpful" memory
+/// entry is exactly such a trace.
+fn record_delegation_memory(parent: &LoopContext<'_>, goal: &str, outcome: &str) {
+    if parent.req.zdr {
+        return;
+    }
+    let Some(bearer) = parent.session_bearer.map(str::to_owned) else {
+        return;
+    };
+    let truncate = |text: &str, max: usize| -> String {
+        if text.chars().count() <= max {
+            text.trim().to_owned()
+        } else {
+            let cut: String = text.chars().take(max).collect();
+            format!("{}…", cut.trim_end())
+        }
+    };
+    let content = format!(
+        "Delegated task: {}\nOutcome: {}",
+        truncate(goal, DELEGATION_MEMORY_GOAL_CHARS),
+        truncate(outcome, DELEGATION_MEMORY_OUTCOME_CHARS),
+    );
+    let request = pb::IndexMemoryRequest {
+        thread_id: parent.req.thread_id.clone(),
+        topic: "DELEGATION".to_owned(),
+        content,
+        org_id: parent.req.org_id.clone(),
+        memory_id: String::new(),
+        user_id: parent.req.user_id.clone(),
+    };
+    let channel = parent.session_channel.clone();
+    let run_id = parent.req.run_id.clone();
+    tokio::spawn(async move {
+        let request = match runtime_loop::authenticated_session_request(request, &bearer) {
+            Ok(r) => r,
+            Err(error) => {
+                warn!(%run_id, %error, "delegation memory skipped: credential not forwardable");
+                return;
+            }
+        };
+        if let Err(status) = pb::memory_service_client::MemoryServiceClient::new(channel)
+            .index_memory(request)
+            .await
+        {
+            warn!(%run_id, error = %status.message(), "delegation memory write failed (best-effort)");
+        }
+    });
 }
 
 /// Resolve the model the agentic loop drives. Autonomous, tool-using runs need
@@ -1166,6 +2346,373 @@ fn browser_act_parameters_json() -> String {
 /// The read-tool allowlist offered to the model. JSON-Schema literals follow the
 /// `model-gateway::tool_loop::builtin_tool_defs` pattern. This set IS the
 /// purpose-lock scope: only these tools may be called.
+/// Contract: every tool this loop OFFERS must have a governed capability
+/// binding, and every id it binds to must be one capability-core actually
+/// seeds.
+///
+/// # Why this is not covered by the existing runtime-loop tests
+///
+/// `execute_step_inner` evaluates capability policy BEFORE any dispatch, and
+/// `capability_policy::trusted_capability_id` returning `None` becomes a hard
+/// refusal there. So a tool added to [`offered_tool_defs`] without a binding is
+/// advertised to the model and then refused the moment it is called — in
+/// production only. Every runtime-loop test injects an `Allow`
+/// capability-policy double that never consults the mapping, so the whole
+/// existing suite passes with a tool that cannot run.
+///
+/// That is not hypothetical: `save_memory` and `recall_memory` were added to
+/// this list, unit-tested green against that double, and were dead on the
+/// governed loop until this test was written.
+#[cfg(test)]
+mod system_prompt_composition {
+    use super::{
+        compose_system_prompt, offered_tool_defs, ACTION_TOOL_NAMES, PREAMBLE_CORE,
+        SNIPPET_ACTION_TOOLS, SNIPPET_KNOWLEDGE_SEARCH, SNIPPET_MEMORY_TOOLS, SNIPPET_SUBAGENT,
+        SNIPPET_USER_SUPPLIED_ARGS, USER_SUPPLIED_ARG_TOOLS,
+    };
+    use std::collections::BTreeSet;
+
+    fn offered(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// The core is unconditional; nothing tool-specific is.
+    #[test]
+    fn an_empty_toolset_gets_only_the_core() {
+        let prompt = compose_system_prompt(&offered(&[]));
+        assert_eq!(prompt, PREAMBLE_CORE);
+    }
+
+    /// The dotted Quarry tools are aliases, and their descriptions now say so.
+    ///
+    /// Advertising two names for one code path is a distractor: Anthropic's
+    /// tool-authoring guidance names differentiation as a primary practice, and
+    /// `web.search` previously described itself as using "the same boundary as
+    /// web_search" without saying it *was* web_search. They are not merged
+    /// because the underscore names are compatibility aliases for stored plans
+    /// (`runtime_loop::QUARRY_MCP_WEB_SEARCH_TOOL`) and dropping either from the
+    /// offered set would drop it from the purpose-lock allowlist too.
+    #[test]
+    fn the_aliased_web_tools_say_they_are_aliases_and_name_the_preferred_one() {
+        let defs = offered_tool_defs();
+        for (alias, preferred) in [("web.search", "web_search"), ("web.read", "web_fetch")] {
+            let def = defs
+                .iter()
+                .find(|def| def.name == alias)
+                .unwrap_or_else(|| panic!("{alias} is no longer offered; re-point this test"));
+            assert!(
+                def.description.contains("ALIAS"),
+                "{alias} must say it is an alias, or the model is choosing between two \
+                 tools it cannot tell apart"
+            );
+            assert!(
+                def.description.contains(preferred),
+                "{alias} must name {preferred} as the one to prefer"
+            );
+            let target = defs
+                .iter()
+                .find(|def| def.name == preferred)
+                .expect("the preferred tool must exist");
+            assert_eq!(
+                def.parameters_json, target.parameters_json,
+                "{alias} claims to be an alias of {preferred} but takes different arguments"
+            );
+        }
+    }
+
+    /// The elicitation snippet is conditional like every other one: a run with
+    /// no tool that needs user-only values must not carry advice about asking
+    /// for them.
+    #[test]
+    fn a_toolset_with_no_user_supplied_args_is_not_told_to_ask_for_any() {
+        let prompt = compose_system_prompt(&offered(&["yr_weather", "web_search", "news"]));
+        assert!(
+            !prompt.contains(SNIPPET_USER_SUPPLIED_ARGS),
+            "coordinates and a search query are derivable; asking for them is the regression"
+        );
+    }
+
+    #[test]
+    fn a_toolset_with_user_supplied_args_is_told_not_to_invent_them() {
+        for tool in USER_SUPPLIED_ARG_TOOLS {
+            let prompt = compose_system_prompt(&offered(&[tool]));
+            assert!(
+                prompt.contains(SNIPPET_USER_SUPPLIED_ARGS),
+                "{tool} requires values only the user holds"
+            );
+        }
+    }
+
+    /// The list must stay narrow. Every entry has to actually require a value no
+    /// other offered tool can discover and the request cannot supply — the whole
+    /// reason it is not simply "tools with required parameters".
+    #[test]
+    fn the_user_supplied_list_excludes_derivable_and_discoverable_tools() {
+        for derivable in [
+            "web_search",
+            "knowledge_search",
+            "code_interpreter",
+            "yr_weather",
+            "traffic",
+            "recall_memory",
+        ] {
+            assert!(
+                !USER_SUPPLIED_ARG_TOOLS.contains(&derivable),
+                "{derivable}'s required args restate the request or are public fact"
+            );
+        }
+        for discoverable in ["read_subagent_result", "execute_provider_action"] {
+            assert!(
+                !USER_SUPPLIED_ARG_TOOLS.contains(&discoverable),
+                "{discoverable}'s missing ids are resolved by a listing tool, measured 10/10"
+            );
+        }
+    }
+
+    /// The snippet has to distinguish asking for a fact from asking permission,
+    /// or it contradicts [`PREAMBLE_CORE`] — whose anti-permission wording was
+    /// added because its absence measurably suppressed tool use.
+    #[test]
+    fn the_snippet_separates_asking_for_a_fact_from_asking_permission() {
+        let text = SNIPPET_USER_SUPPLIED_ARGS.to_lowercase();
+        assert!(text.contains("not asking permission"));
+        assert!(
+            text.contains("fill required arguments"),
+            "it must also say which values to fill without asking, or it reads as a licence to stall"
+        );
+    }
+
+    /// The bug this item fixes. A run with only read tools must not be told it
+    /// can book shipments or publish posts — it cannot, and saying so invites a
+    /// confident claim about an action that will never happen.
+    #[test]
+    fn a_read_only_toolset_is_never_told_it_can_take_actions() {
+        let prompt = compose_system_prompt(&offered(&["yr_weather", "traffic", "news"]));
+        assert!(
+            !prompt.contains(SNIPPET_ACTION_TOOLS),
+            "a read-only run must not claim real-effect capability"
+        );
+        assert!(
+            !prompt.contains("REAL effect"),
+            "no action framing may survive in a read-only prompt"
+        );
+        assert!(
+            !prompt.contains(SNIPPET_KNOWLEDGE_SEARCH),
+            "knowledge_search rules must not appear without knowledge_search"
+        );
+    }
+
+    /// And the converse — the wording whose ABSENCE was measured to suppress
+    /// real tool use must appear whenever an action tool is offered. Asserted
+    /// per action tool so adding one to ACTION_TOOL_NAMES cannot half-work.
+    #[test]
+    fn every_action_tool_triggers_the_measured_capability_wording() {
+        for tool in ACTION_TOOL_NAMES {
+            let prompt = compose_system_prompt(&offered(&[tool]));
+            assert!(
+                prompt.contains(SNIPPET_ACTION_TOOLS),
+                "offering {tool} must include the action-capability wording; without \
+                 it models default to 'I cannot access your accounts' and draft \
+                 copy-paste text instead of calling the tool"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_specific_snippets_track_their_tools() {
+        let prompt = compose_system_prompt(&offered(&["knowledge_search"]));
+        assert!(prompt.contains(SNIPPET_KNOWLEDGE_SEARCH));
+
+        let prompt = compose_system_prompt(&offered(&["save_memory"]));
+        assert!(prompt.contains(SNIPPET_MEMORY_TOOLS));
+        let prompt = compose_system_prompt(&offered(&["recall_memory"]));
+        assert!(
+            prompt.contains(SNIPPET_MEMORY_TOOLS),
+            "either memory tool alone must bring the guidance"
+        );
+
+        let prompt = compose_system_prompt(&offered(&["subagent.research"]));
+        assert!(prompt.contains(SNIPPET_SUBAGENT));
+        let prompt = compose_system_prompt(&offered(&["subagent."]));
+        assert!(
+            !prompt.contains(SNIPPET_SUBAGENT),
+            "the bare prefix is not a subagent tool — same rule as \
+             subagent::is_subagent_tool and trusted_capability_id"
+        );
+    }
+
+    /// A pure function of the offered set: same input, same output, and order
+    /// independent of iteration order (BTreeSet already sorts, so this pins that
+    /// no snippet is emitted from inside a per-tool loop).
+    #[test]
+    fn composition_is_deterministic() {
+        let set = offered(&[
+            "knowledge_search",
+            "book_shipment",
+            "save_memory",
+            "yr_weather",
+        ]);
+        let first = compose_system_prompt(&set);
+        assert_eq!(first, compose_system_prompt(&set));
+        for snippet in [
+            SNIPPET_ACTION_TOOLS,
+            SNIPPET_KNOWLEDGE_SEARCH,
+            SNIPPET_MEMORY_TOOLS,
+        ] {
+            assert_eq!(
+                first.matches(snippet).count(),
+                1,
+                "each snippet must appear exactly once regardless of how many \
+                 tools trigger it"
+            );
+        }
+    }
+
+    /// Regression guard on the real default run: the production toolset must
+    /// still receive the action and knowledge-search guidance it had when the
+    /// prompt was one string. A decomposition that quietly dropped either would
+    /// otherwise pass every test above.
+    #[test]
+    fn the_real_offered_toolset_keeps_the_guidance_it_had() {
+        let set: BTreeSet<String> = offered_tool_defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        let prompt = compose_system_prompt(&set);
+        for (snippet, why) in [
+            (SNIPPET_ACTION_TOOLS, "the default run offers action tools"),
+            (
+                SNIPPET_KNOWLEDGE_SEARCH,
+                "the default run offers knowledge_search",
+            ),
+            (
+                SNIPPET_MEMORY_TOOLS,
+                "the default run offers the memory tools",
+            ),
+        ] {
+            assert!(
+                prompt.contains(snippet),
+                "the production toolset lost guidance it used to have: {why}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod capability_binding_contract {
+    use super::offered_tool_defs;
+    use crate::capability_policy::trusted_capability_id;
+    use std::path::Path;
+
+    /// Names that legitimately resolve no static capability. Keep this list
+    /// short and justified — every entry is a tool the model can see and not
+    /// use through this mapping.
+    const EXPECTED_UNBOUND: &[&str] = &[];
+
+    #[test]
+    fn every_offered_tool_has_a_capability_binding() {
+        let unbound: Vec<String> = offered_tool_defs()
+            .into_iter()
+            .map(|def| def.name)
+            .filter(|name| trusted_capability_id(name).is_none())
+            .filter(|name| !EXPECTED_UNBOUND.contains(&name.as_str()))
+            .collect();
+        assert!(
+            unbound.is_empty(),
+            "these tools are offered to the model but have no capability \
+             binding, so `execute_step_inner` will refuse them on first use: \
+             {unbound:?}\n\nAdd an arm to \
+             `capability_policy::trusted_capability_id` using an id \
+             capability-core already seeds, or add the tool to \
+             EXPECTED_UNBOUND with a reason."
+        );
+    }
+
+    /// Binding to an id nothing seeds fails closed at runtime —
+    /// `EvaluatePolicy` has nothing to evaluate — which looks identical to a
+    /// missing binding. Read across to capability-core the way
+    /// `tests/cross_service_loop_contract.rs` does, for the same reason: the
+    /// two services deploy separately and neither can depend on the other.
+    ///
+    /// Capabilities are seeded from TWO places, and checking only one is how
+    /// the first draft of this test produced ten false positives: the Go
+    /// `registry.go` table, and the `capabilities` INSERTs in
+    /// `migrations/*.up.sql`. Both are scanned.
+    #[test]
+    fn every_bound_capability_id_is_seeded_by_capability_core() {
+        let capability_core =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../go/services/capability-core");
+        let registry =
+            std::fs::read_to_string(capability_core.join("internal/registry/registry.go"))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "cannot read capability-core's registry.go ({error}). If it moved, \
+                 re-point this test — do not delete it; it is the only check that \
+                 these ids are real."
+                    )
+                });
+        let migrations_dir = capability_core.join("migrations");
+        let mut seeded = registry;
+        let entries = std::fs::read_dir(&migrations_dir).unwrap_or_else(|error| {
+            panic!(
+                "cannot list {} ({error}) — half the seeding source would be \
+                 invisible and this test would report false positives",
+                migrations_dir.display()
+            )
+        });
+        let mut migration_count = 0usize;
+        for entry in entries {
+            let path = entry.expect("readable dir entry").path();
+            // ONLY `*.up.sql`. A `*.down.sql` names the same id in its DELETE
+            // statements, so scanning both made a capability that is *deleted*
+            // and never inserted look seeded — which is how this test passed
+            // for `cap.agent.lineage.read` after its up-migration was removed.
+            let is_up_migration = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".up.sql"));
+            if is_up_migration {
+                seeded.push_str(&std::fs::read_to_string(&path).expect("readable migration"));
+                migration_count += 1;
+            }
+        }
+        assert!(
+            migration_count > 0,
+            "found no migrations to scan — this test broke, not the invariant"
+        );
+
+        // Every offered tool's id, plus the two reachable only through
+        // special-cased paths rather than a plain match arm.
+        let mut ids: Vec<String> = offered_tool_defs()
+            .into_iter()
+            .filter_map(|def| trusted_capability_id(&def.name))
+            .collect();
+        ids.extend(trusted_capability_id("subagent.researcher"));
+        ids.push(crate::ticket_tools::CAPABILITY_ID.to_owned());
+        ids.sort();
+        ids.dedup();
+        assert!(
+            !ids.is_empty(),
+            "parsed no capability ids at all — this test broke, not the invariant"
+        );
+
+        // Match the quoted id so a substring of a longer id cannot pass:
+        // `cap.memory` must not be satisfied by `cap.memory.search`.
+        let missing: Vec<&String> = ids
+            .iter()
+            .filter(|id| {
+                !seeded.contains(&format!("ID: \"{id}\"")) && !seeded.contains(&format!("'{id}'"))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these capability ids are bound by execution-core but seeded by \
+             neither capability-core's registry.go nor its migrations, so every \
+             call is refused with nothing to evaluate: {missing:?}"
+        );
+    }
+}
+
 fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
     let tools = vec![
         pb::ToolDefinition {
@@ -1245,12 +2792,12 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
         },
         pb::ToolDefinition {
             name: "web.search".to_owned(),
-            description: "Quarry public-web discovery. Uses the same tenant-scoped, cited search boundary as web_search; no external web-execution service is involved.".to_owned(),
+            description: "ALIAS for web_search — same Quarry client, same results, same scope. Kept so existing plans that name it keep working. Prefer web_search; there is no case where this returns anything different.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"limit":{"type":"integer","description":"Max results 1-50"}},"required":["query"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "web.read".to_owned(),
-            description: "Quarry source normalization for one public URL. Returns cleaned text through Quarry's scoped extract boundary; it is not Data Plane retrieval.".to_owned(),
+            description: "ALIAS for web_fetch — same Quarry extract boundary, same cleaned text. Kept so existing plans that name it keep working. Prefer web_fetch; there is no case where this returns anything different.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to read"}},"required":["url"]}"#.to_owned(),
         },
         pb::ToolDefinition {
@@ -1277,6 +2824,50 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             description: "Run REAL Python (or POSIX sh) in an isolated sandbox to compute, analyse data, or PRODUCE FILES — spreadsheets (openpyxl, XlsxWriter, pandas), Word documents (python-docx), PowerPoint (python-pptx), PDFs (reportlab, pypdf), charts/images (matplotlib headless, Pillow), plus numpy/pandas for data work. The working directory starts EMPTY and is deleted after the call, so write output with plain relative paths (e.g. open('report.xlsx','wb')) and they are returned to you as files with name, mime type and base64 content; nothing persists between calls. There is NO NETWORK: you cannot download anything, call an API, or pip install — use only the libraries listed. Pass input data via files_in (bare filenames, base64 content); the program reads them from the working directory. Print anything you want to read yourself to stdout. Long-running programs are killed at the timeout (30s by default), and a non-zero exit returns its traceback so you can fix the code and retry.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Defaults to python"},"code":{"type":"string","description":"The complete program to run"},"files_in":{"type":"array","description":"Optional input files written into the working directory before the program runs","items":{"type":"object","properties":{"name":{"type":"string","description":"Bare filename, no directories or '..'"},"content_b64":{"type":"string","description":"Base64-encoded file content"}},"required":["name","content_b64"]}}},"required":["code"]}"#.to_owned(),
         },
+        // Long-term memory (harness-adoption §7.9). Offered here — and ONLY
+        // here — because the governed agentic loop is memory's one legitimate
+        // home: the inline chat loop refuses side effects by design (its old
+        // `save_memory` arm was unreachable dead code for exactly that
+        // reason), and the chat path gets memory passively via per-turn
+        // prefetch instead. Writes are refused on ZDR runs with an honest
+        // explanation; session-core enforces the same server-side.
+        pb::ToolDefinition {
+            name: "save_memory".to_owned(),
+            description: "Save ONE durable fact to long-term memory so future conversations can recall it: a standing preference, constraint, decision, or identifier the user will expect you to remember (e.g. 'invoices must be in NOK', 'the project reference code is ZX-88214'). Do NOT save transient task state, tool output, or anything the user asked to keep private. Unavailable on Zero-Data-Retention runs.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"content":{"type":"string","description":"The single fact to remember, self-contained and concise"},"topic":{"type":"string","description":"Optional short topic label, e.g. PREFERENCE, CONSTRAINT, IDENTIFIER"}},"required":["content"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "recall_memory".to_owned(),
+            description: "Search long-term memory for facts saved in earlier conversations: preferences, constraints, decisions, identifiers. Use when the task references something the user established before ('the usual carrier', 'my reference code'). Returns matching memories or an honest no_memories status — treat an empty result as 'not recorded', never as proof it was never said.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"What to look for"},"limit":{"type":"integer","minimum":1,"maximum":20,"description":"Max memories to return (default 5)"}},"required":["query"]}"#.to_owned(),
+        },
+        // Recovering a skill the per-prompt budget cut. `skill_budget` degrades
+        // before dropping and marks what it cut — honest, and until now
+        // unrecoverable. Offered in BOTH loops because the budget is shared: a
+        // deployed agent must not be left reading half a rule that chat could
+        // have read whole.
+        pb::ToolDefinition {
+            name: "reattach_skill".to_owned(),
+            description: "Read one of this organization's skill instructions back IN FULL. Use it when a skill block in your context ends with a truncation marker, or when a rule you are about to follow looks cut off — acting on half an instruction is worse than pausing to read the rest. Give the skill's name exactly as it appears in the block.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"name":{"type":"string","description":"The skill's name, exactly as shown in its block"}},"required":["name"]}"#.to_owned(),
+        },
+        // Reading back what a delegation concluded (harness-adoption 1.1, cold
+        // resume). Offered here for the same reason as everything above — the
+        // purpose-lock rejects any tool absent from this list — and offered as a
+        // PAIR: the listing is content-free and always available, the read is
+        // approval-gated on every posture. The descriptions say so, because a
+        // model that does not know the read needs consent will call it
+        // reflexively and stall the run on an approval nobody expected.
+        pb::ToolDefinition {
+            name: "list_subagent_results".to_owned(),
+            description: "List the subagent tasks THIS run has delegated, with each one's goal, status, and whether it stored a conclusion. Use it when you have delegated work and cannot see the result — after a restart your own message history no longer holds it, but the delegation records survive. This returns no conclusions, only which ones exist; read one with read_subagent_result.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "read_subagent_result".to_owned(),
+            description: "Read what ONE of this run's delegated subagents concluded, by child_run_id from list_subagent_results. This requires the user's approval every time — the conclusion belongs to the subagent's own run, and bringing it into this conversation is a disclosure the user allows. So call it when the user asks what a delegation found, or when you genuinely need the finding to continue; do not call it speculatively. You may only read this run's own delegations.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"child_run_id":{"type":"string","description":"A child_run_id from list_subagent_results"}},"required":["child_run_id"]}"#.to_owned(),
+        },
         // Delegation. Offered so the capability is actually reachable: the
         // purpose-lock rejects any tool absent from this list, so without a
         // definition here a `subagent.*` call could never be dispatched at all.
@@ -1285,7 +2876,7 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
         // over-delegates burns the run's shared round budget.
         pb::ToolDefinition {
             name: "subagent.task".to_owned(),
-            description: "Delegate a self-contained sub-task to a subagent that runs its own tool loop with the SAME tools you have, then returns only its final answer. Its work happens in an isolated context, so use it when a sub-task needs many tool calls whose intermediate output you do not need (e.g. 'find every carrier that ships dangerous goods to Svalbard and summarise the cheapest'). Give it one clear, self-contained goal — it cannot see this conversation, cannot ask you questions, cannot delegate further, and cannot run tools that require human approval. Its rounds come out of THIS run's budget, so do not delegate work you can do in a call or two yourself.".to_owned(),
+            description: "Delegate a self-contained sub-task to a subagent that runs its own tool loop with the SAME tools you have, then returns only its final answer. Its work happens in an isolated context, so use it when a sub-task needs many tool calls whose intermediate output you do not need (e.g. 'find every carrier that ships dangerous goods to Svalbard and summarise the cheapest'). Give it one clear, self-contained goal — it cannot see this conversation, cannot ask you questions, and cannot delegate further (nesting is capped at one level). It may ONLY use read/analysis tools: any side-effecting or destructive action (delete, write, send, deploy, book, publish, execute a provider action, drive a browser, run a shell command, ...) is refused outright, even if this run's own permission mode is 'auto' — delegating that kind of step does not skip its gate, it just fails, so do it yourself instead. Its rounds come out of THIS run's budget, so do not delegate work you can do in a call or two yourself.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent, including any context it needs"},"max_rounds":{"type":"integer","minimum":1,"description":"Optional cap on the subagent's tool rounds; capped by this run's remaining budget"}},"required":["goal"]}"#.to_owned(),
         },
     ];
@@ -1409,6 +3000,36 @@ async fn record_tool_step(
 /// before either state change or pause event. Deliberately NO terminal
 /// `CompleteStep` and NO plan COMPLETED/FAILED transition — a durable run is
 /// paused, not finished; resume re-invokes `run_agent`.
+/// Which kind of approval a pause is actually asking for.
+///
+/// `Destructive` is the honest label for the gate this loop was built around — a
+/// real side effect held behind the `ask` posture. It is the wrong label for
+/// `permission::requires_consent_to_disclose`, where nothing is destroyed and
+/// what the person is being asked is whether content may cross into this
+/// conversation. `Permission` is the enum's own name for exactly that.
+pub(crate) fn approval_kind_for(tool_name: &str) -> pb::ApprovalKind {
+    if crate::permission::requires_consent_to_disclose(tool_name) {
+        pb::ApprovalKind::Permission
+    } else {
+        pb::ApprovalKind::Destructive
+    }
+}
+
+/// The sentence the person reads before deciding.
+///
+/// "tool 'X' requires approval" describes the mechanism, not the choice. For a
+/// disclosure it says what would be disclosed and where it would go, because
+/// that is the whole content of the decision.
+pub(crate) fn approval_reason_for(tool_name: &str) -> String {
+    if crate::permission::requires_consent_to_disclose(tool_name) {
+        return format!(
+            "'{tool_name}' would bring what a delegated subagent concluded into this \
+             conversation. Approve to let the agent read that finding."
+        );
+    }
+    format!("tool '{tool_name}' requires approval")
+}
+
 async fn pause_for_approval(
     state: &crate::state::StateStore,
     session_channel: &Channel,
@@ -1426,11 +3047,16 @@ async fn pause_for_approval(
         pb::CreateApprovalRequest {
             run_id: req.run_id.clone(),
             step_id: step_id.to_owned(),
-            kind: pb::ApprovalKind::Destructive as i32,
+            // Every pause used to report itself as DESTRUCTIVE. That is true of
+            // the gate this function was written for (a real side effect behind
+            // `ask`), and false of a consent gate: telling someone that reading
+            // a finding is a destructive operation is how a prompt stops meaning
+            // anything. The kind and the reason both say which one this is.
+            kind: approval_kind_for(tool_name) as i32,
             requested_of: req.org_id.clone(),
             org_id: req.org_id.clone(),
             user_id: req.user_id.clone(),
-            reason: format!("tool '{tool_name}' requires approval"),
+            reason: approval_reason_for(tool_name),
             expires_in_seconds: 3600,
             // Let session-core mint the durable approval id (matrix §4.1).
             client_approval_id: String::new(),
@@ -1470,6 +3096,11 @@ async fn pause_for_approval(
         final_output: String::new(),
         rounds_executed,
         grounded: false,
+        // A pause is not a finish. `pause_for_approval` builds this response from
+        // outside the loop and so cannot see its compaction state; the resumed
+        // run reports its own. Reporting `true` here from nowhere would be worse
+        // than reporting nothing.
+        compaction_triggered: false,
     })
 }
 
@@ -1709,6 +3340,11 @@ async fn finalize(
     success: bool,
     rounds_executed: u32,
     grounded: bool,
+    // Whether the loop cleared tool-result payloads to stay inside the context
+    // window. Reported on the response because compaction is lossy and
+    // otherwise invisible: an answer built on a compacted prompt can be worse
+    // for a reason nothing else in the response explains.
+    compaction_triggered: bool,
     bearer: Option<&str>,
     terminal_tokens: &dyn ManagedRunTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
@@ -1799,6 +3435,7 @@ async fn finalize(
         final_output: final_answer,
         rounds_executed,
         grounded,
+        compaction_triggered,
     })
 }
 
@@ -2233,12 +3870,31 @@ mod tests {
         persisted_step_payloads: Vec<(String, String, String)>, // (step_id, output, error)
         managed_terminal_outcomes: Vec<(String, i32, i32, String)>, // (run_id, source, outcome, failure_code)
         managed_heartbeats: Vec<(String, i32)>,                     // (run_id, source)
-        plan_transitions: Vec<(i32, i32)>,                          // (from, to)
-        approvals: Vec<(String, String)>,                           // (step_id, reason)
-        decisions: Vec<(String, i32)>, // (approval_id, decision) — DecideApproval
+        /// `(run_id, output)` for each `RecordRunOutput`. Separate from
+        /// `managed_terminal_outcomes` on purpose: a test must be able to assert
+        /// that a receipt was written and an answer was NOT (the ZDR case).
+        recorded_run_outputs: Vec<(String, String)>,
+        /// Make `RecordRunOutput` fail, to prove a delegation still returns its
+        /// answer when the durable copy could not be written.
+        fail_run_output: bool,
+        /// Status `MockRunService` reports for a child run. `completed` unless a
+        /// replay test needs to prove the still-in-flight refusal.
+        replayed_run_status: Option<String>,
+        plan_transitions: Vec<(i32, i32)>, // (from, to)
+        approvals: Vec<(String, String)>,  // (step_id, reason)
+        decisions: Vec<(String, i32)>,     // (approval_id, decision) — DecideApproval
         /// Fixture for `MockSession::list_agent_skills`; empty unless a
         /// `fetch_skill_context` test populates it.
         agent_skills: Vec<pb::AgentSkill>,
+        /// Delegated child runs registered via `StartManagedRun`:
+        /// (parent_run_id, goal, start_key, agent_id).
+        started_child_runs: Vec<(String, String, String, String)>,
+        /// Lineage edges recorded via `AttachSubagent`:
+        /// (parent_run_id, child_run_id, role).
+        lineage_edges: Vec<(String, String, i32)>,
+        /// When set, `start_managed_run` fails — used to prove a delegation
+        /// still completes when its bookkeeping does not.
+        fail_child_run_start: bool,
     }
 
     type SharedRecorder = Arc<Mutex<Recorder>>;
@@ -2281,6 +3937,12 @@ mod tests {
         Answer(String),
         /// A round that requests tool calls (model content may accompany them).
         ToolCalls {
+            content: String,
+            calls: Vec<pb::ToolCall>,
+        },
+        /// A round that requests tool calls AND reports hitting the output
+        /// token ceiling — the truncated-last-call case.
+        TruncatedToolCalls {
             content: String,
             calls: Vec<pb::ToolCall>,
         },
@@ -2387,6 +4049,23 @@ mod tests {
                     tool_calls: Vec::new(),
                     ..Default::default()
                 })),
+                Scripted::TruncatedToolCalls { content, calls } => {
+                    Ok(Response::new(pb::InferResponse {
+                        request_id: "req".to_owned(),
+                        content,
+                        model_used: "mock".to_owned(),
+                        // The provider's own signal that generation was cut
+                        // off mid-message.
+                        stop_reason: "max_tokens".to_owned(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        tool_calls: calls,
+                        // Provider provenance (`provider_used` / `residency`) is
+                        // not what this arm exercises; default it like the
+                        // sibling arms instead of listing every field.
+                        ..Default::default()
+                    }))
+                }
                 Scripted::ToolCalls { content, calls } => Ok(Response::new(pb::InferResponse {
                     request_id: "req".to_owned(),
                     content,
@@ -2752,6 +4431,120 @@ mod tests {
         }
     }
 
+    // --- RunService mock: serves the run rows a REPLAYED delegation reads back.
+    //
+    // Added because the replay path is the only thing standing between a
+    // re-driven parent step and two contradicting truths (a good answer plus a
+    // ledger that says the child failed), and it cannot be tested without a run
+    // to read.
+
+    struct MockRunService {
+        rec: SharedRecorder,
+    }
+
+    impl MockRunService {
+        fn detail(&self, run_id: &str) -> pb::RunDetail {
+            let rec = self.rec.lock().unwrap();
+            let final_output = rec
+                .recorded_run_outputs
+                .iter()
+                .find(|(recorded, _)| recorded == run_id)
+                .map(|(_, answer)| answer.clone())
+                .unwrap_or_default();
+            pb::RunDetail {
+                run_id: run_id.to_owned(),
+                thread_id: sample_request().thread_id,
+                parent_run_id: sample_request().run_id,
+                agent_id: "task".to_owned(),
+                status: rec
+                    .replayed_run_status
+                    .clone()
+                    .unwrap_or_else(|| "completed".to_owned()),
+                mode: "execute".to_owned(),
+                goal: "the delegated goal".to_owned(),
+                final_output,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl pb::run_service_server::RunService for MockRunService {
+        async fn get_run(
+            &self,
+            request: Request<pb::GetRunRequest>,
+        ) -> Result<Response<pb::RunDetail>, Status> {
+            Ok(Response::new(self.detail(&request.into_inner().run_id)))
+        }
+
+        async fn list_runs(
+            &self,
+            _: Request<pb::ListRunsRequest>,
+        ) -> Result<Response<pb::ListRunsResponse>, Status> {
+            let ids: Vec<String> = self
+                .rec
+                .lock()
+                .unwrap()
+                .recorded_run_outputs
+                .iter()
+                .map(|(run_id, _)| run_id.clone())
+                .collect();
+            Ok(Response::new(pb::ListRunsResponse {
+                runs: ids.iter().map(|run_id| self.detail(run_id)).collect(),
+                has_more: false,
+            }))
+        }
+
+        async fn get_scheduled_step_context(
+            &self,
+            _: Request<pb::GetScheduledStepContextRequest>,
+        ) -> Result<Response<pb::ScheduledStepContext>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn cancel_run(
+            &self,
+            _: Request<pb::CancelRunRequest>,
+        ) -> Result<Response<pb::CancelRunResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn list_system_runs(
+            &self,
+            _: Request<pb::ListSystemRunsRequest>,
+        ) -> Result<Response<pb::ListRunsResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn resolve_run_owner(
+            &self,
+            _: Request<pb::ResolveRunOwnerRequest>,
+        ) -> Result<Response<pb::ResolveRunOwnerResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn resolve_thread_owner(
+            &self,
+            _: Request<pb::ResolveThreadOwnerRequest>,
+        ) -> Result<Response<pb::ResolveThreadOwnerResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn resolve_run_action_authority(
+            &self,
+            _: Request<pb::ResolveRunActionAuthorityRequest>,
+        ) -> Result<Response<pb::ResolveRunActionAuthorityResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn resolve_scheduled_step_authority(
+            &self,
+            _: Request<pb::ResolveScheduledStepAuthorityRequest>,
+        ) -> Result<Response<pb::ResolveScheduledStepAuthorityResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+    }
+
     // --- Managed terminalization mock: records immutable receipt operations. ---
 
     struct MockManagedRunLifecycle {
@@ -2763,9 +4556,47 @@ mod tests {
     impl ManagedRunLifecycle for MockManagedRunLifecycle {
         async fn start_managed_run(
             &self,
-            _: Request<pb::StartManagedRunRequest>,
+            request: Request<pb::StartManagedRunRequest>,
         ) -> Result<Response<pb::StartManagedRunResponse>, Status> {
-            Err(Status::unimplemented("start_managed_run not used"))
+            if request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                != Some("Bearer test-terminalize-service-token")
+            {
+                return Err(Status::unauthenticated(
+                    "managed run start requires its service credential",
+                ));
+            }
+            if self.rec.lock().unwrap().fail_child_run_start {
+                return Err(Status::unavailable("managed run start unavailable"));
+            }
+            let req = request.into_inner();
+            // Mirror the real idempotency contract: the same start_key replays
+            // the same run id and reports already_started.
+            let mut rec = self.rec.lock().unwrap();
+            let existing = rec
+                .started_child_runs
+                .iter()
+                .find(|(_, _, key, _)| key == &req.start_key)
+                .map(|(_, _, key, _)| format!("child-{key}"));
+            let already_started = existing.is_some();
+            let run_id = existing.unwrap_or_else(|| format!("child-{}", req.start_key));
+            if !already_started {
+                rec.started_child_runs.push((
+                    req.parent_run_id.clone(),
+                    req.goal.clone(),
+                    req.start_key.clone(),
+                    req.agent_id.clone(),
+                ));
+            }
+            Ok(Response::new(pb::StartManagedRunResponse {
+                run_id,
+                created_at: None,
+                terminal_step_id: "execution-core-agent-final".to_owned(),
+                already_started,
+                thread_id: req.thread_id,
+            }))
         }
 
         async fn record_terminal_outcome(
@@ -2801,6 +4632,36 @@ mod tests {
                 applied_at: None,
                 already_applied: false,
                 reconciliation_required: false,
+            }))
+        }
+
+        async fn record_run_output(
+            &self,
+            request: Request<pb::RecordRunOutputRequest>,
+        ) -> Result<Response<pb::RecordRunOutputResponse>, Status> {
+            if request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                != Some("Bearer test-terminalize-service-token")
+            {
+                return Err(Status::unauthenticated(
+                    "recording a run answer requires its service credential",
+                ));
+            }
+            if self.rec.lock().unwrap().fail_run_output {
+                return Err(Status::unavailable("run output store unavailable"));
+            }
+            let req = request.into_inner();
+            let stored_chars = u32::try_from(req.output.chars().count()).unwrap_or(u32::MAX);
+            self.rec
+                .lock()
+                .unwrap()
+                .recorded_run_outputs
+                .push((req.run_id.clone(), req.output));
+            Ok(Response::new(pb::RecordRunOutputResponse {
+                run_id: req.run_id,
+                stored_chars,
             }))
         }
 
@@ -3039,9 +4900,23 @@ mod tests {
 
         async fn attach_subagent(
             &self,
-            _: Request<pb::AttachSubagentRequest>,
+            request: Request<pb::AttachSubagentRequest>,
         ) -> Result<Response<pb::AttachSubagentResponse>, Status> {
-            Err(Status::unimplemented("attach_subagent not used"))
+            let req = request.into_inner();
+            let mut rec = self.rec.lock().unwrap();
+            // The real table's composite PK rejects a duplicate edge; mirror it
+            // so the already_started replay path is exercised, not smoothed over.
+            if rec.lineage_edges.iter().any(|(parent, child, _)| {
+                parent == &req.parent_run_id && child == &req.child_run_id
+            }) {
+                return Err(Status::already_exists("subagent edge already recorded"));
+            }
+            rec.lineage_edges.push((
+                req.parent_run_id.clone(),
+                req.child_run_id.clone(),
+                req.role,
+            ));
+            Ok(Response::new(pb::AttachSubagentResponse::default()))
         }
 
         async fn stream_run_events(
@@ -3086,6 +4961,9 @@ mod tests {
                     rec: rec.clone(),
                     fail_create_approval,
                 }))
+                .add_service(pb::run_service_server::RunServiceServer::new(
+                    MockRunService { rec: rec.clone() },
+                ))
                 .add_service(ManagedRunLifecycleServer::new(MockManagedRunLifecycle {
                     rec,
                     fail_terminal_receipt,
@@ -3166,7 +5044,14 @@ mod tests {
             max_rounds: 4,
             zdr: false,
             tools: Vec::new(),
-            ..Default::default()
+            // PRIVACY FLOOR: no tier stated, which is what an unconstrained run
+            // sends — a floor is imposed only when the caller asked for one, and
+            // the tests that DO care set it explicitly on the returned request.
+            min_privacy_tier: pb::PrivacyTier::Unspecified as i32,
+            plan_mode: false,
+            // No graded constraint stated, which is what an ordinary run sends —
+            // the ladder narrows a run only when a grant put it there.
+            autonomy_rung: 0,
         }
     }
 
@@ -3649,7 +5534,11 @@ mod tests {
         let call = pb::ToolCall {
             id: "call-1".to_owned(),
             name: "yr_weather".to_owned(),
-            arguments_json: "{}".to_owned(), // missing lat/lon → execute_step fails fast
+            // Schema-valid, so this fails where this test needs it to — at
+            // dispatch, with no configured upstream — rather than being refused
+            // by pre-dispatch argument validation, which would record no audit
+            // step at all and make the assertion below vacuous.
+            arguments_json: r#"{"lat":60.39,"lon":5.32}"#.to_owned(),
         };
         let inference_channel = spawn_inference_channel(vec![
             Scripted::ToolCalls {
@@ -4025,12 +5914,222 @@ mod tests {
     /// A tool call that dispatches for real and fails fast without a network:
     /// `yr_weather` with no coordinates loses its serde parse inside
     /// `execute_step`, which proves the nested loop reached real dispatch.
+    /// A call that fails at DISPATCH — `information-core` is not configured in
+    /// tests, so the tool errors when it runs.
+    ///
+    /// Arguments are deliberately schema-valid. This used to pass `{}`, which was
+    /// a shortcut to the same failure; once pre-dispatch argument validation
+    /// landed, `{}` was refused in the pre-pass instead and these tests silently
+    /// stopped exercising the dispatch-failure path they were written for (three
+    /// of them failed, which is how this was caught). A fixture must fail for the
+    /// reason its users are testing, not for a newer one.
     fn failing_tool_call(id: &str) -> pb::ToolCall {
         pb::ToolCall {
             id: id.to_owned(),
             name: "yr_weather".to_owned(),
-            arguments_json: "{}".to_owned(),
+            arguments_json: r#"{"lat":60.39,"lon":5.32}"#.to_owned(),
         }
+    }
+
+    /// Lineage is bookkeeping; the delegated work is the product.
+    ///
+    /// If `StartManagedRun` is unavailable the delegation must still run and
+    /// still return its answer — refusing a task the user asked for because a
+    /// lineage row could not be written would trade a real failure for a
+    /// cosmetic one. The inverse (recording nothing and saying nothing) was the
+    /// prior behaviour and is what the warning in
+    /// `register_delegated_child_run` exists to prevent.
+    #[tokio::test]
+    async fn a_delegation_still_completes_when_its_child_run_cannot_be_registered() {
+        const DELEGATED_GOAL: &str = "Find the current Bergen weather";
+        const SUBAGENT_ANSWER: &str = "Bergen: 8 degrees and raining.";
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().fail_child_run_start = true;
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: "Delegating the lookup.".to_owned(),
+                calls: vec![subagent_call(
+                    "sub-1",
+                    &format!(r#"{{"goal":"{DELEGATED_GOAL}"}}"#),
+                )],
+            },
+            Scripted::Answer(SUBAGENT_ANSWER.to_owned()),
+            Scripted::Answer(format!("Delegated result: {SUBAGENT_ANSWER}")),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a delegating run must not fail because bookkeeping did");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            resp.final_output,
+            format!("Delegated result: {SUBAGENT_ANSWER}"),
+            "the subagent's answer must still reach the parent"
+        );
+
+        let r = rec.lock().unwrap();
+        assert!(
+            r.started_child_runs.is_empty(),
+            "the child run genuinely failed to register in this scenario"
+        );
+        assert!(
+            r.lineage_edges.is_empty(),
+            "no edge may be recorded for a child run that does not exist — it \
+             would dangle against the runs FK"
+        );
+        // And crucially, no orphan obligation was settled for a run that was
+        // never created.
+        assert_eq!(
+            r.managed_terminal_outcomes
+                .iter()
+                .filter(|(run_id, ..)| run_id != &sample_request().run_id)
+                .count(),
+            0,
+            "settling a child run that was never started would be a receipt for \
+             nothing"
+        );
+    }
+
+    /// A zero-retention run stores NOTHING durable, and a delegation's answer
+    /// is content — the most obviously retained thing in the whole flow.
+    ///
+    /// This is checked here rather than trusted to session-core's refusal
+    /// because both sides exist on purpose: the caller knows the posture with no
+    /// round trip, the server fails closed for a ZDR credential anyway, and
+    /// neither is allowed to depend on the other being right. Note what still
+    /// happens on a ZDR run — the terminal receipt, which is metadata-only and
+    /// safe. That difference IS the design.
+    #[tokio::test]
+    async fn a_zero_retention_delegation_records_a_receipt_but_never_its_answer() {
+        const DELEGATED_GOAL: &str = "Find the current Bergen weather";
+        const SUBAGENT_ANSWER: &str = "Bergen: 8 degrees and raining.";
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: "Delegating the lookup.".to_owned(),
+                calls: vec![subagent_call(
+                    "sub-1",
+                    &format!(r#"{{"goal":"{DELEGATED_GOAL}"}}"#),
+                )],
+            },
+            Scripted::Answer(SUBAGENT_ANSWER.to_owned()),
+            Scripted::Answer(format!("Delegated result: {SUBAGENT_ANSWER}")),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut request = sample_request();
+        request.zdr = true;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            request,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a ZDR delegation still runs");
+
+        assert_eq!(
+            resp.final_output,
+            format!("Delegated result: {SUBAGENT_ANSWER}"),
+            "the answer still reaches the parent in-flight; only the durable copy is withheld"
+        );
+        let r = rec.lock().unwrap();
+        assert!(
+            r.recorded_run_outputs.is_empty(),
+            "a ZDR run promised no durable trace, and a stored conclusion is one: {:?}",
+            r.recorded_run_outputs
+        );
+        assert!(
+            !r.managed_terminal_outcomes.is_empty(),
+            "the metadata-only receipt is still written — that is what makes it \
+             safe on a ZDR run, and losing it would leave an obligation the \
+             watchdog force-fails"
+        );
+    }
+
+    /// The durable copy is bookkeeping; the delegated work is the product. A
+    /// failed write must cost the ability to read the answer back later, and
+    /// nothing else — the parent still gets its answer this turn.
+    #[tokio::test]
+    async fn a_delegation_still_answers_when_its_conclusion_cannot_be_stored() {
+        const DELEGATED_GOAL: &str = "Find the current Bergen weather";
+        const SUBAGENT_ANSWER: &str = "Bergen: 8 degrees and raining.";
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().fail_run_output = true;
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: "Delegating the lookup.".to_owned(),
+                calls: vec![subagent_call(
+                    "sub-1",
+                    &format!(r#"{{"goal":"{DELEGATED_GOAL}"}}"#),
+                )],
+            },
+            Scripted::Answer(SUBAGENT_ANSWER.to_owned()),
+            Scripted::Answer(format!("Delegated result: {SUBAGENT_ANSWER}")),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a delegating run must not fail because bookkeeping did");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            resp.final_output,
+            format!("Delegated result: {SUBAGENT_ANSWER}")
+        );
+        let r = rec.lock().unwrap();
+        assert!(
+            r.recorded_run_outputs.is_empty(),
+            "the write genuinely failed in this scenario"
+        );
+        // And the child still reaches a terminal state, so the watchdog has
+        // nothing to force-fail.
+        assert!(
+            r.managed_terminal_outcomes
+                .iter()
+                .any(|(run_id, _, outcome, _)| {
+                    run_id == &format!("child-{}:tool_1_sub-1", sample_request().run_id)
+                        && *outcome == pb::TerminalOutcome::Completed as i32
+                }),
+            "a failed answer write must not leave the child obligation open"
+        );
     }
 
     // Asserts the whole delegation contract in one run: nesting, isolation,
@@ -4133,10 +6232,83 @@ mod tests {
             ],
             "the delegated run is visible, attributed, and non-terminal"
         );
+        // TERMINAL-ONCE, now asserted PER RUN rather than by total count.
+        //
+        // The old assertion was `managed_terminal_outcomes.len() == 1`, which
+        // was a proxy: it read as "one receipt per run" but actually encoded
+        // "nested loops terminalize nothing at all". Delegated child runs are
+        // now durable managed runs, so each legitimately settles its own
+        // obligation — and the total is no longer the invariant. The invariant
+        // is that the PARENT run has exactly one, which is what a
+        // double-terminalization bug would break, and the total-count form
+        // could not distinguish from a child settling correctly.
+        let parent_receipts = r
+            .managed_terminal_outcomes
+            .iter()
+            .filter(|(run_id, ..)| run_id == &sample_request().run_id)
+            .count();
         assert_eq!(
-            r.managed_terminal_outcomes.len(),
+            parent_receipts, 1,
+            "TERMINAL-ONCE: the parent run must have exactly one managed receipt"
+        );
+        let mut settled: Vec<&String> = r
+            .managed_terminal_outcomes
+            .iter()
+            .map(|(run_id, ..)| run_id)
+            .collect();
+        let before_dedup = settled.len();
+        settled.sort();
+        settled.dedup();
+        assert_eq!(
+            settled.len(),
+            before_dedup,
+            "TERMINAL-ONCE: no run may be terminalized twice, parent or child"
+        );
+
+        // The delegation is now durable and in the lineage graph — the gap that
+        // made GetSubagentLineage return nothing for every real subagent.
+        assert_eq!(
+            r.started_child_runs.len(),
             1,
-            "TERMINAL-ONCE: a nested loop must not add a second managed receipt"
+            "the delegation must register exactly one durable child run"
+        );
+        let (parent_run_id, goal, start_key, agent_id) = &r.started_child_runs[0];
+        assert_eq!(parent_run_id, &sample_request().run_id);
+        assert_eq!(
+            agent_id, "task",
+            "the child run is labelled by the subagent's task label \
+             (subagent.task -> task), not by the tool name or the step id"
+        );
+        assert!(
+            !goal.is_empty(),
+            "the child run must carry the delegated goal, or the lineage row says nothing"
+        );
+        assert_eq!(
+            start_key,
+            &format!("{}:tool_1_sub-1", sample_request().run_id),
+            "start_key must be identifiers only — stable across retries and \
+             carrying no prompt or tool content"
+        );
+        assert_eq!(
+            r.lineage_edges,
+            vec![(
+                sample_request().run_id.clone(),
+                format!("child-{}:tool_1_sub-1", sample_request().run_id),
+                pb::SubagentRole::Generic as i32,
+            )],
+            "the parent -> child edge must be recorded, since the lineage \
+             endpoint reads subagent_edges and not runs.parent_run_id"
+        );
+        // The child settles its own obligation; an unsettled managed run is
+        // force-failed by the deadline watchdog.
+        assert!(
+            r.managed_terminal_outcomes
+                .iter()
+                .any(|(run_id, _, outcome, _)| {
+                    run_id == &format!("child-{}:tool_1_sub-1", sample_request().run_id)
+                        && *outcome == pb::TerminalOutcome::Completed as i32
+                }),
+            "the delegated child run must be settled Completed"
         );
         assert_eq!(
             r.plan_transitions,
@@ -4163,6 +6335,37 @@ mod tests {
         assert!(
             !output.contains("spawned"),
             "the fabricated 'spawned <tool>' summary is gone: {output}"
+        );
+
+        // COLD RESUME (harness-adoption 1.1). The answer above lives in the
+        // parent's live message history and dies with the process. What survives
+        // is this: the answer written to the CHILD run's own record, readable
+        // afterwards through `read_subagent_result` once the user allows it.
+        //
+        // The parent's own run must NOT be the one carrying it — that is the
+        // whole authority split. Asserting the run id, not just the presence,
+        // is what makes this a boundary test rather than a "something was
+        // written" test.
+        assert_eq!(
+            r.recorded_run_outputs.len(),
+            1,
+            "the delegation's answer must be recorded exactly once"
+        );
+        let (answer_run_id, answer) = &r.recorded_run_outputs[0];
+        assert_eq!(
+            answer_run_id,
+            &format!("child-{}:tool_1_sub-1", sample_request().run_id),
+            "the answer belongs to the CHILD run's record, never the parent's"
+        );
+        assert_ne!(
+            answer_run_id,
+            &sample_request().run_id,
+            "writing it onto the parent run would make the conclusion readable \
+             with no permission asked, which is exactly what the split prevents"
+        );
+        assert!(
+            answer.contains(SUBAGENT_ANSWER),
+            "the recorded answer must be the subagent's actual conclusion: {answer}"
         );
     }
 
@@ -4230,6 +6433,434 @@ mod tests {
         assert!(
             outer_output.contains("I completed it myself."),
             "{outer_output}"
+        );
+    }
+
+    /// THE safety property for pre-dispatch validation, in this loop too: it must
+    /// have no opinion on any legitimate call against our own catalogue. A
+    /// validator that refuses a call the executor would have accepted breaks a
+    /// working tool, which is strictly worse than not validating.
+    #[test]
+    fn validation_never_objects_to_a_legitimate_call_on_the_offered_catalogue() {
+        let offered = offered_tool_defs();
+        for def in &offered {
+            let args = minimal_valid_arguments(&def.parameters_json);
+            assert!(
+                argument_problem(&offered, &def.name, &args, "").is_none(),
+                "'{}' rejects its own minimally valid arguments {args}",
+                def.name
+            );
+        }
+    }
+
+    /// And it must not form an opinion about a tool whose schema this run does not
+    /// hold. A client-declared or MCP tool absent from the offered set is the
+    /// purpose-lock's business, not the validator's — guessing a schema would be
+    /// worse than not checking.
+    #[test]
+    fn validation_has_no_opinion_on_a_tool_it_was_not_offered() {
+        let offered = offered_tool_defs();
+        assert!(argument_problem(&offered, "mcp__acme__do_thing", "{}", "").is_none());
+        assert!(argument_problem(&[], "yr_weather", "{}", "").is_none());
+    }
+
+    /// Smallest object satisfying a schema's `required` fields — enough to clear
+    /// validation, nothing invented beyond that.
+    fn minimal_valid_arguments(parameters_json: &str) -> String {
+        let Ok(schema) = serde_json::from_str::<serde_json::Value>(parameters_json) else {
+            return "{}".to_owned();
+        };
+        let props = schema.get("properties").and_then(|p| p.as_object());
+        let required = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|r| r.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut out = serde_json::Map::new();
+        for field in required {
+            let spec = props.and_then(|p| p.get(field));
+            let value = match spec.and_then(|s| s.get("enum")).and_then(|e| e.as_array()) {
+                Some(values) if !values.is_empty() => values[0].clone(),
+                _ => match spec.and_then(|s| s.get("type")).and_then(|t| t.as_str()) {
+                    Some("number" | "integer") => serde_json::json!(1),
+                    Some("boolean") => serde_json::json!(true),
+                    Some("array") => serde_json::json!([]),
+                    Some("object") => serde_json::json!({}),
+                    _ => serde_json::json!("x"),
+                },
+            };
+            out.insert(field.to_owned(), value);
+        }
+        serde_json::Value::Object(out).to_string()
+    }
+
+    /// A delegated subagent has no children (`MAX_DEPTH == 1`), so both
+    /// delegation-record tools would only ever return nothing for it.
+    ///
+    /// It must be TOLD that, not handed an empty list. An empty list reads as
+    /// "the delegations I made produced nothing" — a claim about work it never
+    /// did, and the exact class of fabrication the fake `spawned <tool>` summary
+    /// used to produce.
+    #[tokio::test]
+    async fn a_delegated_subagent_is_told_why_it_has_no_delegation_records() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call(
+                        "sub-1",
+                        r#"{"goal":"summarise earlier findings"}"#,
+                    )],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![pb::ToolCall {
+                        id: "list-1".to_owned(),
+                        name: crate::runtime_loop::subagent_results::LIST_TOOL.to_owned(),
+                        arguments_json: "{}".to_owned(),
+                    }],
+                },
+                Scripted::Answer("I have no delegations of my own.".to_owned()),
+                Scripted::Answer("Reported back.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        // `auto`, deliberately: this refusal must not depend on a posture. If it
+        // only fired under `ask` it would be the pre-existing approval refusal
+        // wearing this test's name.
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a refused record read inside a subagent must not fail the run");
+
+        assert_eq!(resp.status, "completed");
+        drop(rec.lock().unwrap());
+        let observed = observed_messages.lock().unwrap();
+        assert_eq!(observed.len(), 4, "parent, child, child, parent");
+        let subagent_next_round = observed[2]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or("", |message| message.content.as_str());
+        assert!(
+            subagent_next_round.contains("only available to the main agent")
+                && subagent_next_round.contains("no subagent results"),
+            "the refusal must reach the subagent's next round with its reason stated: \
+             {subagent_next_round}"
+        );
+    }
+
+    /// The graded rung, enforced per call in the real loop.
+    ///
+    /// `auto` posture deliberately: under `auto` nothing is gated on risk, so a
+    /// refusal here can only be the rung. That is the whole point — the ladder
+    /// expresses a state neither `plan_mode` (all or nothing) nor the posture
+    /// (`auto` gates nothing) can.
+    #[tokio::test]
+    async fn a_granted_rung_refuses_what_it_does_not_cover_and_permits_what_it_does() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        // Above the granted rung: an outbound action.
+                        pb::ToolCall {
+                            id: "send-1".to_owned(),
+                            name: "send_invoice".to_owned(),
+                            arguments_json: "{}".to_owned(),
+                        },
+                        // At the granted rung: a read, which must still run.
+                        pb::ToolCall {
+                            id: "look-1".to_owned(),
+                            name: "company_lookup".to_owned(),
+                            arguments_json: r#"{"query":"Aquatiq"}"#.to_owned(),
+                        },
+                    ],
+                },
+                Scripted::Answer("I could not send it; here is what I found.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.plan_mode = false;
+        req.autonomy_rung = pb::AutonomyRung::WorkspaceWrite as i32;
+        req.tools = vec![pb::ToolDefinition {
+            name: "send_invoice".to_owned(),
+            description: "Send an invoice to a customer.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a refused rung must not fail the run");
+        assert_eq!(resp.status, "completed");
+
+        drop(rec.lock().unwrap());
+        let observed = observed_messages.lock().unwrap();
+        let next_round = observed[1]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or("", |message| message.content.as_str());
+        assert!(
+            next_round.contains("danger_full_access") && next_round.contains("workspace_write"),
+            "the refusal must name both rungs so the model knows how far short it is: {next_round}"
+        );
+        assert!(
+            next_round.contains("requires a person"),
+            "the model must be told it cannot widen its own authority: {next_round}"
+        );
+        // The read at the granted rung was NOT collateral damage.
+        assert!(
+            next_round.contains("company_lookup"),
+            "a refusal above the rung must not suppress a call at it: {next_round}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delegated_subagent_may_never_run_a_risky_tool_even_under_auto_mode() {
+        // Leaf/orchestrator role split (§7.3): even under `auto` -- where the
+        // TOP-LEVEL run would execute `delete_records` with no gating at all --
+        // a delegated subagent must refuse it outright. `auto` mode is chosen
+        // deliberately, not `ask`, so this proves the NEW blocklist fired, not
+        // the pre-existing "a subagent cannot request approval" refusal (which
+        // only applies under `ask` and would mask this from ever being tested).
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"purge stale records"}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![pb::ToolCall {
+                        id: "del-1".to_owned(),
+                        name: "delete_records".to_owned(),
+                        arguments_json: "{}".to_owned(),
+                    }],
+                },
+                Scripted::Answer("I could not complete this myself.".to_owned()),
+                Scripted::Answer("Reported back: could not complete it.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.tools = vec![pb::ToolDefinition {
+            name: "delete_records".to_owned(),
+            description: "Delete records (destructive).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a refused risky tool inside a subagent must not fail the run");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, "Reported back: could not complete it.");
+
+        // The rejection happens in the sequential pre-pass (same phase as
+        // purpose-lock), before any `record_tool_step` audit write, so it is
+        // never durably persisted on its own -- it is fed back to the
+        // subagent as its next round's tool context, exactly like a
+        // purpose-lock rejection. Verify it landed there.
+        drop(rec.lock().unwrap());
+        let observed = observed_messages.lock().unwrap();
+        assert_eq!(observed.len(), 4, "parent, child, child, parent");
+        // The tool-context message `format_tool_context` appends is the LAST
+        // "user" message in the subagent's second-round request, not the
+        // first (which is still the original delegated goal).
+        let subagent_next_round = observed[2]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or("", |message| message.content.as_str());
+        assert!(
+            subagent_next_round.contains("may never run")
+                && subagent_next_round.contains("regardless of the run's permission mode"),
+            "the refusal must reach the subagent's own next round, naming itself as the \
+             leaf-role blocklist rather than a generic denial: {subagent_next_round}"
+        );
+        assert!(
+            !subagent_next_round.contains("deleted"),
+            "a refused risky call must never look like it actually ran: {subagent_next_round}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_round_refuses_only_its_last_tool_call_and_runs_the_rest() {
+        // pi's version of this guard fails EVERY call in a length-stopped
+        // message. Providers emit content blocks in order, so only the final
+        // one can be half-written — failing the earlier, complete calls would
+        // discard valid work. This pins the more precise behaviour (and
+        // matches model-gateway's inline loop, per the contract test).
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::TruncatedToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        // Complete: dispatches for real and fails fast on its
+                        // own missing coordinates, proving it RAN.
+                        failing_tool_call("wx-complete"),
+                        // Truncated: must be refused before dispatch.
+                        failing_tool_call("wx-cut-off"),
+                    ],
+                },
+                Scripted::Answer("Retried the cut-off call properly.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a truncated round must not fail the run");
+        assert_eq!(resp.status, "completed");
+
+        // The complete call was audited (it really dispatched); the truncated
+        // one never reached `record_tool_step`, exactly like a purpose-lock
+        // rejection.
+        let r = rec.lock().unwrap();
+        let recorded: Vec<&str> = r.completed.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            recorded,
+            vec!["tool_1_wx-complete"],
+            "only the complete call should have been dispatched/audited: {recorded:?}"
+        );
+        drop(r);
+
+        // And the model was told WHY, in its next round's tool context.
+        let observed = observed_messages.lock().unwrap();
+        let next_round = observed[1]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or("", |message| message.content.as_str());
+        assert!(
+            next_round.contains("output token limit") && next_round.contains("truncated"),
+            "the refusal must name truncation as the cause: {next_round}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_refuses_a_risky_tool_at_the_top_level_even_under_auto_mode() {
+        // Server-side plan-mode enforcement (§13.5 item 3). `mode = "auto"`
+        // is chosen deliberately: under `ask` this would ALSO be blocked by
+        // the pre-existing approval gate, which would mask whether the NEW
+        // plan-mode check fired at all. This is the top-level (depth 0) run
+        // -- the leaf-blocklist test above covers the delegated-subagent
+        // case; this one proves plan mode restricts the ORCHESTRATOR itself,
+        // which depth alone never would.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![pb::ToolCall {
+                    id: "del-1".to_owned(),
+                    name: "delete_records".to_owned(),
+                    arguments_json: "{}".to_owned(),
+                }],
+            },
+            Scripted::Answer("I described the plan instead of deleting anything.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let gated_tools = vec![pb::ToolDefinition {
+            name: "delete_records".to_owned(),
+            description: "Delete records (destructive).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.plan_mode = true;
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            gated_tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a refused plan-mode tool call must not fail the run");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            resp.final_output,
+            "I described the plan instead of deleting anything."
+        );
+        // Never durably recorded as having run (same reasoning as the
+        // leaf-blocklist rejection: it is fed back as tool context, not
+        // audited as an executed step) -- confirm no step was persisted.
+        let r = rec.lock().unwrap();
+        assert!(
+            r.completed.is_empty(),
+            "plan mode must refuse before any step is dispatched/recorded: {:?}",
+            r.completed
         );
     }
 
@@ -4363,5 +6994,503 @@ mod tests {
             error.contains("1-round budget"),
             "the clamp to the parent's remainder is what the subagent actually got: {error}"
         );
+    }
+
+    /// THE continuation property, and the bug it fixes.
+    ///
+    /// `start_key` is `<parent_run_id>:<parent_step_id>` — identifiers only — so
+    /// a re-driven parent step reuses its child run instead of forking the
+    /// lineage. That makes re-running the nested loop actively wrong: the child
+    /// already carries an IMMUTABLE terminal receipt, so a second
+    /// `RecordTerminalOutcome` returns the FIRST outcome. A replay that re-ran
+    /// and succeeded would hand the parent a good answer while the ledger kept
+    /// saying the child failed.
+    ///
+    /// So a replay resumes from the recorded answer and charges zero rounds —
+    /// asserted by the round count, which is what proves no work was redone.
+    #[tokio::test]
+    async fn a_replayed_delegation_resumes_from_its_recorded_answer_without_re_running() {
+        const RECORDED: &str = "Bring, 412 NOK (from the first attempt)";
+        let start_key = format!("{}:tool_1_sub-1", sample_request().run_id);
+        let child_run_id = format!("child-{start_key}");
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        {
+            // The delegation already happened: a child run exists for this
+            // start_key and its answer is on the record.
+            let mut r = rec.lock().unwrap();
+            r.started_child_runs.push((
+                sample_request().run_id.clone(),
+                "lookup the carrier".to_owned(),
+                start_key,
+                "task".to_owned(),
+            ));
+            r.recorded_run_outputs
+                .push((child_run_id.clone(), RECORDED.to_owned()));
+        }
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        // Exactly TWO scripted rounds: the parent's delegating round and its
+        // answer. A third would mean the nested loop ran.
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"lookup the carrier"}"#)],
+                },
+                Scripted::Answer(format!("The carrier is {RECORDED}")),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a resumed delegation completes the run");
+
+        assert_eq!(resp.status, "completed");
+        // `rounds_executed` is parent + delegated. Two here means the parent's
+        // delegating and answering rounds and ZERO delegated rounds — the
+        // non-replay version of this same script charges 4
+        // (`subagent_runs_a_real_nested_loop_...`), so the difference is exactly
+        // the work a resume did not redo.
+        assert_eq!(
+            resp.rounds_executed, 2,
+            "2 parent rounds and NO delegated round: a resume redoes no work"
+        );
+        assert_eq!(
+            observed_messages.lock().unwrap().len(),
+            2,
+            "two inference calls — the nested loop never ran"
+        );
+
+        let r = rec.lock().unwrap();
+        let (output, error) = persisted_step(&r, "tool_1_sub-1");
+        assert!(
+            output.contains(RECORDED),
+            "the recorded answer IS the tool output: {output}"
+        );
+        assert!(error.is_empty(), "a resumed delegation is not a failure");
+        // And no second answer was written: the record already had one, and
+        // overwriting it would replace the answer the receipt was settled for.
+        assert_eq!(
+            r.recorded_run_outputs.len(),
+            1,
+            "a resume must not rewrite the recorded answer"
+        );
+    }
+
+    /// A replay whose earlier attempt left nothing to hand back must SAY so, not
+    /// re-run. Re-running is what produces the good-answer/bad-ledger pair, and
+    /// it is exactly the case where re-running looks most tempting.
+    #[tokio::test]
+    async fn a_replayed_delegation_with_nothing_recorded_is_refused_not_re_run() {
+        let start_key = format!("{}:tool_1_sub-1", sample_request().run_id);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().started_child_runs.push((
+            sample_request().run_id.clone(),
+            "lookup the carrier".to_owned(),
+            start_key,
+            "task".to_owned(),
+        ));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"lookup the carrier"}"#)],
+                },
+                Scripted::Answer("I could not get that finding.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a refused replay must not fail the run");
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            observed_messages.lock().unwrap().len(),
+            2,
+            "the nested loop must not run for a replay"
+        );
+
+        let r = rec.lock().unwrap();
+        let (_, error) = persisted_step(&r, "tool_1_sub-1");
+        assert!(
+            error.contains("already ran once for this step"),
+            "the refusal must name the replay as the reason: {error}"
+        );
+        assert!(
+            error.contains("yourself"),
+            "and tell the model what to do instead: {error}"
+        );
+    }
+
+    /// A delegation still in flight from an earlier attempt is a different
+    /// refusal: starting it again would fork one delegation into two.
+    #[tokio::test]
+    async fn a_replayed_delegation_still_running_is_refused_as_in_flight() {
+        let start_key = format!("{}:tool_1_sub-1", sample_request().run_id);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        {
+            let mut r = rec.lock().unwrap();
+            r.started_child_runs.push((
+                sample_request().run_id.clone(),
+                "lookup the carrier".to_owned(),
+                start_key,
+                "task".to_owned(),
+            ));
+            r.replayed_run_status = Some("running".to_owned());
+        }
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![subagent_call("sub-1", r#"{"goal":"lookup the carrier"}"#)],
+            },
+            Scripted::Answer("Still waiting on that.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("an in-flight replay must not fail the run");
+
+        let r = rec.lock().unwrap();
+        let (_, error) = persisted_step(&r, "tool_1_sub-1");
+        assert!(
+            error.contains("still running") && error.contains("fork one delegation into two"),
+            "an in-flight replay is its own refusal, not 'nothing recorded': {error}"
+        );
+    }
+
+    /// The per-run child ceiling (`subagent::MAX_TOTAL_CHILDREN`), which the
+    /// round budget genuinely cannot express.
+    ///
+    /// # Why the round budget is not already this
+    ///
+    /// The premise this test started from was wrong and the failure said so: a
+    /// single round cannot fan out at all, because the first `spawn` claims the
+    /// whole remaining pool with `swap(0)` and every sibling is then refused for
+    /// lack of budget. So fan-out within one round is already bounded to one.
+    ///
+    /// The real runaway is ACROSS rounds — one delegation per round, for as many
+    /// rounds as the budget allows. A generous `max_rounds` therefore permits
+    /// dozens of durable child runs, lineage rows and managed obligations from a
+    /// single conversation. This test gives the run far more budget than the
+    /// ceiling and proves the ceiling, not the budget, is what stops it.
+    #[tokio::test]
+    async fn the_per_run_child_ceiling_bounds_delegations_across_rounds() {
+        let over = crate::subagent::MAX_TOTAL_CHILDREN + 1;
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+
+        // One delegation per round, each answered in a single child round, for
+        // one round more than the ceiling allows. The trailing answer is the
+        // parent's own, after the refusal it reads as a tool error.
+        let mut script = Vec::new();
+        for index in 0..over {
+            script.push(Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![subagent_call(
+                    &format!("sub-{index}"),
+                    &format!(r#"{{"goal":"lookup {index}","max_rounds":1}}"#),
+                )],
+            });
+            script.push(Scripted::Answer(format!("finding {index}")));
+        }
+        script.push(Scripted::Answer("Collected the findings.".to_owned()));
+        let inference_channel = spawn_inference_channel(script).await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        // Far above what the delegations together can spend, so a refusal here
+        // cannot be the pool talking.
+        req.max_rounds = 64;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("a refused delegation must not fail the run");
+        assert_eq!(resp.status, "completed");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            u32::try_from(r.started_child_runs.len()).unwrap(),
+            crate::subagent::MAX_TOTAL_CHILDREN,
+            "the ceiling must cap the DURABLE child runs, not merely the answers"
+        );
+
+        // The refusal the model reads must name the ceiling. Blaming the round
+        // budget would be false — it had 60+ rounds left — and would send the
+        // model to re-plan the wrong constraint.
+        let refusals: Vec<String> = (0..over)
+            .map(|index| persisted_step(&r, &format!("tool_{}_sub-{index}", index + 1)).1)
+            .filter(|error| !error.is_empty())
+            .collect();
+        assert_eq!(
+            refusals.len(),
+            1,
+            "exactly one delegation is refused, and only the last: {refusals:?}"
+        );
+        assert!(
+            refusals[0].contains("per-run limit"),
+            "the refusal must name the ceiling: {}",
+            refusals[0]
+        );
+        assert!(
+            !refusals[0].contains("no round budget left"),
+            "blaming the round budget would be false — it had plenty: {}",
+            refusals[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_delegations_in_one_round_share_the_same_budget_pool() {
+        // Same setup as `subagent_budget_cannot_exceed_the_parents_remaining_rounds`
+        // (parent has exactly 1 round left to lend) but with TWO greedy
+        // delegations requested in the SAME round, dispatched concurrently.
+        // Before the shared-pool fix, each `LoopSubagentDispatch` would have
+        // captured its OWN full 1-round snapshot and could independently spend
+        // it, letting the pair together consume up to 2 delegated rounds from
+        // a run that only had 1 left. With the shared pool, the second claim
+        // observes what the first already spent.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![
+                    subagent_call("sub-a", r#"{"goal":"boil the ocean","max_rounds":99}"#),
+                    subagent_call("sub-b", r#"{"goal":"count the stars","max_rounds":99}"#),
+                ],
+            }],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.max_rounds = 2;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("an exhausted run is still finalized");
+
+        assert_eq!(
+            resp.rounds_executed, 2,
+            "1 parent round + at most 1 delegated round shared by the pair -- \
+             not 3, which is what a per-call snapshot (each sibling seeing the \
+             full 1-round remainder independently) would have produced"
+        );
+
+        let r = rec.lock().unwrap();
+        let (_, error_a) = persisted_step(&r, "tool_1_sub-a");
+        let (_, error_b) = persisted_step(&r, "tool_2_sub-b");
+        // Exactly one of the pair could have actually claimed the run's single
+        // remaining round; the other must see the pool already spent (refused
+        // outright, never getting to run at all) regardless of what the first
+        // one then did with its claim. Which one wins is a dispatch-order
+        // detail, not a contract this test pins.
+        let refused = [&error_a, &error_b]
+            .into_iter()
+            .filter(|error| error.contains("no round budget left to lend"))
+            .count();
+        assert_eq!(
+            refused, 1,
+            "exactly one sibling must be refused outright for lack of shared \
+             budget -- 0 would mean the pool did not cap them at all, and 2 \
+             would mean neither could claim it: sub-a={error_a:?} sub-b={error_b:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_after_the_first_pause_is_still_recorded_not_silently_dropped() {
+        // `delete_records` (index 0) pauses for approval; `yr_weather` (index 1,
+        // offered alongside it) comes AFTER the pausing call in the model's own
+        // array order. Concurrent dispatch means it still genuinely runs (it
+        // never needed approval), and Phase 3 must still write its audit step
+        // even though the round as a whole returns `awaiting_approval` --
+        // a call that really executed must never go missing from the run's own
+        // record just because a sibling elsewhere in the batch needed a human.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![
+                pb::ToolCall {
+                    id: "del-1".to_owned(),
+                    name: "delete_records".to_owned(),
+                    arguments_json: "{}".to_owned(),
+                },
+                failing_tool_call("wx-1"),
+            ],
+        }])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let gated_tools = vec![
+            pb::ToolDefinition {
+                name: "delete_records".to_owned(),
+                description: "Delete records (destructive).".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            },
+            pb::ToolDefinition {
+                name: "yr_weather".to_owned(),
+                description: "Weather lookup.".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            },
+        ];
+
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            gated_tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("durable approval should pause the run");
+
+        assert_eq!(resp.status, "awaiting_approval");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.approvals.len(),
+            1,
+            "exactly one durable approval, for del-1"
+        );
+        assert_eq!(r.approvals[0].0, "tool_1_del-1");
+        // The genuinely-executed sibling still has its own audit step, despite
+        // sitting after the pausing call in the model's array order.
+        assert_eq!(
+            r.completed,
+            vec![("tool_2_wx-1".to_owned(), "running".to_owned())],
+            "wx-1 actually ran (concurrently) and must not vanish from the audit trail"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_approval_needing_call_in_the_same_batch_does_not_get_a_second_durable_approval(
+    ) {
+        // Two independently gated calls in one round. Only the first (by array
+        // order) may win the durable, idempotency-keyed approval; a second
+        // approval write in the same round would be a duplicate the model
+        // never asked to reconcile, and the run can only be `AwaitingApproval`
+        // for one thing at a time.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![
+                pb::ToolCall {
+                    id: "del-1".to_owned(),
+                    name: "delete_records".to_owned(),
+                    arguments_json: "{}".to_owned(),
+                },
+                pb::ToolCall {
+                    id: "del-2".to_owned(),
+                    name: "delete_records".to_owned(),
+                    arguments_json: "{}".to_owned(),
+                },
+            ],
+        }])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let gated_tools = vec![pb::ToolDefinition {
+            name: "delete_records".to_owned(),
+            description: "Delete records (destructive).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            gated_tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("durable approval should pause the run");
+
+        assert_eq!(resp.status, "awaiting_approval");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.approvals.len(),
+            1,
+            "del-2 also needed approval, but only del-1 (first by array order) gets \
+             the durable write; del-2 can be requested again once the run resumes"
+        );
+        assert_eq!(r.approvals[0].0, "tool_1_del-1");
     }
 }

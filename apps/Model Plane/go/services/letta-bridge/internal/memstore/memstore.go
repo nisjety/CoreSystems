@@ -97,7 +97,7 @@ func (s *Store) Delete(orgID, userID, memoryID string) bool {
 // Search returns up to topK hits whose content contains the query substring
 // (case-insensitive), scoped to the given org and optional thread/topic filters.
 // An empty query matches all records in scope. If topK <= 0, all matches are returned.
-func (s *Store) Search(orgID, threadID, query string, topicFilter []string, updatedAfter time.Time, topK int32) []Hit {
+func (s *Store) Search(orgID, threadID, userID, query string, topicFilter []string, updatedAfter time.Time, topK int32) []Hit {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	hits := make([]Hit, 0)
@@ -111,6 +111,12 @@ func (s *Store) Search(orgID, threadID, query string, topicFilter []string, upda
 			continue
 		}
 		if threadID != "" && r.ThreadID != threadID {
+			continue
+		}
+		// Own user-scoped memories plus everything owned by nobody
+		// (org/workspace/policy), matching pgstore and session-core's durable
+		// rule. Without this the semantic tier is wider than the durable one.
+		if userID != "" && r.UserID != "" && r.UserID != userID {
 			continue
 		}
 		if len(allowedTopics) > 0 {

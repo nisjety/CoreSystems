@@ -1034,6 +1034,7 @@ fn to_internal_request(
         .collect();
 
     Ok(provider::InferRequest {
+        thinking_budget_tokens: req.thinking_budget_tokens,
         request_id: req.request_id.clone(),
         provider_hint: req.provider_hint.clone(),
         model: req.model.clone(),
@@ -1049,6 +1050,7 @@ fn to_internal_request(
         min_privacy_tier: tier_from_wire(req.min_privacy_tier)?,
         tools,
         tool_choice: req.tool_choice.clone(),
+        min_residency: req.min_residency.clone(),
         org_id: principal.org_id.clone(),
         user_id: principal.budget_user_id(),
         // The verified caller's own token, forwarded so the intent layer's
@@ -1277,6 +1279,29 @@ fn validate_video_generation(req: &pb::CreateVideoGenerationJobRequest) -> Resul
     Ok(())
 }
 
+/// gRPC trailer key carrying inference-core's own classification of a provider
+/// failure, so downstream services read a type instead of matching prose.
+///
+/// Additive by design: the Status message still holds the provider's original
+/// text, so a caller that has not adopted this key behaves exactly as before.
+pub const PROVIDER_ERROR_KIND_TRAILER: &str = "x-mp-provider-error";
+
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] for a prompt over the input limit.
+pub const PROVIDER_ERROR_TOO_LONG: &str = "too_long";
+
+fn too_long_status(detail: &str) -> Status {
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    match PROVIDER_ERROR_TOO_LONG.parse() {
+        Ok(value) => {
+            metadata.insert(PROVIDER_ERROR_KIND_TRAILER, value);
+        }
+        // Unreachable for a static ASCII literal; if it ever were, the typed
+        // signal is simply absent and the message-text fallback still applies.
+        Err(_) => tracing::error!("provider error kind is not a valid trailer value"),
+    }
+    Status::with_metadata(tonic::Code::Unavailable, detail.to_owned(), metadata)
+}
+
 fn provider_error_to_status(error: provider::ProviderError) -> Status {
     match error {
         provider::ProviderError::InvalidResponse(message) => Status::invalid_argument(message),
@@ -1284,6 +1309,14 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         provider::ProviderError::Unavailable(message) | provider::ProviderError::Http(message) => {
             Status::unavailable(message)
         }
+        // Code stays `unavailable`, deliberately. An overflow error is
+        // retryable in a way an invalid argument is not: FallbackChain can move
+        // the request to a larger-context provider, and a prompt too long for
+        // an 8k model may well fit a 200k one. Re-coding this to
+        // `invalid_argument` would silently remove that recovery path. What is
+        // added is the machine-readable type, so a caller no longer has to
+        // re-derive it from provider prose.
+        provider::ProviderError::TooLong { detail } => too_long_status(&detail),
         provider::ProviderError::AllExhausted { attempts } => {
             Status::unavailable(format!("all providers exhausted after {attempts} attempts"))
         }
@@ -1319,6 +1352,7 @@ mod tests {
     fn internal_infer_scope_comes_only_from_verified_principal() {
         let principal = AuthenticatedPrincipal::for_test("org-signed", Some("user-signed"), true);
         let request = pb::InferRequest {
+            thinking_budget_tokens: 0,
             org_id: "org-signed".to_owned(),
             zdr: false,
             ..Default::default()
