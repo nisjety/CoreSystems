@@ -229,3 +229,126 @@ func TestModelsRegistry_Delete_SoftThenNotFound(t *testing.T) {
 		t.Fatalf("expected ErrCapabilityNotFound on second delete, got %v", err)
 	}
 }
+
+// allMigrationFilenames lists every up migration through 0013 in order.
+// Separate from setupModelsRegistry's 0001+0002-only list (used by
+// TestModelsRegistry_List_SeedCount, which asserts the pre-0013 seed count)
+// so that test is unaffected by later migrations.
+func allMigrationFilenames() []string {
+	return []string{
+		"0001_models.up.sql",
+		"0002_seed_models.up.sql",
+		"0003_capabilities_registry.up.sql",
+		"0004_seed_self_owned_systems.up.sql",
+		"0005_seed_operating_map_capability.up.sql",
+		"0006_capability_availability_contract.up.sql",
+		"0007_tenant_scopes_and_risk_constraints.up.sql",
+		"0008_execution_dispatch_capabilities.up.sql",
+		"0009_mcp_oauth_client_columns.up.sql",
+		"0010_sandbox_code_execution_capability.up.sql",
+		"0011_conversation_ticket_action_capability.up.sql",
+		"0012_run_watch_subscriptions.up.sql",
+		"0013_privacy_tier_columns.up.sql",
+	}
+}
+
+func setupModelsRegistryAllMigrations(t *testing.T) (*ModelsRegistry, *pgxpool.Pool) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	container, err := tcpostgres.Run(ctx,
+		"postgres:16-alpine",
+		tcpostgres.WithDatabase("capabilities"),
+		tcpostgres.WithUsername("test"),
+		tcpostgres.WithPassword("test"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	if err != nil {
+		t.Fatalf("start postgres container: %v", err)
+	}
+	t.Cleanup(func() {
+		termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer termCancel()
+		_ = container.Terminate(termCtx)
+	})
+
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("get conn string: %v", err)
+	}
+
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	migrationsDir := filepath.Join("..", "..", "migrations")
+	for _, name := range allMigrationFilenames() {
+		path := filepath.Join(migrationsDir, name)
+		sqlBytes, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
+	}
+
+	reg, err := NewModelsRegistry(pool)
+	if err != nil {
+		t.Fatalf("new models registry: %v", err)
+	}
+	return reg, pool
+}
+
+func TestModelsRegistry_Migration0013_DefaultsToUnspecified(t *testing.T) {
+	reg, _ := setupModelsRegistryAllMigrations(t)
+	ctx := context.Background()
+
+	m, err := reg.GetByName(ctx, uuid.Nil, "openai", "gpt-4o")
+	if err != nil {
+		t.Fatalf("GetByName: %v", err)
+	}
+	if m.PrivacyTier != models.PrivacyTierUnspecified {
+		t.Fatalf("expected default privacy_tier=unspecified, got %q", m.PrivacyTier)
+	}
+	if m.Residency != "" {
+		t.Fatalf("expected default residency='', got %q", m.Residency)
+	}
+}
+
+func TestModelsRegistry_Migration0013_RejectsUnknownPrivacyTier(t *testing.T) {
+	_, pool := setupModelsRegistryAllMigrations(t)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, `UPDATE models SET privacy_tier = 'bogus' WHERE provider = 'openai' AND name = 'gpt-4o'`)
+	if err == nil {
+		t.Fatal("expected the models_privacy_tier_check constraint to reject an unknown tier label")
+	}
+}
+
+func TestModelsRegistry_Migration0013_SoftDeletesDecorativeGeminiSeed(t *testing.T) {
+	reg, _ := setupModelsRegistryAllMigrations(t)
+	ctx := context.Background()
+
+	if _, err := reg.GetByName(ctx, uuid.Nil, "google", "gemini-1.5-pro"); !errors.Is(err, domain.ErrCapabilityNotFound) {
+		t.Fatalf("expected the decorative google/gemini-1.5-pro seed row to be soft-deleted, got err=%v", err)
+	}
+
+	list, err := reg.List(ctx, ModelsFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, m := range list {
+		if m.Provider == "google" && m.Name == "gemini-1.5-pro" {
+			t.Fatal("soft-deleted gemini row must not appear in List (deleted_at IS NULL filter)")
+		}
+	}
+}

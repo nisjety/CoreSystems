@@ -123,6 +123,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Startup-loaded cache over the models table (PROVIDER_AND_PRIVACY_STRATEGY.md
+	// §4.5): ListCapabilities/GetCapability must not perform a synchronous
+	// Postgres round-trip per request. modelsCache is what the server actually
+	// reads from; modelsReg remains available for future admin-side writes.
+	modelsCache, err := registry.NewModelsCache(ctx, modelsReg)
+	if err != nil {
+		slog.Error("models cache initial load failed", "error", err)
+		os.Exit(1)
+	}
+
 	capStore, err := registry.NewCapabilitiesStore(pool)
 	if err != nil {
 		slog.Error("capabilities store unavailable", "error", err)
@@ -351,7 +361,7 @@ func main() {
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPC)))
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
-	capSrv := capserver.NewServer(reg, modelsReg, pol).WithStore(capStore)
+	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore)
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}
