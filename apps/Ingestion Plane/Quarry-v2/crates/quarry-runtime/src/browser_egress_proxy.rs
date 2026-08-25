@@ -147,6 +147,12 @@ impl PinnedBrowserEgressProxy {
     }
 }
 
+impl Default for PinnedBrowserEgressProxy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl BrowserEgressProxyProvider for PinnedBrowserEgressProxy {
     async fn endpoint_for_session(

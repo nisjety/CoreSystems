@@ -164,16 +164,11 @@ impl IngestClient {
         let status = resp.status();
         if !status.is_success() {
             return Err(QuarryError::new(
-                if status.as_u16() == 429 {
-                    ErrorCode::RateLimited
-                } else if status.as_u16() == 401 {
-                    ErrorCode::Forbidden
-                } else if status.as_u16() == 403 {
-                    ErrorCode::Forbidden
-                } else if status.as_u16() >= 500 {
-                    ErrorCode::DriverFailed
-                } else {
-                    ErrorCode::BadRequest
+                match status.as_u16() {
+                    429 => ErrorCode::RateLimited,
+                    401 | 403 => ErrorCode::Forbidden,
+                    code if code >= 500 => ErrorCode::DriverFailed,
+                    _ => ErrorCode::BadRequest,
                 },
                 format!("data plane returned status {}", status.as_u16()),
             ));
