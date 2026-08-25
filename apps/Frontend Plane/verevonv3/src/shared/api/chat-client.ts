@@ -1,5 +1,10 @@
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
+import {
+  isSelectablePrivacyTier,
+  normalizePrivacyTier,
+  type PrivacyTier,
+} from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import {
@@ -81,6 +86,14 @@ export type ChatInvokeRequest = {
   regenerated?: boolean
   /** This turn is an EDITED resubmit of the previous question. Same reasoning. */
   editResubmit?: boolean
+  /**
+   * Minimum Venice-style privacy tier this turn may be served by
+   * (`min_privacy_tier` on the wire). Enforcement is server-side: ineligible
+   * providers are skipped and an empty remainder fails closed — never a silent
+   * downgrade. OMITTED from the wire unless explicitly set: unspecified means
+   * today's behavior byte-identically.
+   */
+  minPrivacyTier?: PrivacyTier
 }
 
 // ── SSE events (mapped from model-gateway's real event names) ────────────────
@@ -258,6 +271,14 @@ export type ModelInfo = {
   cheap?: boolean
   /** Relative cost tier hint, when the backend reports it. */
   costTier?: 'low' | 'medium' | 'high'
+  /**
+   * Venice-style programmatic privacy tier for this model's provider
+   * (`privacy_tier` on `/v1/models`). `undefined` when absent/unknown — the
+   * UI then renders no claim at all rather than guessing one.
+   */
+  privacyTier?: PrivacyTier
+  /** Data-residency region the backend reports alongside the tier (`residency`). */
+  residency?: string
 }
 
 // Opt-in rich SSE families the model-gateway understands (chat-parity §2).
@@ -389,6 +410,14 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // matching the rest of this body keeps one convention.
     regenerated: request.regenerated ?? false,
     edited_resubmit: request.editResubmit ?? false,
+    // Tier selection is opt-in ONLY: omitted unless the user explicitly picked
+    // a tier, so a default send stays byte-identical to today's behavior
+    // (UNSPECIFIED ⇒ no constraint server-side). Same pattern as
+    // `support_context_query` above. `isSelectablePrivacyTier` (not mere
+    // truthiness) keeps a literal `'unspecified'` OFF the wire too.
+    ...(isSelectablePrivacyTier(request.minPrivacyTier)
+      ? { min_privacy_tier: request.minPrivacyTier }
+      : {}),
   }
 }
 
@@ -817,6 +846,9 @@ export async function listModels(): Promise<ModelInfo[]> {
         name,
       )
       const costTier = normalizeCostTier(item.cost_tier ?? item.cost ?? item.tier)
+      // Unknown/garbage tier values normalize to undefined → neutral UI, never
+      // a fabricated residency claim.
+      const privacyTier = normalizePrivacyTier(item.privacy_tier ?? item.privacyTier)
       return {
         id,
         name,
@@ -828,6 +860,8 @@ export async function listModels(): Promise<ModelInfo[]> {
         provider,
         modality,
         costTier,
+        privacyTier,
+        residency: str(item.residency),
         cheap: readBool(item.cheap) ?? readBool(item.is_cheap),
       }
     })

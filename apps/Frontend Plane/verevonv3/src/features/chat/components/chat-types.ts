@@ -5,6 +5,9 @@ import {
   type ChatAction,
 } from '@/shared/api/chat-client'
 import {
+  type PrivacyTier,
+} from '@/shared/api/privacy-tier'
+import {
   type Approval,
 } from '@/shared/api/orchestration-client'
 import {
@@ -279,6 +282,12 @@ export type SendOptions = {
    */
   regenerated?: boolean
   editResubmit?: boolean
+  /**
+   * Minimum privacy tier requested for this turn (Venice-style tiering).
+   * Only set when the user explicitly picked a tiered catalog model; omitted
+   * otherwise, so unspecified stays byte-identical on the wire.
+   */
+  minPrivacyTier?: PrivacyTier
 }
 
 export type EvidenceSource = (Citation & { kind: 'web' }) | ChatGroundingSource

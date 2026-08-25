@@ -1,4 +1,5 @@
 import { requestJson } from './http'
+import { normalizePrivacyTier, type PrivacyTier } from './privacy-tier'
 
 // Runs-history read model for the Agent Run Console. These call the gateway
 // `/api/v1/agents/runs[/:run_id]` proxy (→ model-gateway → session-core
@@ -26,6 +27,12 @@ export type RunDetail = {
   outputTokens: number
   /** Data-residency region stamped on the run (from RunDetail.metadata.residency). */
   residency?: string
+  /**
+   * Venice-style privacy tier stamped on the run alongside `residency`
+   * (run provenance). `undefined` when absent/unknown — the console then
+   * renders no claim at all rather than guessing one.
+   */
+  privacyTier?: PrivacyTier
   /** RFC3339 timestamps, when present. */
   createdAt?: string
   updatedAt?: string
@@ -62,6 +69,15 @@ function residencyFrom(raw: RawRun): string | undefined {
   return undefined
 }
 
+/** Read a privacy tier from the run's arbitrary metadata object, if present. */
+function privacyTierFrom(raw: RawRun): unknown {
+  const meta = raw.metadata
+  if (meta && typeof meta === 'object') {
+    return (meta as Record<string, unknown>).privacy_tier ?? (meta as Record<string, unknown>).privacyTier
+  }
+  return undefined
+}
+
 /** Normalize a model-gateway run object (snake_case) to our camelCase shape. */
 function normalizeRun(raw: RawRun): RunDetail | null {
   const runId = str(raw.run_id) ?? str(raw.runId) ?? str(raw.id)
@@ -81,6 +97,9 @@ function normalizeRun(raw: RawRun): RunDetail | null {
     inputTokens: num(raw.input_tokens ?? raw.inputTokens),
     outputTokens: num(raw.output_tokens ?? raw.outputTokens),
     residency: str(raw.residency) ?? residencyFrom(raw),
+    // Unknown/garbage tier values degrade to undefined → neutral console UI,
+    // never a fabricated claim.
+    privacyTier: normalizePrivacyTier(raw.privacy_tier ?? raw.privacyTier ?? privacyTierFrom(raw)),
     createdAt: str(raw.created_at) ?? str(raw.createdAt),
     updatedAt: str(raw.updated_at) ?? str(raw.updatedAt),
   }

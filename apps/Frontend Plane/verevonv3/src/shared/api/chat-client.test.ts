@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildChatWireBody,
+  listModels,
   shouldRequestSupportContext,
   describeFeedbackFailure,
   getChatThreadTranscript,
@@ -194,6 +195,53 @@ describe('chat-client tool wiring', () => {
     await streamChat({ content: 'hi' }, { onFollowUps })
 
     expect(onFollowUps).not.toHaveBeenCalled()
+  })
+})
+
+describe('chat invoke privacy tier (Venice tiering)', () => {
+  function jsonResponse(data: unknown): Response {
+    return new Response(JSON.stringify(data), {
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  // Opt-in ONLY: a default send must stay byte-identical to the pre-tier
+  // behavior — unspecified means no constraint server-side.
+  it('omits min_privacy_tier unless explicitly selected', () => {
+    const body = buildChatWireBody({ content: 'hi' })
+    expect(body).not.toHaveProperty('min_privacy_tier')
+  })
+
+  it('emits min_privacy_tier snake_case when a tier is selected', () => {
+    const body = buildChatWireBody({ content: 'hi', minPrivacyTier: 'sovereign' })
+    expect(body.min_privacy_tier).toBe('sovereign')
+  })
+
+  it('never emits min_privacy_tier for unspecified, even if passed', () => {
+    const body = buildChatWireBody({ content: 'hi', minPrivacyTier: 'unspecified' })
+    expect(body).not.toHaveProperty('min_privacy_tier')
+  })
+
+  it('discloses per-model privacy_tier/residency from /v1/models and degrades unknown values to neutral', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ models: [
+        { id: 'm-eu', name: 'EU Model', privacy_tier: 'eu_resident', residency: 'eu-central-1' },
+        { id: 'm-sov', name: 'Sovereign Model', privacyTier: 'sovereign' },
+        { id: 'm-garbage', name: 'Garbage Model', privacy_tier: 'fort_knox' },
+        { id: 'm-old', name: 'Old Shape Model' },
+      ] }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const models = await listModels()
+
+    expect(models).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'm-eu', privacyTier: 'eu_resident', residency: 'eu-central-1' }),
+      expect.objectContaining({ id: 'm-sov', privacyTier: 'sovereign' }),
+    ]))
+    // Unknown/garbage values must NOT surface as any claim at all.
+    expect(models.find((model) => model.id === 'm-garbage')?.privacyTier).toBeUndefined()
+    expect(models.find((model) => model.id === 'm-old')?.privacyTier).toBeUndefined()
   })
 })
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getRunWatchStatus, unwatchRun, watchRun } from './runs-client'
+import { getRun, getRunWatchStatus, unwatchRun, watchRun } from './runs-client'
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -7,6 +7,70 @@ function jsonResponse(data: unknown, status = 200): Response {
     headers: { 'Content-Type': 'application/json' },
   })
 }
+
+describe('getRun privacy-tier provenance', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('parses tier + residency from run provenance (top level or metadata)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      run: {
+        run_id: 'run_1',
+        status: 'completed',
+        goal: 'g',
+        checkpoint_index: 0,
+        steps_completed: 1,
+        input_tokens: 1,
+        output_tokens: 2,
+        privacy_tier: 'sovereign',
+        residency: 'norway-east',
+      },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const run = await getRun('run_1')
+
+    expect(run).toEqual(expect.objectContaining({
+      runId: 'run_1',
+      privacyTier: 'sovereign',
+      residency: 'norway-east',
+    }))
+  })
+
+  it('falls back to metadata.privacy_tier beside the existing residency fallback', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      run: {
+        run_id: 'run_2',
+        status: 'completed',
+        goal: 'g',
+        metadata: { privacy_tier: 'zdr_contractual', region: 'eu-central-1' },
+      },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const run = await getRun('run_2')
+
+    expect(run?.privacyTier).toBe('zdr_contractual')
+    expect(run?.residency).toBe('eu-central-1')
+  })
+
+  it('degrades unknown tier values to undefined — never a fabricated claim', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      run: {
+        run_id: 'run_3',
+        status: 'completed',
+        goal: 'g',
+        privacy_tier: 'fort_knox',
+      },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const run = await getRun('run_3')
+
+    expect(run?.privacyTier).toBeUndefined()
+  })
+})
 
 describe('watchRun', () => {
   afterEach(() => {

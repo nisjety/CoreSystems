@@ -7565,6 +7565,56 @@ textarea:focus-visible {
   color: var(--verevon-accent, #b46e3c);
 }
 
+/* Privacy-tier badges (Venice-style tiering). The affirmative tint is applied
+   ONLY via data-tone="claimed", i.e. when the backend actually attested the
+   tier (eu_resident / zdr_contractual / sovereign) — same rule as stated vs.
+   inferred memory provenance. `global` renders plainly; unspecified/unknown
+   never render a badge at all. */
+.dashboard-composer-model-badge--tier-global {
+  background: transparent;
+  border: 1px solid var(--verevon-border);
+  color: var(--verevon-text-muted);
+}
+
+.dashboard-composer-model-badge--tier-eu_resident,
+.dashboard-composer-model-badge--tier-zdr_contractual,
+.dashboard-composer-model-badge--tier-sovereign {
+  background: color-mix(in srgb, var(--success, #2f9e6e) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success, #2f9e6e) 38%, transparent);
+  color: color-mix(in srgb, var(--success, #2f9e6e) 82%, var(--verevon-text));
+}
+
+.dark .dashboard-composer-model-badge--tier-eu_resident,
+.dark .dashboard-composer-model-badge--tier-zdr_contractual,
+.dark .dashboard-composer-model-badge--tier-sovereign {
+  background: rgba(74, 222, 128, 0.14);
+  border-color: rgba(74, 222, 128, 0.34);
+  color: #86efac;
+}
+
+/* Honest smaller-catalog note under a selected SOVEREIGN model: informational,
+   never an alarm — the fleet narrows by design at this tier. */
+.dashboard-composer-model-tier-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 12px 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 9px;
+  background: var(--linear-main-bg);
+  color: var(--verevon-text-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 15px;
+}
+
+.dark .dashboard-composer-model-tier-note {
+  background: #101116;
+  border-color: var(--border);
+  color: var(--verevon-border-warm);
+}
+
 .dark .dashboard-composer-model-group__label {
   color: var(--verevon-border-warm);
 }
