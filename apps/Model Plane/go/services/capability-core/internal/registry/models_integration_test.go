@@ -59,7 +59,7 @@ func setupModelsRegistry(t *testing.T) (*ModelsRegistry, *pgxpool.Pool) {
 	t.Cleanup(pool.Close)
 
 	migrationsDir := filepath.Join("..", "..", "migrations")
-	for _, name := range []string{"0001_models.up.sql", "0002_seed_models.up.sql"} {
+	for _, name := range allMigrationFilenames() {
 		path := filepath.Join(migrationsDir, name)
 		sqlBytes, err := os.ReadFile(path)
 		if err != nil {
@@ -143,8 +143,10 @@ func TestModelsRegistry_List_SeedCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(list) != 5 {
-		t.Fatalf("expected 5 seeded rows, got %d", len(list))
+	if len(list) != 4 {
+		// 0002 seeds five rows; 0013 soft-deletes the decorative
+		// google/gemini-1.5-pro row (no serving adapter exists), leaving four.
+		t.Fatalf("expected 4 live seeded rows, got %d", len(list))
 	}
 }
 
@@ -156,8 +158,9 @@ func TestModelsRegistry_ListAsCapabilities_Shape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAsCapabilities: %v", err)
 	}
-	if len(caps) != 5 {
-		t.Fatalf("expected 5 caps, got %d", len(caps))
+	if len(caps) != 4 {
+		// Five seeded minus the gemini row 0013 soft-deletes.
+		t.Fatalf("expected 4 caps, got %d", len(caps))
 	}
 	for _, c := range caps {
 		if c.Kind != models.KindModel {
@@ -230,10 +233,11 @@ func TestModelsRegistry_Delete_SoftThenNotFound(t *testing.T) {
 	}
 }
 
-// allMigrationFilenames lists every up migration through 0013 in order.
-// Separate from setupModelsRegistry's 0001+0002-only list (used by
-// TestModelsRegistry_List_SeedCount, which asserts the pre-0013 seed count)
-// so that test is unaffected by later migrations.
+// allMigrationFilenames lists every up migration in order. Every
+// ModelsRegistry read path selects privacy_tier/residency (migration 0013),
+// so tests against this registry must always run against the fully-migrated
+// schema; applying a prefix of the migrations reproduces production's
+// pre-upgrade state that this code no longer supports.
 func allMigrationFilenames() []string {
 	return []string{
 		"0001_models.up.sql",
@@ -252,64 +256,8 @@ func allMigrationFilenames() []string {
 	}
 }
 
-func setupModelsRegistryAllMigrations(t *testing.T) (*ModelsRegistry, *pgxpool.Pool) {
-	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-
-	container, err := tcpostgres.Run(ctx,
-		"postgres:16-alpine",
-		tcpostgres.WithDatabase("capabilities"),
-		tcpostgres.WithUsername("test"),
-		tcpostgres.WithPassword("test"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
-		),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() {
-		termCtx, termCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer termCancel()
-		_ = container.Terminate(termCtx)
-	})
-
-	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("get conn string: %v", err)
-	}
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("open pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	migrationsDir := filepath.Join("..", "..", "migrations")
-	for _, name := range allMigrationFilenames() {
-		path := filepath.Join(migrationsDir, name)
-		sqlBytes, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read migration %s: %v", name, err)
-		}
-		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-			t.Fatalf("apply migration %s: %v", name, err)
-		}
-	}
-
-	reg, err := NewModelsRegistry(pool)
-	if err != nil {
-		t.Fatalf("new models registry: %v", err)
-	}
-	return reg, pool
-}
-
 func TestModelsRegistry_Migration0013_DefaultsToUnspecified(t *testing.T) {
-	reg, _ := setupModelsRegistryAllMigrations(t)
+	reg, _ := setupModelsRegistry(t)
 	ctx := context.Background()
 
 	m, err := reg.GetByName(ctx, uuid.Nil, "openai", "gpt-4o")
@@ -325,7 +273,7 @@ func TestModelsRegistry_Migration0013_DefaultsToUnspecified(t *testing.T) {
 }
 
 func TestModelsRegistry_Migration0013_RejectsUnknownPrivacyTier(t *testing.T) {
-	_, pool := setupModelsRegistryAllMigrations(t)
+	_, pool := setupModelsRegistry(t)
 	ctx := context.Background()
 
 	_, err := pool.Exec(ctx, `UPDATE models SET privacy_tier = 'bogus' WHERE provider = 'openai' AND name = 'gpt-4o'`)
@@ -335,7 +283,7 @@ func TestModelsRegistry_Migration0013_RejectsUnknownPrivacyTier(t *testing.T) {
 }
 
 func TestModelsRegistry_Migration0013_SoftDeletesDecorativeGeminiSeed(t *testing.T) {
-	reg, _ := setupModelsRegistryAllMigrations(t)
+	reg, _ := setupModelsRegistry(t)
 	ctx := context.Background()
 
 	if _, err := reg.GetByName(ctx, uuid.Nil, "google", "gemini-1.5-pro"); !errors.Is(err, domain.ErrCapabilityNotFound) {
