@@ -19,6 +19,7 @@
   "dependencies": {
     "3d-force-graph": "^1.80.0",
     "@kobalte/core": "^0.13.13",
+    "@quarry/client": "file:../../Ingestion Plane/Quarry-v2/sdks/typescript",
     "@solidjs/router": "^1.0.0",
     "@tanstack/ai": "^0.44.0",
     "@tanstack/ai-client": "^0.23.2",

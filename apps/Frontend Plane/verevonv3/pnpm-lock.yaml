@@ -18,6 +18,9 @@ importers:
       '@kobalte/core':
         specifier: ^0.13.13
         version: 0.13.13(solid-js@1.9.14)
+      '@quarry/client':
+        specifier: file:../../Ingestion Plane/Quarry-v2/sdks/typescript
+        version: file:../../Ingestion Plane/Quarry-v2/sdks/typescript
       '@solidjs/router':
         specifier: ^1.0.0
         version: 1.0.0(solid-js@1.9.14)
@@ -370,6 +373,9 @@ packages:
     resolution: {integrity: sha512-DTcUc8qii+cpHvtOwggMtBRMjKZHXYWdw8syRYu2vtzuq4Wxphqq4NfCs5Zt44L6mA8rfDfj+PHnxFc/FeK6mQ==}
     engines: {node: '>=20'}
     hasBin: true
+
+  '@quarry/client@file:../../Ingestion Plane/Quarry-v2/sdks/typescript':
+    resolution: {directory: ../../Ingestion Plane/Quarry-v2/sdks/typescript, type: directory}
 
   '@rolldown/binding-android-arm64@1.2.4':
     resolution: {integrity: sha512-jHC2cnyKz5xU2fhECtFl8OZ83cYNt13GZQD+0uMJ/X3o+ijmd56okHhTUwxVSHPx1IRVIJEZ1/1pPzeLCU6XKA==}
@@ -2317,6 +2323,8 @@ snapshots:
   '@playwright/test@1.62.1':
     dependencies:
       playwright: 1.62.1
+
+  '@quarry/client@file:../../Ingestion Plane/Quarry-v2/sdks/typescript': {}
 
   '@rolldown/binding-android-arm64@1.2.4':
     optional: true
