@@ -24,6 +24,11 @@ pub fn bridge_to_grpc(
                 model_used: chunk.model_used,
                 input_tokens: chunk.input_tokens,
                 output_tokens: chunk.output_tokens,
+                // Stream provenance stamped by the chain (final chunk, and any
+                // chunk the provider left unlabeled) so SSE consumers observe
+                // exactly where the tokens were served from.
+                provider_used: chunk.provider_used,
+                residency: chunk.residency,
             };
             if tx.send(Ok(proto_chunk)).await.is_err() {
                 break;

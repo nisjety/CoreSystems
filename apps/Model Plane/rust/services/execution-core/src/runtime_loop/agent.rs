@@ -650,6 +650,12 @@ async fn run_rounds(
             max_tokens: MAX_TOKENS,
             structured_output_schema: String::new(),
             zdr,
+            // PRIVACY FLOOR: the run's `min_privacy_tier` rides on EVERY
+            // inference round, mirroring the ZDR flag above. A constrained chat
+            // turn routed through the governed agent loop must enforce exactly
+            // the same tier as the inline invoke path — inference-core skips
+            // ineligible providers before any network call and fails closed.
+            min_privacy_tier: req.min_privacy_tier,
             tools: ctx.tools.clone(),
             tool_choice: "auto".to_owned(),
         });
@@ -2286,11 +2292,16 @@ mod tests {
 
     type ObservedMessages = Arc<Mutex<Vec<Vec<pb::ChatMessage>>>>;
 
+    type ObservedTiers = Arc<Mutex<Vec<i32>>>;
+
     struct MockInference {
         script: Mutex<std::collections::VecDeque<Scripted>>,
         /// ZDR flag observed on each `InferRequest`, so a test can assert the
         /// run's `zdr` was threaded through.
         observed_zdr: Arc<Mutex<Vec<bool>>>,
+        /// Wire `min_privacy_tier` observed on each `InferRequest`, so a test
+        /// can assert the run's privacy floor was threaded through.
+        observed_tiers: ObservedTiers,
         /// Message history observed on each `InferRequest`, in call order. A
         /// nested subagent shares this channel, so the recording is also the
         /// evidence that its context was ISOLATED from its parent's.
@@ -2302,6 +2313,7 @@ mod tests {
             Self {
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr: Arc::new(Mutex::new(Vec::new())),
+                observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -2310,6 +2322,7 @@ mod tests {
             Self {
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr,
+                observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -2321,7 +2334,17 @@ mod tests {
             Self {
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr: Arc::new(Mutex::new(Vec::new())),
+                observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages,
+            }
+        }
+
+        fn with_tier_recorder(steps: Vec<Scripted>, observed_tiers: ObservedTiers) -> Self {
+            Self {
+                script: Mutex::new(steps.into_iter().collect()),
+                observed_zdr: Arc::new(Mutex::new(Vec::new())),
+                observed_tiers,
+                observed_messages: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -2337,6 +2360,10 @@ mod tests {
         ) -> Result<Response<pb::InferResponse>, Status> {
             let observed = request.into_inner();
             self.observed_zdr.lock().unwrap().push(observed.zdr);
+            self.observed_tiers
+                .lock()
+                .unwrap()
+                .push(observed.min_privacy_tier);
             self.observed_messages
                 .lock()
                 .unwrap()
@@ -2358,6 +2385,7 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     tool_calls: Vec::new(),
+                    ..Default::default()
                 })),
                 Scripted::ToolCalls { content, calls } => Ok(Response::new(pb::InferResponse {
                     request_id: "req".to_owned(),
@@ -2367,6 +2395,7 @@ mod tests {
                     input_tokens: 1,
                     output_tokens: 1,
                     tool_calls: calls,
+                    ..Default::default()
                 })),
                 Scripted::Error => Err(Status::unavailable("inference down")),
             }
@@ -3086,6 +3115,13 @@ mod tests {
         spawn_inference_channel_inner(MockInference::with_zdr_recorder(script, observed_zdr)).await
     }
 
+    /// Like [`spawn_inference_channel`] but records every observed
+    /// `InferRequest.min_privacy_tier`, so a test can assert the run's privacy
+    /// floor was threaded through to inference.
+    async fn spawn_inference_channel_with_tier(script: Vec<Scripted>, observed_tiers: ObservedTiers) -> Channel {
+        spawn_inference_channel_inner(MockInference::with_tier_recorder(script, observed_tiers)).await
+    }
+
     /// Like [`spawn_inference_channel`] but records the message history of every
     /// `InferRequest`, in call order, into `observed_messages`.
     async fn spawn_inference_channel_with_messages(
@@ -3130,6 +3166,7 @@ mod tests {
             max_rounds: 4,
             zdr: false,
             tools: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -3449,6 +3486,48 @@ mod tests {
                 String::new(),
             )],
             "the metadata-only managed receipt carries no response content"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_threads_request_min_privacy_tier_into_inference() {
+        // PRIVACY FLOOR: a `RunAgentRequest.min_privacy_tier` must ride on EVERY
+        // round's `InferRequest`, mirroring the ZDR threading above — otherwise a
+        // constrained chat turn routed through the governed agent loop would be
+        // silently downgraded to unconstrained providers.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_tiers: ObservedTiers = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_tier(
+            vec![Scripted::Answer("ok".to_owned())],
+            observed_tiers.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.min_privacy_tier = pb::PrivacyTier::Sovereign as i32;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .expect("tier-constrained agent run should succeed");
+
+        assert_eq!(resp.status, "completed");
+        let observed = observed_tiers.lock().unwrap();
+        assert_eq!(observed.len(), 1, "exactly one inference round");
+        assert_eq!(
+            observed[0],
+            pb::PrivacyTier::Sovereign as i32,
+            "the run's min_privacy_tier must be threaded into the InferRequest"
         );
     }
 

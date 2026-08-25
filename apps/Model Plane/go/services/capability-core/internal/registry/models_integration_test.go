@@ -59,7 +59,7 @@ func setupModelsRegistry(t *testing.T) (*ModelsRegistry, *pgxpool.Pool) {
 	t.Cleanup(pool.Close)
 
 	migrationsDir := filepath.Join("..", "..", "migrations")
-	for _, name := range []string{"0001_models.up.sql", "0002_seed_models.up.sql"} {
+	for _, name := range allMigrationFilenames() {
 		path := filepath.Join(migrationsDir, name)
 		sqlBytes, err := os.ReadFile(path)
 		if err != nil {
@@ -143,8 +143,10 @@ func TestModelsRegistry_List_SeedCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(list) != 5 {
-		t.Fatalf("expected 5 seeded rows, got %d", len(list))
+	if len(list) != 4 {
+		// 0002 seeds five rows; 0013 soft-deletes the decorative
+		// google/gemini-1.5-pro row (no serving adapter exists), leaving four.
+		t.Fatalf("expected 4 live seeded rows, got %d", len(list))
 	}
 }
 
@@ -156,8 +158,9 @@ func TestModelsRegistry_ListAsCapabilities_Shape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAsCapabilities: %v", err)
 	}
-	if len(caps) != 5 {
-		t.Fatalf("expected 5 caps, got %d", len(caps))
+	if len(caps) != 4 {
+		// Five seeded minus the gemini row 0013 soft-deletes.
+		t.Fatalf("expected 4 caps, got %d", len(caps))
 	}
 	for _, c := range caps {
 		if c.Kind != models.KindModel {
@@ -227,5 +230,73 @@ func TestModelsRegistry_Delete_SoftThenNotFound(t *testing.T) {
 	}
 	if err := reg.Delete(ctx, m.ID); !errors.Is(err, domain.ErrCapabilityNotFound) {
 		t.Fatalf("expected ErrCapabilityNotFound on second delete, got %v", err)
+	}
+}
+
+// allMigrationFilenames lists every up migration in order. Every
+// ModelsRegistry read path selects privacy_tier/residency (migration 0013),
+// so tests against this registry must always run against the fully-migrated
+// schema; applying a prefix of the migrations reproduces production's
+// pre-upgrade state that this code no longer supports.
+func allMigrationFilenames() []string {
+	return []string{
+		"0001_models.up.sql",
+		"0002_seed_models.up.sql",
+		"0003_capabilities_registry.up.sql",
+		"0004_seed_self_owned_systems.up.sql",
+		"0005_seed_operating_map_capability.up.sql",
+		"0006_capability_availability_contract.up.sql",
+		"0007_tenant_scopes_and_risk_constraints.up.sql",
+		"0008_execution_dispatch_capabilities.up.sql",
+		"0009_mcp_oauth_client_columns.up.sql",
+		"0010_sandbox_code_execution_capability.up.sql",
+		"0011_conversation_ticket_action_capability.up.sql",
+		"0012_run_watch_subscriptions.up.sql",
+		"0013_privacy_tier_columns.up.sql",
+	}
+}
+
+func TestModelsRegistry_Migration0013_DefaultsToUnspecified(t *testing.T) {
+	reg, _ := setupModelsRegistry(t)
+	ctx := context.Background()
+
+	m, err := reg.GetByName(ctx, uuid.Nil, "openai", "gpt-4o")
+	if err != nil {
+		t.Fatalf("GetByName: %v", err)
+	}
+	if m.PrivacyTier != models.PrivacyTierUnspecified {
+		t.Fatalf("expected default privacy_tier=unspecified, got %q", m.PrivacyTier)
+	}
+	if m.Residency != "" {
+		t.Fatalf("expected default residency='', got %q", m.Residency)
+	}
+}
+
+func TestModelsRegistry_Migration0013_RejectsUnknownPrivacyTier(t *testing.T) {
+	_, pool := setupModelsRegistry(t)
+	ctx := context.Background()
+
+	_, err := pool.Exec(ctx, `UPDATE models SET privacy_tier = 'bogus' WHERE provider = 'openai' AND name = 'gpt-4o'`)
+	if err == nil {
+		t.Fatal("expected the models_privacy_tier_check constraint to reject an unknown tier label")
+	}
+}
+
+func TestModelsRegistry_Migration0013_SoftDeletesDecorativeGeminiSeed(t *testing.T) {
+	reg, _ := setupModelsRegistry(t)
+	ctx := context.Background()
+
+	if _, err := reg.GetByName(ctx, uuid.Nil, "google", "gemini-1.5-pro"); !errors.Is(err, domain.ErrCapabilityNotFound) {
+		t.Fatalf("expected the decorative google/gemini-1.5-pro seed row to be soft-deleted, got err=%v", err)
+	}
+
+	list, err := reg.List(ctx, ModelsFilter{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, m := range list {
+		if m.Provider == "google" && m.Name == "gemini-1.5-pro" {
+			t.Fatal("soft-deleted gemini row must not appear in List (deleted_at IS NULL filter)")
+		}
 	}
 }

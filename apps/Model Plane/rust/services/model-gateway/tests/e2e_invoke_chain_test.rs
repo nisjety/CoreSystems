@@ -144,6 +144,8 @@ impl InferenceCore for MockOk {
             stop_reason: "stop".into(),
             input_tokens: 1,
             output_tokens: 1,
+            provider_used: String::new(),
+            residency: String::new(),
             tool_calls: Vec::new(),
         }))
     }
@@ -161,6 +163,8 @@ impl InferenceCore for MockOk {
                 model_used: "mock".into(),
                 input_tokens: 0,
                 output_tokens: 0,
+                provider_used: String::new(),
+                residency: String::new(),
             }),
             Ok(InferChunk {
                 request_id: "req-stream-ok".into(),
@@ -169,6 +173,8 @@ impl InferenceCore for MockOk {
                 model_used: "mock".into(),
                 input_tokens: 3,
                 output_tokens: 2,
+                provider_used: String::new(),
+                residency: String::new(),
             }),
         ]))))
     }
@@ -202,6 +208,8 @@ impl InferenceCore for MockOk {
                 modality: "embedding".into(),
                 streaming: false,
                 features: Vec::new(),
+                privacy_tier: 0,
+                residency: String::new(),
             }],
         }))
     }
@@ -628,6 +636,8 @@ impl InferenceCore for MockStreamDown {
             stop_reason: "stop".into(),
             input_tokens: 1,
             output_tokens: 1,
+            provider_used: String::new(),
+            residency: String::new(),
             tool_calls: Vec::new(),
         }))
     }

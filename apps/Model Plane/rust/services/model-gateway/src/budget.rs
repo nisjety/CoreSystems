@@ -182,6 +182,7 @@ mod tests {
             space_append_context: None,
             structured_output_schema: None,
             zdr: true,
+            min_privacy_tier: None,
             max_cost_usd: Some(10.0),
             max_tokens: Some(1_000),
         }

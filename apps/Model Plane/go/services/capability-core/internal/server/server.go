@@ -32,11 +32,21 @@ import (
 type Server struct {
 	mpv1.UnimplementedCapabilityCoreServer
 	registry            *registry.Registry
-	modelReg            *registry.ModelsRegistry
+	modelReg            modelCapabilitySource
 	policy              *policy.Engine
 	store               capabilityStore // optional: enables score-ranked List
 	toolRank            toolDefinitionSearcher
 	decisionProofSigner *DecisionProofSigner
+}
+
+// modelCapabilitySource is the narrow slice of the models registry the
+// server needs. Satisfied by both *registry.ModelsRegistry (direct Postgres
+// reads) and *registry.ModelsCache (the startup-loaded, hot-path-safe
+// projection — see PROVIDER_AND_PRIVACY_STRATEGY.md §4.5); production wiring
+// (cmd/main.go) uses the cache.
+type modelCapabilitySource interface {
+	ListAsCapabilitiesForOrg(ctx context.Context, orgID string) ([]*models.Capability, error)
+	GetByCapabilityIDForOrg(ctx context.Context, id, orgID string) (*registry.Model, error)
 }
 
 type toolDefinitionSearcher interface {
@@ -70,6 +80,26 @@ func toDetail(c *models.Capability) *mpv1.CapabilityDetail {
 		ExecutionMode:    availability.ExecutionMode,
 		CostClass:        availability.CostClass,
 		HealthCheckedAt:  availability.HealthCheckedAt,
+		PrivacyTier:      privacyTierToProto(c.PrivacyTier),
+		Residency:        c.Residency,
+	}
+}
+
+// privacyTierToProto maps the persisted snake_case label to the wire enum.
+// An unrecognized/empty label degrades to UNSPECIFIED rather than fabricating
+// a stronger claim — disclosure must never overclaim.
+func privacyTierToProto(label string) mpv1.PrivacyTier {
+	switch label {
+	case models.PrivacyTierGlobal:
+		return mpv1.PrivacyTier_PRIVACY_TIER_GLOBAL
+	case models.PrivacyTierEUResident:
+		return mpv1.PrivacyTier_PRIVACY_TIER_EU_RESIDENT
+	case models.PrivacyTierZDRContractual:
+		return mpv1.PrivacyTier_PRIVACY_TIER_ZDR_CONTRACTUAL
+	case models.PrivacyTierSovereign:
+		return mpv1.PrivacyTier_PRIVACY_TIER_SOVEREIGN
+	default:
+		return mpv1.PrivacyTier_PRIVACY_TIER_UNSPECIFIED
 	}
 }
 
@@ -87,7 +117,7 @@ func hasAllChecks(checks []string, required ...string) bool {
 }
 
 // NewServer constructs a Server wired to the provided registry and policy engine.
-func NewServer(reg *registry.Registry, modelReg *registry.ModelsRegistry, pol *policy.Engine) *Server {
+func NewServer(reg *registry.Registry, modelReg modelCapabilitySource, pol *policy.Engine) *Server {
 	return &Server{registry: reg, modelReg: modelReg, policy: pol}
 }
 

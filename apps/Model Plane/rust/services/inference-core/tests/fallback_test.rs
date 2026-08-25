@@ -66,6 +66,8 @@ impl ProviderRouterDyn for MockProvider {
                     model_used: model,
                     input_tokens: 0,
                     output_tokens: 0,
+                    provider_used: String::new(),
+                    residency: String::new(),
                 })
                 .await;
         });

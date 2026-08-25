@@ -545,6 +545,10 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         input_tokens,
         output_tokens,
         tool_calls,
+        // Provenance is stamped by the fallback chain (which knows which
+        // registered provider served), not by the raw adapter.
+        provider_used: String::new(),
+        residency: String::new(),
     }
 }
 
@@ -595,6 +599,15 @@ impl ProviderRouter for AnthropicProvider {
             .collect(),
             AnthropicFlavor::Azure { models, .. } => models.clone(),
         };
+        // Venice-style per-model privacy disclosure, derived from this
+        // provider's own declared residency + ZDR attestation.
+        let caps = self.capabilities();
+        let privacy_tier = super::PrivacyTier::classify(&caps);
+        let residency_label = if caps.residency == super::Residency::Global {
+            String::new()
+        } else {
+            caps.residency.as_str().to_owned()
+        };
         ids.into_iter()
             .map(|id| {
                 let cheap = is_cheap_claude(&id);
@@ -609,6 +622,8 @@ impl ProviderRouter for AnthropicProvider {
                         "reasoning".to_owned(),
                     ],
                     cheap,
+                    privacy_tier,
+                    residency_label: residency_label.clone(),
                 }
             })
             .collect()
@@ -749,7 +764,7 @@ impl ProviderRouter for AnthropicProvider {
                     buffer = buffer[newline_pos + 1..].to_owned();
 
                     if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
+                    if data == "[DONE]" {
                             let final_chunk = InferChunk {
                                 request_id: request_id.clone(),
                                 delta: String::new(),
@@ -757,6 +772,8 @@ impl ProviderRouter for AnthropicProvider {
                                 model_used: model.clone(),
                                 input_tokens,
                                 output_tokens,
+                                provider_used: String::new(),
+                                residency: String::new(),
                             };
                             let _ = tx.send(final_chunk).await;
                             return;
@@ -780,6 +797,8 @@ impl ProviderRouter for AnthropicProvider {
                                     model_used: model.clone(),
                                     input_tokens: 0,
                                     output_tokens: 0,
+                                    provider_used: String::new(),
+                                    residency: String::new(),
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -792,6 +811,8 @@ impl ProviderRouter for AnthropicProvider {
                                     model_used: model.clone(),
                                     input_tokens,
                                     output_tokens,
+                                    provider_used: String::new(),
+                                    residency: String::new(),
                                 };
                                 let _ = tx.send(final_chunk).await;
                                 return;
@@ -809,6 +830,8 @@ impl ProviderRouter for AnthropicProvider {
                 model_used: model,
                 input_tokens,
                 output_tokens,
+                provider_used: String::new(),
+                residency: String::new(),
             };
             let _ = tx.send(final_chunk).await;
         });

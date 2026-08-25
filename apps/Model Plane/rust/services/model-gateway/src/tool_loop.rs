@@ -3252,6 +3252,10 @@ pub async fn run_tool_rounds(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    // Caller-selected minimum privacy tier (wire numeric). Every tool-round
+    // infer carries it so a derived call never reaches a provider the main
+    // chain would refuse.
+    min_privacy_tier: i32,
     model: &str,
     base_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
@@ -3315,6 +3319,9 @@ pub async fn run_tool_rounds(
                 max_tokens: TOOL_ROUND_TOKENS,
                 structured_output_schema: String::new(),
                 zdr,
+                // Same caller privacy floor as the answer stream: a tool-round
+                // infer must never reach a provider the main chain would refuse.
+                min_privacy_tier,
                 tools: tools.clone(),
                 tool_choice: tool_choice.clone(),
             },

@@ -38,6 +38,13 @@ type Model struct {
 	RiskLevel   string
 	LazyLoad    bool
 	Description string
+	// PrivacyTier and Residency are declarative disclosure (migration 0013):
+	// startup-cached, never consulted synchronously on the invoke hot path
+	// (PROVIDER_AND_PRIVACY_STRATEGY.md §4.5). PrivacyTier is one of
+	// models.PrivacyTier*; Residency is a free-form declared label ("eu",
+	// "norway") or empty when undeclared.
+	PrivacyTier string
+	Residency   string
 }
 
 // ModelsFilter narrows List results.
@@ -89,11 +96,13 @@ func ToCapability(m *Model) *models.Capability {
 		IdempotencyKey:   idempotencyPrefix + id,
 		OrgID:            m.OrgID.String(),
 		EnabledForScopes: []string{scope},
+		PrivacyTier:      m.PrivacyTier,
+		Residency:        m.Residency,
 	}
 }
 
 const modelColumns = `id, org_id, scope, provider, name, version,
-	config_json, enabled, risk_level, lazy_load, description`
+	config_json, enabled, risk_level, lazy_load, description, privacy_tier, residency`
 
 func scanModel(row pgx.Row) (*Model, error) {
 	var (
@@ -103,6 +112,7 @@ func scanModel(row pgx.Row) (*Model, error) {
 	if err := row.Scan(
 		&m.ID, &orgID, &m.Scope, &m.Provider, &m.Name, &m.Version,
 		&m.ConfigJSON, &m.Enabled, &m.RiskLevel, &m.LazyLoad, &m.Description,
+		&m.PrivacyTier, &m.Residency,
 	); err != nil {
 		return nil, err
 	}
@@ -288,6 +298,12 @@ func (r *ModelsRegistry) Upsert(ctx context.Context, m *Model) (*Model, error) {
 	if !models.IsSupportedRiskLevel(m.RiskLevel) {
 		return nil, domain.ErrInvalidArgument
 	}
+	if m.PrivacyTier == "" {
+		m.PrivacyTier = models.PrivacyTierUnspecified
+	}
+	if !models.IsSupportedPrivacyTier(m.PrivacyTier) {
+		return nil, domain.ErrInvalidArgument
+	}
 	cfg := m.ConfigJSON
 	if len(cfg) == 0 {
 		cfg = []byte("{}")
@@ -299,21 +315,25 @@ func (r *ModelsRegistry) Upsert(ctx context.Context, m *Model) (*Model, error) {
 	row := r.pool.QueryRow(ctx, `
 		INSERT INTO models (
 			id, org_id, scope, provider, name, version,
-			config_json, enabled, risk_level, lazy_load, description
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			config_json, enabled, risk_level, lazy_load, description,
+			privacy_tier, residency
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (org_id, provider, name) WHERE deleted_at IS NULL
 		DO UPDATE SET
-			scope       = EXCLUDED.scope,
-			version     = EXCLUDED.version,
-			config_json = EXCLUDED.config_json,
-			enabled     = EXCLUDED.enabled,
-			risk_level  = EXCLUDED.risk_level,
-			lazy_load   = EXCLUDED.lazy_load,
-			description = EXCLUDED.description,
-			updated_at  = now()
+			scope        = EXCLUDED.scope,
+			version      = EXCLUDED.version,
+			config_json  = EXCLUDED.config_json,
+			enabled      = EXCLUDED.enabled,
+			risk_level   = EXCLUDED.risk_level,
+			lazy_load    = EXCLUDED.lazy_load,
+			description  = EXCLUDED.description,
+			privacy_tier = EXCLUDED.privacy_tier,
+			residency    = EXCLUDED.residency,
+			updated_at   = now()
 		RETURNING `+modelColumns,
 		m.ID, orgArg, m.Scope, m.Provider, m.Name, m.Version,
 		cfg, m.Enabled, m.RiskLevel, m.LazyLoad, m.Description,
+		m.PrivacyTier, m.Residency,
 	)
 	return scanModel(row)
 }
