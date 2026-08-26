@@ -32,6 +32,17 @@ The result is a plane that already has genuine agent support, but not a fully co
 > - **Agent/tool loop is real and non-mocked.** `execution-core/src/runtime_loop/mod.rs::execute_step` dispatches a *broader* tool set than this doc originally listed — beyond `shell`/`browser_agent`/`subagent`, it now also routes `web_search`, `web_fetch`, `knowledge_search`, `get_shipping_quotes`/`shipping_carriers`/`book_shipment` (to `shipping-core` via `SHIPPING_CORE_URL`, default `http://host.docker.internal:3156`), social tools, `execute_provider_action` (integration-corev2), and `mcp__<server>__<tool>` proxying. `[source-only]`
 > - **HITL is enforced in the loop, not decorative.** `permission::evaluate_call` returns `AwaitApproval` for risky tools under `ask` posture (`is_risky_tool` + operation-aware provider-action/MCP gating), which yields `StepOutcome::awaiting_approval()` *before* the tool runs; `grpc.rs` then mints a durable `create_approval` in session-core and pauses the run. Under `auto` (default chat) posture nothing is gated by design. `[source-only]`
 > - **session-core orchestration RPCs are fully implemented.** `orchestration_grpc.rs` implements `list_plans`, `list_todos`, `list_approvals`, `create_approval`, `decide_approval`, `get_subagent_lineage`, `attach_subagent` with **zero** `Unimplemented`. `[source-only]`
+> - **[STALE as of 2026-08-26 — kept for the record, do not re-derive from it.]**
+>   The claim below dated from before the OAuth remote-MCP client landed. Today
+>   `grep -rni visma` across model-gateway + capability-core source returns 22
+>   matches across 7 files: `mcp_oauth.rs` is a full OAuth 2.1 + Dynamic Client
+>   Registration remote-MCP client (32 unit tests, SSRF-checked before every
+>   dial, encrypted refresh tokens in `mcp_oauth_tokens`), and
+>   `deploy/.env.example:79` names Visma Net as its intended use. What remains
+>   is a CREDENTIALS state — no Visma connection is configured — not a missing
+>   client. This paragraph seeded a wrong "no OAuth remote-MCP client exists"
+>   item in a 2026-08 P0 list; that is why it is corrected in place rather than
+>   deleted.
 > - **MCP is real; Visma is not wired.** `bridges/mcp-bridge/server.js` is a working STDIO+HTTP MCP translator with allowlist gating, and the gateway `ProxyMcpTool` path is live. BUT `mcp-bridge` is **not in the main compose** (an un-deployed overlay) and a repo-wide `grep visma` across Model Plane source returns **zero** matches — no Visma MCP server is registered/seeded/defaulted. "Test the Visma MCP" is therefore not a wired Model Plane capability today; the only Visma MCP is an assistant-side claude.ai connector. `[source-only]` `[live-curl: registry]`
 
 ## Current Runtime Topology

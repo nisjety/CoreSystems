@@ -462,6 +462,26 @@ const GROUNDED_ARGUMENT_PATHS: &[(&str, &[&str])] = &[
             "package.height_cm",
         ],
     ),
+    // THIRD spelling of the same capability. The chat dispatch arm accepts
+    // `"shipping_get_quotes" | "shipping.get_quotes"` because the Console's
+    // explicit tool selection uses the dotted id as a client-DECLARED tool —
+    // which `inline_tool_allowed` admits (it is a denylist) and which no
+    // builtin schema covers, so before this entry the dotted name reached the
+    // real executor having skipped BOTH the schema check and this gate. A
+    // grounding table keyed on exact names must key on every dispatchable
+    // spelling, or the alias is the bypass.
+    (
+        "shipping.get_quotes",
+        &[
+            "from.postal_code",
+            "to.postal_code",
+            "from.name",
+            "to.name",
+            "package.length_cm",
+            "package.width_cm",
+            "package.height_cm",
+        ],
+    ),
 ];
 
 /// Tools this module will ground-check. Exposed so the prompt-side list can be

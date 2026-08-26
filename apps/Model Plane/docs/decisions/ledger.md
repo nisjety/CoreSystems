@@ -1195,3 +1195,62 @@ Two further corrections to the entry above:
    works, not the *committed* baseline. Recorded because the same mistake is easy
    to repeat: regenerating an artifact and then testing the regenerated copy
    measures nothing about what is checked in.
+
+## Chat elicitation + the third shipping spelling (2026-08-26) — status: **implemented, measured; snippet is weak on chat and the gate carries it**
+
+Closes the asymmetry recorded in `external-ideas-harvest.md` §14 (chat had zero
+tool guidance), and fixes a grounding bypass found on the way in.
+
+**The bypass first, because it is the sharper find:** the chat dispatch arm
+accepts `"shipping_get_quotes" | "shipping.get_quotes"` — the dotted id is what
+the Console uses for explicit tool selection, arriving as a CLIENT-declared tool.
+`inline_tool_allowed` is a denylist, so it admits the name; it is not a builtin,
+so `builtin_argument_problem`'s def-lookup `?` bailed before schema OR grounding
+ran; and the arm then executed it against the real shipping aggregator. Third
+spelling of one capability, and the second time an alias walked around a gate
+keyed on exact names. Fixed three ways: a `GROUNDED_ARGUMENT_PATHS` entry for the
+dotted spelling, the gateway gate restructured so grounding runs for ANY
+dispatchable name (schema validation still only where we hold the schema), and
+the reachability contract extended to count a dispatch arm as a reachable route —
+mutation-tested.
+
+**The snippet:** `SNIPPET_USER_SUPPLIED_ARGS` now exists in model-gateway too,
+byte-identical to execution-core's (pinned by a decoded-string contract test —
+raw-source comparison would assert formatting, the `skill_budget_contract`
+lesson applied pre-emptively), injected in `sse.rs` before the first non-system
+turn, gated on the FINAL offered set.
+
+**Measured, chat catalogue, temp 0.7, 5 samples/case:**
+
+| Direction | before | after |
+|---|---|---|
+| FAB — must not invent (4 shipping queries) | 0/20 | **4/20** |
+| CALL — must call now (valid cases) | 20/20 | **20/20** |
+
+Two honest readings that must not be lost:
+
+1. **The snippet alone is weak on chat.** +4/20, nowhere near the agent loop's
+   +18.3 pp — there the snippet rode with a full preamble; here it is the only
+   tool guidance in the stack. On chat the grounding gate carries correctness
+   (all 16 remaining fabrications are refused pre-dispatch); the snippet's value
+   is saving the refusal round-trip, and it saves 4/20, not 11/20. Do not quote
+   the agent loop's number for chat.
+2. **Zero under-calling regression**, including the case built to catch it: a
+   fully-specified quote request (every value stated) calls 10/10 with the
+   snippet present.
+
+Also corrected in place: `MODEL_PLANE_DEEP_DIVE.md` and `feature.md` both
+asserted `grep -rni visma` returns 0 matches — it returns 22 across 7 files
+(`mcp_oauth.rs` is a full OAuth 2.1 + DCR client naming Visma Net as its use
+case). Those two paragraphs seeded the false "no OAuth remote-MCP client exists"
+P0 item; the correction is stamped STALE-as-of-2026-08-26 above the original
+text rather than deleting it, so the provenance of the wrong P0 item stays
+visible.
+
+Measurement harness bug worth recording: 4 of 8 must-CALL cases initially
+expected `track_shipment`/`company_lookup`, which chat's catalogue does not
+offer — `web_search` was the model's CORRECT answer there. A must-call case is
+only valid against the catalogue actually offered; scores before exclusion
+(20/40) would have read as a selection collapse that never happened.
+
+Workspace green at 2,327.

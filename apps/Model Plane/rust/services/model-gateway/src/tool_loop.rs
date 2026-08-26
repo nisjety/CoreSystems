@@ -459,6 +459,56 @@ pub(crate) fn inline_tool_allowed(name: &str) -> bool {
         && name != "mcp_catalog"
 }
 
+/// Prompt guidance for tools whose required arguments only the user can
+/// supply.
+///
+/// Byte-identical to execution-core's `SNIPPET_USER_SUPPLIED_ARGS`, pinned by
+/// the cross-loop contract test: the two loops must describe the same rule in
+/// the same words, or an operator reading two transcripts learns two rules.
+/// Measured on the agent loop 2026-08-25: +18.3 pp correct elicitation
+/// (p=0.016) with zero under-calling regression at n=60. Chat had NOTHING —
+/// its system stack (instructions, grounding, temporal, identity, memory)
+/// carries no tool guidance at all, and chat measured **20/20 fabricated**
+/// on the same queries. Here the grounding gate refuses those calls, so the
+/// snippet's job on chat is to save the wasted round-trip, not correctness.
+const SNIPPET_USER_SUPPLIED_ARGS: &str = "Some offered tools require values only the user can \
+supply — a street address, a postal code, package dimensions, a price. Fill required arguments \
+freely when the request states them or when they are public fact (a Norwegian city's coordinates, \
+a registered company's name), but never invent a user-only value: a call built on a guessed postal \
+code or guessed dimensions still succeeds, and returns a real, plausible, wrong answer that nobody \
+can tell apart from a correct one. When such a value is missing, ask one short question naming \
+exactly what you need — that is asking for a fact, not asking permission, and the rule against \
+asking permission does not apply to it.";
+
+/// The chat loop's spellings of the tools that need the snippet. Chat has no
+/// `book_shipment`; its shipping tool is `shipping_get_quotes`, plus the
+/// Console's client-declared dotted alias the dispatch arm also accepts.
+/// Every name here must have a `GROUNDED_ARGUMENT_PATHS` entry (contract-
+/// tested): a warned-but-unchecked tool is advice already measured ignored,
+/// and a checked-but-unwarned tool is a refusal the model cannot anticipate.
+const USER_SUPPLIED_ARG_TOOLS: &[&str] = &["shipping_get_quotes", "shipping.get_quotes"];
+
+/// The system message carrying [`SNIPPET_USER_SUPPLIED_ARGS`], when this
+/// turn's offered set contains a tool that needs it. Pure so it is testable
+/// without the SSE machinery; `None` when no offered tool qualifies, because
+/// advice about tools that are not offered is noise the model has to discount.
+#[must_use]
+pub(crate) fn user_supplied_args_notice(
+    tool_defs: &[mp_contracts::model_plane::v1::ToolDefinition],
+) -> Option<mp_contracts::model_plane::v1::ChatMessage> {
+    if !tool_defs
+        .iter()
+        .any(|def| USER_SUPPLIED_ARG_TOOLS.contains(&def.name.as_str()))
+    {
+        return None;
+    }
+    Some(mp_contracts::model_plane::v1::ChatMessage {
+        role: "system".to_owned(),
+        content: SNIPPET_USER_SUPPLIED_ARGS.to_owned(),
+        name: String::new(),
+    })
+}
+
 /// Split `mcp__<server_id>__<tool>` into `(server_id, tool)`. Mirrors
 /// execution-core's `mcp_gateway::parse_mcp_tool_name` exactly: split on the
 /// FIRST `__` after the prefix (a tool name may itself contain `__`; a
@@ -1505,17 +1555,27 @@ fn builtin_argument_problem(
     arguments_json: &str,
     conversation: &str,
 ) -> Option<String> {
-    let def = builtin_tool_defs()
+    // Schema validation only where we HOLD the schema (a builtin). A
+    // client-declared tool is validated against nothing here on purpose —
+    // guessing a schema is worse than none. Grounding, below, is different:
+    // it needs no schema, only the conversation, so it must NOT hide behind
+    // this lookup. It used to: the dispatch arm accepts the Console's
+    // client-declared `shipping.get_quotes` alias, which is not a builtin, so
+    // the early `?` skipped grounding too and the alias walked past the gate
+    // into the real shipping executor.
+    if let Some(def) = builtin_tool_defs()
         .into_iter()
-        .find(|def| def.name == tool_name)?;
-    let errors =
-        mp_contracts::tool_arguments::validate_arguments(&def.parameters_json, arguments_json);
-    if !errors.is_empty() {
-        return Some(mp_contracts::tool_arguments::repair_message(
-            tool_name,
-            &errors,
-            &def.parameters_json,
-        ));
+        .find(|def| def.name == tool_name)
+    {
+        let errors =
+            mp_contracts::tool_arguments::validate_arguments(&def.parameters_json, arguments_json);
+        if !errors.is_empty() {
+            return Some(mp_contracts::tool_arguments::repair_message(
+                tool_name,
+                &errors,
+                &def.parameters_json,
+            ));
+        }
     }
     // Schema-shaped is not the same as true: a required value the user never
     // gave is well-formed and clears every check above this one. Kept identical
@@ -6441,6 +6501,58 @@ mod tests {
                  breaks a working tool",
                 def.name
             );
+        }
+    }
+
+    /// The Console's client-declared `shipping.get_quotes` alias is not a
+    /// builtin, so it used to skip BOTH the schema check and the grounding gate
+    /// via the early def-lookup bail — and then dispatch to the real shipping
+    /// executor anyway. Grounding needs no schema, so it must fire on every
+    /// dispatchable spelling.
+    #[test]
+    fn the_client_declared_shipping_alias_cannot_bypass_grounding() {
+        let fabricated = r#"{"from":{"name":"Bergen","postal_code":"5000"},
+            "to":{"name":"Stavanger","postal_code":"4000"},
+            "package":{"weight_kg":3,"length_cm":30,"width_cm":20,"height_cm":10},
+            "segment":"b2c"}"#;
+        let problem = builtin_argument_problem(
+            "shipping.get_quotes",
+            fabricated,
+            "hva vil det koste å sende 3 kg fra Bergen til Stavanger?",
+        )
+        .expect("invented postal codes and dimensions must be refused on the alias too");
+        assert!(problem.contains("appear nowhere in this conversation"));
+
+        // Fully stated → the alias passes, exactly like the canonical name.
+        let grounded = r#"{"from":{"name":"Storgata 1","postal_code":"0155"},
+            "to":{"name":"Kongens gate 2","postal_code":"7011"},
+            "package":{"weight_kg":5,"length_cm":30,"width_cm":20,"height_cm":15},
+            "segment":"b2b"}"#;
+        assert!(builtin_argument_problem(
+            "shipping.get_quotes",
+            grounded,
+            "compare shipping prices for a 5 kg parcel, 30x20x15 cm, from Storgata 1, \
+             0155 Oslo to Kongens gate 2, 7011 Trondheim",
+        )
+        .is_none());
+    }
+
+    /// The elicitation notice rides only on turns whose FINAL offered set
+    /// contains a tool that needs it — guidance about an unoffered tool is
+    /// noise the model has to discount.
+    #[test]
+    fn the_elicitation_notice_is_gated_on_the_offered_set() {
+        let def = |name: &str| mp_contracts::model_plane::v1::ToolDefinition {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        };
+        assert!(user_supplied_args_notice(&[def("web_search"), def("yr_weather")]).is_none());
+        for shipping in ["shipping_get_quotes", "shipping.get_quotes"] {
+            let notice = user_supplied_args_notice(&[def("web_search"), def(shipping)])
+                .expect("a shipping tool in the offered set needs the guidance");
+            assert_eq!(notice.role, "system");
+            assert!(notice.content.contains("never invent a user-only value"));
         }
     }
 

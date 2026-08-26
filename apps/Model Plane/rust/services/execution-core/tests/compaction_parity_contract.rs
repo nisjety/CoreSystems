@@ -383,6 +383,104 @@ fn the_prompt_and_the_enforcement_agree_on_which_tools_need_user_supplied_values
              GROUNDED_ARGUMENT_PATHS — the prompt asks for a value nothing verifies"
         );
     }
+
+    // The chat loop keeps its own list under the same name, with its own
+    // spellings (`shipping_get_quotes` plus the Console's dotted alias). Same
+    // rule: every name the prompt warns about must be one the gate verifies.
+    let chat = read("model-gateway/src/tool_loop.rs");
+    let chat_list = between(&chat, "const USER_SUPPLIED_ARG_TOOLS: &[&str] = &[", "];");
+    let chat_names = quoted_names(chat_list);
+    assert!(
+        !chat_names.is_empty(),
+        "the gateway's USER_SUPPLIED_ARG_TOOLS list is gone or renamed; re-point this test"
+    );
+    for name in chat_names {
+        assert!(
+            check_list.contains(&name),
+            "`{name}` is in the gateway's USER_SUPPLIED_ARG_TOOLS but has no \
+             GROUNDED_ARGUMENT_PATHS entry — chat warns about a value nothing verifies"
+        );
+    }
+}
+
+/// Both loops must give the elicitation rule in the SAME WORDS.
+///
+/// The snippet was measured on the agent loop (+18.3 pp, zero under-calling
+/// regression) and then carried to chat verbatim. Two loops describing the same
+/// rule differently is how the same org's assistant asks for a postal code in
+/// one surface and invents it in the other — and the wording is load-bearing:
+/// the "asking for a fact, not asking permission" sentence exists to avoid
+/// contradicting the measured anti-permission wording both preambles carry.
+/// Compared as DECODED strings, because the two files wrap the literal at
+/// different columns and raw source comparison asserts formatting, not words
+/// (the rustfmt lesson from `skill_budget_contract.rs`, applied pre-emptively).
+#[test]
+fn both_loops_state_the_elicitation_rule_in_identical_words() {
+    let agent = read("execution-core/src/runtime_loop/agent.rs");
+    let chat = read("model-gateway/src/tool_loop.rs");
+    let a = decoded_str_const(&agent, "SNIPPET_USER_SUPPLIED_ARGS", "execution-core");
+    let c = decoded_str_const(&chat, "SNIPPET_USER_SUPPLIED_ARGS", "model-gateway");
+    assert_eq!(
+        a, c,
+        "the two loops teach different elicitation rules; change both or neither"
+    );
+    assert!(
+        a.contains("never invent a user-only value"),
+        "the rule lost its core sentence"
+    );
+}
+
+/// A `&str` constant's logical value: find the declaration, take the literal,
+/// decode `\`-continuations and simple escapes. Formatting-tolerant on purpose.
+fn decoded_str_const(source: &str, name: &str, which: &str) -> String {
+    let decl = ["pub(crate) const ", "pub const ", "const "]
+        .iter()
+        .find_map(|vis| source.find(&format!("{vis}{name}: &str =")))
+        .unwrap_or_else(|| panic!("`{name}` not found in {which}"));
+    let after = &source[decl..];
+    let open = after.find('"').expect("no string literal");
+    let body = &after[open + 1..];
+    let mut end = None;
+    let mut escaped = false;
+    for (index, ch) in body.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
+                end = Some(index);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let raw = &body[..end.unwrap_or_else(|| panic!("unterminated literal for {name}"))];
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('\n') => {
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+            }
+            Some('n') => out.push('\n'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Text between two markers, for reading a list out of source.
@@ -519,13 +617,22 @@ fn every_ground_checked_tool_is_offered_and_every_offered_shipping_tool_is_check
     );
 
     for tool in &checked {
-        let offered_somewhere = chat.contains(&format!("name: \"{tool}\""))
+        // Reachable = advertised in a catalogue (`name: "…"`), OR accepted by a
+        // dispatch match arm (`"…" =>` / `| "…"`). The second route exists
+        // because the Console declares `shipping.get_quotes` as a CLIENT tool —
+        // no catalogue carries it, yet the model can call it and the executor
+        // runs it, which is precisely why it needs a table entry.
+        let advertised = chat.contains(&format!("name: \"{tool}\""))
             || agent.contains(&format!("name: \"{tool}\""));
+        let dispatched = chat.contains(&format!("\"{tool}\" =>"))
+            || chat.contains(&format!("| \"{tool}\""))
+            || agent.contains(&format!("\"{tool}\" =>"))
+            || agent.contains(&format!("| \"{tool}\""));
         assert!(
-            offered_somewhere,
-            "`{tool}` is ground-checked but no loop offers it, so the check can never \
-             fire — either the name is wrong (this is exactly how `shipping_get_quotes` \
-             was missed) or the entry is dead"
+            advertised || dispatched,
+            "`{tool}` is ground-checked but no loop advertises or dispatches it, so \
+             the check can never fire — either the name is wrong (this is exactly how \
+             `shipping_get_quotes` was missed) or the entry is dead"
         );
     }
 

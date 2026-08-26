@@ -1171,6 +1171,18 @@ pub async fn invoke_stream_sse(
             tool_defs.push(web_search);
         }
     }
+    // Tool-argument elicitation guidance, gated on the FINAL offered set (after
+    // the client/builtin merge and the web_search append above) so the prompt
+    // never warns about a tool this turn cannot call. Inserted before the first
+    // non-system turn like the memory block: guidance is context, not history.
+    if let Some(notice) = crate::tool_loop::user_supplied_args_notice(&tool_defs) {
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != "system")
+            .unwrap_or(messages.len());
+        messages.insert(insert_at, notice);
+    }
+
     // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
     // stop it cooperatively. `cancels` is moved into the task to finish() on end.
     let cancels = state.cancels.clone();

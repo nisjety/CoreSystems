@@ -32,6 +32,17 @@ Last updated: 2026-04-30
 >   `is_risky_call` gate `book_shipment`, `execute_provider_action` (write ops),
 >   `publish_social_post`, `browser_agent`, and all `mcp__*` calls, returning
 >   `AwaitApproval` and resolving a durable session-core approval id. `[source-only]`
+> - **[STALE as of 2026-08-26 — kept for the record, do not re-derive from it.]**
+>   The claim below dated from before the OAuth remote-MCP client landed. Today
+>   `grep -rni visma` across model-gateway + capability-core source returns 22
+>   matches across 7 files: `mcp_oauth.rs` is a full OAuth 2.1 + Dynamic Client
+>   Registration remote-MCP client (32 unit tests, SSRF-checked before every
+>   dial, encrypted refresh tokens in `mcp_oauth_tokens`), and
+>   `deploy/.env.example:79` names Visma Net as its intended use. What remains
+>   is a CREDENTIALS state — no Visma connection is configured — not a missing
+>   client. This paragraph seeded a wrong "no OAuth remote-MCP client exists"
+>   item in a 2026-08 P0 list; that is why it is corrected in place rather than
+>   deleted.
 > - **No Visma MCP exists in Model Plane source** — `grep -rni visma` across
 >   rust/go/bridges/python returns **0** matches (Visma appears only in prose
 >   docs). "Test the Visma MCP" is not a wired Model Plane capability; the
