@@ -1322,3 +1322,58 @@ Verification: Rust workspace 2,330 passed / 0 failed; SPA 1,217 passed across
 exhaustion priority (2), memory attestation honesty (1), mid-run composer
 regression (3), plus the C4 guard exercised via existing context-assembly
 paths.
+
+### Correction, same day — two of the 8 "fixes" were themselves inert, and the test that should have caught it also false-passed
+
+Asked directly whether all 8 were working, and checked instead of asserting.
+Two were not:
+
+**C7 (autonomy grant) was a no-op.** `PlanModeStore::record_grant` is keyed by
+thread, and the production caller — `http_routes::plan_approval` — sent
+`session_id: String::new()`. The guard correctly refused every empty key, so no
+grant was ever recorded. Identical in shape to the C4 bug fixed hours earlier
+(authz on an always-empty `run_id`): the fix reads a field the caller leaves
+blank. Now `plan_approval` resolves the run's `thread_id` via `GetRun` before
+granting — server-side from the already-ownership-checked run, so a caller
+cannot attach a grant to a thread it does not own. Pinned by a **round-trip**
+test (write with the approval's thread, read with the next run's thread) plus
+org/thread isolation cases; mutation-verified by reverting the record call.
+
+**C5 (subagent.task) created a newly-advertised-but-denied tool.**
+`cap.agent.spawn` is seeded `unavailable` by 0008 doctrine and NOTHING attests
+it — so advertising the tool meant the model would now try it and hit the
+fail-closed gate, having burned a round. Attested from the same session-core
+probe as the memory pair, which is the truthful dependency:
+`register_delegated_child_run` is a session-core StartRun, and the nested loop
+otherwise runs in-process on the parent's own inference path. Health attestation
+is not permission — the row's `medium` risk still decides allow/ask/deny.
+
+**And the new contract test guarding this false-passed.**
+`every_offered_tool_capability_has_an_attestor` first checked
+`health_attest.rs.contains(&capability)`, which matched the
+`pub const X: &str = "id";` DECLARATION — so deleting the attestation while
+leaving the constant still passed, verified by mutation. It now resolves the
+constant→id map and searches only inside the bodies of `attestable` and
+`memory_attestations`. Both mutations (drop the spawn attestation, drop a memory
+attestation) now fail it.
+
+**The test also surfaced 12 more instances of the same defect, unverified.**
+Twelve advertised tools are bound to capabilities execution-core does not
+attest: `cap.tool.information.read` (yr_weather, traffic, news,
+company_lookup), `cap.tool.shipping.track`, `cap.tool.social.{read,publish}`,
+`cap.retrieval.query`, `cap.tool.provider.{read,execute}`, `cap.browser.open`,
+`cap.tool.http`, `cap.skill.summarize`, `cap.agent.lineage.read`. Each
+PLAUSIBLY belongs to another service's reporter — but the three reporters
+confirmed to exist attest only `cap.command.{shell,sandbox}` (execution-core),
+`cap.tool.ticket.create` (conversation-core) and
+`cap.tool.shipping.{read,book}` (shipping-core). **`cap.tool.shipping.track` is
+not among them.** Held in a named `UNATTESTED_BASELINE` quarantine — explicitly
+a record of an open question, not an approval — so the list cannot grow while
+the question stays visible. Verified-elsewhere entries are kept in a separate
+list that names the owning reporter.
+
+Honest status: 8 of 8 have their missing link closed in source with mutation-
+tested guards on the ones that carry them. What is NOT established is live
+end-to-end proof for any of them — no deployed stack was exercised, the 0014
+migration has never been applied, and the grant store is in-memory so it fails
+open to UNSPECIFIED on gateway restart.

@@ -55,6 +55,9 @@ pub const MEMORY_SEARCH_CAPABILITY: &str = "cap.memory.search";
 /// Long-term memory persist (`save_memory`).
 pub const MEMORY_INDEX_CAPABILITY: &str = "cap.memory.index";
 
+/// Governed delegation (`subagent.*`).
+pub const AGENT_SPAWN_CAPABILITY: &str = "cap.agent.spawn";
+
 /// Scope required to attest a `global` capability row. capability-core's handler
 /// looks the row up with `GetGlobal` only for a service principal holding this
 /// scope; with the tenant-level health scope it would instead look for a
@@ -169,7 +172,7 @@ async fn session_core_reachable() -> bool {
     .unwrap_or(false)
 }
 
-/// The memory-tool attestations, when the dependency probe passed.
+/// The session-core-dependent attestations, when the dependency probe passed.
 ///
 /// Separate from [`attestable`]: those two capabilities are facts about THIS
 /// process (its sandbox, its interpreter); these two are facts about a
@@ -192,6 +195,21 @@ pub fn memory_attestations(session_core_up: bool) -> Vec<Attestation> {
             MEMORY_INDEX_CAPABILITY,
             "session_memory_probed",
             "Session Core memory endpoint connected.",
+        ),
+        // Delegation shares this dependency and no other: the nested loop runs
+        // in-process on the parent's own inference path, and the ONE thing it
+        // needs beyond that is `register_delegated_child_run`, a session-core
+        // StartRun. Attested here rather than left unattested because
+        // `subagent.task` is now advertised — an offered tool whose capability
+        // nothing attests is the fail-closed denial this module exists to
+        // remove, and the model would burn a round discovering it.
+        //
+        // The row's risk_level (medium, migration 0008) still decides
+        // allow/ask/deny; attesting health is not granting permission.
+        attestation(
+            AGENT_SPAWN_CAPABILITY,
+            "session_run_registration_probed",
+            "Session Core run-registration endpoint connected.",
         ),
     ]
 }
@@ -537,7 +555,14 @@ mod tests {
         assert!(memory_attestations(false).is_empty());
         let up = memory_attestations(true);
         let ids: Vec<&str> = up.iter().map(|a| a.capability_id.as_str()).collect();
-        assert_eq!(ids, vec![MEMORY_SEARCH_CAPABILITY, MEMORY_INDEX_CAPABILITY]);
+        assert_eq!(
+            ids,
+            vec![
+                MEMORY_SEARCH_CAPABILITY,
+                MEMORY_INDEX_CAPABILITY,
+                AGENT_SPAWN_CAPABILITY
+            ]
+        );
         assert!(up.iter().all(|a| a.state == "available"));
     }
 
