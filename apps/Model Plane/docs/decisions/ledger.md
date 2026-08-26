@@ -1466,3 +1466,43 @@ swallowed. It has three component tests; the live version is a UI interaction.
 Standing status: **8 of 8 fixed in source, 4 of 8 proven live** (0014, H1, C5,
 plus D7's data path). The other four are one valid bearer away, and the
 instrument to decide them is committed.
+
+### The dev auth bypass does not work (2026-08-26) — a NEW defect, and it blocks the last four proofs
+
+Enabled at the operator's explicit request, on model-gateway only, to prove C4,
+C2, C7 and P2 live. It does not function, so those four remain unproven.
+
+**What was verified, in order:** both gates reach the container
+(`docker exec … echo $MODEL_GATEWAY_AUTH_DEV_BYPASS` → `1`, and both are in the
+compose `environment:` block, so the shell export is not silently dropped —
+which is the usual trap here). The gateway then LOGS acceptance on every
+request: `WARN MODEL_GATEWAY_AUTH_DEV_BYPASS enabled — accepting bearer without
+verification`. And every `/v1/*` request still returns **bare 401,
+content-length 0** — `/v1/models`, `/v1/threads`, `/v1/threads/:id/context`,
+with and without `x-user-id`/`x-org-id`. `/healthz` returns 200, so the public
+router is fine.
+
+**Localized:** session-core receives NOTHING during a context request, so the
+rejection happens inside model-gateway before its own handler runs. Of the
+layers after `require_auth`, `authorize_principal_route` is the only one that
+returns 401 silently (two `?` sites: absent `Claims`, and
+`Claims::principal_kind()`). `rate_limit_middleware` only ever returns 429.
+
+**Why this is surprising and worth a real investigation:** on source,
+`dev_bypass_claims` builds `principal_type="user"`, `sub == user_id`,
+`service_id: None`, which satisfies `principal_kind`'s User arm exactly; and all
+eight `verify_delegated_*_bearer` calls return `Ok(None)` when their header is
+absent, before touching JWKS. So the bypass branch should reach `next.run(req)`
+with valid claims. It logs that it did, and the request is still refused. The
+gap between "the code says this works" and "it does not" is the whole subject of
+this session, now in the verification tool itself.
+
+**Auth was restored immediately and confirmed:** `BYPASS=0`, `INSECURE` empty,
+**zero** bypass log lines, and an unauthenticated `/v1/models` returns 401. The
+copied `deploy/.env` was deleted again.
+
+Standing status unchanged: **8 of 8 fixed in source, 4 of 8 proven live** (0014,
+H1, C5, D7's data path). The remaining four need a real SPA session — the
+bypass is not a usable substitute until this defect is fixed, and
+`scripts/tests/reachability-live-proof.sh` will decide all four the moment a
+valid bearer exists.
