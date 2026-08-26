@@ -1138,7 +1138,15 @@ async fn run_rounds(
             // A run with no stated rung is unaffected: `check_autonomy_rung`
             // returns `Ok` for `UNSPECIFIED`, so a caller that predates the
             // ladder behaves exactly as it did.
-            if !req.plan_mode && !crate::subagent::is_subagent_tool(&call.name) {
+            //
+            // Checked regardless of plan mode. This used to be gated on
+            // `!req.plan_mode` — and the only production producer set a rung
+            // exactly when plan_mode was true, so the one rung that could
+            // refuse was set precisely when the check was skipped, and the
+            // gate could never refuse anything. Plan mode's own refusal below
+            // is stricter where both apply; running both costs one enum
+            // comparison and removes the masking.
+            if !crate::subagent::is_subagent_tool(&call.name) {
                 let granted = pb::AutonomyRung::try_from(req.autonomy_rung)
                     .unwrap_or(pb::AutonomyRung::Unspecified);
                 if let Err(refusal) = crate::permission::check_autonomy_rung(
@@ -2628,6 +2636,149 @@ mod capability_binding_contract {
         );
     }
 
+    /// A binding to a SEEDED id still fails closed if nothing ever attests it.
+    ///
+    /// Migration rows are created `availability_state='unavailable',
+    /// availability_reason_code='health_not_attested'` by doctrine (0008, 0013,
+    /// 0014) — source presence is not runtime health. So the seeding test above
+    /// passes for a capability that can never be allowed, and this is the third
+    /// link the chain needs: advertised -> bound -> SEEDED -> ATTESTED.
+    ///
+    /// Both instances this catches were real. `save_memory`/`recall_memory`
+    /// were advertised, prompted for and dispatched while
+    /// `cap.memory.{index,search}` had no attestor at all; and advertising
+    /// `subagent.task` briefly re-created the same state for `cap.agent.spawn`,
+    /// which 0008 had seeded and nothing attested — the model would have burned
+    /// a round discovering a refusal.
+    #[test]
+    fn every_offered_tool_capability_has_an_attestor() {
+        let attestor = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/health_attest.rs"),
+        )
+        .expect("health_attest.rs is the runtime attestation source; re-point this test if moved");
+
+        // Resolve which capability ids are ACTUALLY ATTESTED, not merely named.
+        //
+        // The first version of this check did `attestor.contains(&capability)`
+        // over the whole file — which matched the `pub const X: &str = "id";`
+        // DECLARATION, so removing the attestation while leaving the constant
+        // still passed. Verified by mutation: it did not fail. That is the exact
+        // declared-but-unused false pass this whole test exists to catch, so it
+        // is resolved properly here: collect the constant->id map, then look only
+        // inside the two functions that BUILD attestations.
+        let const_ids: Vec<(String, String)> = attestor
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let rest = line
+                    .strip_prefix("pub const ")
+                    .or_else(|| line.strip_prefix("const "))?;
+                let (name, tail) = rest.split_once(": &str = ")?;
+                let value = tail.trim().trim_end_matches(';').trim_matches('"');
+                (!value.is_empty()).then(|| (name.trim().to_owned(), value.to_owned()))
+            })
+            .collect();
+
+        let attesting_bodies: String = ["pub fn attestable(", "pub fn memory_attestations("]
+            .iter()
+            .map(|signature| {
+                let start = attestor
+                    .find(signature)
+                    .unwrap_or_else(|| panic!("`{signature}` is gone; re-point this test"));
+                let rest = &attestor[start..];
+                // Up to the next top-level item — enough to cover the body.
+                let end = rest[1..]
+                    .find("\npub fn ")
+                    .or_else(|| rest[1..].find("\nfn "))
+                    .map_or(rest.len(), |at| at + 1);
+                rest[..end].to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let attested: Vec<&str> = const_ids
+            .iter()
+            .filter(|(name, _)| attesting_bodies.contains(name.as_str()))
+            .map(|(_, id)| id.as_str())
+            .collect();
+        assert!(
+            attested.len() >= 2,
+            "resolved only {attested:?} as attested — the parse broke, not the invariant"
+        );
+
+        // QUARANTINE, not an approval list.
+        //
+        // These twelve are advertised today, bound to a capability, and NOT
+        // attested by execution-core. Each one PLAUSIBLY belongs to another
+        // service's reporter (quarry-edge for web/information reads,
+        // integration-core for provider and social, the Data Plane for
+        // retrieval, browser-broker for browser grants, shipping-core for
+        // shipping) — but that was NOT verified when this list was written, and
+        // the three reporters known to exist as of 2026-08-26 attest only
+        // cap.command.{shell,sandbox}, cap.tool.ticket.create and
+        // cap.tool.shipping.{read,book}. Notably `cap.tool.shipping.track` is
+        // NOT among them.
+        //
+        // So this list may well be twelve more instances of exactly the defect
+        // this test catches. It is recorded rather than silently excluded so the
+        // question is visible and answerable; the test's job meanwhile is to
+        // stop the list from GROWING, which is what caught cap.memory.* and
+        // cap.agent.spawn. Removing an entry requires naming the reporter that
+        // attests it.
+        // VERIFIED elsewhere — a named reporter was confirmed to attest these
+        // (2026-08-26 verification: shipping-core and conversation-core each run
+        // a Go `capabilityhealth` reporter on their own route/scope).
+        const ATTESTED_BY_ANOTHER_REPORTER: &[(&str, &str)] = &[
+            (
+                "cap.tool.shipping.read",
+                "shipping-core capabilityhealth reporter",
+            ),
+            (
+                "cap.tool.shipping.book",
+                "shipping-core capabilityhealth reporter",
+            ),
+            (
+                "cap.tool.ticket.create",
+                "conversation-core capabilityhealth reporter",
+            ),
+        ];
+
+        const UNATTESTED_BASELINE: &[&str] = &[
+            "cap.tool.information.read",
+            "cap.tool.shipping.track",
+            "cap.tool.social.read",
+            "cap.tool.social.publish",
+            "cap.retrieval.query",
+            "cap.tool.provider.read",
+            "cap.tool.provider.execute",
+            "cap.browser.open",
+            "cap.tool.http",
+            "cap.skill.summarize",
+            "cap.agent.lineage.read",
+        ];
+
+        let mut unattested = Vec::new();
+        for def in offered_tool_defs() {
+            let Some(capability) = trusted_capability_id(&def.name) else {
+                continue; // covered by the binding test above
+            };
+            if ATTESTED_BY_ANOTHER_REPORTER
+                .iter()
+                .any(|(id, _)| *id == capability.as_str())
+                || UNATTESTED_BASELINE.contains(&capability.as_str())
+            {
+                continue;
+            }
+            if !attested.contains(&capability.as_str()) {
+                unattested.push(format!("{} -> {capability}", def.name));
+            }
+        }
+        assert!(
+            unattested.is_empty(),
+            "these tools are advertised and bound to a capability that              execution-core's health reporter never attests, so every call              fails closed at the policy gate: {unattested:?}\n\nEither attest              it in `health_attest.rs` from a TRUTHFUL probe of what the tool              actually needs, or add it to ATTESTED_ELSEWHERE naming the service              that owns its health."
+        );
+    }
+
     /// Binding to an id nothing seeds fails closed at runtime —
     /// `EvaluatePolicy` has nothing to evaluate — which looks identical to a
     /// missing binding. Read across to capability-core the way
@@ -2835,6 +2986,21 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             name: "save_memory".to_owned(),
             description: "Save ONE durable fact to long-term memory so future conversations can recall it: a standing preference, constraint, decision, or identifier the user will expect you to remember (e.g. 'invoices must be in NOK', 'the project reference code is ZX-88214'). Do NOT save transient task state, tool output, or anything the user asked to keep private. Unavailable on Zero-Data-Retention runs.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"content":{"type":"string","description":"The single fact to remember, self-contained and concise"},"topic":{"type":"string","description":"Optional short topic label, e.g. PREFERENCE, CONSTRAINT, IDENTIFIER"}},"required":["content"]}"#.to_owned(),
+        },
+        // Delegation. This definition is what makes `run_subagent` reachable
+        // first-party: dispatch is prefix-matched on `subagent.`
+        // (`crate::subagent::is_subagent_tool`), the capability binding
+        // (`subagent.*` → cap.agent.spawn) has been seeded since migration
+        // 0008, `SNIPPET_SUBAGENT` gates on this name being offered — and yet
+        // no catalogue advertised any `subagent.*` name, so the entire
+        // delegation arc (nested loop, lineage, cold resume, replay semantics)
+        // was reachable only by an API caller declaring the tool themselves.
+        // Verified 2026-08-26: every prior `subagent.` literal was a policy
+        // mapping or inside #[cfg(test)].
+        pb::ToolDefinition {
+            name: "subagent.task".to_owned(),
+            description: "Delegate ONE self-contained sub-task to a fresh subagent that runs its own bounded tool loop and returns only its conclusion. The subagent starts with NO view of this conversation, so state the goal completely and include every fact it needs. Delegate only work that is genuinely separable (a research question, a bounded computation over tools); do the rest yourself. Costs rounds from this run's own budget and requires approval like other real-effect capabilities.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent"},"max_rounds":{"type":"integer","description":"Optional cap on the subagent's tool rounds"}},"required":["goal"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "recall_memory".to_owned(),
@@ -4996,8 +5162,12 @@ mod tests {
     /// Like [`spawn_inference_channel`] but records every observed
     /// `InferRequest.min_privacy_tier`, so a test can assert the run's privacy
     /// floor was threaded through to inference.
-    async fn spawn_inference_channel_with_tier(script: Vec<Scripted>, observed_tiers: ObservedTiers) -> Channel {
-        spawn_inference_channel_inner(MockInference::with_tier_recorder(script, observed_tiers)).await
+    async fn spawn_inference_channel_with_tier(
+        script: Vec<Scripted>,
+        observed_tiers: ObservedTiers,
+    ) -> Channel {
+        spawn_inference_channel_inner(MockInference::with_tier_recorder(script, observed_tiers))
+            .await
     }
 
     /// Like [`spawn_inference_channel`] but records the message history of every

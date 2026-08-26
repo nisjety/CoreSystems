@@ -6127,6 +6127,28 @@ async fn plan_approval(
     // In-process: this IS the gateway, so calling the coordinator directly
     // rather than dialling our own gRPC surface keeps one code path and one
     // validation.
+    // Resolve the run's THREAD before granting. The grant has to outlive this
+    // run — the work it authorizes happens on the NEXT run of the same
+    // conversation — so `PlanModeStore` keys grants by thread. This used to send
+    // an empty `session_id`, which the store correctly refused, making the whole
+    // grant path a no-op; the field is filled here rather than trusted from the
+    // client so a caller cannot attach a grant to a thread it does not own (the
+    // ownership check above is on the RUN, and session-core resolves the thread
+    // from that same run).
+    let thread_id = state
+        .run_client
+        .clone()
+        .get_run(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRunRequest {
+                run_id: run_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| grpc_status_to_http(&error))?
+        .into_inner()
+        .thread_id;
+
     let exited = crate::coordinator::handle_exit_plan_mode(
         &state.plan_mode,
         &*state.publisher,
@@ -6134,7 +6156,7 @@ async fn plan_approval(
             request_id: format!("plan-approval-{run_id}"),
             org_id: claims.org_id.clone(),
             run_id: run_id.clone(),
-            session_id: String::new(),
+            session_id: thread_id,
             granted_rung: escalation.to() as i32,
             justification: escalation.justification().to_owned(),
         },

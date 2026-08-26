@@ -267,8 +267,7 @@ const DEFAULT_RATE_LIMIT_MAX_WAIT_MS: u64 = 8_000;
 /// provider below the floor is skipped BEFORE any network call, the same way a
 /// non-ZDR provider is skipped when `zdr` is set.
 fn provider_meets_privacy_tier(caps: &ProviderCapabilities, min_privacy_tier: PrivacyTier) -> bool {
-    min_privacy_tier == PrivacyTier::Unspecified
-        || PrivacyTier::classify(caps) >= min_privacy_tier
+    min_privacy_tier == PrivacyTier::Unspecified || PrivacyTier::classify(caps) >= min_privacy_tier
 }
 
 /// The typed exhaustion error for a tier-constrained request whose entire
@@ -297,11 +296,22 @@ fn rate_limit_max_wait() -> Duration {
 /// Kept separate from the generic failure count because the two need different
 /// answers: a throttled chain is worth waiting for or reporting with a time, and
 /// a broken one is not.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct ThrottleState {
     /// Shortest `retry_after_ms` any throttled provider asked for — the soonest
     /// moment a retry could plausibly succeed.
     soonest_retry_ms: Option<u64>,
+    /// The first `TooLong` detail any provider returned during the walk.
+    ///
+    /// Recorded so exhaustion can surface the TYPED overflow instead of a
+    /// generic `AllExhausted`. Until this field existed, `classify_http_failure`
+    /// produced `ProviderError::TooLong` at five call sites and every chain
+    /// discarded it in a `Err(e) => warn!` arm — so `grpc.rs`'s `too_long_status`
+    /// (and its `x-mp-provider-error: too_long` trailer, and the gateway's
+    /// context-length recovery keyed on it) had zero production callers. The
+    /// walk still CONTINUES past a TooLong on purpose: a later provider with a
+    /// larger window is the recovery path, and only exhaustion reports it.
+    too_long_detail: Option<String>,
 }
 
 impl ThrottleState {
@@ -312,13 +322,19 @@ impl ThrottleState {
         });
     }
 
-    fn throttled(self) -> bool {
+    fn record_too_long(&mut self, detail: &str) {
+        if self.too_long_detail.is_none() {
+            self.too_long_detail = Some(detail.to_owned());
+        }
+    }
+
+    fn throttled(&self) -> bool {
         self.soonest_retry_ms.is_some()
     }
 
     /// The wait to honor before retrying the chain, or `None` when the provider's
     /// own retry-after exceeds what an interactive request should absorb.
-    fn affordable_wait(self) -> Option<Duration> {
+    fn affordable_wait(&self) -> Option<Duration> {
         let wait = Duration::from_millis(self.soonest_retry_ms?);
         (wait <= rate_limit_max_wait()).then_some(wait)
     }
@@ -329,10 +345,22 @@ impl ThrottleState {
     /// retry-after, so a caller can say "try again in about a minute" instead of
     /// reporting a generic failure for something that is neither permanent nor
     /// the user's fault.
-    fn exhausted_error(self, attempts: u32) -> ProviderError {
-        match self.soonest_retry_ms {
-            Some(retry_after_ms) => ProviderError::RateLimited { retry_after_ms },
-            None => ProviderError::AllExhausted { attempts },
+    fn exhausted_error(&self, attempts: u32) -> ProviderError {
+        // Priority order is deliberate. RateLimited first: a throttled provider
+        // might genuinely serve this exact prompt after the wait, so "try again
+        // shortly" is still the true story. TooLong next: it is deterministic —
+        // the same prompt overflows the same providers every time — so once no
+        // retry can help, the caller needs the typed overflow to trigger
+        // compaction, not a generic exhaustion. AllExhausted only when the walk
+        // learned nothing more specific.
+        match (&self.soonest_retry_ms, &self.too_long_detail) {
+            (Some(retry_after_ms), _) => ProviderError::RateLimited {
+                retry_after_ms: *retry_after_ms,
+            },
+            (None, Some(detail)) => ProviderError::TooLong {
+                detail: detail.clone(),
+            },
+            (None, None) => ProviderError::AllExhausted { attempts },
         }
     }
 }
@@ -1223,6 +1251,15 @@ impl FallbackChain {
                         throttle.record(retry_after_ms);
                         break; // Skip remaining retries for this provider
                     }
+                    Err(ProviderError::TooLong { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "prompt too long for this provider; walking on for a larger window"
+                        );
+                        throttle.record_too_long(&detail);
+                        break; // Deterministic for this provider — retrying cannot help.
+                    }
                     Err(e) => {
                         warn!(
                             provider = %name,
@@ -1470,11 +1507,7 @@ impl FallbackChain {
                         let residency = caps.residency.as_str().to_owned();
                         let provider_name = name.clone();
                         let rx = Self::normalize_stream_model(rx, call_req.model.clone());
-                        return Some(Self::stamp_stream_provenance(
-                            rx,
-                            provider_name,
-                            residency,
-                        ));
+                        return Some(Self::stamp_stream_provenance(rx, provider_name, residency));
                     }
                     Err(ProviderError::RateLimited { retry_after_ms }) => {
                         warn!(
@@ -1485,6 +1518,15 @@ impl FallbackChain {
                         );
                         throttle.record(retry_after_ms);
                         break;
+                    }
+                    Err(ProviderError::TooLong { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "prompt too long for this provider; walking on for a larger window"
+                        );
+                        throttle.record_too_long(&detail);
+                        break; // Deterministic for this provider — retrying cannot help.
                     }
                     Err(e) => {
                         warn!(
@@ -1512,6 +1554,7 @@ impl FallbackChain {
         req: &EmbedRequest,
     ) -> Result<EmbedResponse, ProviderError> {
         self.reject_non_eu_embedding_region(req)?;
+        let mut throttle = ThrottleState::default();
         let mut total_attempts: u32 = 0;
 
         for (name, provider) in &self.providers {
@@ -1583,7 +1626,17 @@ impl FallbackChain {
                             retry_after_ms = retry_after_ms,
                             "rate limited, moving to next provider"
                         );
+                        throttle.record(retry_after_ms);
                         break;
+                    }
+                    Err(ProviderError::TooLong { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "prompt too long for this provider; walking on for a larger window"
+                        );
+                        throttle.record_too_long(&detail);
+                        break; // Deterministic for this provider — retrying cannot help.
                     }
                     Err(e) => {
                         warn!(
@@ -1604,9 +1657,10 @@ impl FallbackChain {
                 "no matching embedding provider deployment has verified ZDR support".to_owned(),
             ))
         } else {
-            Err(ProviderError::AllExhausted {
-                attempts: total_attempts,
-            })
+            // Surfaces RateLimited (with retry-after) or TooLong when the walk
+            // recorded one — an embedding input over the model limit was
+            // previously reported as generic exhaustion, which callers retried.
+            Err(throttle.exhausted_error(total_attempts))
         }
     }
 
@@ -2179,8 +2233,14 @@ mod resolution_tests {
             ..Default::default()
         };
 
-        let resp = chain.infer(&req).await.expect("the EU provider satisfies the minimum");
-        assert!(weak_seen.lock().unwrap().is_none(), "a provider below the requested tier must be skipped BEFORE any call");
+        let resp = chain
+            .infer(&req)
+            .await
+            .expect("the EU provider satisfies the minimum");
+        assert!(
+            weak_seen.lock().unwrap().is_none(),
+            "a provider below the requested tier must be skipped BEFORE any call"
+        );
         assert!(strong_seen.lock().unwrap().is_some());
         // Provenance discloses the posture that was actually met.
         assert_eq!(resp.provider_used, "azure-openai");
@@ -2217,14 +2277,16 @@ mod resolution_tests {
             residency: Residency::Global,
             ..RecordingProvider::default()
         });
-        let chain =
-            FallbackChain::new_with_providers(vec![("openai".to_owned(), provider)], 1);
+        let chain = FallbackChain::new_with_providers(vec![("openai".to_owned(), provider)], 1);
         let req = InferRequest {
             request_id: "tier-u2".to_owned(),
             model: "gpt-4o-mini".to_owned(),
             ..Default::default()
         };
-        chain.infer(&req).await.expect("no constraint means no skipping");
+        chain
+            .infer(&req)
+            .await
+            .expect("no constraint means no skipping");
         assert!(seen.lock().unwrap().is_some());
     }
 
@@ -2246,9 +2308,7 @@ mod resolution_tests {
         }
 
         async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
-            Err(ProviderError::UnsupportedModel(
-                "stream double".to_owned(),
-            ))
+            Err(ProviderError::UnsupportedModel("stream double".to_owned()))
         }
 
         async fn infer_stream(
@@ -2315,7 +2375,10 @@ mod resolution_tests {
             last = Some(chunk);
         }
         let final_chunk = last.expect("the stream must produce its final chunk");
-        assert!(!*weak_reached.lock().unwrap(), "the weak provider must be skipped before opening any stream");
+        assert!(
+            !*weak_reached.lock().unwrap(),
+            "the weak provider must be skipped before opening any stream"
+        );
         assert!(*strong_reached.lock().unwrap());
         assert_eq!(final_chunk.provider_used, "azure-openai");
         assert_eq!(final_chunk.residency, "eu");
@@ -2330,7 +2393,9 @@ mod resolution_tests {
             FallbackChain::new_with_providers(vec![("openai".to_owned(), only_weak)], 1);
         let err = weak_chain.infer_stream(&req).await.unwrap_err();
         assert!(!*only_weak_reached.lock().unwrap());
-        assert!(matches!(err, ProviderError::TierUnavailable(message) if message.contains("eu_resident")));
+        assert!(
+            matches!(err, ProviderError::TierUnavailable(message) if message.contains("eu_resident"))
+        );
     }
 
     /// Embedding path: the gate runs AFTER the EU-region gate but still BEFORE
@@ -2358,7 +2423,10 @@ mod resolution_tests {
         // The region gate passes (swedencentral is EU); the TIER gate is what
         // rejects — proving both gates compose and the tier one is present.
         let err = chain.create_embedding(&req).await.unwrap_err();
-        assert!(!*reached.lock().unwrap(), "embedding provider below the tier must never see a network call");
+        assert!(
+            !*reached.lock().unwrap(),
+            "embedding provider below the tier must never see a network call"
+        );
         assert!(matches!(
             err,
             ProviderError::TierUnavailable(message) if message.contains("eu_resident")
@@ -2369,7 +2437,10 @@ mod resolution_tests {
             min_privacy_tier: PrivacyTier::Unspecified,
             ..req
         };
-        chain.create_embedding(&unconstrained).await.expect("Unspecified imposes no constraint");
+        chain
+            .create_embedding(&unconstrained)
+            .await
+            .expect("Unspecified imposes no constraint");
         assert!(*reached.lock().unwrap());
     }
 
@@ -2610,6 +2681,53 @@ mod resolution_tests {
             throttle.affordable_wait(),
             Some(Duration::from_millis(1_200))
         );
+    }
+
+    /// The typed overflow must survive exhaustion. Before this state existed,
+    /// `classify_http_failure` produced `TooLong` at five provider call sites
+    /// and every chain discarded it in a generic `Err(e) => warn!` arm — so
+    /// `too_long_status` and the `x-mp-provider-error: too_long` trailer had
+    /// ZERO production callers, and the gateway's context-length recovery,
+    /// keyed on that trailer, could never trigger from the typed path.
+    #[test]
+    fn an_exhausted_walk_that_saw_too_long_reports_too_long_not_generic_exhaustion() {
+        let mut throttle = ThrottleState::default();
+        throttle.record_too_long("400: prompt is 250000 tokens, maximum is 128000");
+        match throttle.exhausted_error(4) {
+            ProviderError::TooLong { detail } => {
+                assert!(
+                    detail.contains("250000"),
+                    "the provider's own text survives"
+                );
+            }
+            other => panic!("expected TooLong, got {other:?}"),
+        }
+        // First detail wins — the walk's earliest overflow names the model the
+        // request was actually routed to.
+        let mut throttle = ThrottleState::default();
+        throttle.record_too_long("first");
+        throttle.record_too_long("second");
+        assert!(matches!(
+            throttle.exhausted_error(2),
+            ProviderError::TooLong { detail } if detail == "first"
+        ));
+    }
+
+    /// RateLimited outranks TooLong on purpose: a throttled provider might
+    /// genuinely serve this exact prompt after the wait (larger window,
+    /// different limit), so "try again shortly" is still the true story; the
+    /// overflow only becomes the answer when no retry can help.
+    #[test]
+    fn a_throttled_walk_outranks_the_overflow() {
+        let mut throttle = ThrottleState::default();
+        throttle.record_too_long("overflow");
+        throttle.record(2_000);
+        assert!(matches!(
+            throttle.exhausted_error(3),
+            ProviderError::RateLimited {
+                retry_after_ms: 2_000
+            }
+        ));
     }
 
     #[test]

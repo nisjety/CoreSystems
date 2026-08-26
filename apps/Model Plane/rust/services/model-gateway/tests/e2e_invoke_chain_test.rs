@@ -1344,6 +1344,28 @@ impl ExecutionCore for RejectingExecutionCore {
 /// `dispatch_never_reached_execution_core` cannot prove non-delivery. The
 /// accept loop keeps running for the lifetime of the test so a retry cannot
 /// fall back to `ECONNREFUSED` and be classified as undelivered after all.
+/// An execution client pointed at a port that is guaranteed to be CLOSED.
+///
+/// Binding to :0 and immediately dropping the listener reserves an address the
+/// OS just confirmed is free, so the connect fails with ECONNREFUSED
+/// deterministically. The alternative — relying on `make_state`'s default
+/// `http://localhost:9093` being unbound — is a hidden dependency on the local
+/// Model Plane stack being DOWN: 9093 is execution-core's published port, so
+/// with the stack up the gateway reached the real service and got a
+/// deterministic refusal (`agent_dispatch_rejected`) instead of an unreachable
+/// transport error. Proven 2026-08-26 by stopping the container: the test went
+/// from failing to passing with no code change.
+async fn unreachable_execution_client() -> ExecutionCoreClient<tonic::transport::Channel> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    ExecutionCoreClient::new(
+        tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect_lazy(),
+    )
+}
+
 async fn spawn_connection_dropping_execution_mock() -> ExecutionCoreClient<tonic::transport::Channel>
 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2634,7 +2656,11 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
     let client = spawn_mock(MockOk::default()).await;
     let (mock_session, session_handles) = MockSessionCore::new();
     let session_client = spawn_session_mock(mock_session).await;
-    let (state, _publisher) = make_state(client, session_client).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    // Explicit, not inherited: the default points at 9093, which is
+    // execution-core's published port, so this assertion silently depended
+    // on the local Model Plane stack being DOWN.
+    state.execution_client = unreachable_execution_client().await;
     let (app, _delegated_jwks) = authenticated_user_router(
         build_router(state, None),
         "org_placeholder",
@@ -2657,9 +2683,9 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
     let body = String::from_utf8(body.to_vec()).unwrap();
     assert!(body.contains("event: connected"), "{body}");
     assert!(body.contains("event: error"), "{body}");
-    // `unreachable`: `make_state` leaves `execution_client` pointing at the
-    // unbound default address, so RunAgent fails in the CONNECT phase with
-    // `ECONNREFUSED`. `dispatch_never_reached_execution_core` can prove from
+    // `unreachable`: `execution_client` points at a port the OS just confirmed
+    // is free (see `unreachable_execution_client`), so RunAgent fails in the
+    // CONNECT phase with `ECONNREFUSED`. `dispatch_never_reached_execution_core` can prove from
     // that errno that the request never left the gateway, so the prepared run
     // is terminalized (nothing is running to finish it) while still being
     // reported retryable — the runner being down is a transport outage, not a

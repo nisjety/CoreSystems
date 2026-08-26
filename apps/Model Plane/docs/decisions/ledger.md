@@ -1034,3 +1034,515 @@ the agent side — a measured non-fix that would read as coverage).
 Left open: chat has no elicitation snippet, so the gate is its only defense and it
 always pays one round-trip where the agent loop avoids it 11/20. Fixing that means
 touching session-core's prompt assembly; not done blind.
+
+## Adoption scorecard verified claim-by-claim (2026-08-25) — status: **8 of 22 claims are built but unreachable**
+
+A 22-claim adversarial verification of the four-harness adoption scorecard
+(Claude Code / Hermes / DeepSeek / pi), each claim traced from advertisement to
+production caller. 12 CONFIRMED-and-reachable, 8 with a real reachability
+defect, 2 stale.
+
+**The defects, each with its missing link — these are work items, not notes:**
+
+1. **Context inspector returns nothing, ever.** `session-core/src/grpc.rs`
+   calls `authorize_run_owner(..., OwnerIntent::Mutate)` *before*
+   `get_context_assembly_inner`, and that function has no empty-string guard —
+   it runs `SELECT ... FROM runs WHERE id = $1` and rejects. Every production
+   request dies before the assembler runs. The whole SPA panel is unreachable.
+2. **Extended-thinking dial has zero production writers.** `InvokeRequest.effort`
+   is read once (`sse.rs`) and turned into `thinking_budget_tokens`, but nothing
+   in the product ever sets it, and the `deep` tier has no reachable config.
+3. **The per-call autonomy gate can never refuse anything.** Only one non-test
+   constructor of `RunAgentRequest` sets the rung; every in-loop construction
+   leaves it unset, which reads as the narrowest rung but is never checked
+   against a graded grant.
+4. **`ProviderError::TooLong` is never propagated.** Constructed at exactly one
+   site (`overflow.rs` `classify_http_failure`); every consumer chain swallows
+   it, so there is no reachable route to `too_long_status` at all.
+5. **The mid-run queued-input fix is client-side dead.** The server half is real,
+   but `ChatPage.tsx` passes `submitting={isStreaming()}` and the composer
+   returns silently — so the silent-drop bug the module exists to fix is *still
+   live in the product*.
+6. **`save_memory`/`recall_memory` are advertised AND dispatched yet still
+   unreachable** — the usual dead-arm test passes, so this one needs the full
+   chain re-walked.
+7. **Memory provenance renders only vacuously**: nothing writes a non-zero
+   origin on the path that feeds it, so two of its three states cannot occur.
+8. **`run_subagent` has no first-party dispatch path.** Dispatch is prefix-based
+   on `subagent.`, and no catalogue advertises any `subagent.*` name.
+
+**Two stale claims**, both in the optimistic-then-pessimistic direction that
+this repo keeps producing: fork-semantics was recorded as "open, next in
+sequence" when it is a dated **reject** (DeepSeek rejected it first and we
+concurred); and the plan-approval ladder was recorded as "needs a product
+decision" when the decision is recorded and the code shipped.
+
+**Standing lesson, now third time this session:** a ✅ in
+`claude-hermes-deepseek.md` means "the mechanism was built", and repeatedly does
+not mean "a user can reach it." Verification must trace advertisement → caller →
+writer → reader. The TL;DR now says this explicitly.
+
+## P0 critical-path list verified item-by-item (2026-08-26) — status: **4 of 10 confirmed as stated; 6 wrong in the pessimistic direction**
+
+A 10-item production-readiness P0 list, each claim verified against source, local
+config, and where possible a live command or the running stack. Verdicts:
+
+**CONFIRMED, and one is worse than claimed**
+- **P0-5 tenant delegation** — real P0. 15 of 16 live workload principals carry
+  `allowAnyOrg`; the guard exists in source and the running Auth Core bypasses it
+  (`NODE_ENV=development` + `PLANE_SERVICE_PRINCIPALS_JSON`). But the fix is not a
+  missing mechanism: `orgIds` already exists, is enforced, and 1 of 16 principals
+  uses it. This is a migration, not a build.
+- **P0-6 managed-run terminalization** — confirmed, and WORSE. Crash: no coverage
+  at all. Cancel-race: none. Response-loss: start side only. The whole lease-backed
+  reconciler (`recover_due_terminalizations` et al.) has **zero callers outside its
+  own file on every branch**. Do not mistake
+  `expired_worker_lease_reclaims_without_duplicate_start_receipt` for coverage — it
+  is a real-Postgres test of *approval continuation*, not terminalization.
+- **P0-9 Space computer** — all four assertions correct. Both stores are
+  `map + RWMutex`, no DB/cache/object-store import, no migrations dir. Scope accepts
+  only `thread`|`agent`; `space_id` is first-class in sessions/runs/execution protos
+  and was never added to `sandboxes.proto`. `SnapshotSandbox` synthesizes a MinIO
+  `object_key` and uploads nothing.
+- **P0-1 artifacts (half)** — no signed artifact instance exists anywhere; no
+  cosign/SLSA/SBOM in the plane; no CI workflow invokes the script.
+
+**WRONG IN THE PESSIMISTIC DIRECTION — the documented failure mode, six more times**
+- **P0-2 approval dispatch**: ~3/4 already shipped. Five continuation RPCs exist and
+  are implemented; the encrypted exact-effect descriptor exists (migration 0022 +
+  `continuation_crypto.rs`, AES-256-GCM, row-bound AAD, ZDR rejected pre-creation,
+  fail-closed on missing key); the durable lease/receipt/outcome state machine has a
+  no-double-execute guard. Only **KMS lifecycle** is genuinely missing (one base64
+  env key, hardcoded `v1:`, no envelope encryption or rotation). "HITL is decorative"
+  is not supportable.
+- **P0-3 capability health**: "zero configured reporters" is false — three exist and
+  are wired (execution-core `health_attest.rs`, conversation-core, shipping-core),
+  plus a dedicated `capability-health-proof.sh` harness. "27 capabilities" matches
+  nothing: 24 in `registry.go`, 30 rows across 6 migrations.
+- **P0-4 retention/ZDR**: "fails closed with no verified ZDR provider" is exactly
+  right (0 ZDR vars in `deploy/.env`). "Default all-ZDR" is wrong — `DEFAULT_POSTURE`
+  is `zdr:false`; ZDR is an opt-in plan-gated add-on. And **"no live chat answers
+  exist" is refuted on the running stack**: 8 assistant messages, 8 completed runs,
+  8 `cost_entries` billed against gpt-4o-mini x7 and claude-sonnet-4-6 x1.
+- **P0-7 memory**: `DEGRADED_SEMANTIC_UNVERIFIED` does **not** stick. It is the
+  pre-first-call state and clears on the first semantic call; model-gateway
+  prefetches every turn, so it clears on turn one. The states that persist are
+  `EMPTY_INDEX` and `LEXICAL_FALLBACK`. Five statuses exist; the docs say four.
+- **P0-8 MCP containment**: the negative matrix exists — loopback, link-local, `::1`,
+  private ranges, redirects and cloud-metadata cases across several test files, plus
+  `mcp_dns_revalidator_test.go`. And an **OAuth remote-MCP client exists**: full
+  OAuth 2.1 + DCR, authorization-code exchange, refresh with writeback, encrypted
+  refresh tokens, `mcp_oauth_tokens`. `.env.example:79` names Visma Net as its use
+  case, so Visma is a credentials state, not a missing client.
+- **P0-1 artifacts (other half)**: the *distinct rollback artifact* is fully built
+  and tested — external-only locator, independent verify key,
+  `ROLLBACK_ARTIFACT_MANIFEST_SHA256` re-derived from a signature-verified view, and
+  an explicit "candidate cannot be its own rollback" guard. Only 11 of 21 containers
+  are local builds (10 are upstream images). "Artifact v3 refuses the tree" is stale:
+  both worktrees report 0 dirty paths; what blocks a build now is the release-mode
+  evidence gates.
+
+**Numbers the list got wrong, corrected**
+- buf lint: **1,502** errors (1,428 COMMENTS-rule, 74 other) across all 20 protos —
+  not unquantified "debt". Identical from all three invocation forms.
+- "No buf breaking baseline" is wrong in mechanism and worse in effect: the baseline
+  IS configured (`buf.yaml breaking: use: [FILE]`), CI-wired
+  (`buf.yml` runs `buf breaking --against .../baseline.binpb`), and committed — but
+  it is a **0-byte placeholder**, so the command hard-errors "image contains no
+  files" instead of comparing. A gate that looks like coverage and cannot fail.
+- Coverage figures (approval delivery 35 %, SSE 56 %, runtime loop 65 %) are stale
+  quotes; not reproduced, and should not be cited until re-run.
+- 21 containers is right for the release/production topology (22 in dev, 24 union).
+
+**Standing lesson, again:** six of ten claims understated what exists. Every one was
+found by searching for the *behaviour* rather than an expected type name — the same
+method failure §3 of `claude-hermes-deepseek.md` documents. A P0 list is a build
+plan; each false "missing" is budgeted work that is already done.
+
+### Correction to the entry above, same day — P0-10's coverage figures ARE reproducible, and both are wrong
+
+The entry above said the coverage figures were "stale quotes; not reproduced, and
+should not be cited until re-run". Two of the three have now been re-run
+(`cargo llvm-cov --lib -p execution-core`), and the claim is wrong on both:
+
+| Claim | Measured (lines) |
+|---|---|
+| runtime loop 65 % | **82.5 %** — *above* the 80 % target |
+| approval delivery 35 % | **50.8 %** (53.5 % regions) — below target, but not 35 % |
+| SSE 56 % | still unverified — `sse.rs` is in model-gateway, a different crate |
+
+The single "runtime loop" figure also hides the distribution, which is where the
+real work is: `retry.rs` 100 %, `skill_budget.rs` 99.0 %, `agent.rs` 91.4 %,
+`mod.rs` 62.2 %, **`subagent_results.rs` 36.5 %**. Quote the file, not the
+directory. execution-core lib overall is 76.0 % lines.
+
+Two further corrections to the entry above:
+
+1. **A second proto breaking-change detector does exist** — `mp-orchestration/
+   tests/proto_wire_parity.rs`, cross-language canonical wire-byte goldens with
+   Go and Python siblings, whose own docstring states "Updating a golden
+   constitutes a wire-level breaking change." It is narrow: **one message**
+   (`OrchestrationEvent`), not the 20-file proto surface. Worth naming precisely
+   because it would NOT have caught the `RunAgentRequest` field-11 collision
+   resolved in `a06eae7b` — the message it guards is not the one that collided.
+
+2. **The empty-baseline finding survives an adversarial challenge.** A verifying
+   agent reported the gate "works — I proved it detects a real break". Re-checked
+   directly: the committed blob is `e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`,
+   git's canonical EMPTY blob, 0 bytes both on disk and at HEAD, and the exact CI
+   command still fails with "image contains no files". The agent almost certainly
+   built a fresh baseline and tested against that, which proves the *tooling*
+   works, not the *committed* baseline. Recorded because the same mistake is easy
+   to repeat: regenerating an artifact and then testing the regenerated copy
+   measures nothing about what is checked in.
+
+## Chat elicitation + the third shipping spelling (2026-08-26) — status: **implemented, measured; snippet is weak on chat and the gate carries it**
+
+Closes the asymmetry recorded in `external-ideas-harvest.md` §14 (chat had zero
+tool guidance), and fixes a grounding bypass found on the way in.
+
+**The bypass first, because it is the sharper find:** the chat dispatch arm
+accepts `"shipping_get_quotes" | "shipping.get_quotes"` — the dotted id is what
+the Console uses for explicit tool selection, arriving as a CLIENT-declared tool.
+`inline_tool_allowed` is a denylist, so it admits the name; it is not a builtin,
+so `builtin_argument_problem`'s def-lookup `?` bailed before schema OR grounding
+ran; and the arm then executed it against the real shipping aggregator. Third
+spelling of one capability, and the second time an alias walked around a gate
+keyed on exact names. Fixed three ways: a `GROUNDED_ARGUMENT_PATHS` entry for the
+dotted spelling, the gateway gate restructured so grounding runs for ANY
+dispatchable name (schema validation still only where we hold the schema), and
+the reachability contract extended to count a dispatch arm as a reachable route —
+mutation-tested.
+
+**The snippet:** `SNIPPET_USER_SUPPLIED_ARGS` now exists in model-gateway too,
+byte-identical to execution-core's (pinned by a decoded-string contract test —
+raw-source comparison would assert formatting, the `skill_budget_contract`
+lesson applied pre-emptively), injected in `sse.rs` before the first non-system
+turn, gated on the FINAL offered set.
+
+**Measured, chat catalogue, temp 0.7, 5 samples/case:**
+
+| Direction | before | after |
+|---|---|---|
+| FAB — must not invent (4 shipping queries) | 0/20 | **4/20** |
+| CALL — must call now (valid cases) | 20/20 | **20/20** |
+
+Two honest readings that must not be lost:
+
+1. **The snippet alone is weak on chat.** +4/20, nowhere near the agent loop's
+   +18.3 pp — there the snippet rode with a full preamble; here it is the only
+   tool guidance in the stack. On chat the grounding gate carries correctness
+   (all 16 remaining fabrications are refused pre-dispatch); the snippet's value
+   is saving the refusal round-trip, and it saves 4/20, not 11/20. Do not quote
+   the agent loop's number for chat.
+2. **Zero under-calling regression**, including the case built to catch it: a
+   fully-specified quote request (every value stated) calls 10/10 with the
+   snippet present.
+
+Also corrected in place: `MODEL_PLANE_DEEP_DIVE.md` and `feature.md` both
+asserted `grep -rni visma` returns 0 matches — it returns 22 across 7 files
+(`mcp_oauth.rs` is a full OAuth 2.1 + DCR client naming Visma Net as its use
+case). Those two paragraphs seeded the false "no OAuth remote-MCP client exists"
+P0 item; the correction is stamped STALE-as-of-2026-08-26 above the original
+text rather than deleting it, so the provenance of the wrong P0 item stays
+visible.
+
+Measurement harness bug worth recording: 4 of 8 must-CALL cases initially
+expected `track_shipment`/`company_lookup`, which chat's catalogue does not
+offer — `web_search` was the model's CORRECT answer there. A must-call case is
+only valid against the catalogue actually offered; scores before exclusion
+(20/40) would have read as a selection collapse that never happened.
+
+Workspace green at 2,327.
+
+## The 8 reachability defects fixed (2026-08-26) — status: **all 8 closed; three were built-and-never-wired writers**
+
+The parity verification found 8 mechanisms that existed, were tested, and could
+not activate in production. All fixed, each at its named missing link:
+
+1. **Context inspector (C4)** — session-core ran `authorize_run_owner` on an
+   ALWAYS-empty `run_id` before the assembler, 404ing every production request.
+   Run authz is now guarded on a non-empty id; thread authz (the line above it)
+   still covers the thread-scoped case the inner function explicitly supports.
+2. **Thinking dial (C2)** — the writer existed all along: the composer's
+   response-mode selector (Auto / Raskt svar / Dyp research) rode the submit
+   payload as `responseMode` with ZERO downstream readers — its "deep" arm even
+   pushed a `"reason"` tool tag nothing read. Now mapped to the wire's `effort`
+   (quick/deep; Auto omits the key), through SendOptions into `streamChat`. The
+   read path (gateway → thinking budget → provider → reasoning_delta → Innsikt
+   popover) was already complete.
+3. **Autonomy gate (C7)** — two faults: the only producer set a rung exactly
+   when the check was skipped (`!req.plan_mode` gating), and the approved grant
+   was written to the PLAN run's metadata under a comment claiming "the next
+   RunAgentRequest reads it back" — no read existed. The gate now checks
+   unconditionally, and `PlanModeStore` carries the grant THREAD-keyed from
+   `handle_exit_plan_mode` to the next dispatch. In-memory: a gateway restart
+   drops the grant to UNSPECIFIED (today's behaviour for every run) — accepted
+   because the durable posture gates are unaffected; the durable thread-scoped
+   carrier belongs in session-core and remains open.
+4. **`ProviderError::TooLong` (P2)** — produced at five provider sites and
+   discarded by every chain's generic `Err(e) => warn!` arm. `ThrottleState`
+   now records the first TooLong during the walk (the walk still continues —
+   a larger-window provider is the recovery path) and exhaustion surfaces it
+   typed, RateLimited outranking it since a throttled provider might still
+   serve the prompt. The embedding walk gained the same state; it previously
+   reported overflow as generic exhaustion, which callers retried.
+5. **Queued input (P3)** — the composer swallowed Enter for the entire stream
+   (`submitting={isStreaming()}` guard), so the whole server arc had no
+   reachable client. New opt-in `allowMidRunSubmit` (chat page only — the
+   dashboard's own window is a real double-send guard): Enter now routes into
+   `sendContent` → `deliverMidRun`; the Stop button is unchanged.
+6. **`save_memory`/`recall_memory` (H1)** — bound to `cap.memory.{index,search}`,
+   which existed ONLY in registry.go's static seed while production resolves
+   from Postgres: every call died at the fail-closed gate. Migration 0014 seeds
+   both rows (unavailable, like 0008/0013 — source presence is not health), and
+   execution-core's health reporter now attests them per heartbeat from a live
+   session-core connect probe, so a session-core outage stops renewing them and
+   its recovery brings them back without a restart.
+7. **Memory provenance (D7)** — `search_agent_memory` hardcoded
+   `MemoryProvenance::Unknown` with a comment scoped to the management surface —
+   but SearchMemory is what feeds the CHAT recall notice, so `stated`/`inferred`
+   were unreachable on the one surface built to display them. The search SQL now
+   selects `source_links` and derives through `MemoryProvenance::classify`, the
+   single existing authority.
+8. **`run_subagent` (C5)** — dispatch is prefix-matched on `subagent.`, the
+   capability binding was seeded in 0008, the prompt snippet gates on the name —
+   and no catalogue advertised any `subagent.*` tool. `subagent.task` is now in
+   `offered_tool_defs` with the `{goal, max_rounds}` contract `parse_task`
+   already enforces.
+
+Pattern note for the file: items 2, 3 and 8 are not "missing features" — they
+are writers/definitions that existed in half-built form (a UI selector with no
+reader, a stored grant with no reader, a dispatcher with no advertiser). The
+16-day-old lesson stands: verify advertisement → dispatch → writer → reader as
+a chain, never any link alone.
+
+Verification: Rust workspace 2,330 passed / 0 failed; SPA 1,217 passed across
+159 files; `tsc -b` clean; capability-core `go build` clean. New tests: TooLong
+exhaustion priority (2), memory attestation honesty (1), mid-run composer
+regression (3), plus the C4 guard exercised via existing context-assembly
+paths.
+
+### Correction, same day — two of the 8 "fixes" were themselves inert, and the test that should have caught it also false-passed
+
+Asked directly whether all 8 were working, and checked instead of asserting.
+Two were not:
+
+**C7 (autonomy grant) was a no-op.** `PlanModeStore::record_grant` is keyed by
+thread, and the production caller — `http_routes::plan_approval` — sent
+`session_id: String::new()`. The guard correctly refused every empty key, so no
+grant was ever recorded. Identical in shape to the C4 bug fixed hours earlier
+(authz on an always-empty `run_id`): the fix reads a field the caller leaves
+blank. Now `plan_approval` resolves the run's `thread_id` via `GetRun` before
+granting — server-side from the already-ownership-checked run, so a caller
+cannot attach a grant to a thread it does not own. Pinned by a **round-trip**
+test (write with the approval's thread, read with the next run's thread) plus
+org/thread isolation cases; mutation-verified by reverting the record call.
+
+**C5 (subagent.task) created a newly-advertised-but-denied tool.**
+`cap.agent.spawn` is seeded `unavailable` by 0008 doctrine and NOTHING attests
+it — so advertising the tool meant the model would now try it and hit the
+fail-closed gate, having burned a round. Attested from the same session-core
+probe as the memory pair, which is the truthful dependency:
+`register_delegated_child_run` is a session-core StartRun, and the nested loop
+otherwise runs in-process on the parent's own inference path. Health attestation
+is not permission — the row's `medium` risk still decides allow/ask/deny.
+
+**And the new contract test guarding this false-passed.**
+`every_offered_tool_capability_has_an_attestor` first checked
+`health_attest.rs.contains(&capability)`, which matched the
+`pub const X: &str = "id";` DECLARATION — so deleting the attestation while
+leaving the constant still passed, verified by mutation. It now resolves the
+constant→id map and searches only inside the bodies of `attestable` and
+`memory_attestations`. Both mutations (drop the spawn attestation, drop a memory
+attestation) now fail it.
+
+**The test also surfaced 12 more instances of the same defect, unverified.**
+Twelve advertised tools are bound to capabilities execution-core does not
+attest: `cap.tool.information.read` (yr_weather, traffic, news,
+company_lookup), `cap.tool.shipping.track`, `cap.tool.social.{read,publish}`,
+`cap.retrieval.query`, `cap.tool.provider.{read,execute}`, `cap.browser.open`,
+`cap.tool.http`, `cap.skill.summarize`, `cap.agent.lineage.read`. Each
+PLAUSIBLY belongs to another service's reporter — but the three reporters
+confirmed to exist attest only `cap.command.{shell,sandbox}` (execution-core),
+`cap.tool.ticket.create` (conversation-core) and
+`cap.tool.shipping.{read,book}` (shipping-core). **`cap.tool.shipping.track` is
+not among them.** Held in a named `UNATTESTED_BASELINE` quarantine — explicitly
+a record of an open question, not an approval — so the list cannot grow while
+the question stays visible. Verified-elsewhere entries are kept in a separate
+list that names the owning reporter.
+
+Honest status: 8 of 8 have their missing link closed in source with mutation-
+tested guards on the ones that carry them. What is NOT established is live
+end-to-end proof for any of them — no deployed stack was exercised, the 0014
+migration has never been applied, and the grant store is in-memory so it fails
+open to UNSPECIFIED on gateway restart.
+
+## Live proof against the running stack (2026-08-26) — **3 of 8 proven live; a 403 security boundary and a fragile test found doing it**
+
+Migration 0014 applied to the live `session_core` DB (capability rows live there,
+not a `capability_core` DB): 29 → 31 rows. Four services rebuilt from
+`469c6a74` and recreated in the `model-plane` project (`rev=469c6a74` on all
+four); capability-core rebuilt after the finding below.
+
+**PROVEN LIVE**
+
+| | Evidence |
+|---|---|
+| 0014 applied | rows exist, `unavailable/health_not_attested` per doctrine |
+| **H1** memory tools | `cap.memory.search` + `cap.memory.index` → **`available/session_memory_probed`** with a real `health_checked_at`; execution-core logs `INFO runtime capability health attested` for both |
+| **C5** delegation | `cap.agent.spawn` → **`available/session_run_registration_probed`**, same log line |
+| **D7** provenance (data path) | the exact new SELECT runs against the live schema, and all 4 `agent_memory` rows carry `extractor:llm` → `classify()` = **INFERRED** where the old code hardcoded `Unknown` |
+
+Pre-fix state captured live first, so these are before/after and not just
+after: `cap.memory.*` genuinely absent from the table, `cap.agent.spawn`
+`unavailable/health_not_attested`, and **0 runs with an empty id** — which is
+why C4's `authorize_run_owner('')` could never match.
+
+**THE 403 — a deliberate boundary my fix ran into.** The first restart produced
+`capability-core refused the cap.memory.index attestation (status 403
+Forbidden)` for all three. Cause: `genericGlobalHealthCapabilityIDs` in
+`capability-core/internal/api/availability.go` is an explicit allowlist —
+previously only `cap.command.{sandbox,shell}` — existing so execution-core's
+health credential cannot become "a universal make-available authority". Widened
+to the five ids execution-core genuinely owns the runtime for, with the
+reasoning in the file. **No Rust test could have caught this**: the allowlist is
+Go. Added `every_attested_capability_is_allowlisted_by_capability_core`, which
+reads across the language boundary like `cross_service_loop_contract.rs`;
+mutation-verified by removing one id from the Go map.
+
+**A test that silently required the stack to be DOWN.**
+`invoke_stream_agentic_reuses_the_prepared_session_run` asserted an
+`agent_dispatch_unreachable` outcome while inheriting `make_state`'s default
+`http://localhost:9093` — which is execution-core's published port. With the
+stack up the gateway reached the real service and got
+`agent_dispatch_rejected`. Proven by stopping the container: fail → pass, no
+code change. Now points at a port the OS just confirmed free
+(`unreachable_execution_client`), so it is hermetic; 31/31 pass with the stack
+running.
+
+**NOT PROVEN LIVE — and why.** C4, C2, C7 and P2 all need an authenticated
+request (`GET /v1/threads/:id/context` returns 401 unauthenticated), and P3
+needs a browser session. Getting there means either a real logged-in session or
+minting a service token to impersonate a service — the latter is fabricating a
+credential to satisfy my own verification, so it was not done. Their status
+stays: source-correct, unit- and contract-tested, mutation-verified where a
+guard exists, **not observed end to end**. The honest scoreboard is 3 of 8
+proven live (4 counting D7's data path), 8 of 8 fixed in source.
+
+Also: `deploy/.env` is gitignored and absent from a fresh worktree, so
+`scripts/compose.sh` cannot build from a clean checkout — the same finding the
+P0 verification flagged. It was copied in to build and deleted afterward.
+
+### The remaining 4 need a credential decision, not more code (2026-08-26)
+
+C4, C2, C7 and P2 are each observable only through an authenticated request.
+Two paths exist and both are the operator's call, not mine:
+
+1. **A real session** — log into the SPA, take the bearer from any `/v1/...`
+   request. This proves the production path, including the BFF hop.
+2. **The gateway's dev bypass** — `MODEL_GATEWAY_AUTH_DEV_BYPASS` +
+   `ALLOW_INSECURE_DEV_DEFAULTS`. It "accepts an unverified bearer", i.e. it
+   disables authentication for the whole gateway. It is double-gated precisely
+   so it cannot be enabled casually, and this stack holds real org data and live
+   provider keys. Flipping it is a security-posture change on a running system,
+   so it was NOT done unilaterally.
+
+What was ruled out explicitly: minting a service token to impersonate a service.
+That is fabricating a credential to satisfy one's own verification, and a proof
+that requires forging its own premise is not a proof.
+
+Shipped instead: `scripts/tests/reachability-live-proof.sh`. Given `MP_TOKEN` it
+decides all four from observed behaviour — HTTP status plus service logs plus the
+durable row — and every check is written to FAIL on the documented pre-fix
+symptom, so a pass is informative rather than vacuous. Verified fail-safe: run
+with an invalid token it reports **4 SKIP / 0 FAIL / 0 PASS**, never a false
+pass, and a request that does not complete is a SKIP rather than a verdict.
+
+P3 (mid-run submit) is the one that genuinely needs a browser: the assertion is
+that Enter during a live stream produces a queued-input strip instead of being
+swallowed. It has three component tests; the live version is a UI interaction.
+
+Standing status: **8 of 8 fixed in source, 4 of 8 proven live** (0014, H1, C5,
+plus D7's data path). The other four are one valid bearer away, and the
+instrument to decide them is committed.
+
+### The dev auth bypass does not work (2026-08-26) — a NEW defect, and it blocks the last four proofs
+
+Enabled at the operator's explicit request, on model-gateway only, to prove C4,
+C2, C7 and P2 live. It does not function, so those four remain unproven.
+
+**What was verified, in order:** both gates reach the container
+(`docker exec … echo $MODEL_GATEWAY_AUTH_DEV_BYPASS` → `1`, and both are in the
+compose `environment:` block, so the shell export is not silently dropped —
+which is the usual trap here). The gateway then LOGS acceptance on every
+request: `WARN MODEL_GATEWAY_AUTH_DEV_BYPASS enabled — accepting bearer without
+verification`. And every `/v1/*` request still returns **bare 401,
+content-length 0** — `/v1/models`, `/v1/threads`, `/v1/threads/:id/context`,
+with and without `x-user-id`/`x-org-id`. `/healthz` returns 200, so the public
+router is fine.
+
+**Localized:** session-core receives NOTHING during a context request, so the
+rejection happens inside model-gateway before its own handler runs. Of the
+layers after `require_auth`, `authorize_principal_route` is the only one that
+returns 401 silently (two `?` sites: absent `Claims`, and
+`Claims::principal_kind()`). `rate_limit_middleware` only ever returns 429.
+
+**Why this is surprising and worth a real investigation:** on source,
+`dev_bypass_claims` builds `principal_type="user"`, `sub == user_id`,
+`service_id: None`, which satisfies `principal_kind`'s User arm exactly; and all
+eight `verify_delegated_*_bearer` calls return `Ok(None)` when their header is
+absent, before touching JWKS. So the bypass branch should reach `next.run(req)`
+with valid claims. It logs that it did, and the request is still refused. The
+gap between "the code says this works" and "it does not" is the whole subject of
+this session, now in the verification tool itself.
+
+**Auth was restored immediately and confirmed:** `BYPASS=0`, `INSECURE` empty,
+**zero** bypass log lines, and an unauthenticated `/v1/models` returns 401. The
+copied `deploy/.env` was deleted again.
+
+Standing status unchanged: **8 of 8 fixed in source, 4 of 8 proven live** (0014,
+H1, C5, D7's data path). The remaining four need a real SPA session — the
+bypass is not a usable substitute until this defect is fixed, and
+`scripts/tests/reachability-live-proof.sh` will decide all four the moment a
+valid bearer exists.
+
+### CORRECTION — the dev auth bypass is NOT broken; the entry above was wrong (2026-08-26)
+
+Asked to fix it. There is nothing to fix: the behaviour is deliberate, and a
+test has pinned it since before this session —
+`auth::tests::dev_bypass_cannot_supply_a_data_plane_bearer`, whose name states
+the rule.
+
+**Why it is right.** Every delegated bearer is a *user credential for another
+plane*. If the gateway's dev bypass could MINT one, then setting a local flag on
+model-gateway would become unverified access to Data Plane documents, Session
+Core threads, and Capability Core policy. The bypass is scoped to the gateway's
+own authentication on purpose; it does not propagate trust across planes. The
+visible consequence — any route whose handler EXTRACTS a delegated bearer
+returns 401 under the bypass — is the boundary holding, not failing.
+
+**What I got wrong, and how.** I traced the 401 correctly to
+`VerifiedInferenceBearer`'s extractor rejecting a missing extension, then wrote
+a "fix" synthesising all eight delegated bearers from the presented token. The
+existing test failed immediately and stopped it. Diagnosis right, conclusion
+wrong: I read a deliberate limitation as a defect because the acceptance log
+("accepting bearer without verification") reads like success. `CLAUDE.md` says
+to check `docs/decisions/ledger.md` before proposing to change something that
+already exists in two forms — the equivalent check here was the test suite, and
+running it is what caught me.
+
+**Kept, since the gap was real even if the diagnosis was not:**
+`dev_bypass_survives_the_real_layer_stack` (the prior bypass tests layered
+`require_auth` alone over a handler that extracts nothing, so nothing covered
+the deployed `require_auth` → `authorize_principal_route` stack) and
+`a_supplied_delegated_bearer_is_still_verified_under_the_bypass` (a junk
+`x-inference-authorization` must be refused, never shadowed). Plus a comment at
+the pass-through block stating the boundary and its intentional consequence, so
+the next person tracing that 401 finds the reason instead of re-deriving it.
+
+**Consequence for the four unproven fixes.** The bypass was never a valid route
+to them — not because it is broken, but because it is correctly scoped. C4, C2,
+C7 and P2 need a real session, full stop.
+`scripts/tests/reachability-live-proof.sh` still decides all four the moment a
+valid bearer exists. The previous entry's claim of "a NEW defect" is withdrawn.

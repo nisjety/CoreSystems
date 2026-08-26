@@ -49,6 +49,15 @@ pub const SANDBOX_CAPABILITY: &str = "cap.command.sandbox";
 /// The `shell` runtime capability (high risk: arbitrary host commands).
 pub const SHELL_CAPABILITY: &str = "cap.command.shell";
 
+/// Long-term memory search (`recall_memory`).
+pub const MEMORY_SEARCH_CAPABILITY: &str = "cap.memory.search";
+
+/// Long-term memory persist (`save_memory`).
+pub const MEMORY_INDEX_CAPABILITY: &str = "cap.memory.index";
+
+/// Governed delegation (`subagent.*`).
+pub const AGENT_SPAWN_CAPABILITY: &str = "cap.agent.spawn";
+
 /// Scope required to attest a `global` capability row. capability-core's handler
 /// looks the row up with `GetGlobal` only for a service principal holding this
 /// scope; with the tenant-level health scope it would instead look for a
@@ -132,6 +141,77 @@ pub fn probe() -> ProbeOutcome {
         sandbox: crate::sandbox::is_supported(),
         interpreter: interpreter_available(),
     }
+}
+
+/// Probe the session-core dependency the memory tools actually call.
+///
+/// A real TCP+HTTP/2 connect to the configured endpoint, per heartbeat — not a
+/// one-shot at boot, because session-core restarting under a running
+/// execution-core is exactly the situation an attestation TTL exists for. No
+/// endpoint configured means the memory tools cannot work in this deployment,
+/// so nothing is attested and the rows keep their fail-closed denial.
+async fn session_core_reachable() -> bool {
+    let Some(url) = std::env::var("SESSION_CORE_URL")
+        .or_else(|_| std::env::var("SESSION_CORE_ADDR"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return false;
+    };
+    let Ok(endpoint) = tonic::transport::Endpoint::from_shared(url) else {
+        return false;
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        endpoint
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .connect(),
+    )
+    .await
+    .map(|result| result.is_ok())
+    .unwrap_or(false)
+}
+
+/// The session-core-dependent attestations, when the dependency probe passed.
+///
+/// Separate from [`attestable`]: those two capabilities are facts about THIS
+/// process (its sandbox, its interpreter); these two are facts about a
+/// dependency, so they are re-probed every heartbeat rather than once at boot.
+/// Until this existed, `save_memory`/`recall_memory` were advertised, prompted
+/// for (`SNIPPET_MEMORY_TOOLS`), and dispatched — and every call died at the
+/// capability gate because `cap.memory.{index,search}` had no attestor at all.
+#[must_use]
+pub fn memory_attestations(session_core_up: bool) -> Vec<Attestation> {
+    if !session_core_up {
+        return Vec::new();
+    }
+    vec![
+        attestation(
+            MEMORY_SEARCH_CAPABILITY,
+            "session_memory_probed",
+            "Session Core memory endpoint connected.",
+        ),
+        attestation(
+            MEMORY_INDEX_CAPABILITY,
+            "session_memory_probed",
+            "Session Core memory endpoint connected.",
+        ),
+        // Delegation shares this dependency and no other: the nested loop runs
+        // in-process on the parent's own inference path, and the ONE thing it
+        // needs beyond that is `register_delegated_child_run`, a session-core
+        // StartRun. Attested here rather than left unattested because
+        // `subagent.task` is now advertised — an offered tool whose capability
+        // nothing attests is the fail-closed denial this module exists to
+        // remove, and the model would burn a round discovering it.
+        //
+        // The row's risk_level (medium, migration 0008) still decides
+        // allow/ask/deny; attesting health is not granting permission.
+        attestation(
+            AGENT_SPAWN_CAPABILITY,
+            "session_run_registration_probed",
+            "Session Core run-registration endpoint connected.",
+        ),
+    ]
 }
 
 /// Execute the interpreter `code_interpreter` actually invokes. Presence on
@@ -417,6 +497,14 @@ pub fn spawn_heartbeat() {
         // would take the capability down again five minutes later.
         loop {
             attestor.attest_all(&planned).await;
+            // Dependency-backed capabilities are re-probed every round: a
+            // session-core outage must stop renewing them (TTL then takes the
+            // rows down, fail-closed), and its recovery must bring them back
+            // without an execution-core restart.
+            let memory = memory_attestations(session_core_reachable().await);
+            if !memory.is_empty() {
+                attestor.attest_all(&memory).await;
+            }
             tokio::time::sleep(interval).await;
         }
     });
@@ -456,6 +544,75 @@ mod tests {
                 "version": version,
                 "risk_level": "low",
             })))
+    }
+
+    /// The dependency-backed pair follows the same honesty rule as the probe
+    /// pair: an unreachable session-core attests NOTHING (the rows keep their
+    /// fail-closed denial), and a reachable one attests exactly the two memory
+    /// capabilities the tools are bound to.
+    /// Every id this reporter attests must be in capability-core's
+    /// `genericGlobalHealthCapabilityIDs` allowlist.
+    ///
+    /// That allowlist exists so this service's health credential cannot become a
+    /// universal "make available" authority, and it is enforced in Go — so no
+    /// Rust-side test could see it. Live proof 2026-08-26: the reporter attested
+    /// `cap.memory.{search,index}` and `cap.agent.spawn`, capability-core
+    /// refused all three **403 Forbidden**, and the tools stayed denied at the
+    /// policy gate while every Rust test passed. Read across the language
+    /// boundary the way `cross_service_loop_contract.rs` does, for the same
+    /// reason: the two services deploy separately and neither can depend on the
+    /// other.
+    #[test]
+    fn every_attested_capability_is_allowlisted_by_capability_core() {
+        let allowlist_source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../go/services/capability-core/internal/api/availability.go"),
+        )
+        .expect(
+            "capability-core's availability.go is the authority on who may attest what;              if it moved, re-point this test — do not delete it, it is the only check that              an attestation can actually land",
+        );
+        let start = allowlist_source
+            .find("var genericGlobalHealthCapabilityIDs = map[string]struct{}{")
+            .expect("the allowlist was renamed; re-point this test");
+        let block = &allowlist_source[start..];
+        let end = block.find("\n}").expect("unterminated allowlist literal");
+        let allowlist = &block[..end];
+
+        let mut missing = Vec::new();
+        for capability in [
+            SANDBOX_CAPABILITY,
+            SHELL_CAPABILITY,
+            MEMORY_SEARCH_CAPABILITY,
+            MEMORY_INDEX_CAPABILITY,
+            AGENT_SPAWN_CAPABILITY,
+        ] {
+            if !allowlist.contains(&format!("\"{capability}\"")) {
+                missing.push(capability);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "this reporter attests {missing:?}, which capability-core's \
+             genericGlobalHealthCapabilityIDs does not allow — every such attestation is \
+             refused 403 and the bound tools stay denied at the policy gate. Add the id \
+             there (and justify that execution-core OWNS that runtime), or stop attesting it."
+        );
+    }
+
+    #[test]
+    fn memory_attestations_track_the_dependency_probe() {
+        assert!(memory_attestations(false).is_empty());
+        let up = memory_attestations(true);
+        let ids: Vec<&str> = up.iter().map(|a| a.capability_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                MEMORY_SEARCH_CAPABILITY,
+                MEMORY_INDEX_CAPABILITY,
+                AGENT_SPAWN_CAPABILITY
+            ]
+        );
+        assert!(up.iter().all(|a| a.state == "available"));
     }
 
     #[test]

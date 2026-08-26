@@ -68,6 +68,28 @@ struct PlanModeEntry {
 #[derive(Clone, Default, Debug)]
 pub struct PlanModeStore {
     inner: Arc<DashMap<String, PlanModeEntry>>,
+    /// Autonomy grants from approved plans, keyed by THREAD — the follow-up
+    /// run is a new run, so a run-keyed entry could never reach it. Written by
+    /// `handle_exit_plan_mode`, read by the invoke path when constructing the
+    /// next `RunAgentRequest`. Until this map existed, the grant was persisted
+    /// to the plan run's metadata with a comment claiming "the next
+    /// RunAgentRequest reads it back" — no such read existed anywhere, so the
+    /// per-call rung gate could never refuse anything.
+    ///
+    /// In-memory, so a gateway restart drops the grant and the next run falls
+    /// back to UNSPECIFIED (no graded constraint — today's behaviour for every
+    /// run). That is fail-open for the graded ladder and is accepted ONLY
+    /// because the durable posture gates (plan mode, risky-call approvals)
+    /// are unaffected; the durable thread-scoped carrier belongs in
+    /// session-core and is recorded as follow-up in the decisions ledger.
+    grants: Arc<DashMap<String, GrantEntry>>,
+}
+
+#[derive(Debug)]
+struct GrantEntry {
+    org_id: String,
+    rung: mp_contracts::model_plane::v1::AutonomyRung,
+    expires_at_unix: i64,
 }
 
 impl PlanModeStore {
@@ -120,6 +142,55 @@ impl PlanModeStore {
             self.inner.remove(&key);
         }
         (false, String::new(), 0)
+    }
+
+    /// Record the rung an approved plan granted for this thread.
+    ///
+    /// Same TTL ceiling as plan entries: a grant is an approval artifact, not a
+    /// standing policy, and an unbounded one would quietly outlive the plan it
+    /// authorized.
+    pub fn record_grant(
+        &self,
+        org_id: &str,
+        thread_id: &str,
+        rung: mp_contracts::model_plane::v1::AutonomyRung,
+    ) {
+        if thread_id.trim().is_empty()
+            || rung == mp_contracts::model_plane::v1::AutonomyRung::Unspecified
+        {
+            return;
+        }
+        self.grants.insert(
+            thread_id.to_owned(),
+            GrantEntry {
+                org_id: org_id.to_owned(),
+                rung,
+                expires_at_unix: now_unix() + MAX_PLAN_TTL_SECS,
+            },
+        );
+    }
+
+    /// The rung a prior approved plan granted this thread, if any and unexpired.
+    /// Org-checked like every other read here; an expired entry is swept.
+    #[must_use]
+    pub fn granted_rung(
+        &self,
+        org_id: &str,
+        thread_id: &str,
+    ) -> Option<mp_contracts::model_plane::v1::AutonomyRung> {
+        let now = now_unix();
+        if let Some(entry) = self.grants.get(thread_id) {
+            if entry.org_id != org_id {
+                return None;
+            }
+            if entry.expires_at_unix > now {
+                return Some(entry.rung);
+            }
+            let key = thread_id.to_owned();
+            drop(entry);
+            self.grants.remove(&key);
+        }
+        None
     }
 }
 
@@ -212,6 +283,9 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
     )
     .map_err(|refusal| Status::invalid_argument(refusal.message()))?;
 
+    // The grant must reach the NEXT run, which is a different run on the same
+    // thread — record it thread-keyed before anything else can fail.
+    store.record_grant(&req.org_id, &req.session_id, escalation.to());
     let was_active = store.exit(&req.org_id, &req.run_id);
     if was_active {
         let envelope = mp_events::envelope::Envelope {
@@ -656,5 +730,80 @@ mod tests {
         // org2 isolated.
         let (org2, _) = s.list("org2", "", 10);
         assert_eq!(org2.len(), 1);
+    }
+
+    /// The grant must survive the run it was granted on, because the work it
+    /// authorizes happens on the NEXT run of the same thread.
+    ///
+    /// This test exists because the first version of this feature keyed the
+    /// grant on a field the production caller left EMPTY (`session_id`), so
+    /// `record_grant` refused every grant and the whole path was a no-op that
+    /// no test noticed. Asserting the round-trip — write with the thread the
+    /// approval resolved, read with the thread the next run carries — is the
+    /// only shape that catches that.
+    #[test]
+    fn a_grant_is_readable_by_the_next_run_on_the_same_thread() {
+        let store = PlanModeStore::new();
+        store.record_grant(
+            "org-1",
+            "thread-1",
+            mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite,
+        );
+        assert_eq!(
+            store.granted_rung("org-1", "thread-1"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+        );
+        // Another org must never read it, and an unrelated thread must not
+        // inherit it.
+        assert_eq!(store.granted_rung("org-2", "thread-1"), None);
+        assert_eq!(store.granted_rung("org-1", "thread-2"), None);
+    }
+
+    /// An empty thread is refused rather than stored under "" — where every
+    /// caller would collide and read each other's grants.
+    #[test]
+    fn an_empty_thread_or_unspecified_rung_records_nothing() {
+        let store = PlanModeStore::new();
+        store.record_grant(
+            "org-1",
+            "",
+            mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite,
+        );
+        assert_eq!(store.granted_rung("org-1", ""), None);
+        store.record_grant(
+            "org-1",
+            "thread-1",
+            mp_contracts::model_plane::v1::AutonomyRung::Unspecified,
+        );
+        assert_eq!(store.granted_rung("org-1", "thread-1"), None);
+    }
+
+    /// Exiting plan mode IS the grant, so the handler must record it — with the
+    /// thread the caller resolved, not with the run id.
+    #[tokio::test]
+    async fn exiting_plan_mode_records_the_grant_for_the_thread() {
+        let store = PlanModeStore::new();
+        let publisher = InMemoryPublisher::new();
+        store.enter("org-1", "run-1", "investigating".to_owned(), 600);
+        let resp = handle_exit_plan_mode(
+            &store,
+            &publisher,
+            ExitPlanModeRequest {
+                request_id: "req-1".to_owned(),
+                org_id: "org-1".to_owned(),
+                run_id: "run-1".to_owned(),
+                session_id: "thread-1".to_owned(),
+                granted_rung: mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite as i32,
+                justification: "the plan only writes a report".to_owned(),
+            },
+        )
+        .await
+        .expect("a justified escalation from READ_ONLY is valid");
+        assert!(resp.was_active);
+        assert_eq!(
+            store.granted_rung("org-1", "thread-1"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+            "the next run on this thread must see the rung the human granted"
+        );
     }
 }

@@ -990,6 +990,16 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         req.extensions_mut().insert(claims);
         req.extensions_mut()
             .insert(VerifiedModelBearer::new(&token));
+        // Delegated bearers are passed through ONLY when the caller supplied
+        // and they verified. The bypass deliberately cannot MINT one — see
+        // `dev_bypass_cannot_supply_a_data_plane_bearer`. A gateway dev flag
+        // must not become cross-plane authority: a synthesised Data Plane or
+        // Session bearer would turn "skip auth on my local gateway" into
+        // unverified access to another plane's content. The consequence is
+        // intentional and worth stating, because it looks like a bug from
+        // outside: under the bypass, any route whose handler EXTRACTS a
+        // delegated bearer still returns 401, so the bypass alone cannot
+        // exercise those routes. That is the boundary working, not failing.
         if let Some(data_plane_bearer) = data_plane_bearer {
             req.extensions_mut().insert(data_plane_bearer);
         }
@@ -1511,6 +1521,88 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], b"org_placeholder:user_placeholder");
+
+        std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
+    }
+
+    /// The bypass through the REAL layer stack, not `require_auth` alone.
+    ///
+    /// `dev_bypass_accepts_any_bearer` above layers only `require_auth`, so it
+    /// proved the branch works in isolation while the deployed stack —
+    /// `require_auth` wrapping `authorize_principal_route` wrapping
+    /// `rate_limit_middleware` (`http_routes.rs`) — returned a bare 401 on every
+    /// `/v1/*` route with the bypass on. Observed 2026-08-26 against the live
+    /// container: the acceptance WARN was logged and the request was still
+    /// refused before any handler ran. Isolation-only coverage is what let that
+    /// stand.
+    #[tokio::test]
+    #[serial]
+    async fn dev_bypass_survives_the_real_layer_stack() {
+        async fn echo_claims(axum::Extension(claims): axum::Extension<Claims>) -> String {
+            format!("{}:{}", claims.org_id, claims.user_id)
+        }
+
+        clear_env();
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", "1");
+
+        // Same order as `http_routes.rs`: the LAST `.layer` is outermost, so
+        // require_auth runs first and authorize_principal_route sees its Claims.
+        let app = Router::new()
+            .route("/v1/models", get(echo_claims))
+            .layer(middleware::from_fn(authorize_principal_route))
+            .layer(middleware::from_fn(require_auth));
+
+        let req = HttpRequest::builder()
+            .uri("/v1/models")
+            .header("authorization", "Bearer whatever")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the bypass must produce a usable request through the layer stack, not just \
+             through require_auth in isolation"
+        );
+
+        std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
+    }
+
+    /// A delegated header the caller DID send must still be verified, not
+    /// shadowed by the synthesised one — otherwise the fix above would turn a
+    /// forged delegate into an accepted one on the realistic SPA/BFF path.
+    #[tokio::test]
+    #[serial]
+    async fn a_supplied_delegated_bearer_is_still_verified_under_the_bypass() {
+        async fn ok() -> &'static str {
+            "ok"
+        }
+
+        clear_env();
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", "1");
+
+        let app = Router::new()
+            .route("/v1/models", get(ok))
+            .layer(middleware::from_fn(require_auth));
+
+        let req = HttpRequest::builder()
+            .uri("/v1/models")
+            .header("authorization", "Bearer whatever")
+            // Present but junk: it must be REJECTED rather than silently
+            // replaced by the synthesised bearer.
+            .header("x-inference-authorization", "Bearer not-a-jwt")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a supplied delegated bearer must go through verification even under the bypass"
+        );
 
         std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
     }
