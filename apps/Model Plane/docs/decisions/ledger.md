@@ -1158,3 +1158,40 @@ config, and where possible a live command or the running stack. Verdicts:
 found by searching for the *behaviour* rather than an expected type name — the same
 method failure §3 of `claude-hermes-deepseek.md` documents. A P0 list is a build
 plan; each false "missing" is budgeted work that is already done.
+
+### Correction to the entry above, same day — P0-10's coverage figures ARE reproducible, and both are wrong
+
+The entry above said the coverage figures were "stale quotes; not reproduced, and
+should not be cited until re-run". Two of the three have now been re-run
+(`cargo llvm-cov --lib -p execution-core`), and the claim is wrong on both:
+
+| Claim | Measured (lines) |
+|---|---|
+| runtime loop 65 % | **82.5 %** — *above* the 80 % target |
+| approval delivery 35 % | **50.8 %** (53.5 % regions) — below target, but not 35 % |
+| SSE 56 % | still unverified — `sse.rs` is in model-gateway, a different crate |
+
+The single "runtime loop" figure also hides the distribution, which is where the
+real work is: `retry.rs` 100 %, `skill_budget.rs` 99.0 %, `agent.rs` 91.4 %,
+`mod.rs` 62.2 %, **`subagent_results.rs` 36.5 %**. Quote the file, not the
+directory. execution-core lib overall is 76.0 % lines.
+
+Two further corrections to the entry above:
+
+1. **A second proto breaking-change detector does exist** — `mp-orchestration/
+   tests/proto_wire_parity.rs`, cross-language canonical wire-byte goldens with
+   Go and Python siblings, whose own docstring states "Updating a golden
+   constitutes a wire-level breaking change." It is narrow: **one message**
+   (`OrchestrationEvent`), not the 20-file proto surface. Worth naming precisely
+   because it would NOT have caught the `RunAgentRequest` field-11 collision
+   resolved in `a06eae7b` — the message it guards is not the one that collided.
+
+2. **The empty-baseline finding survives an adversarial challenge.** A verifying
+   agent reported the gate "works — I proved it detects a real break". Re-checked
+   directly: the committed blob is `e69de29bb2d1d6434b8b29ae775ad8c2e48c5391`,
+   git's canonical EMPTY blob, 0 bytes both on disk and at HEAD, and the exact CI
+   command still fails with "image contains no files". The agent almost certainly
+   built a fresh baseline and tested against that, which proves the *tooling*
+   works, not the *committed* baseline. Recorded because the same mistake is easy
+   to repeat: regenerating an artifact and then testing the regenerated copy
+   measures nothing about what is checked in.
