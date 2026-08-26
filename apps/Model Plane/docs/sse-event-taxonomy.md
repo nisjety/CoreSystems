@@ -25,6 +25,7 @@ asserted, not just reported.
 | `follow_ups` | — (control) | `ChatEvent::FollowUps` | ✅ |
 | `grounding` | `citations` | `ChatEvent::Grounding` | ✅ |
 | `memory_recall` | `memory` | `ChatEvent::MemoryRecall` | ✅ |
+| `queued_input` | — (control) | `ChatEvent::QueuedInput` | ✅ |
 | `reasoning_delta` | `reasoning` | `ChatEvent::ReasoningDelta` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |

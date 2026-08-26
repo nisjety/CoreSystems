@@ -83,9 +83,40 @@ VARIANT_ARM = re.compile(
 )
 
 
+def strip_line_comments(body: str) -> str:
+    """Remove `//` comments so a comment cannot break a match-arm pattern list.
+
+    This is not cosmetic. `VARIANT_ARM` requires an unbroken chain of
+    `ChatEvent::X { .. } |` patterns up to the `=>`, and `family()` documents its
+    control-event group with a comment sitting BETWEEN two of those patterns.
+    Flattening whitespace left the comment text inline, the chain broke, and the
+    match began after it — so `Title` and `FollowUps` were reported as having no
+    family arm when both are plainly in the `=> None` group. The gate had been
+    failing on that false positive, which is how a red CI gate stops being read.
+
+    Only whole-line and trailing comments are stripped, and only outside string
+    literals — the arms here carry `Some("name")` values that must survive.
+    """
+    out: list[str] = []
+    for line in body.split("\n"):
+        in_string = False
+        cut = None
+        index = 0
+        while index < len(line) - 1:
+            char = line[index]
+            if char == '"' and (index == 0 or line[index - 1] != "\\"):
+                in_string = not in_string
+            elif not in_string and char == "/" and line[index + 1] == "/":
+                cut = index
+                break
+            index += 1
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
 def parse_arms(body: str) -> dict[str, str | None]:
     """Map each ChatEvent variant to its arm value (None for a `None` arm)."""
-    flat = " ".join(body.split())
+    flat = " ".join(strip_line_comments(body).split())
     out: dict[str, str | None] = {}
     for match in VARIANT_ARM.finditer(flat):
         value = match.group(2) or match.group(3)

@@ -1546,3 +1546,68 @@ to them — not because it is broken, but because it is correctly scoped. C4, C2
 C7 and P2 need a real session, full stop.
 `scripts/tests/reachability-live-proof.sh` still decides all four the moment a
 valid bearer exists. The previous entry's claim of "a NEW defect" is withdrawn.
+
+## The 12 incomplete parity rows, worked through (2026-08-26) — **4 were stale, 1 was a red CI gate, 7 remain**
+
+Asked to complete them. Verified each before building, because 8 of 22 parity
+claims and 6 of 10 P0 items this week understated what already existed.
+
+**Four were stale — the code was ahead of the row:**
+
+* **Elicitation instruction** — 🟡 "agent loop only" was true until `47c15eee`
+  put a byte-identical snippet in model-gateway, contract-pinned. Now ✅, with
+  the honest caveat that chat measured +4/20 against the agent loop's +18.3 pp:
+  on chat the snippet is the only tool guidance in the stack, so the gate carries
+  correctness and the snippet only saves the round-trip.
+* **Extended-thinking budget** — 🟡 "not confirmed as a first-class budgeted
+  mode". It is one (`thinking.rs`: deep 4096 / quick 1024, stepped down to keep
+  answer headroom). The 08-25 verification found the read path live with zero
+  writers; the writer existed too, unrecognised, as the composer's response-mode
+  selector whose payload field nothing read. Now wired.
+* **Multi-provider routing** — 🟡 "ad-hoc provider structs (not yet re-verified)".
+  The caveat was the accurate part: `intent.rs` + `routing_policy.rs` (runtime-
+  tunable complexity weights and a mode × complexity → model table externalised
+  from consts) + `fallback.rs`'s gated provider walk + `policy_client.rs`, all
+  consumed by `FallbackChain`.
+* **Docs-freshness CI gate** — ❌ when it exists: `gen-sse-event-taxonomy.py
+  --check`, wired in `.github/workflows/sse-taxonomy.yml`. See below.
+
+**The gate was RED on a false positive, which is why nobody read it.**
+`parse_arms`'s regex needs an unbroken chain of `|`-joined patterns up to the
+`=>`, and `family()` documents its control-event group with a comment sitting
+*between* two of those patterns. Flattening left the comment inline, the chain
+broke, and `Title`/`FollowUps` were reported as having no family arm — both are
+plainly in the `=> None` group. Third time this week a source-text parser was
+defeated by formatting (after `skill_budget_contract`'s rustfmt wrapping and my
+own attestor test matching a const *declaration*): **a parser must normalise what
+it reads.** Comment stripping added, mutation-verified — reverting it reproduces
+the exact false positive. And the gate had stopped catching real drift:
+`queued_input` was missing from the committed doc. Regenerated; green at 15
+events.
+
+**Seven remain, and they are not one kind of thing:**
+
+*Decisions, already annotated — closing these would mean building what the
+reference rejected:* fork-semantics (DeepSeek: "inherited completed turns …
+violate the fresh-context contract") and per-agent filesystem isolation (DeepSeek
+does not do it either; what it isolates is CONTEXT, which `run_subagent` already
+does).
+
+*Needs a product call, now annotated as such rather than a bare ❌:*
+self-modification. Three of four systems lack it; the one that has it labels its
+own mechanism non-security-boundary. Adopting it means letting the agent mount
+code into a runtime holding live tenant data.
+
+*Genuine remaining feature work, each needing a design call before code:*
+- **Sandbox full/partial vocabulary** — `capability_profile()` is served over
+  HTTP by execution-core and still has **no Go consumer**; verified, the row is
+  accurate. The open question is which service should read it and what it should
+  do with `partial`.
+- **Memory lifecycle surface** — the gap vs Hermes is the lifecycle, not the
+  backends (three ship).
+- **Memory-adapter registry** — three named sub-gaps: one-external-provider cap,
+  reserved-core-tool-name guard, per-durability-class background write draining.
+- **Model-authored orchestration scripts** — Temporal exists but is not the
+  production path; whether we WANT model-authored fan-out is the prior question.
+
+Matrix now **28 ✅ / 4 🟡 / 4 ❌** of 37, from 24/7/5.
