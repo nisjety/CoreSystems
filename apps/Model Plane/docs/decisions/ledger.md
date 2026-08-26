@@ -1506,3 +1506,43 @@ H1, C5, D7's data path). The remaining four need a real SPA session — the
 bypass is not a usable substitute until this defect is fixed, and
 `scripts/tests/reachability-live-proof.sh` will decide all four the moment a
 valid bearer exists.
+
+### CORRECTION — the dev auth bypass is NOT broken; the entry above was wrong (2026-08-26)
+
+Asked to fix it. There is nothing to fix: the behaviour is deliberate, and a
+test has pinned it since before this session —
+`auth::tests::dev_bypass_cannot_supply_a_data_plane_bearer`, whose name states
+the rule.
+
+**Why it is right.** Every delegated bearer is a *user credential for another
+plane*. If the gateway's dev bypass could MINT one, then setting a local flag on
+model-gateway would become unverified access to Data Plane documents, Session
+Core threads, and Capability Core policy. The bypass is scoped to the gateway's
+own authentication on purpose; it does not propagate trust across planes. The
+visible consequence — any route whose handler EXTRACTS a delegated bearer
+returns 401 under the bypass — is the boundary holding, not failing.
+
+**What I got wrong, and how.** I traced the 401 correctly to
+`VerifiedInferenceBearer`'s extractor rejecting a missing extension, then wrote
+a "fix" synthesising all eight delegated bearers from the presented token. The
+existing test failed immediately and stopped it. Diagnosis right, conclusion
+wrong: I read a deliberate limitation as a defect because the acceptance log
+("accepting bearer without verification") reads like success. `CLAUDE.md` says
+to check `docs/decisions/ledger.md` before proposing to change something that
+already exists in two forms — the equivalent check here was the test suite, and
+running it is what caught me.
+
+**Kept, since the gap was real even if the diagnosis was not:**
+`dev_bypass_survives_the_real_layer_stack` (the prior bypass tests layered
+`require_auth` alone over a handler that extracts nothing, so nothing covered
+the deployed `require_auth` → `authorize_principal_route` stack) and
+`a_supplied_delegated_bearer_is_still_verified_under_the_bypass` (a junk
+`x-inference-authorization` must be refused, never shadowed). Plus a comment at
+the pass-through block stating the boundary and its intentional consequence, so
+the next person tracing that 401 finds the reason instead of re-deriving it.
+
+**Consequence for the four unproven fixes.** The bypass was never a valid route
+to them — not because it is broken, but because it is correctly scoped. C4, C2,
+C7 and P2 need a real session, full stop.
+`scripts/tests/reachability-live-proof.sh` still decides all four the moment a
+valid bearer exists. The previous entry's claim of "a NEW defect" is withdrawn.
