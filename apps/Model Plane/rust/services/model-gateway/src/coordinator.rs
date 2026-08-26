@@ -68,6 +68,28 @@ struct PlanModeEntry {
 #[derive(Clone, Default, Debug)]
 pub struct PlanModeStore {
     inner: Arc<DashMap<String, PlanModeEntry>>,
+    /// Autonomy grants from approved plans, keyed by THREAD — the follow-up
+    /// run is a new run, so a run-keyed entry could never reach it. Written by
+    /// `handle_exit_plan_mode`, read by the invoke path when constructing the
+    /// next `RunAgentRequest`. Until this map existed, the grant was persisted
+    /// to the plan run's metadata with a comment claiming "the next
+    /// RunAgentRequest reads it back" — no such read existed anywhere, so the
+    /// per-call rung gate could never refuse anything.
+    ///
+    /// In-memory, so a gateway restart drops the grant and the next run falls
+    /// back to UNSPECIFIED (no graded constraint — today's behaviour for every
+    /// run). That is fail-open for the graded ladder and is accepted ONLY
+    /// because the durable posture gates (plan mode, risky-call approvals)
+    /// are unaffected; the durable thread-scoped carrier belongs in
+    /// session-core and is recorded as follow-up in the decisions ledger.
+    grants: Arc<DashMap<String, GrantEntry>>,
+}
+
+#[derive(Debug)]
+struct GrantEntry {
+    org_id: String,
+    rung: mp_contracts::model_plane::v1::AutonomyRung,
+    expires_at_unix: i64,
 }
 
 impl PlanModeStore {
@@ -120,6 +142,55 @@ impl PlanModeStore {
             self.inner.remove(&key);
         }
         (false, String::new(), 0)
+    }
+
+    /// Record the rung an approved plan granted for this thread.
+    ///
+    /// Same TTL ceiling as plan entries: a grant is an approval artifact, not a
+    /// standing policy, and an unbounded one would quietly outlive the plan it
+    /// authorized.
+    pub fn record_grant(
+        &self,
+        org_id: &str,
+        thread_id: &str,
+        rung: mp_contracts::model_plane::v1::AutonomyRung,
+    ) {
+        if thread_id.trim().is_empty()
+            || rung == mp_contracts::model_plane::v1::AutonomyRung::Unspecified
+        {
+            return;
+        }
+        self.grants.insert(
+            thread_id.to_owned(),
+            GrantEntry {
+                org_id: org_id.to_owned(),
+                rung,
+                expires_at_unix: now_unix() + MAX_PLAN_TTL_SECS,
+            },
+        );
+    }
+
+    /// The rung a prior approved plan granted this thread, if any and unexpired.
+    /// Org-checked like every other read here; an expired entry is swept.
+    #[must_use]
+    pub fn granted_rung(
+        &self,
+        org_id: &str,
+        thread_id: &str,
+    ) -> Option<mp_contracts::model_plane::v1::AutonomyRung> {
+        let now = now_unix();
+        if let Some(entry) = self.grants.get(thread_id) {
+            if entry.org_id != org_id {
+                return None;
+            }
+            if entry.expires_at_unix > now {
+                return Some(entry.rung);
+            }
+            let key = thread_id.to_owned();
+            drop(entry);
+            self.grants.remove(&key);
+        }
+        None
     }
 }
 
@@ -212,6 +283,9 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
     )
     .map_err(|refusal| Status::invalid_argument(refusal.message()))?;
 
+    // The grant must reach the NEXT run, which is a different run on the same
+    // thread — record it thread-keyed before anything else can fail.
+    store.record_grant(&req.org_id, &req.session_id, escalation.to());
     let was_active = store.exit(&req.org_id, &req.run_id);
     if was_active {
         let envelope = mp_events::envelope::Envelope {

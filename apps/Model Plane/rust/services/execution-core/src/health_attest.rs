@@ -49,6 +49,12 @@ pub const SANDBOX_CAPABILITY: &str = "cap.command.sandbox";
 /// The `shell` runtime capability (high risk: arbitrary host commands).
 pub const SHELL_CAPABILITY: &str = "cap.command.shell";
 
+/// Long-term memory search (`recall_memory`).
+pub const MEMORY_SEARCH_CAPABILITY: &str = "cap.memory.search";
+
+/// Long-term memory persist (`save_memory`).
+pub const MEMORY_INDEX_CAPABILITY: &str = "cap.memory.index";
+
 /// Scope required to attest a `global` capability row. capability-core's handler
 /// looks the row up with `GetGlobal` only for a service principal holding this
 /// scope; with the tenant-level health scope it would instead look for a
@@ -132,6 +138,62 @@ pub fn probe() -> ProbeOutcome {
         sandbox: crate::sandbox::is_supported(),
         interpreter: interpreter_available(),
     }
+}
+
+/// Probe the session-core dependency the memory tools actually call.
+///
+/// A real TCP+HTTP/2 connect to the configured endpoint, per heartbeat — not a
+/// one-shot at boot, because session-core restarting under a running
+/// execution-core is exactly the situation an attestation TTL exists for. No
+/// endpoint configured means the memory tools cannot work in this deployment,
+/// so nothing is attested and the rows keep their fail-closed denial.
+async fn session_core_reachable() -> bool {
+    let Some(url) = std::env::var("SESSION_CORE_URL")
+        .or_else(|_| std::env::var("SESSION_CORE_ADDR"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return false;
+    };
+    let Ok(endpoint) = tonic::transport::Endpoint::from_shared(url) else {
+        return false;
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        endpoint
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .connect(),
+    )
+    .await
+    .map(|result| result.is_ok())
+    .unwrap_or(false)
+}
+
+/// The memory-tool attestations, when the dependency probe passed.
+///
+/// Separate from [`attestable`]: those two capabilities are facts about THIS
+/// process (its sandbox, its interpreter); these two are facts about a
+/// dependency, so they are re-probed every heartbeat rather than once at boot.
+/// Until this existed, `save_memory`/`recall_memory` were advertised, prompted
+/// for (`SNIPPET_MEMORY_TOOLS`), and dispatched — and every call died at the
+/// capability gate because `cap.memory.{index,search}` had no attestor at all.
+#[must_use]
+pub fn memory_attestations(session_core_up: bool) -> Vec<Attestation> {
+    if !session_core_up {
+        return Vec::new();
+    }
+    vec![
+        attestation(
+            MEMORY_SEARCH_CAPABILITY,
+            "session_memory_probed",
+            "Session Core memory endpoint connected.",
+        ),
+        attestation(
+            MEMORY_INDEX_CAPABILITY,
+            "session_memory_probed",
+            "Session Core memory endpoint connected.",
+        ),
+    ]
 }
 
 /// Execute the interpreter `code_interpreter` actually invokes. Presence on
@@ -417,6 +479,14 @@ pub fn spawn_heartbeat() {
         // would take the capability down again five minutes later.
         loop {
             attestor.attest_all(&planned).await;
+            // Dependency-backed capabilities are re-probed every round: a
+            // session-core outage must stop renewing them (TTL then takes the
+            // rows down, fail-closed), and its recovery must bring them back
+            // without an execution-core restart.
+            let memory = memory_attestations(session_core_reachable().await);
+            if !memory.is_empty() {
+                attestor.attest_all(&memory).await;
+            }
             tokio::time::sleep(interval).await;
         }
     });
@@ -456,6 +526,19 @@ mod tests {
                 "version": version,
                 "risk_level": "low",
             })))
+    }
+
+    /// The dependency-backed pair follows the same honesty rule as the probe
+    /// pair: an unreachable session-core attests NOTHING (the rows keep their
+    /// fail-closed denial), and a reachable one attests exactly the two memory
+    /// capabilities the tools are bound to.
+    #[test]
+    fn memory_attestations_track_the_dependency_probe() {
+        assert!(memory_attestations(false).is_empty());
+        let up = memory_attestations(true);
+        let ids: Vec<&str> = up.iter().map(|a| a.capability_id.as_str()).collect();
+        assert_eq!(ids, vec![MEMORY_SEARCH_CAPABILITY, MEMORY_INDEX_CAPABILITY]);
+        assert!(up.iter().all(|a| a.state == "available"));
     }
 
     #[test]

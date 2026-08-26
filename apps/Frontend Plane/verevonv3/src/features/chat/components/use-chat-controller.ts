@@ -1098,6 +1098,7 @@ export function useChatController() {
           attachments: options.attachments,
           actions: options.actions,
           planMode: planMode(),
+          effort: options.effort,
           zdr: options.zdr,
           regenerated: options.regenerated,
           editResubmit: options.editResubmit,
@@ -1426,6 +1427,7 @@ export function useChatController() {
       tools: payload.tools,
       actions,
       zdr: payload.zdr,
+      effort: payload.effort,
       // Carried only when the selected catalog model attests a tier; the wire
       // body omits it otherwise (see buildChatWireBody).
       minPrivacyTier: payload.minPrivacyTier,

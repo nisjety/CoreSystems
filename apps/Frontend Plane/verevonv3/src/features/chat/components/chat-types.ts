@@ -326,6 +326,9 @@ export type StreamAttachment = {
 
 export type SendOptions = {
   actions?: ChatAction[]
+  /** Reasoning effort from the composer's response-mode selector. */
+  effort?: 'quick' | 'deep'
+
   attachments?: StreamAttachment[]
   browseWeb?: boolean
   deepResearch?: boolean

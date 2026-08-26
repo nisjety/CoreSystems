@@ -1138,7 +1138,15 @@ async fn run_rounds(
             // A run with no stated rung is unaffected: `check_autonomy_rung`
             // returns `Ok` for `UNSPECIFIED`, so a caller that predates the
             // ladder behaves exactly as it did.
-            if !req.plan_mode && !crate::subagent::is_subagent_tool(&call.name) {
+            //
+            // Checked regardless of plan mode. This used to be gated on
+            // `!req.plan_mode` — and the only production producer set a rung
+            // exactly when plan_mode was true, so the one rung that could
+            // refuse was set precisely when the check was skipped, and the
+            // gate could never refuse anything. Plan mode's own refusal below
+            // is stricter where both apply; running both costs one enum
+            // comparison and removes the masking.
+            if !crate::subagent::is_subagent_tool(&call.name) {
                 let granted = pb::AutonomyRung::try_from(req.autonomy_rung)
                     .unwrap_or(pb::AutonomyRung::Unspecified);
                 if let Err(refusal) = crate::permission::check_autonomy_rung(
@@ -2835,6 +2843,21 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             name: "save_memory".to_owned(),
             description: "Save ONE durable fact to long-term memory so future conversations can recall it: a standing preference, constraint, decision, or identifier the user will expect you to remember (e.g. 'invoices must be in NOK', 'the project reference code is ZX-88214'). Do NOT save transient task state, tool output, or anything the user asked to keep private. Unavailable on Zero-Data-Retention runs.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"content":{"type":"string","description":"The single fact to remember, self-contained and concise"},"topic":{"type":"string","description":"Optional short topic label, e.g. PREFERENCE, CONSTRAINT, IDENTIFIER"}},"required":["content"]}"#.to_owned(),
+        },
+        // Delegation. This definition is what makes `run_subagent` reachable
+        // first-party: dispatch is prefix-matched on `subagent.`
+        // (`crate::subagent::is_subagent_tool`), the capability binding
+        // (`subagent.*` → cap.agent.spawn) has been seeded since migration
+        // 0008, `SNIPPET_SUBAGENT` gates on this name being offered — and yet
+        // no catalogue advertised any `subagent.*` name, so the entire
+        // delegation arc (nested loop, lineage, cold resume, replay semantics)
+        // was reachable only by an API caller declaring the tool themselves.
+        // Verified 2026-08-26: every prior `subagent.` literal was a policy
+        // mapping or inside #[cfg(test)].
+        pb::ToolDefinition {
+            name: "subagent.task".to_owned(),
+            description: "Delegate ONE self-contained sub-task to a fresh subagent that runs its own bounded tool loop and returns only its conclusion. The subagent starts with NO view of this conversation, so state the goal completely and include every fact it needs. Delegate only work that is genuinely separable (a research question, a bounded computation over tools); do the rest yourself. Costs rounds from this run's own budget and requires approval like other real-effect capabilities.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent"},"max_rounds":{"type":"integer","description":"Optional cap on the subagent's tool rounds"}},"required":["goal"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "recall_memory".to_owned(),
@@ -4996,8 +5019,12 @@ mod tests {
     /// Like [`spawn_inference_channel`] but records every observed
     /// `InferRequest.min_privacy_tier`, so a test can assert the run's privacy
     /// floor was threaded through to inference.
-    async fn spawn_inference_channel_with_tier(script: Vec<Scripted>, observed_tiers: ObservedTiers) -> Channel {
-        spawn_inference_channel_inner(MockInference::with_tier_recorder(script, observed_tiers)).await
+    async fn spawn_inference_channel_with_tier(
+        script: Vec<Scripted>,
+        observed_tiers: ObservedTiers,
+    ) -> Channel {
+        spawn_inference_channel_inner(MockInference::with_tier_recorder(script, observed_tiers))
+            .await
     }
 
     /// Like [`spawn_inference_channel`] but records the message history of every

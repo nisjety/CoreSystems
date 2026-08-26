@@ -5112,7 +5112,16 @@ impl SessionCore for SessionService {
             let req = request.into_inner();
             authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
                 .await?;
-            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            // Run-level authorization only when a run is actually named. An
+            // empty run_id means thread-scoped assembly — the inner function
+            // explicitly supports it (`if run_id.is_empty() { None }`), and the
+            // thread check above already authorizes that scope. Unguarded, this
+            // lookup 404'd EVERY production request: the SPA's only caller
+            // sends no run id, so `SELECT ... WHERE id = ''` matched nothing
+            // and the whole context-inspector panel could never display data.
+            if !req.run_id.trim().is_empty() {
+                authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            }
             get_context_assembly_inner(
                 self,
                 req,

@@ -1254,3 +1254,71 @@ only valid against the catalogue actually offered; scores before exclusion
 (20/40) would have read as a selection collapse that never happened.
 
 Workspace green at 2,327.
+
+## The 8 reachability defects fixed (2026-08-26) — status: **all 8 closed; three were built-and-never-wired writers**
+
+The parity verification found 8 mechanisms that existed, were tested, and could
+not activate in production. All fixed, each at its named missing link:
+
+1. **Context inspector (C4)** — session-core ran `authorize_run_owner` on an
+   ALWAYS-empty `run_id` before the assembler, 404ing every production request.
+   Run authz is now guarded on a non-empty id; thread authz (the line above it)
+   still covers the thread-scoped case the inner function explicitly supports.
+2. **Thinking dial (C2)** — the writer existed all along: the composer's
+   response-mode selector (Auto / Raskt svar / Dyp research) rode the submit
+   payload as `responseMode` with ZERO downstream readers — its "deep" arm even
+   pushed a `"reason"` tool tag nothing read. Now mapped to the wire's `effort`
+   (quick/deep; Auto omits the key), through SendOptions into `streamChat`. The
+   read path (gateway → thinking budget → provider → reasoning_delta → Innsikt
+   popover) was already complete.
+3. **Autonomy gate (C7)** — two faults: the only producer set a rung exactly
+   when the check was skipped (`!req.plan_mode` gating), and the approved grant
+   was written to the PLAN run's metadata under a comment claiming "the next
+   RunAgentRequest reads it back" — no read existed. The gate now checks
+   unconditionally, and `PlanModeStore` carries the grant THREAD-keyed from
+   `handle_exit_plan_mode` to the next dispatch. In-memory: a gateway restart
+   drops the grant to UNSPECIFIED (today's behaviour for every run) — accepted
+   because the durable posture gates are unaffected; the durable thread-scoped
+   carrier belongs in session-core and remains open.
+4. **`ProviderError::TooLong` (P2)** — produced at five provider sites and
+   discarded by every chain's generic `Err(e) => warn!` arm. `ThrottleState`
+   now records the first TooLong during the walk (the walk still continues —
+   a larger-window provider is the recovery path) and exhaustion surfaces it
+   typed, RateLimited outranking it since a throttled provider might still
+   serve the prompt. The embedding walk gained the same state; it previously
+   reported overflow as generic exhaustion, which callers retried.
+5. **Queued input (P3)** — the composer swallowed Enter for the entire stream
+   (`submitting={isStreaming()}` guard), so the whole server arc had no
+   reachable client. New opt-in `allowMidRunSubmit` (chat page only — the
+   dashboard's own window is a real double-send guard): Enter now routes into
+   `sendContent` → `deliverMidRun`; the Stop button is unchanged.
+6. **`save_memory`/`recall_memory` (H1)** — bound to `cap.memory.{index,search}`,
+   which existed ONLY in registry.go's static seed while production resolves
+   from Postgres: every call died at the fail-closed gate. Migration 0014 seeds
+   both rows (unavailable, like 0008/0013 — source presence is not health), and
+   execution-core's health reporter now attests them per heartbeat from a live
+   session-core connect probe, so a session-core outage stops renewing them and
+   its recovery brings them back without a restart.
+7. **Memory provenance (D7)** — `search_agent_memory` hardcoded
+   `MemoryProvenance::Unknown` with a comment scoped to the management surface —
+   but SearchMemory is what feeds the CHAT recall notice, so `stated`/`inferred`
+   were unreachable on the one surface built to display them. The search SQL now
+   selects `source_links` and derives through `MemoryProvenance::classify`, the
+   single existing authority.
+8. **`run_subagent` (C5)** — dispatch is prefix-matched on `subagent.`, the
+   capability binding was seeded in 0008, the prompt snippet gates on the name —
+   and no catalogue advertised any `subagent.*` tool. `subagent.task` is now in
+   `offered_tool_defs` with the `{goal, max_rounds}` contract `parse_task`
+   already enforces.
+
+Pattern note for the file: items 2, 3 and 8 are not "missing features" — they
+are writers/definitions that existed in half-built form (a UI selector with no
+reader, a stored grant with no reader, a dispatcher with no advertiser). The
+16-day-old lesson stands: verify advertisement → dispatch → writer → reader as
+a chain, never any link alone.
+
+Verification: Rust workspace 2,330 passed / 0 failed; SPA 1,217 passed across
+159 files; `tsc -b` clean; capability-core `go build` clean. New tests: TooLong
+exhaustion priority (2), memory attestation honesty (1), mid-run composer
+regression (3), plus the C4 guard exercised via existing context-assembly
+paths.

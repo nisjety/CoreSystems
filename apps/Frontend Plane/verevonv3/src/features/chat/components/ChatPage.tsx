@@ -108,6 +108,11 @@ export default function ChatPage() {
       planMode={planMode()}
       showTurnReceipt={false}
       submitting={isStreaming()}
+      allowMidRunSubmit
+      // ^ chat opts in: a submit during the stream is a MID-RUN message, which
+      // sendContent persists to the thread and queues into the live run
+      // (deliverMidRun). Without it the composer swallowed Enter for the whole
+      // stream and the queued-input arc had no reachable client.
       temporaryChat={temporaryChat()}
       temporaryChatLocked={temporaryChatLocked()}
     />

@@ -5273,16 +5273,22 @@ fn spawn_run_dispatch(
         // vocabulary what `plan_mode` states as a boolean — the two agree by
         // construction rather than by hoping they stay in step.
         //
-        // Anything else sends UNSPECIFIED, which is deliberately NOT a grant:
-        // execution-core reads it as "no graded constraint stated" and falls
-        // back to the posture gates that governed this path before the ladder
-        // existed. Inventing a wider rung here would manufacture an authority no
-        // human granted; the only thing that widens a run is an approved plan,
-        // which persists its rung on the run itself.
+        // Anything else sends the rung an approved plan granted this THREAD,
+        // read from the coordinator's grant store — the only writer is
+        // `handle_exit_plan_mode`, so a rung wider than READ_ONLY always traces
+        // to a validated human escalation. Absent a grant it stays UNSPECIFIED,
+        // which is deliberately NOT a grant: execution-core reads it as "no
+        // graded constraint stated" and falls back to the posture gates that
+        // governed this path before the ladder existed. Inventing a wider rung
+        // here would manufacture an authority no human granted.
         autonomy_rung: if plan_mode {
             mp_contracts::model_plane::v1::AutonomyRung::ReadOnly as i32
         } else {
-            mp_contracts::model_plane::v1::AutonomyRung::Unspecified as i32
+            state
+                .plan_mode
+                .granted_rung(org_id, &run.thread_id)
+                .unwrap_or(mp_contracts::model_plane::v1::AutonomyRung::Unspecified)
+                as i32
         },
     };
     let run_agent_req = authenticated_run_agent_request(

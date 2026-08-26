@@ -1335,10 +1335,13 @@ impl ModelGateway for GatewayService {
                         run_id,
                         mode: "execute".to_owned(),
                         org_id,
-                        // The grant `handle_exit_plan_mode` already validated,
-                        // persisted so it outlives this request: the next
-                        // RunAgentRequest reads it back and execution-core
-                        // enforces it per call.
+                        // The grant `handle_exit_plan_mode` already validated.
+                        // Durable copy for audit; the LIVE read the next
+                        // RunAgentRequest uses is the coordinator grant store
+                        // (`PlanModeStore::granted_rung`, thread-keyed), which
+                        // `handle_exit_plan_mode` populated just above — this
+                        // comment used to claim the read existed here when
+                        // nothing anywhere read it back.
                         granted_rung,
                         justification,
                     },

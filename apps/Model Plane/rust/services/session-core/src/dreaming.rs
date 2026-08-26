@@ -588,9 +588,11 @@ pub(crate) async fn search_agent_memory(
             String,
             f64,
             DateTime<Utc>,
+            Vec<String>,
         ),
     >(
-        "SELECT id, COALESCE(session_id, ''), scope, kind, key, content, confidence, updated_at \
+        "SELECT id, COALESCE(session_id, ''), scope, kind, key, content, confidence, updated_at, \
+         source_links \
          FROM agent_memory \
          WHERE org_id = $1 \
            AND review_state = 'accepted' \
@@ -631,7 +633,7 @@ pub(crate) async fn search_agent_memory(
     Ok(rows
         .into_iter()
         .map(
-            |(id, session_id, scope, kind, key, content, confidence, updated_at)| {
+            |(id, session_id, scope, kind, key, content, confidence, updated_at, source_links)| {
                 let exact_bonus = if query.is_empty()
                     || content
                         .to_ascii_lowercase()
@@ -652,12 +654,15 @@ pub(crate) async fn search_agent_memory(
                         session_id
                     },
                     topic: memory_topic(&scope, &kind).to_owned(),
-                    // Search does not select source_links, so it reports
-                    // Unknown rather than guessing. Provenance exists for the
-                    // memory-management surface, which lists rather than
-                    // searches; a relevance hit is not the place a user decides
-                    // what to keep.
-                    provenance: MemoryProvenance::Unknown,
+                    // Derived from source_links exactly like the list surface
+                    // (`MemoryProvenance::classify` is the single authority).
+                    // This used to hardcode Unknown — reasonable for the
+                    // management surface it was written against, but SearchMemory
+                    // is what feeds the CHAT recall notice, so the hardcoded
+                    // Unknown made `stated`/`inferred` unreachable on the one
+                    // surface built to display them: every recalled memory
+                    // rendered as pre-provenance no matter how it was written.
+                    provenance: MemoryProvenance::classify(&source_links),
                     content,
                     score: memory_score(confidence, exact_bonus),
                     updated_at,
