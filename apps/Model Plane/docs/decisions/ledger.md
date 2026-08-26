@@ -1081,3 +1081,80 @@ decision" when the decision is recorded and the code shipped.
 `claude-hermes-deepseek.md` means "the mechanism was built", and repeatedly does
 not mean "a user can reach it." Verification must trace advertisement → caller →
 writer → reader. The TL;DR now says this explicitly.
+
+## P0 critical-path list verified item-by-item (2026-08-26) — status: **4 of 10 confirmed as stated; 6 wrong in the pessimistic direction**
+
+A 10-item production-readiness P0 list, each claim verified against source, local
+config, and where possible a live command or the running stack. Verdicts:
+
+**CONFIRMED, and one is worse than claimed**
+- **P0-5 tenant delegation** — real P0. 15 of 16 live workload principals carry
+  `allowAnyOrg`; the guard exists in source and the running Auth Core bypasses it
+  (`NODE_ENV=development` + `PLANE_SERVICE_PRINCIPALS_JSON`). But the fix is not a
+  missing mechanism: `orgIds` already exists, is enforced, and 1 of 16 principals
+  uses it. This is a migration, not a build.
+- **P0-6 managed-run terminalization** — confirmed, and WORSE. Crash: no coverage
+  at all. Cancel-race: none. Response-loss: start side only. The whole lease-backed
+  reconciler (`recover_due_terminalizations` et al.) has **zero callers outside its
+  own file on every branch**. Do not mistake
+  `expired_worker_lease_reclaims_without_duplicate_start_receipt` for coverage — it
+  is a real-Postgres test of *approval continuation*, not terminalization.
+- **P0-9 Space computer** — all four assertions correct. Both stores are
+  `map + RWMutex`, no DB/cache/object-store import, no migrations dir. Scope accepts
+  only `thread`|`agent`; `space_id` is first-class in sessions/runs/execution protos
+  and was never added to `sandboxes.proto`. `SnapshotSandbox` synthesizes a MinIO
+  `object_key` and uploads nothing.
+- **P0-1 artifacts (half)** — no signed artifact instance exists anywhere; no
+  cosign/SLSA/SBOM in the plane; no CI workflow invokes the script.
+
+**WRONG IN THE PESSIMISTIC DIRECTION — the documented failure mode, six more times**
+- **P0-2 approval dispatch**: ~3/4 already shipped. Five continuation RPCs exist and
+  are implemented; the encrypted exact-effect descriptor exists (migration 0022 +
+  `continuation_crypto.rs`, AES-256-GCM, row-bound AAD, ZDR rejected pre-creation,
+  fail-closed on missing key); the durable lease/receipt/outcome state machine has a
+  no-double-execute guard. Only **KMS lifecycle** is genuinely missing (one base64
+  env key, hardcoded `v1:`, no envelope encryption or rotation). "HITL is decorative"
+  is not supportable.
+- **P0-3 capability health**: "zero configured reporters" is false — three exist and
+  are wired (execution-core `health_attest.rs`, conversation-core, shipping-core),
+  plus a dedicated `capability-health-proof.sh` harness. "27 capabilities" matches
+  nothing: 24 in `registry.go`, 30 rows across 6 migrations.
+- **P0-4 retention/ZDR**: "fails closed with no verified ZDR provider" is exactly
+  right (0 ZDR vars in `deploy/.env`). "Default all-ZDR" is wrong — `DEFAULT_POSTURE`
+  is `zdr:false`; ZDR is an opt-in plan-gated add-on. And **"no live chat answers
+  exist" is refuted on the running stack**: 8 assistant messages, 8 completed runs,
+  8 `cost_entries` billed against gpt-4o-mini x7 and claude-sonnet-4-6 x1.
+- **P0-7 memory**: `DEGRADED_SEMANTIC_UNVERIFIED` does **not** stick. It is the
+  pre-first-call state and clears on the first semantic call; model-gateway
+  prefetches every turn, so it clears on turn one. The states that persist are
+  `EMPTY_INDEX` and `LEXICAL_FALLBACK`. Five statuses exist; the docs say four.
+- **P0-8 MCP containment**: the negative matrix exists — loopback, link-local, `::1`,
+  private ranges, redirects and cloud-metadata cases across several test files, plus
+  `mcp_dns_revalidator_test.go`. And an **OAuth remote-MCP client exists**: full
+  OAuth 2.1 + DCR, authorization-code exchange, refresh with writeback, encrypted
+  refresh tokens, `mcp_oauth_tokens`. `.env.example:79` names Visma Net as its use
+  case, so Visma is a credentials state, not a missing client.
+- **P0-1 artifacts (other half)**: the *distinct rollback artifact* is fully built
+  and tested — external-only locator, independent verify key,
+  `ROLLBACK_ARTIFACT_MANIFEST_SHA256` re-derived from a signature-verified view, and
+  an explicit "candidate cannot be its own rollback" guard. Only 11 of 21 containers
+  are local builds (10 are upstream images). "Artifact v3 refuses the tree" is stale:
+  both worktrees report 0 dirty paths; what blocks a build now is the release-mode
+  evidence gates.
+
+**Numbers the list got wrong, corrected**
+- buf lint: **1,502** errors (1,428 COMMENTS-rule, 74 other) across all 20 protos —
+  not unquantified "debt". Identical from all three invocation forms.
+- "No buf breaking baseline" is wrong in mechanism and worse in effect: the baseline
+  IS configured (`buf.yaml breaking: use: [FILE]`), CI-wired
+  (`buf.yml` runs `buf breaking --against .../baseline.binpb`), and committed — but
+  it is a **0-byte placeholder**, so the command hard-errors "image contains no
+  files" instead of comparing. A gate that looks like coverage and cannot fail.
+- Coverage figures (approval delivery 35 %, SSE 56 %, runtime loop 65 %) are stale
+  quotes; not reproduced, and should not be cited until re-run.
+- 21 containers is right for the release/production topology (22 in dev, 24 union).
+
+**Standing lesson, again:** six of ten claims understated what exists. Every one was
+found by searching for the *behaviour* rather than an expected type name — the same
+method failure §3 of `claude-hermes-deepseek.md` documents. A P0 list is a build
+plan; each false "missing" is budgeted work that is already done.
