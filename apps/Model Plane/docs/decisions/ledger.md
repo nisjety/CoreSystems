@@ -1611,3 +1611,50 @@ code into a runtime holding live tenant data.
   production path; whether we WANT model-authored fan-out is the prior question.
 
 Matrix now **28 ✅ / 4 🟡 / 4 ❌** of 37, from 24/7/5.
+
+## Chat elicitation weakness fixed — a dangling cross-reference (2026-08-26)
+
+Chat gained only +4/20 from the elicitation snippet where the agent loop gained
++18.3 pp. That was recorded as inherent ("on chat the snippet is the only tool
+guidance in the stack"). It was not inherent — it was a **dangling reference**.
+
+The snippet ended: *"…that is asking for a fact, not asking permission, and the
+rule against asking permission does not apply to it."* That clause points at
+`PREAMBLE_CORE`'s anti-permission sentence. It resolves in the agent loop. In
+chat it dangles — chat's system stack (authored instructions, grounding,
+temporal, identity, memory) contains no tool guidance whatsoever, so the model
+was pointed at a rule it could not find.
+
+Rewritten self-contained, and more directive where the measured failure was:
+the model was *calling anyway*, so the action is now exclusive — "do not call the
+tool at all — reply with one short question naming exactly the values you need"
+— and the permission distinction is stated inline instead of referenced.
+
+**A/B at 60 samples per arm, same catalogue, temp 0.7:**
+
+| Arm | Correct |
+|---|---|
+| OLD (dangling cross-reference) | 16/60 — 26.7 % |
+| NEW (self-contained) | **27/60 — 45.0 %** |
+
+**+18.3 pp, z=2.09, p=0.036.** Chat now gains what the agent loop gains, from
+the same wording.
+
+Method note worth keeping: the first single-run comparison was 5/20 → 9/20,
+p≈0.18 — directional, not a result. This session had already produced one wrong
+conclusion from an under-powered run (the preamble "caused" fabrication at one
+sample per case; it vanished at five), so the A/B was re-run at n=60 per arm
+before anything was claimed. Also fixed a harness flaw found on the way: four of
+the eight must-CALL cases named `track_shipment`/`company_lookup`, which chat's
+catalogue does not offer — `web_search` was the model's correct answer, and
+scoring it a miss read as a selection collapse that never happened. With the
+cases corrected, CALL is 40/40 both before and after.
+
+Regression checks, both directions, both loops: chat CALL 40/40 → 40/40; agent
+FAB 83.3 % → 85.0 % (within noise, SE 4.6 %) and agent CALL 100 % → 100 %. The
+snippet stays byte-identical across loops, pinned by the decoded-string contract
+test. Workspace green at 2,337.
+
+The harness also now reads the snippet from source rather than a hardcoded copy —
+a pasted snippet drifts the moment either side changes, and measuring the wrong
+text is worse than not measuring.

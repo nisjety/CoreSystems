@@ -471,14 +471,27 @@ pub(crate) fn inline_tool_allowed(name: &str) -> bool {
 /// carries no tool guidance at all, and chat measured **20/20 fabricated**
 /// on the same queries. Here the grounding gate refuses those calls, so the
 /// snippet's job on chat is to save the wasted round-trip, not correctness.
+///
+/// # Why the wording changed on 2026-08-26
+///
+/// The first version ended "...that is asking for a fact, not asking
+/// permission, and the rule against asking permission does not apply to it" —
+/// a cross-reference to [`PREAMBLE_CORE`]'s anti-permission sentence. That
+/// reference resolves in the agent loop and DANGLES in chat, whose system stack
+/// (authored instructions, grounding, temporal, identity, memory) carries no
+/// tool guidance at all: the model was pointed at a rule it could not find.
+/// Rewritten to be self-contained — it now states the permission distinction
+/// inline and names the required action exclusively ("do not call the tool at
+/// all — reply with one short question"), because the measured failure was the
+/// model calling anyway rather than misunderstanding.
 const SNIPPET_USER_SUPPLIED_ARGS: &str = "Some offered tools require values only the user can \
 supply — a street address, a postal code, package dimensions, a price. Fill required arguments \
 freely when the request states them or when they are public fact (a Norwegian city's coordinates, \
 a registered company's name), but never invent a user-only value: a call built on a guessed postal \
 code or guessed dimensions still succeeds, and returns a real, plausible, wrong answer that nobody \
-can tell apart from a correct one. When such a value is missing, ask one short question naming \
-exactly what you need — that is asking for a fact, not asking permission, and the rule against \
-asking permission does not apply to it.";
+can tell apart from a correct one. When such a value is missing, do not call the tool at \
+all — reply with one short question naming exactly the values you need. Asking for a missing fact \
+is not asking permission: never ask whether to proceed with a call you can already make.";
 
 /// The chat loop's spellings of the tools that need the snippet. Chat has no
 /// `book_shipment`; its shipping tool is `shipping_get_quotes`, plus the

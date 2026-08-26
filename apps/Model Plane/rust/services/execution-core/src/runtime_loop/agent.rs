@@ -168,9 +168,9 @@ supply — a street address, a postal code, package dimensions, a price. Fill re
 freely when the request states them or when they are public fact (a Norwegian city's coordinates, \
 a registered company's name), but never invent a user-only value: a call built on a guessed postal \
 code or guessed dimensions still succeeds, and returns a real, plausible, wrong answer that nobody \
-can tell apart from a correct one. When such a value is missing, ask one short question naming \
-exactly what you need — that is asking for a fact, not asking permission, and the rule against \
-asking permission does not apply to it.";
+can tell apart from a correct one. When such a value is missing, do not call the tool at \
+all — reply with one short question naming exactly the values you need. Asking for a missing fact \
+is not asking permission: never ask whether to proceed with a call you can already make.";
 
 /// Tools whose required arguments include values only the user can supply, so a
 /// missing one must be asked for rather than filled.
