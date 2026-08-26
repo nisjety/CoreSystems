@@ -1433,3 +1433,36 @@ proven live (4 counting D7's data path), 8 of 8 fixed in source.
 Also: `deploy/.env` is gitignored and absent from a fresh worktree, so
 `scripts/compose.sh` cannot build from a clean checkout — the same finding the
 P0 verification flagged. It was copied in to build and deleted afterward.
+
+### The remaining 4 need a credential decision, not more code (2026-08-26)
+
+C4, C2, C7 and P2 are each observable only through an authenticated request.
+Two paths exist and both are the operator's call, not mine:
+
+1. **A real session** — log into the SPA, take the bearer from any `/v1/...`
+   request. This proves the production path, including the BFF hop.
+2. **The gateway's dev bypass** — `MODEL_GATEWAY_AUTH_DEV_BYPASS` +
+   `ALLOW_INSECURE_DEV_DEFAULTS`. It "accepts an unverified bearer", i.e. it
+   disables authentication for the whole gateway. It is double-gated precisely
+   so it cannot be enabled casually, and this stack holds real org data and live
+   provider keys. Flipping it is a security-posture change on a running system,
+   so it was NOT done unilaterally.
+
+What was ruled out explicitly: minting a service token to impersonate a service.
+That is fabricating a credential to satisfy one's own verification, and a proof
+that requires forging its own premise is not a proof.
+
+Shipped instead: `scripts/tests/reachability-live-proof.sh`. Given `MP_TOKEN` it
+decides all four from observed behaviour — HTTP status plus service logs plus the
+durable row — and every check is written to FAIL on the documented pre-fix
+symptom, so a pass is informative rather than vacuous. Verified fail-safe: run
+with an invalid token it reports **4 SKIP / 0 FAIL / 0 PASS**, never a false
+pass, and a request that does not complete is a SKIP rather than a verdict.
+
+P3 (mid-run submit) is the one that genuinely needs a browser: the assertion is
+that Enter during a live stream produces a queued-input strip instead of being
+swallowed. It has three component tests; the live version is a UI interaction.
+
+Standing status: **8 of 8 fixed in source, 4 of 8 proven live** (0014, H1, C5,
+plus D7's data path). The other four are one valid bearer away, and the
+instrument to decide them is committed.
