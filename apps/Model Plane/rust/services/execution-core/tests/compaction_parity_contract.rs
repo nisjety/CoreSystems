@@ -721,3 +721,55 @@ fn read_contracts(file: &str) -> String {
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {} ({error})", path.display()))
 }
+
+/// A memory write must stay SYNCHRONOUS — awaited, with its result reaching the
+/// model — not backgrounded.
+///
+/// # Why this is pinned rather than commented
+///
+/// Hermes carries `flush_pending` and durability-classed background writes
+/// because its memory writes are queued: a shutdown between the write and the
+/// flush loses the memory. The 2026-08-22 parity list recorded those as gaps we
+/// should close. They do not transfer, and the reason is exactly this call
+/// shape: `execute_save_memory` awaits `index_memory` and turns its result into
+/// the tool outcome, so a save has either landed before the model is told it did,
+/// or the model is told it failed. There is no pending queue, so there is
+/// nothing to flush.
+///
+/// That conclusion is only true while the write stays awaited. Backgrounding it
+/// for latency — a plausible, well-meant optimisation — would silently
+/// reintroduce the lost-write hazard AND silently invalidate the recorded
+/// analysis. This test is the tripwire: change the call shape and it fails,
+/// pointing at the decision that has to be revisited.
+#[test]
+fn a_memory_write_is_awaited_not_backgrounded() {
+    let loop_source = read("execution-core/src/runtime_loop/mod.rs");
+    let body = function_body(&loop_source, "async fn execute_save_memory(");
+
+    // Strip comments first: a doc comment mentioning `tokio::spawn` would
+    // otherwise read as the code doing it. Third parser in this file to need
+    // this — see `str_const` and the taxonomy generator.
+    let code: String = body
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(at) => &line[..at],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        code.contains(".index_memory(") && code.contains(".await"),
+        "execute_save_memory no longer awaits index_memory — if the write was moved \
+         off the request path, the lost-write hazard Hermes's `flush_pending` exists \
+         for now applies here too, and the parity analysis recording it as \
+         non-transferable must be revisited"
+    );
+    assert!(
+        !code.contains("tokio::spawn"),
+        "execute_save_memory now spawns: a backgrounded memory write can be lost on \
+         shutdown, and the model would be told the save succeeded before it did. If \
+         this is deliberate, port a flush-on-shutdown path and update §7.9's \
+         transfer analysis in claude-hermes-deepseek.md"
+    );
+}

@@ -1658,3 +1658,51 @@ test. Workspace green at 2,337.
 The harness also now reads the snippet from source rather than a hardcoded copy —
 a pasted snippet drifts the moment either side changes, and measuring the wrong
 text is worse than not measuring.
+
+## Memory lifecycle surface (2026-08-26) — **the gap does not survive a call-site check; one invariant pinned instead**
+
+Asked to fix it. Verified §7.9's list item by item first, and every one is closed,
+exists under our own name, or does not transfer. §7.9 is dated 2026-08-22 and had
+already been corrected twice in its own text; this is the third pass.
+
+**Closed since it was written:**
+- *SSE chat prefetch* — was ❌ "never wired". Wired: `fetch_chat_memory_context`,
+  400 ms bound, `is_trivial_prompt` skip (52 entries, 22 of them Norwegian).
+- *Model-callable write* — was ❌ "unreachable, execution-core has no memory tool
+  at all". It offers and dispatches both; their capabilities had no durable row
+  and no attestor, which migration 0014 and the health reporter fixed —
+  **verified `available` on the running stack**.
+
+**Never actually absent — the grep was for the wrong thing:**
+- *"No memory context segment is produced anywhere"* was a repo-wide search for a
+  segment **kind** named `memory`. Memory is bucketed by
+  `bucket_memory_segments` (`session-core/grpc.rs:200`) into five typed fields —
+  `policy_/workspace_/agent_/user_/episodic_segments`. Fifth instance of this
+  same error inside one section, and the same shape as the registry/voice/memory
+  corrections that prompted §3's warning box.
+
+**Exists under our own name, so the hook list read as absent:**
+`on_pre_compress` ✅ · `on_delegation` ✅ · `recall_status` ✅ · session-end
+extraction = `dreaming::dream_once` ✅ · `system_prompt_block` = the
+`"Relevant memory:"` injection, on **both** the gRPC and SSE paths ✅.
+
+**Genuinely non-transferable, with the reason:**
+- `backup_paths` — Hermes is file-backed; we are Postgres.
+- `flush_pending` + durability-classed background writes — these exist because
+  Hermes queues writes, so a shutdown between write and flush loses the memory.
+  Ours are **awaited**: `execute_save_memory` awaits `index_memory` and turns its
+  result into the tool outcome, so a save has landed before the model is told it
+  did, or the model is told it failed. No pending queue, nothing to flush.
+  Building it would be defending against a mechanism we do not have — the same
+  call §7.9 itself makes about the `StreamingContextScrubber`.
+
+**What was actually built: the tripwire under that last conclusion.**
+`a_memory_write_is_awaited_not_backgrounded` asserts the call shape the analysis
+rests on. Backgrounding the write for latency is a plausible, well-meant
+optimisation that would silently reintroduce the lost-write hazard AND silently
+invalidate this entry. Mutation-verified: inserting a `tokio::spawn` into
+`execute_save_memory` fails it with a message naming the decision to revisit.
+It strips comments before matching — third parser in that file to need it, after
+`str_const` and the taxonomy generator.
+
+Matrix **29 ✅ / 3 🟡 / 4 ❌** of 37. Workspace green at 2,338.
