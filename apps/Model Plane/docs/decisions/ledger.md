@@ -1377,3 +1377,59 @@ tested guards on the ones that carry them. What is NOT established is live
 end-to-end proof for any of them — no deployed stack was exercised, the 0014
 migration has never been applied, and the grant store is in-memory so it fails
 open to UNSPECIFIED on gateway restart.
+
+## Live proof against the running stack (2026-08-26) — **3 of 8 proven live; a 403 security boundary and a fragile test found doing it**
+
+Migration 0014 applied to the live `session_core` DB (capability rows live there,
+not a `capability_core` DB): 29 → 31 rows. Four services rebuilt from
+`469c6a74` and recreated in the `model-plane` project (`rev=469c6a74` on all
+four); capability-core rebuilt after the finding below.
+
+**PROVEN LIVE**
+
+| | Evidence |
+|---|---|
+| 0014 applied | rows exist, `unavailable/health_not_attested` per doctrine |
+| **H1** memory tools | `cap.memory.search` + `cap.memory.index` → **`available/session_memory_probed`** with a real `health_checked_at`; execution-core logs `INFO runtime capability health attested` for both |
+| **C5** delegation | `cap.agent.spawn` → **`available/session_run_registration_probed`**, same log line |
+| **D7** provenance (data path) | the exact new SELECT runs against the live schema, and all 4 `agent_memory` rows carry `extractor:llm` → `classify()` = **INFERRED** where the old code hardcoded `Unknown` |
+
+Pre-fix state captured live first, so these are before/after and not just
+after: `cap.memory.*` genuinely absent from the table, `cap.agent.spawn`
+`unavailable/health_not_attested`, and **0 runs with an empty id** — which is
+why C4's `authorize_run_owner('')` could never match.
+
+**THE 403 — a deliberate boundary my fix ran into.** The first restart produced
+`capability-core refused the cap.memory.index attestation (status 403
+Forbidden)` for all three. Cause: `genericGlobalHealthCapabilityIDs` in
+`capability-core/internal/api/availability.go` is an explicit allowlist —
+previously only `cap.command.{sandbox,shell}` — existing so execution-core's
+health credential cannot become "a universal make-available authority". Widened
+to the five ids execution-core genuinely owns the runtime for, with the
+reasoning in the file. **No Rust test could have caught this**: the allowlist is
+Go. Added `every_attested_capability_is_allowlisted_by_capability_core`, which
+reads across the language boundary like `cross_service_loop_contract.rs`;
+mutation-verified by removing one id from the Go map.
+
+**A test that silently required the stack to be DOWN.**
+`invoke_stream_agentic_reuses_the_prepared_session_run` asserted an
+`agent_dispatch_unreachable` outcome while inheriting `make_state`'s default
+`http://localhost:9093` — which is execution-core's published port. With the
+stack up the gateway reached the real service and got
+`agent_dispatch_rejected`. Proven by stopping the container: fail → pass, no
+code change. Now points at a port the OS just confirmed free
+(`unreachable_execution_client`), so it is hermetic; 31/31 pass with the stack
+running.
+
+**NOT PROVEN LIVE — and why.** C4, C2, C7 and P2 all need an authenticated
+request (`GET /v1/threads/:id/context` returns 401 unauthenticated), and P3
+needs a browser session. Getting there means either a real logged-in session or
+minting a service token to impersonate a service — the latter is fabricating a
+credential to satisfy my own verification, so it was not done. Their status
+stays: source-correct, unit- and contract-tested, mutation-verified where a
+guard exists, **not observed end to end**. The honest scoreboard is 3 of 8
+proven live (4 counting D7's data path), 8 of 8 fixed in source.
+
+Also: `deploy/.env` is gitignored and absent from a fresh worktree, so
+`scripts/compose.sh` cannot build from a clean checkout — the same finding the
+P0 verification flagged. It was copied in to build and deleted afterward.

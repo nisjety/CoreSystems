@@ -550,6 +550,55 @@ mod tests {
     /// pair: an unreachable session-core attests NOTHING (the rows keep their
     /// fail-closed denial), and a reachable one attests exactly the two memory
     /// capabilities the tools are bound to.
+    /// Every id this reporter attests must be in capability-core's
+    /// `genericGlobalHealthCapabilityIDs` allowlist.
+    ///
+    /// That allowlist exists so this service's health credential cannot become a
+    /// universal "make available" authority, and it is enforced in Go — so no
+    /// Rust-side test could see it. Live proof 2026-08-26: the reporter attested
+    /// `cap.memory.{search,index}` and `cap.agent.spawn`, capability-core
+    /// refused all three **403 Forbidden**, and the tools stayed denied at the
+    /// policy gate while every Rust test passed. Read across the language
+    /// boundary the way `cross_service_loop_contract.rs` does, for the same
+    /// reason: the two services deploy separately and neither can depend on the
+    /// other.
+    #[test]
+    fn every_attested_capability_is_allowlisted_by_capability_core() {
+        let allowlist_source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../go/services/capability-core/internal/api/availability.go"),
+        )
+        .expect(
+            "capability-core's availability.go is the authority on who may attest what;              if it moved, re-point this test — do not delete it, it is the only check that              an attestation can actually land",
+        );
+        let start = allowlist_source
+            .find("var genericGlobalHealthCapabilityIDs = map[string]struct{}{")
+            .expect("the allowlist was renamed; re-point this test");
+        let block = &allowlist_source[start..];
+        let end = block.find("\n}").expect("unterminated allowlist literal");
+        let allowlist = &block[..end];
+
+        let mut missing = Vec::new();
+        for capability in [
+            SANDBOX_CAPABILITY,
+            SHELL_CAPABILITY,
+            MEMORY_SEARCH_CAPABILITY,
+            MEMORY_INDEX_CAPABILITY,
+            AGENT_SPAWN_CAPABILITY,
+        ] {
+            if !allowlist.contains(&format!("\"{capability}\"")) {
+                missing.push(capability);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "this reporter attests {missing:?}, which capability-core's \
+             genericGlobalHealthCapabilityIDs does not allow — every such attestation is \
+             refused 403 and the bound tools stay denied at the policy gate. Add the id \
+             there (and justify that execution-core OWNS that runtime), or stop attesting it."
+        );
+    }
+
     #[test]
     fn memory_attestations_track_the_dependency_probe() {
         assert!(memory_attestations(false).is_empty());
