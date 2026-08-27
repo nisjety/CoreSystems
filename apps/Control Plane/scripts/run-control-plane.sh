@@ -221,6 +221,23 @@ persist_if_missing GRAFANA_ADMIN_PASSWORD "$(random_value)"
 # (${..:?}), and build-verevon-services.sh interpolates Compose directly rather
 # than through this script's $tmp_env — an ephemeral default here is invisible
 # to that entry point and its compose config validation fails.
+# Seeded EMPTY on purpose: the principal registry is deployment policy, not a
+# generated secret, so it is maintained in the local store rather than minted
+# here. That does mean a fresh machine starts with no principals at all and
+# every cross-plane lane is closed until they are added back.
+#
+# The governed ticket-action lane (Phase 0) needs the `execution-core`
+# principal to carry, for audience session-core:
+#     scopesByAudience.session-core   includes  approval:deliver
+#     retentionByAudience.session-core = persistent
+#
+# approval:deliver is what session-core's authorize_operation() checks before
+# it will hand out an approval-delivery claim. The retention marker is a real
+# DATA-RETENTION DECISION, not a toggle: session-core refuses durable writes
+# from a credential minted as `zdr`, and approval receipts are durable by
+# nature. It was set to persistent deliberately for this audience only --
+# quarry stays `zdr`. Revisit it with whoever owns retention policy before
+# copying this shape to another audience.
 persist_if_missing PLANE_SERVICE_PRINCIPALS_JSON '{}'
 
 # Session-signing and token-at-rest keys MUST be stable: rotating them logs
