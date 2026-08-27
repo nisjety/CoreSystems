@@ -102,7 +102,57 @@ services:
       retries: 3
       start_period: 5s
 
+  # TLS termination for INTERNAL plane-to-plane calls. Not the edge: this
+  # listener lives only on inter-plane-bus. user-core and conversation-core
+  # serve plain HTTP with no TLS listener of their own, and the governed
+  # ticket-action lane refuses plaintext to any non-IP-loopback host, so those
+  # two services are unreachable by that lane without this proxy.
+  #
+  # Certificates come from ./generate-internal-tls.sh (gitignored, dev-only).
+  # The network aliases below MUST match the certificate SANs -- clients dial
+  # the alias, and rustls/Go verify it against dNSName.
+  internal-tls-proxy:
+    image: nginx:1.27-alpine
+    container_name: coresystem-internal-tls-proxy
+    restart: unless-stopped
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;"]
+    volumes:
+      - ./configs/internal-tls-proxy.conf:/etc/nginx/nginx.conf:ro
+      - ./secrets/internal-tls/server.crt:/etc/internal-tls/server.crt:ro
+      - ./secrets/internal-tls/server.key:/etc/internal-tls/server.key:ro
+    networks:
+      inter-plane-bus:
+        aliases:
+          - user-core-tls
+          - conversation-core-tls
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/log/nginx
+    healthcheck:
+      # Probes its own TLS listener through a known server_name, so a broken
+      # certificate or a dead upstream shows up as unhealthy rather than as a
+      # connection that merely accepts TCP.
+      test: [CMD-SHELL, "wget -q -O /dev/null --no-check-certificate --header='Host: user-core-tls' https://127.0.0.1:8443/ 2>&1 | grep -qv 'unable to connect' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+
 networks:
+  # Provisioned by the plane runners; this stack only attaches to it.
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus
   coresystem-edge:
     name: coresystem-edge
     driver: bridge

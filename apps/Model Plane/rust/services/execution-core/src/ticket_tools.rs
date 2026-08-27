@@ -265,10 +265,36 @@ impl AgentTicketActionClient {
             application_delegation_secret,
             "Conversation Core execution delegation secret",
         )?;
-        let http = Client::builder()
+        let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(3))
-            .timeout(HTTP_TIMEOUT)
+            .timeout(HTTP_TIMEOUT);
+        // This lane requires HTTPS to every non-loopback peer, but reqwest is
+        // built here with rustls + webpki-roots, which trusts the bundled public
+        // CA set and ignores the system trust store entirely -- SSL_CERT_FILE and
+        // /etc/ssl/certs do nothing. A privately-signed internal endpoint is
+        // therefore unreachable unless its CA is added explicitly.
+        //
+        // Additive only: the public roots stay trusted, so setting this cannot
+        // downgrade verification of a publicly-signed peer. Unset means unchanged
+        // behaviour. A configured-but-unreadable or malformed bundle is a hard
+        // error rather than a silent fallback to the public roots, because that
+        // fallback would look identical to a working deployment right up until
+        // the first request failed.
+        if let Some(path) = env_value("EXECUTION_CORE_TICKET_CA_BUNDLE") {
+            let pem = std::fs::read(&path).map_err(|error| {
+                format!("ticket action CA bundle {path} is unreadable: {error}")
+            })?;
+            let anchors = reqwest::Certificate::from_pem_bundle(&pem)
+                .map_err(|_| format!("ticket action CA bundle {path} is not valid PEM"))?;
+            if anchors.is_empty() {
+                return Err(format!("ticket action CA bundle {path} contains no certificate"));
+            }
+            for anchor in anchors {
+                builder = builder.add_root_certificate(anchor);
+            }
+        }
+        let http = builder
             .build()
             .map_err(|_| "ticket action HTTP client is unavailable".to_owned())?;
         Ok(Self {

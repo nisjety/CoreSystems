@@ -821,9 +821,18 @@ services:
       # Core, and Execution Core have distinct, least-privilege credentials.
       # Never place the values in this Compose file; provision them through the
       # deployment's private environment/secret store.
-      CONTROL_PLANE_USER_CORE_URL: ${CONTROL_PLANE_USER_CORE_URL:-http://user-core:3012}
+      # Both point at coresystem-internal-tls-proxy (Infra Plane), never at the
+      # services directly: service_base_url() below refuses plaintext to any host
+      # that is not an IP loopback, and neither upstream has a TLS listener.
+      # The hostnames are network aliases on inter-plane-bus AND SANs on the
+      # proxy certificate; they must stay identical to both.
+      #
+      # reqwest is built with rustls webpki-roots here, which ignores the system
+      # trust store, so the dev CA is loaded explicitly by path.
+      EXECUTION_CORE_TICKET_CA_BUNDLE: ${EXECUTION_CORE_TICKET_CA_BUNDLE:-/etc/internal-tls/ca.crt}
+      CONTROL_PLANE_USER_CORE_URL: ${CONTROL_PLANE_USER_CORE_URL:-https://user-core-tls:8443}
       EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN: ${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:-}
-      CONVERSATION_CORE_AGENT_ACTION_URL: ${CONVERSATION_CORE_AGENT_ACTION_URL:-http://conversation-core-go:3160}
+      CONVERSATION_CORE_AGENT_ACTION_URL: ${CONVERSATION_CORE_AGENT_ACTION_URL:-https://conversation-core-tls:8443}
       CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN: ${CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN:-}
       EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN: ${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:-}
       EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK:-false}
@@ -903,6 +912,10 @@ services:
         condition: service_healthy
       inference-core:
         condition: service_healthy
+    volumes:
+      # Verify-only: this service checks the proxy's certificate and never
+      # presents one. The private key never leaves the Infra Plane.
+      - ../../Infra Plane/secrets/internal-tls/ca.crt:/etc/internal-tls/ca.crt:ro
     networks:
       default: {}
       inter-plane-bus: {}
