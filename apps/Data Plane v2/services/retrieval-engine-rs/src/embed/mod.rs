@@ -662,10 +662,11 @@ mod tests {
 
     #[test]
     fn cohere_requires_endpoint_and_key() {
-        let err = match EmbeddingClient::cohere("", "", "Cohere-embed-4", "2024-05-01-preview", 1536) {
-            Ok(_) => panic!("empty endpoint should fail"),
-            Err(err) => err,
-        };
+        let err =
+            match EmbeddingClient::cohere("", "", "Cohere-embed-4", "2024-05-01-preview", 1536) {
+                Ok(_) => panic!("empty endpoint should fail"),
+                Err(err) => err,
+            };
         assert!(
             err.to_string().contains("COHERE_EMBED_V4_ENDPOINT"),
             "unexpected error: {err}"

@@ -299,7 +299,11 @@ async fn readyz() -> impl axum::response::IntoResponse {
     let erasure = nats_connection::erasure_health::readiness();
     let ok = erasure.is_ready();
     (
-        if ok { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE },
+        if ok {
+            axum::http::StatusCode::OK
+        } else {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        },
         Json(serde_json::json!({
             "status": if ok { "ready" } else { "not_ready" },
             "service": "graph-index-rs",

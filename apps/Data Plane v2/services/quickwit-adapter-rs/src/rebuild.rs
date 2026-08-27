@@ -658,11 +658,7 @@ mod contextual_bm25_tests {
             doc.body
         );
         // The chunk's own terms appear in exactly one searchable field.
-        assert!(!doc
-            .context_body
-            .as_deref()
-            .unwrap()
-            .contains("31 percent"));
+        assert!(!doc.context_body.as_deref().unwrap().contains("31 percent"));
     }
 
     /// Non-contextualized units are the default state (the feature ships off),
@@ -677,7 +673,10 @@ mod contextual_bm25_tests {
 
         let wire = serde_json::to_value(&doc).expect("serializable");
         assert!(
-            !wire.as_object().expect("object").contains_key("context_body"),
+            !wire
+                .as_object()
+                .expect("object")
+                .contains_key("context_body"),
             "an absent context must not be sent as an empty field"
         );
         // And a contextualized one must actually reach the wire.

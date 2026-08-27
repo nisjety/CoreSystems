@@ -73,8 +73,14 @@ mod tests {
         // are real query terms), so `../bad` reduces to `..bad` rather than
         // `bad`. Harmless as a tsquery term; the path separator is what mattered.
         assert_eq!(got, "alpha or siteignored or ..bad or beta");
-        assert!(!got.contains(':'), "field selectors must not survive: {got}");
-        assert!(!got.contains('/'), "path separators must not survive: {got}");
+        assert!(
+            !got.contains(':'),
+            "field selectors must not survive: {got}"
+        );
+        assert!(
+            !got.contains('/'),
+            "path separators must not survive: {got}"
+        );
     }
 
     // `websearch_to_tsquery` tolerates operator keywords as ordinary words, so a

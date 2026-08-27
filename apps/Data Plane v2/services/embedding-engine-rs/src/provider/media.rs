@@ -145,7 +145,11 @@ impl MediaEmbeddingProvider {
     /// Embed one or more media URLs. The sidecar fetches the bytes itself (same
     /// division of labour as ColQwen's reranker), so no bytes transit this
     /// process — only URLs go out and vectors come back.
-    pub async fn embed_urls(&self, kind: MediaKind, urls: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+    pub async fn embed_urls(
+        &self,
+        kind: MediaKind,
+        urls: &[&str],
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
         if urls.is_empty() {
             return Ok(Vec::new());
         }

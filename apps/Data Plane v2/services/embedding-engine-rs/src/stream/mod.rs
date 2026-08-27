@@ -193,9 +193,7 @@ pub async fn run_consumer(
                         Some(EnvelopeError::Expired(stale)) if subject == SUBJECT_CREATED => {
                             let kid = serde_json::from_slice::<serde_json::Value>(&stale.payload)
                                 .ok()
-                                .and_then(|p| {
-                                    p["knowledge_id"].as_str().map(str::to_owned)
-                                })
+                                .and_then(|p| p["knowledge_id"].as_str().map(str::to_owned))
                                 .unwrap_or_default();
                             if kid.is_empty() {
                                 tracing::warn!(

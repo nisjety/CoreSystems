@@ -132,7 +132,11 @@ pub async fn search_contradictions(
     // emitted. `$4` is an OPTIONAL predicate (`$4::text IS NULL OR ...`), so a
     // query that sanitizes to nothing binds NULL — "no text filter" — rather
     // than an empty tsquery that would match no claim at all.
-    .bind(query.map(crate::search::textquery::fts_disjunction).filter(|q| !q.is_empty()))
+    .bind(
+        query
+            .map(crate::search::textquery::fts_disjunction)
+            .filter(|q| !q.is_empty()),
+    )
     .bind(limit)
     .fetch_all(&mut *tx)
     .await?;

@@ -372,8 +372,9 @@ pub async fn spawn(
                                 "error": e.to_string(),
                                 "attempts": delivered,
                             });
-                            if let Err(error) =
-                                nats.publish(MEDIA_DLQ_SUBJECT, dlq.to_string().into()).await
+                            if let Err(error) = nats
+                                .publish(MEDIA_DLQ_SUBJECT, dlq.to_string().into())
+                                .await
                             {
                                 tracing::error!(%error, "media DLQ publish failed");
                             }
@@ -688,8 +689,10 @@ mod caption_tests {
     /// cosine 1.000000 on a reversal).
     #[test]
     fn reversed_footage_yields_different_text_than_the_forward_version() {
-        let forward = video_caption::compose_caption(0, 4_000, "A person stands, then falls to the floor.");
-        let reverse = video_caption::compose_caption(0, 4_000, "A person lies on the floor, then stands up.");
+        let forward =
+            video_caption::compose_caption(0, 4_000, "A person stands, then falls to the floor.");
+        let reverse =
+            video_caption::compose_caption(0, 4_000, "A person lies on the floor, then stands up.");
         assert_ne!(
             forward, reverse,
             "order must be observable in the indexed text, or the fix does nothing"

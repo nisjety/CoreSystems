@@ -269,7 +269,8 @@ impl EmbeddingProvider {
         if api_key.trim().is_empty() {
             anyhow::bail!("COHERE_EMBED_V4_API_KEY is required when EMBEDDING_PROVIDER=cohere");
         }
-        let output_dimension = validate_matryoshka_dimension(output_dimension, "EMBEDDING_DIMENSION")?;
+        let output_dimension =
+            validate_matryoshka_dimension(output_dimension, "EMBEDDING_DIMENSION")?;
         Ok(Self {
             inner: EmbeddingBackend::Cohere(CohereEmbeddingClient {
                 http: Client::builder()
@@ -646,10 +647,11 @@ mod tests {
 
     #[test]
     fn cohere_requires_endpoint_and_key() {
-        let err = match EmbeddingProvider::cohere("", "", "Cohere-embed-4", "2024-05-01-preview", 1536) {
-            Ok(_) => panic!("empty endpoint should fail"),
-            Err(err) => err,
-        };
+        let err =
+            match EmbeddingProvider::cohere("", "", "Cohere-embed-4", "2024-05-01-preview", 1536) {
+                Ok(_) => panic!("empty endpoint should fail"),
+                Err(err) => err,
+            };
         assert!(
             err.to_string().contains("COHERE_EMBED_V4_ENDPOINT"),
             "unexpected error: {err}"

@@ -97,10 +97,7 @@ mod backoff_tests {
             Duration::from_secs(3)
         );
         // A `Retry-After: 0` must not turn the retry into a same-window hammer.
-        assert_eq!(
-            backoff_for(1, Some(Duration::ZERO)),
-            Duration::from_secs(1)
-        );
+        assert_eq!(backoff_for(1, Some(Duration::ZERO)), Duration::from_secs(1));
     }
 
     #[test]

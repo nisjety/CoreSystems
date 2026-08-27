@@ -175,8 +175,7 @@ type Suppressed = std::collections::HashSet<(String, String)>;
 
 fn egress_allowed(classification: Option<&str>) -> bool {
     match classification {
-        Some(c) => EGRESS_ALLOWED_CLASSIFICATIONS
-            .contains(&c.trim().to_ascii_lowercase().as_str()),
+        Some(c) => EGRESS_ALLOWED_CLASSIFICATIONS.contains(&c.trim().to_ascii_lowercase().as_str()),
         // Fail closed: a document with no classification is not assumed safe to
         // send to the extraction model.
         None => false,
@@ -239,7 +238,10 @@ pub async fn run_once(
         let mut errored = false;
         for (knowledge_id, text) in &chunks {
             match extractor.extract(text, org_id, false).await {
-                Ok(result) => match store.persist_extraction(org_id, knowledge_id, &result).await {
+                Ok(result) => match store
+                    .persist_extraction(org_id, knowledge_id, &result)
+                    .await
+                {
                     Ok(persisted) => {
                         if let Err(e) = store
                             .persist_text_unit_mappings(
@@ -379,7 +381,10 @@ pub async fn run(
         // backlog, and racing it would double-extract the same documents.
         tokio::time::sleep(config.interval).await;
 
-        match sqlx::query_scalar::<_, String>(ORGS_SQL).fetch_all(&pool).await {
+        match sqlx::query_scalar::<_, String>(ORGS_SQL)
+            .fetch_all(&pool)
+            .await
+        {
             Ok(orgs) => {
                 let mut total = 0usize;
                 for org_id in orgs {
@@ -471,8 +476,7 @@ mod tests {
     /// An outage must not suppress anything, at any scale.
     #[test]
     fn a_total_provider_outage_suppresses_nothing() {
-        let outcomes: Vec<DocumentOutcome> =
-            (0..50).map(|_| classify_outcome(0, true)).collect();
+        let outcomes: Vec<DocumentOutcome> = (0..50).map(|_| classify_outcome(0, true)).collect();
         assert!(
             outcomes.iter().all(|o| *o == DocumentOutcome::Failed),
             "every document must stay eligible while the model is failing"

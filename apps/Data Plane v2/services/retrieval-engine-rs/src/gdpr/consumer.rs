@@ -62,12 +62,12 @@ const INBOX_PREFIX: &str = "_INBOX.RETRIEVAL_ENGINE_GDPR";
 /// misconfigured or momentarily-unavailable shared broker doesn't hot-loop.
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 
+use nats_connection::erasure_health::{mark_connected, mark_enabled};
 /// Erasure-consumer readiness is tracked in the shared crate
 /// (`nats_connection::erasure_health`) rather than here: the failure it guards
 /// is identical in all five Rust services on this subject, and five copies of a
 /// state machine is how they drift apart.
 pub use nats_connection::erasure_health::{readiness, ErasureReadiness};
-use nats_connection::erasure_health::{mark_connected, mark_enabled};
 
 /// Run the GDPR erasure consumer until the process shuts down, reconnecting
 /// with a fixed backoff on any connect/bind failure or stream-end. Never

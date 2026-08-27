@@ -620,15 +620,8 @@ impl RetrievalPipeline {
             // catches a tower swap (e.g. CLAP -> GLAP) that outgrew its
             // collection.
             Ok(vec_q) if vec_q.len() == want_dim => {
-                match vector_search(
-                    &self.qdrant,
-                    collection,
-                    vec_q,
-                    org_id,
-                    Vec::new(),
-                    top_k,
-                )
-                .await
+                match vector_search(&self.qdrant, collection, vec_q, org_id, Vec::new(), top_k)
+                    .await
                 {
                     Ok(hits) if !hits.is_empty() => hits,
                     Ok(_) => Vec::new(),
@@ -904,8 +897,16 @@ impl RetrievalPipeline {
         // conservative-by-default config declaration — see
         // `Config::media_embedder_sovereign`.
         let media_sovereign_ok = !sovereign_required || self.config.media_embedder_sovereign;
-        let effective_w_audio = if media_sovereign_ok { self.config.w_audio } else { 0.0 };
-        let effective_w_video = if media_sovereign_ok { self.config.w_video } else { 0.0 };
+        let effective_w_audio = if media_sovereign_ok {
+            self.config.w_audio
+        } else {
+            0.0
+        };
+        let effective_w_video = if media_sovereign_ok {
+            self.config.w_video
+        } else {
+            0.0
+        };
 
         // Resolve the mode-mix weights FIRST so they can drive engine routing
         // (D4+D5 spec §7) and so captured-on-trace == used-for-scoring.
@@ -1020,7 +1021,11 @@ impl RetrievalPipeline {
             &top_n.to_string(),
             zdr_mode.as_str(),
             if sovereign_required { "sov=1" } else { "sov=0" },
-            if req.admin_read_all { "admin=1" } else { "admin=0" },
+            if req.admin_read_all {
+                "admin=1"
+            } else {
+                "admin=0"
+            },
             // The resolved blend, not the requested one: two different requests
             // (explicit mode_mix vs. agent default vs. smart hybrid) that
             // resolve to the same weights genuinely produce the same result and

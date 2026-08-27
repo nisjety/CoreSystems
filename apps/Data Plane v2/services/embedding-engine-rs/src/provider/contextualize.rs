@@ -495,10 +495,7 @@ mod tests {
         // The spread stays inside one quarter-step, so jitter never reorders
         // attempts across backoff generations.
         for d in &delays {
-            assert!(
-                *d >= base && *d < base + base / 4,
-                "{d:?} escaped its step"
-            );
+            assert!(*d >= base && *d < base + base / 4, "{d:?} escaped its step");
         }
     }
 
@@ -525,10 +522,7 @@ mod tests {
     #[test]
     fn context_is_prepended_and_the_chunk_survives_verbatim() {
         let composed = compose_contextualized("  This is from ACME's Q2 report.  ", "Margin: 31%.");
-        assert_eq!(
-            composed,
-            "This is from ACME's Q2 report.\n\nMargin: 31%."
-        );
+        assert_eq!(composed, "This is from ACME's Q2 report.\n\nMargin: 31%.");
         assert!(
             composed.ends_with("Margin: 31%."),
             "the chunk must be preserved exactly, not rewritten"
@@ -558,8 +552,14 @@ mod tests {
                 "DATABASE_URL".to_string(),
                 "postgres://test.invalid/test".to_string(),
             ),
-            ("NATS_URL".to_string(), "nats://test.invalid:4222".to_string()),
-            ("QDRANT_URL".to_string(), "http://test.invalid:6334".to_string()),
+            (
+                "NATS_URL".to_string(),
+                "nats://test.invalid:4222".to_string(),
+            ),
+            (
+                "QDRANT_URL".to_string(),
+                "http://test.invalid:6334".to_string(),
+            ),
         ])
         .expect("minimal config")
     }

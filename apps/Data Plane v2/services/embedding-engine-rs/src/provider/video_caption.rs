@@ -272,7 +272,10 @@ mod tests {
     /// must not render as a nonsense "0.0s–0.0s" range.
     #[test]
     fn a_segment_without_timings_omits_the_range() {
-        assert_eq!(compose_caption(0, 0, "A door closes."), "[video] A door closes.");
+        assert_eq!(
+            compose_caption(0, 0, "A door closes."),
+            "[video] A door closes."
+        );
         assert_eq!(
             compose_caption(5_000, 1_000, "Out of order."),
             "[video] Out of order.",

@@ -153,7 +153,9 @@ mod tests {
 
     #[test]
     fn never_connected_is_stalled_not_reconnecting() {
-        let _g = GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset(true, false, 0);
         let state = readiness();
         assert_eq!(state, ErasureReadiness::Stalled { seconds_down: 0 });
@@ -166,16 +168,23 @@ mod tests {
 
     #[test]
     fn a_brief_reconnect_stays_ready() {
-        let _g = GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset(true, false, now_epoch().saturating_sub(60));
         let state = readiness();
         assert!(matches!(state, ErasureReadiness::Reconnecting { .. }));
-        assert!(state.is_ready(), "a broker blip must not evict the instance");
+        assert!(
+            state.is_ready(),
+            "a broker blip must not evict the instance"
+        );
     }
 
     #[test]
     fn a_sustained_outage_fails_readiness() {
-        let _g = GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset(
             true,
             false,
@@ -188,7 +197,9 @@ mod tests {
 
     #[test]
     fn connected_is_ready() {
-        let _g = GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset(true, true, now_epoch());
         assert_eq!(readiness(), ErasureReadiness::Connected);
         assert!(readiness().is_ready());
@@ -198,7 +209,9 @@ mod tests {
     /// standalone deployment must not be held out of the ready set for it.
     #[test]
     fn disabled_is_ready() {
-        let _g = GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset(false, false, 0);
         assert_eq!(readiness(), ErasureReadiness::Disabled);
         assert!(readiness().is_ready());
@@ -206,7 +219,9 @@ mod tests {
 
     #[test]
     fn mark_connected_records_a_bind_timestamp() {
-        let _g = GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _g = GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset(true, false, 0);
         mark_connected(true);
         assert!(LAST_OK_EPOCH.load(Ordering::Relaxed) > 0);

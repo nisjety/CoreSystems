@@ -437,7 +437,11 @@ fn expired_envelope_jti(private: &str, age_seconds: i64, jti: &str) -> Vec<u8> {
 }
 
 fn expired_envelope(private: &str, age_seconds: i64) -> Vec<u8> {
-    expired_envelope_jti(private, age_seconds, &format!("expired-fixture-{age_seconds}"))
+    expired_envelope_jti(
+        private,
+        age_seconds,
+        &format!("expired-fixture-{age_seconds}"),
+    )
 }
 
 #[test]
@@ -512,7 +516,10 @@ fn a_forged_envelope_never_reaches_the_expired_recovery_path() {
 
     // 3. Expired but for a subject outside the signer's scope.
     assert!(matches!(
-        verifier().verify("dataplane.wiki.pages.created", &expired_envelope(&private, 600)),
+        verifier().verify(
+            "dataplane.wiki.pages.created",
+            &expired_envelope(&private, 600)
+        ),
         Err(EnvelopeError::InvalidEnvelope)
     ));
 
@@ -551,7 +558,9 @@ fn a_fresh_envelope_is_unaffected_and_skew_is_still_tolerated() {
     // tightening it.
     let barely = expired_envelope_jti(&private, 130, "skew-barely");
     assert!(
-        verifier.verify("dataplane.documents.created", &barely).is_ok(),
+        verifier
+            .verify("dataplane.documents.created", &barely)
+            .is_ok(),
         "clock skew must still be tolerated"
     );
 }

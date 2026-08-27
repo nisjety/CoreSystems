@@ -270,14 +270,11 @@ pub async fn run_consumer(
                         // envelope per chunk.
                         match e.downcast_ref::<EnvelopeError>() {
                             Some(EnvelopeError::Expired(stale)) => {
-                                let doc = serde_json::from_slice::<serde_json::Value>(
-                                    &stale.payload,
-                                )
-                                .ok()
-                                .and_then(|p| {
-                                    p["document_id"].as_str().map(str::to_owned)
-                                })
-                                .unwrap_or_else(|| "<unknown>".to_string());
+                                let doc =
+                                    serde_json::from_slice::<serde_json::Value>(&stale.payload)
+                                        .ok()
+                                        .and_then(|p| p["document_id"].as_str().map(str::to_owned))
+                                        .unwrap_or_else(|| "<unknown>".to_string());
                                 tracing::error!(
                                     document_id = %doc,
                                     "graph event DROPPED: envelope authentic but expired \

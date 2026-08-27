@@ -99,10 +99,10 @@ pub async fn seed_entities_for_query(
     // The SQL still binds `org_id` itself — the database policy is a backstop
     // against that filter being dropped or mis-edited later, not a replacement.
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
-        // OR-joined: both tsquery builders AND bare words, so a
-        // natural-language question could not match a short entity phrase.
-        // See `search::textquery`.
-        let fts = crate::search::textquery::fts_disjunction(query);
+    // OR-joined: both tsquery builders AND bare words, so a
+    // natural-language question could not match a short entity phrase.
+    // See `search::textquery`.
+    let fts = crate::search::textquery::fts_disjunction(query);
     let rows = sqlx::query_as::<_, (String,)>(seed_entity_sql())
         .bind(org_id)
         .bind(&fts)
@@ -166,10 +166,10 @@ pub async fn graph_arm_candidates(
     // Phase 1 RLS: single-org retrieval path, same rationale as
     // `seed_entities_for_query` above.
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
-        // OR-joined: both tsquery builders AND bare words, so a
-        // natural-language question could not match a short entity phrase.
-        // See `search::textquery`.
-        let fts = crate::search::textquery::fts_disjunction(query);
+    // OR-joined: both tsquery builders AND bare words, so a
+    // natural-language question could not match a short entity phrase.
+    // See `search::textquery`.
+    let fts = crate::search::textquery::fts_disjunction(query);
     let rows = sqlx::query_as::<_, (String, String, String)>(graph_arm_sql())
         .bind(org_id)
         .bind(&fts)
@@ -367,10 +367,10 @@ pub async fn graph_expansion_search(
     // a backstop, not a replacement for the explicit filter.
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
 
-        // OR-joined: both tsquery builders AND bare words, so a
-        // natural-language question could not match a short entity phrase.
-        // See `search::textquery`.
-        let fts = crate::search::textquery::fts_disjunction(query);
+    // OR-joined: both tsquery builders AND bare words, so a
+    // natural-language question could not match a short entity phrase.
+    // See `search::textquery`.
+    let fts = crate::search::textquery::fts_disjunction(query);
     let entity_rows = sqlx::query_as::<_, (String, String, String, f64)>(graph_entity_sql())
         .bind(org_id)
         .bind(&fts)
