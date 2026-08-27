@@ -42644,6 +42644,7 @@ textarea:focus-visible {
   margin: 10px 0 0;
   font-size: 12px;
   color: var(--verevon-text-muted);
+}
 
 /* /spaces resolver: the org-room provisioning card shown while the channel is
    being ensured and Control registration is awaited. The spinner animation is
