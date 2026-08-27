@@ -52,6 +52,11 @@ sdks/typescript/dist/
 sdks/typescript/.openapi-generator/
 sdks/typescript/node_modules/
 sdks/typescript/*.json
+# Building the generated SDK (whose package.json is itself generated and
+# ignored above) leaves a lockfile behind. It pins an ignored manifest, so
+# it must not be committed either.
+sdks/typescript/pnpm-lock.yaml
+sdks/typescript/package-lock.json
 sdks/typescript/.gitignore
 sdks/typescript/.npmignore
 sdks/typescript/.openapi-generator-ignore
