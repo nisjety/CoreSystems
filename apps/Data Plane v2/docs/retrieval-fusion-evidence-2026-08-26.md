@@ -893,7 +893,7 @@ declares `float`. With the endpoint working, the actual arm behaviour:
 | `where is idx_ku_content_tsv_gin defined and how is it used` | 10 | 10 |
 | `src/api/mod.rs` | 10 | 10 |
 
-## 3. Realistic query shapes cost 0.115 nDCG — open
+## 3. Realistic query shapes cost 0.115 nDCG — fixed by anchoring
 
 Same 23 identifiers, same judgments, each wrapped in the words a person would
 type around it (`where is X defined and how is it used`):
@@ -917,10 +917,72 @@ swamped:
 | `"where" OR "is" OR "internal/jobs/executor.go" OR "called"` | **1,517** | **none** |
 
 1,517 of ~2,328 chunks — the disjunction matches most of the corpus and ranking
-is dominated by the common terms. The standard remedies are stopword handling,
-minimum-should-match, or boosting rare/identifier-shaped terms; picking among
-them needs measurement, not a guess, so this is recorded and left open rather
-than patched.
+is dominated by the common terms.
+
+### Boosting does nothing; requiring works
+
+Measured against the live index before touching any code:
+
+| Quickwit query | hits | target in top 5 |
+|---|---|---|
+| `("where" OR "is" OR "internal/jobs/executor.go" OR "called")` | 1,517 | 0/5 |
+| the same with `^10` on the path | 1,517 | 0/5 |
+| `+("internal/jobs/executor.go") AND ("where" OR "is" OR "called")` | 14 | **5/5** |
+
+Quickwit accepts `term^boost` and ranks identically, so boosting was a dead end.
+Requiring the term is the only lever that moves anything.
+
+### The fix: anchor the lexical arms on distinctive terms
+
+`textquery::distinctive_terms` classifies each sanitized term as an anchor or as
+prose, and `fts_anchor_disjunction` / `build_quickwit_query` search on the
+anchors when the query has any:
+
+* Quickwit — `+(anchors...) AND (prose...)`: anchors required, prose left as an
+  optional clause so it still shapes BM25 order within the anchored set.
+* Postgres — anchors only. `websearch_to_tsquery` has no "required plus
+  optional" form, so OR-ing prose in could add rows but never reorder them.
+* No anchors (a pure prose question) — unchanged behaviour, which is the path
+  the 87-query set measures.
+
+Anchor rules are deliberately narrow, each firing on something a person expects
+an exact match for: contains `_` or `/`; contains a digit **and** a letter; or
+has a short alphabetic extension after a dot. The digit rule requires a letter
+because a first attempt without it made every bare number an anchor — "top 10
+results" would have become a required match on `10`.
+
+**Why trading the lexical arm's recall for precision is right here:** results are
+fused. The lexical arm exists to nail exact tokens; the dense arm already
+supplies the fuzzy, semantic, typo-tolerant half. Letting each arm do what it is
+good at beats making both mediocre.
+
+### Measured after deploying
+
+| cell | recall@10 | nDCG@10 | MRR | found |
+|---|---|---|---|---|
+| bare identifier, before | 1.0000 | 0.9622 | 0.9493 | 23/23 |
+| bare identifier, after | 1.0000 | 0.9622 | 0.9493 | 23/23 |
+| prose-wrapped, before | 0.9130 | 0.8473 | 0.8261 | 21/23 |
+| prose-wrapped, after | **1.0000** | **0.9035** | **0.8710** | **23/23** |
+
+Prose recall fully restored — every identifier findable again regardless of the
+words around it — nDCG +0.056, MRR +0.045, and **exactly zero movement** on the
+bare case that already worked. The residual 0.059 nDCG gap to bare is ranking,
+not findability, which is expected: prose adds noise to the fused order.
+
+No regression on natural-language questions, which was the risk (an incidental
+identifier-shaped token in a prose question could have over-narrowed). All four
+gated cells, pinned-weight configuration, against the committed baseline:
+
+| cell | recall | nDCG | MRR |
+|---|---|---|---|
+| baseline | +0.0115 | −0.0037 | −0.0084 |
+| contextual | +0.0115 | +0.0139 | +0.0152 |
+| lexical-baseline | +0.0000 | +0.0000 | +0.0000 |
+| lexical-contextual | +0.0000 | +0.0000 | +0.0000 |
+
+Both natural-language deltas sit inside the ±0.045 rerank-lottery noise; the
+contextual cell improved.
 
 ## Also observed, not yet chased
 

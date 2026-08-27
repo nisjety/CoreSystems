@@ -35,6 +35,94 @@ pub fn fts_disjunction(query: &str) -> String {
     sanitize_terms(query).join(" or ")
 }
 
+/// Terms that look like an exact thing the user is hunting — an identifier, a
+/// path, a config key, a version — as opposed to the prose they wrapped it in.
+///
+/// # Why the lexical arms need this
+///
+/// OR-joining every term fixed "multi-word questions match nothing", then swung
+/// straight into the opposite failure: a rare, high-value term OR'd with common
+/// words gets swamped by them. Measured on the live corpus, hunting a path:
+///
+/// | Quickwit query | hits | target in top 5 |
+/// |---|---|---|
+/// | `"where" OR "is" OR "internal/jobs/executor.go" OR "called"` | 1,517 | 0/5 |
+/// | `"internal/jobs/executor.go"` alone | 14 | 5/5 |
+/// | `+("internal/jobs/executor.go") AND ("where" OR "is" OR "called")` | 14 | 5/5 |
+///
+/// End to end that cost 0.115 nDCG: the same 23 mined identifiers wrapped in
+/// `where is X defined and how is it used` scored 0.8473 against 0.9622 bare,
+/// with two becoming unfindable.
+///
+/// Boosting was tried first and does nothing — Quickwit accepts `term^10` and
+/// ranks identically. Requiring the term is what works.
+///
+/// # Why requiring is the right call for the LEXICAL arm specifically
+///
+/// It trades recall for precision, which would be wrong for a single-arm search
+/// and is right here: results are fused. The lexical arm exists to nail exact
+/// tokens; the dense arm already supplies the fuzzy, semantic, typo-tolerant
+/// half. Letting each arm do what it is good at beats making both mediocre.
+///
+/// Shape is deliberately "at least one distinctive term", not "all of them": a
+/// user naming two identifiers usually wants either, and requiring both can
+/// yield nothing.
+///
+/// Heuristic, and intentionally a narrow one — every rule below fires on
+/// something a person would expect an exact match for:
+/// * contains `_` or `/` — `snake_case`, `SCREAMING_CASE`, paths
+/// * contains a digit **and** a letter — `embed-v-4-0`, `PLAN_2026`, `v4`. The
+///   letter is required so a bare number does not anchor: "top 10 results" must
+///   not become a required match on `10`, and a year on its own is prose.
+/// * has a short alphabetic extension after a `.` — file names
+///
+/// A plain long word is NOT distinctive: prose is exactly what the dense arm
+/// handles, and promoting ordinary words here would re-create the flood.
+#[must_use]
+pub fn distinctive_terms(query: &str) -> Vec<String> {
+    sanitize_terms(query)
+        .into_iter()
+        .filter(|term| is_distinctive(term))
+        .collect()
+}
+
+fn is_distinctive(term: &str) -> bool {
+    if term.contains('_') || term.contains('/') {
+        return true;
+    }
+    if term.chars().any(char::is_numeric) && term.chars().any(char::is_alphabetic) {
+        return true;
+    }
+    // `foo.rs`, `config.yaml` — a short alphabetic tail after a dot. Guards
+    // against treating an abbreviation or a sentence-ending word as a filename.
+    match term.rsplit_once('.') {
+        Some((stem, ext)) => {
+            !stem.is_empty()
+                && (2..=4).contains(&ext.len())
+                && ext.chars().all(|ch| ch.is_ascii_alphabetic())
+        }
+        None => false,
+    }
+}
+
+/// The FTS predicate for the lexical arms: anchor on the distinctive terms when
+/// the query has any, else fall back to the full disjunction.
+///
+/// Ordinary terms are dropped rather than OR'd in alongside, because
+/// `websearch_to_tsquery` cannot express "required plus optional" — an OR of
+/// prose words can only add rows, never reorder them, and ranking is a separate
+/// `ts_rank` concern. Quickwit keeps the ordinary terms as an optional clause,
+/// where they legitimately influence BM25 order; see `build_quickwit_query`.
+#[must_use]
+pub fn fts_anchor_disjunction(query: &str) -> String {
+    let distinctive = distinctive_terms(query);
+    if distinctive.is_empty() {
+        fts_disjunction(query)
+    } else {
+        distinctive.join(" or ")
+    }
+}
+
 /// Reduce a user query to bare terms: strip anything that could carry query
 /// syntax (`:` field selectors, wildcards, parentheses) and cap the count so one
 /// enormous query cannot build an unbounded disjunction.
@@ -145,6 +233,54 @@ mod tests {
     fn punctuation_only_input_yields_no_predicate() {
         assert!(fts_disjunction("??? !!! :::").is_empty());
         assert!(fts_disjunction("").is_empty());
+    }
+
+    #[test]
+    fn identifier_shapes_are_distinctive_and_prose_is_not() {
+        // The anchor terms a person expects an exact match on.
+        for term in [
+            "RERANK_TOP_K",
+            "idx_ku_content_tsv_gin",
+            "src/api/mod.rs",
+            "internal/jobs/executor.go",
+            "embed-v-4-0",
+            "config.yaml",
+            "QM_INSPIRED_IMPROVEMENT_PLAN_2026",
+        ] {
+            assert!(is_distinctive(term), "{term} should anchor the lexical arm");
+        }
+        // Prose must NOT be promoted — that would rebuild the flood this exists
+        // to stop. Note `defined.` keeps its dot after sanitization, so the
+        // filename rule has to reject a sentence-ending word.
+        for term in ["where", "is", "defined", "called", "retrieval", "defined."] {
+            assert!(!is_distinctive(term), "{term} must stay ordinary");
+        }
+    }
+
+    #[test]
+    fn an_anchored_query_drops_the_prose() {
+        // The measured failure: the path buried under `where`/`is`/`called`.
+        assert_eq!(
+            fts_anchor_disjunction("where is internal/jobs/executor.go called"),
+            "internal/jobs/executor.go"
+        );
+        // Two anchors stay a disjunction — either is a legitimate answer.
+        assert_eq!(
+            fts_anchor_disjunction("compare RERANK_TOP_K and W_BM25 defaults"),
+            "RERANK_TOP_K or W_BM25"
+        );
+    }
+
+    #[test]
+    fn pure_prose_keeps_the_full_disjunction() {
+        // No anchor present, so behaviour is unchanged — this is the path the
+        // 87-query natural-language set measures, and it must not move.
+        assert_eq!(
+            fts_anchor_disjunction("how does retrieval combine dense and sparse"),
+            // Note the literal "and" from the question survives as a term —
+            // `websearch_to_tsquery` treats operator keywords as ordinary words.
+            "how or does or retrieval or combine or dense or and or sparse"
+        );
     }
 
     #[test]

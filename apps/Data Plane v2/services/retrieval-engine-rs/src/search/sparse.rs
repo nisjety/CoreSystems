@@ -207,7 +207,11 @@ pub async fn bm25_search(
     // because it is total on user input: it never raises a syntax error, so the
     // sanitized terms cannot combine into something that fails the query.
     // Verified: `a or or or -- \\ ) | & ! or b` parses to `'a' | 'or' | 'b'`.
-    let fts_query = crate::search::textquery::fts_disjunction(query);
+    // Anchored: when the query names an identifier/path, search on that rather
+    // than OR-ing the surrounding prose in alongside it. `websearch_to_tsquery`
+    // has no "required plus optional" form, so prose terms could only add rows
+    // here, never reorder them — the flood with none of the upside.
+    let fts_query = crate::search::textquery::fts_anchor_disjunction(query);
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<_, BM25Row>(
         r#"
@@ -392,14 +396,42 @@ fn build_quickwit_query(org_id: &str, query: &str) -> String {
         quote_term("knowledge_unit")
     );
     if terms.is_empty() {
-        org_filter
-    } else {
-        let disjunction = terms
-            .iter()
+        return org_filter;
+    }
+
+    let quoted = |list: &[String]| {
+        list.iter()
             .map(|term| quote_term(term))
             .collect::<Vec<_>>()
-            .join(" OR ");
-        format!("{org_filter} AND ({disjunction})")
+            .join(" OR ")
+    };
+
+    // Anchor on the distinctive terms when the query has any. A rare term OR'd
+    // with common words is swamped by them — measured 1,517 hits with the target
+    // in none of the top 5, against 14 hits and 5/5 once the term is required.
+    // `^boost` was tried first and Quickwit ranks identically, so requiring is
+    // the only lever that moves anything. See `textquery::distinctive_terms` for
+    // why trading the lexical arm's recall for precision is right in a fused
+    // system.
+    //
+    // Ordinary terms stay as an OPTIONAL clause here (unlike the Postgres arm,
+    // which cannot express that) so they still shape BM25 order within the
+    // anchored set.
+    let distinctive = crate::search::textquery::distinctive_terms(query);
+    if distinctive.is_empty() {
+        return format!("{org_filter} AND ({})", quoted(&terms));
+    }
+
+    let ordinary: Vec<String> = terms
+        .iter()
+        .filter(|term| !distinctive.contains(term))
+        .cloned()
+        .collect();
+    let anchor = format!("+({})", quoted(&distinctive));
+    if ordinary.is_empty() {
+        format!("{org_filter} AND {anchor}")
+    } else {
+        format!("{org_filter} AND {anchor} AND ({})", quoted(&ordinary))
     }
 }
 
@@ -595,8 +627,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         let query = build_quickwit_query("org-1", &long);
-        let terms = query.split_once(" AND (").expect("terms").1;
-        assert_eq!(terms.matches(" OR ").count(), 31, "32 terms -> 31 joins");
+        // `term0`..`term99` are digit+letter, so every one is a distinctive
+        // anchor and they land inside `+( ... )` rather than the optional
+        // clause. The org filter contains no ` OR `, so counting across the
+        // whole query is exact and survives either shape.
+        assert_eq!(query.matches(" OR ").count(), 31, "32 terms -> 31 joins");
     }
 
     #[tokio::test]
