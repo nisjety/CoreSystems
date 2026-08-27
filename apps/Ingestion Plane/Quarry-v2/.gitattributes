@@ -1,0 +1,19 @@
+# sdks/ is written by sdks/generate.sh, which runs openapi-generator inside a
+# Linux container. The container writes LF. With core.autocrlf=true these tracked
+# files are checked out as CRLF, so every regeneration flipped all 193 of them to
+# "modified" in `git status` while being byte-identical to HEAD — `git diff
+# --numstat` reported 0 changed lines across the lot. That noise buries real
+# changes and invites someone to commit 193 files of pure line-ending churn.
+#
+# Pin the generator's output to LF so the container's bytes and the working tree
+# agree. Same reasoning, and the same fix, as convex-core/.gitattributes (whose
+# _generated/ files are written by a container too) and the root rule for *.sh.
+#
+# Patterns here are relative to this directory: the repo path contains a space
+# ("Ingestion Plane"), and .gitattributes patterns cannot express one.
+#
+# Scoped to sdks/ deliberately. This repo pins line endings per generated path
+# rather than declaring a repo-wide `* text=auto`, which would rewrite every
+# tracked file in every plane at once.
+sdks/typescript/** text eol=lf
+sdks/python/** text eol=lf
