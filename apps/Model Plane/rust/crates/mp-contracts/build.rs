@@ -1,9 +1,34 @@
+/// Strip the Windows extended-length path prefix that `Path::canonicalize`
+/// always adds.
+///
+/// `protoc` cannot read such a path: it reports the include directory as
+/// "directory does not exist" and then `Cannot convert path ... to or from
+/// Windows style` for every `.proto`, so the whole workspace fails to build on
+/// Windows with `model_plane/v1/ids.proto: File not found` (reproduced with
+/// libprotoc 35.1). Canonicalization itself is worth keeping — it resolves the
+/// `../../../` and hands `protoc` an absolute include root — so only the prefix
+/// goes. A no-op on Linux, where the prefix never appears, which is where CI
+/// runs and why this went unnoticed.
+fn strip_extended_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    let Some(rest) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) else {
+        return path;
+    };
+    // `\\?\UNC\server\share` denotes `\\server\share`; dropping only the
+    // prefix would leave the bogus `UNC\server\share`.
+    match rest.strip_prefix(r"UNC\") {
+        Some(unc) => std::path::PathBuf::from(format!(r"\\{unc}")),
+        None => std::path::PathBuf::from(rest),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let proto_root = std::path::Path::new(&manifest_dir)
-        .join("../../../proto")
-        .canonicalize()
-        .expect("proto/ directory must exist relative to mp-contracts crate");
+    let proto_root = strip_extended_prefix(
+        std::path::Path::new(&manifest_dir)
+            .join("../../../proto")
+            .canonicalize()
+            .expect("proto/ directory must exist relative to mp-contracts crate"),
+    );
 
     let mp_protos = &[
         "model_plane/v1/ids.proto",

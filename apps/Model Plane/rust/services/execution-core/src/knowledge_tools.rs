@@ -97,6 +97,29 @@ fn build_request(
             Some(user_id.to_owned())
         },
         zdr_mode: zdr.then(|| "ephemeral".to_owned()),
+        // Jurisdiction axis, and it must be populated: Data Plane v2 reads an
+        // absent `sovereign_required` as `true` (fail-closed, since absence of
+        // proof is not proof that egress is permitted), which Azure-hosted
+        // Cohere Embed v4 can never satisfy — so `..Default::default()`'s `None`
+        // made every governed-loop `knowledge_search` fail before retrieval ran.
+        //
+        // The value is the declared no-signal default, and this crate has no
+        // signal to do better with TODAY: `ExecuteStepRequest` carries `zdr`
+        // (field 9) but no privacy floor, so the run's `min_privacy_tier` —
+        // which `RunAgentRequest` does carry, and which agent.rs already threads
+        // onto every `InferRequest` — never reaches this executor. Closing that
+        // means a `min_privacy_tier` field on `ExecuteStepRequest` plus
+        // threading it through `runtime_loop::execute_step*`; until then a
+        // sovereign-pinned agent run gets sovereign MODEL serving and
+        // non-sovereign retrieval EMBEDDING, and this comment is the only place
+        // that says so.
+        //
+        // A signed `sovereign = true` on the forwarded user bearer still wins:
+        // retrieval-engine-rs re-applies its own floor on receipt, so this can
+        // fail to raise the posture but never relax one.
+        sovereign_required: Some(
+            mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
+        ),
         ..Default::default()
     });
     request

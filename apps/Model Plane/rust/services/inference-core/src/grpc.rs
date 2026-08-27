@@ -1329,9 +1329,7 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         // act on it (adjust the request / opt in) rather than retry blindly.
         provider::ProviderError::ResidencyViolation(message)
         | provider::ProviderError::ZdrUnavailable(message)
-        | provider::ProviderError::TierUnavailable(message) => {
-            Status::failed_precondition(message)
-        }
+        | provider::ProviderError::TierUnavailable(message) => Status::failed_precondition(message),
     }
 }
 

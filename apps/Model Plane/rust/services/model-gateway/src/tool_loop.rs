@@ -1535,7 +1535,13 @@ fn verevon_read_outcome(
 /// Execute a single model-requested tool call against the gateway's tool
 /// handlers. Unknown tools / bad args return an error outcome (the model is
 /// told, so it can recover). New tools plug in here (MCP proxy, etc.).
-fn knowledge_search_request(org_id: &str, query: &str, top_k: i32, zdr: bool) -> RetrieveRequest {
+fn knowledge_search_request(
+    org_id: &str,
+    query: &str,
+    top_k: i32,
+    zdr: bool,
+    sovereign_required: bool,
+) -> RetrieveRequest {
     RetrieveRequest {
         org_id: org_id.to_owned(),
         query: query.to_owned(),
@@ -1544,6 +1550,11 @@ fn knowledge_search_request(org_id: &str, query: &str, top_k: i32, zdr: bool) ->
         // identity in the message is deliberately absent.
         user_id: None,
         zdr_mode: crate::retrieval::data_plane_zdr_mode(zdr),
+        // Always populated. Data Plane v2 reads an absent `sovereign_required`
+        // as `true` (fail-closed), which its Azure-hosted embedding provider
+        // cannot satisfy, so leaving this off is what made every
+        // `knowledge_search` call fail before retrieval ran.
+        sovereign_required: Some(sovereign_required),
         context_budget_tokens: Some(crate::retrieval::DEFAULT_CONTEXT_BUDGET_TOKENS),
         context_format: Some(crate::retrieval::CONTEXT_FORMAT.to_owned()),
         ..Default::default()
@@ -1750,6 +1761,13 @@ pub async fn dispatch_tool(
     // tools) simply always screens rather than being unable to check in.
     capability_bearer: Option<&str>,
     zdr: bool,
+    // Jurisdiction posture for this turn: whether Data Plane v2 retrieval must
+    // stay on sovereign infrastructure. Separate from `zdr` (retention) and
+    // resolved upstream by `mp_contracts::dataplane_posture` from the caller's
+    // signed `sovereign` claim plus its privacy floor. Threaded rather than
+    // defaulted here because the tool loop is where a constrained turn actually
+    // reaches the Data Plane.
+    sovereign_required: bool,
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
 ) -> ToolOutcome {
@@ -2359,7 +2377,7 @@ pub async fn dispatch_tool(
             let top_k = i32::try_from(arg_i64(&call.arguments_json, "top_k").unwrap_or(5))
                 .unwrap_or(5)
                 .clamp(1, 20);
-            let request = knowledge_search_request(org_id, &query, top_k, zdr);
+            let request = knowledge_search_request(org_id, &query, top_k, zdr, sovereign_required);
             let request = match crate::retrieval::authorize(tonic::Request::new(request), bearer) {
                 Ok(request) => request,
                 Err(error) => {
@@ -2374,8 +2392,32 @@ pub async fn dispatch_tool(
             };
             match state.retrieval_client.clone().retrieve(request).await {
                 Ok(resp) => {
-                    let items: Vec<serde_json::Value> = resp
-                        .into_inner()
+                    let response = resp.into_inner();
+                    // Data Plane v2's advisory side channel (proto field 10),
+                    // computed on every retrieval and — until this read — thrown
+                    // away at the gRPC boundary. Total decode: an absent or
+                    // malformed Struct yields empty lists, never an error,
+                    // because advisory data must not cost anyone their results.
+                    let metadata = crate::retrieval_metadata::from_struct(
+                        response.retrieval_metadata.as_ref(),
+                    );
+                    let hinted = metadata.hinted_tools();
+                    if crate::retrieval_metadata::retention_posture_conflict(
+                        !zdr,
+                        &metadata.zdr_actions_applied,
+                    ) {
+                        // ZDR has to survive every content-carrying boundary,
+                        // and this is one: Data Plane enforced a retention
+                        // action on content about to enter a durable turn.
+                        // Expected unreachable — see the function's doc — so it
+                        // is logged rather than silently tolerated.
+                        tracing::warn!(
+                            org_id = %org_id,
+                            actions = ?metadata.zdr_actions_applied,
+                            "Data Plane applied ZDR enforcement to a retrieval on a durable turn"
+                        );
+                    }
+                    let items: Vec<serde_json::Value> = response
                         .candidates
                         .iter()
                         .map(|c| {
@@ -2396,7 +2438,29 @@ pub async fn dispatch_tool(
                     // this per-candidate map, which is out of scope here (see
                     // final report) in favor of covering the three explicitly
                     // untrusted classes end to end.
-                    let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+                    //
+                    // An object rather than the bare array this used to return:
+                    // the results now travel with Data Plane's own advice about
+                    // them. Both advisory keys are omitted when empty, so a
+                    // confident retrieval with ZDR off is unchanged apart from
+                    // the `results` wrapper.
+                    let mut envelope = serde_json::json!({ "results": items });
+                    if let Some(object) = envelope.as_object_mut() {
+                        if !hinted.is_empty() {
+                            object.insert(
+                                "suggested_next_tools".to_owned(),
+                                serde_json::json!(hinted),
+                            );
+                        }
+                        if !metadata.zdr_actions_applied.is_empty() {
+                            object.insert(
+                                "zdr_actions_applied".to_owned(),
+                                serde_json::json!(metadata.zdr_actions_applied),
+                            );
+                        }
+                    }
+                    let output =
+                        serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_owned());
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
@@ -2409,6 +2473,95 @@ pub async fn dispatch_tool(
                 }
                 Err(e) => err_outcome(call, format!("knowledge_search failed: {}", e.message())),
             }
+        }
+        // Data Plane v2's typed retrieval endpoints — the ones
+        // `suggested_next_tools` names. Same authority posture as
+        // `knowledge_search` above: the verified request org, the caller's own
+        // verified Data Plane bearer, and no org argument in any input schema.
+        // Results are org-internal per `TrustClass::classify`, the same class as
+        // `knowledge_list_documents`, so they share `verevon_read_outcome`'s
+        // provenance + result-parking path rather than a second one.
+        "knowledge_graph_search" => {
+            let query = arg_str(&call.arguments_json, "query");
+            if query.trim().is_empty() {
+                return err_outcome(call, "knowledge_graph_search requires a 'query' argument");
+            }
+            let Some(bearer) = data_plane_bearer else {
+                return err_outcome(
+                    call,
+                    "knowledge_graph_search requires a verified user bearer",
+                );
+            };
+            verevon_read_outcome(
+                state,
+                org_id,
+                user_id,
+                zdr,
+                call,
+                crate::retrieval_tools::graph_search(
+                    state,
+                    bearer,
+                    org_id,
+                    &query,
+                    arg_i64(&call.arguments_json, "limit"),
+                    zdr,
+                )
+                .await,
+            )
+        }
+        "knowledge_wiki_search" => {
+            let query = arg_str(&call.arguments_json, "query");
+            if query.trim().is_empty() {
+                return err_outcome(call, "knowledge_wiki_search requires a 'query' argument");
+            }
+            let Some(bearer) = data_plane_bearer else {
+                return err_outcome(
+                    call,
+                    "knowledge_wiki_search requires a verified user bearer",
+                );
+            };
+            verevon_read_outcome(
+                state,
+                org_id,
+                user_id,
+                zdr,
+                call,
+                crate::retrieval_tools::wiki_search(
+                    state,
+                    bearer,
+                    org_id,
+                    &query,
+                    arg_i64(&call.arguments_json, "limit"),
+                )
+                .await,
+            )
+        }
+        // No required argument: an absent `query` means "every recorded
+        // contradiction in this org", which is the honest answer to "do our
+        // sources disagree about anything?".
+        "knowledge_contradictions" => {
+            let Some(bearer) = data_plane_bearer else {
+                return err_outcome(
+                    call,
+                    "knowledge_contradictions requires a verified user bearer",
+                );
+            };
+            let query = arg_str(&call.arguments_json, "query");
+            verevon_read_outcome(
+                state,
+                org_id,
+                user_id,
+                zdr,
+                call,
+                crate::retrieval_tools::contradictions(
+                    state,
+                    bearer,
+                    org_id,
+                    Some(query.as_str()),
+                    arg_i64(&call.arguments_json, "limit"),
+                )
+                .await,
+            )
         }
         "brreg_lookup_organization" | "brreg.lookup_organization" => {
             dispatch_brreg_lookup_tool(state, call).await
@@ -2747,6 +2900,13 @@ async fn dispatch_audited_tool(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    // Jurisdiction posture for this turn: whether Data Plane v2 retrieval must
+    // stay on sovereign infrastructure. Separate from `zdr` (retention) and
+    // resolved upstream by `mp_contracts::dataplane_posture` from the caller's
+    // signed `sovereign` claim plus its privacy floor. Threaded rather than
+    // defaulted here because the tool loop is where a constrained turn actually
+    // reaches the Data Plane.
+    sovereign_required: bool,
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
 ) -> Result<ToolOutcome, &'static str> {
@@ -2797,6 +2957,7 @@ async fn dispatch_audited_tool(
             session_bearer,
             capability_bearer,
             zdr,
+            sovereign_required,
             call,
             ingestion_bearer,
         )
@@ -2892,6 +3053,12 @@ pub(crate) async fn dispatch_web_tool_audited(
         // fetches with the largest external-content surface.
         None,
         zdr,
+        // Web tools only, per this function's doc: neither `web_search` nor
+        // `fetch_url` reaches Data Plane retrieval, so there is no sovereignty
+        // posture to carry. Deliberately the no-signal value and not a threaded
+        // one — adding a Data-Plane-backed tool to this path has to come with
+        // threading a real posture in, and this line is where that shows up.
+        mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
         call,
         None,
     )
@@ -2958,6 +3125,28 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             name: "knowledge_search".to_owned(),
             description: "Search the organization's OWN internal knowledge base (ingested documents) and return the most relevant passages. Prefer this for questions about the company's own data, docs, or products.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"What to look up in the org knowledge base"},"top_k":{"type":"integer","description":"Max passages 1-20"}},"required":["query"]}"#.to_owned(),
+        },
+        // --- Data Plane v2 typed retrieval -----------------------------------
+        // `knowledge_search` is the general hybrid retrieval; these three are
+        // the typed endpoints Data Plane v2 names in `suggested_next_tools` on
+        // every retrieval (see `crate::retrieval_metadata`). They are advertised
+        // unconditionally, for the same reason `result_query` is: a hint arrives
+        // mid-loop, and the model can only act on it if the tool is already in
+        // the list it was given. Read-only, org-scoped by the verified request.
+        ToolDefinition {
+            name: "knowledge_graph_search".to_owned(),
+            description: "Search the organization's knowledge GRAPH for entities and topic-cluster summaries related to a query, instead of returning document passages. Use it when knowledge_search came back weak, empty, or off-target and you need semantically adjacent material — 'who and what is connected to X', 'what themes surround Y' — or when a knowledge_search result told you to try the graph. Returns entities (id, type, label) and community summaries, not quotable passages, so cite the documents knowledge_search returns rather than these summaries. Do NOT use it as a first resort for a plain factual lookup (use knowledge_search) or for the public web (use web_search).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"What to explore in the knowledge graph"},"limit":{"type":"integer","description":"Max entities to return, 1-10 (default 5)"}},"required":["query"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "knowledge_wiki_search".to_owned(),
+            description: "Search the organization's curated internal WIKI pages (title, path, and an excerpt) rather than its ingested source documents. Use it when knowledge_search found nothing or only weak matches, or when the question is about how this organization does something — a policy, a procedure, an internal convention — which is more often written up on a wiki page than buried in an ingested file. Returns published pages only. Do NOT use it for the substance of ingested documents (use knowledge_search) or for public-web material (use web_search).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"What to look for in the wiki (matches title, path and content)"},"limit":{"type":"integer","description":"Max pages to return, 1-10 (default 5)"}},"required":["query"]}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "knowledge_contradictions".to_owned(),
+            description: "List claims in the organization's knowledge base that CONTRADICT other claims, with the conflicting claim ids and their source references. Use it before presenting a confident answer that several different sources contributed to, or whenever a knowledge_search result told you the sources may disagree: it is how you find out that two documents say different things instead of silently picking one. An empty result is a real and useful answer — it means the recorded claims do not conflict — so report that rather than treating it as a failure. Omit the query to check the whole knowledge base. Do NOT use it to find documents (use knowledge_search).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"Optional topic to narrow the check to. Omit to list every recorded contradiction in the organization."},"limit":{"type":"integer","description":"Max contradictions to return, 1-10 (default 5)"}}}"#.to_owned(),
         },
         ToolDefinition {
             name: "shipping_get_quotes".to_owned(),
@@ -3228,6 +3417,9 @@ pub async fn run_forced_web_search(
         session_bearer,
         capability_bearer,
         zdr,
+        // A forced `web_search` and nothing else, so no Data Plane retrieval is
+        // reachable from here — same reasoning as `dispatch_web_tool_audited`.
+        mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
         &call,
         None,
     )
@@ -3532,6 +3724,13 @@ pub async fn run_tool_rounds(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    // Jurisdiction posture for this turn's Data Plane retrievals — the axis
+    // `zdr` does not cover. Resolved by the caller from its signed `sovereign`
+    // claim and `min_privacy_tier` below (`mp_contracts::dataplane_posture`),
+    // and threaded here because `knowledge_search` is dispatched from this
+    // loop: a turn pinned to sovereign model serving must not have its
+    // retrieval embedded off-jurisdiction on the way there.
+    sovereign_required: bool,
     // Caller-selected minimum privacy tier (wire numeric). Every tool-round
     // infer carries it so a derived call never reaches a provider the main
     // chain would refuse.
@@ -3782,6 +3981,7 @@ pub async fn run_tool_rounds(
                     session_bearer,
                     capability_bearer,
                     zdr,
+                    sovereign_required,
                     call,
                     ingestion_bearer,
                 )
@@ -4074,6 +4274,7 @@ mod tests {
             "",
             None,
             true,
+            false,
             &call,
             None,
         )
@@ -4240,6 +4441,7 @@ mod tests {
             "",
             None,
             false,
+            false,
             &call,
             None,
         )
@@ -4286,6 +4488,7 @@ mod tests {
             "",
             "",
             None,
+            false,
             false,
             &call,
             None,
@@ -4336,6 +4539,7 @@ mod tests {
             "",
             None,
             false,
+            false,
             &call,
             None,
         )
@@ -4378,6 +4582,7 @@ mod tests {
             "",
             "",
             None,
+            false,
             false,
             &call,
             None,
@@ -4459,6 +4664,7 @@ mod tests {
             "",
             None,
             false,
+            false,
             &call,
             None,
         )
@@ -4493,6 +4699,7 @@ mod tests {
             "",
             "",
             None,
+            false,
             false,
             &call,
             None,
@@ -4532,6 +4739,7 @@ mod tests {
             "",
             None,
             false,
+            false,
             &call,
             None,
         )
@@ -4566,6 +4774,7 @@ mod tests {
             "",
             None,
             false,
+            false,
             &call,
             None,
         )
@@ -4595,6 +4804,7 @@ mod tests {
             "",
             "",
             None,
+            false,
             false,
             &tool_call(crate::runtime_registries::MCP_CATALOG_TOOL_NAME, "{}"),
             None,
@@ -4646,9 +4856,45 @@ mod tests {
         assert!(request.metadata().get("authorization").is_none());
     }
 
+    /// Every Data Plane hint must name a tool the model was actually offered.
+    ///
+    /// Without this, `retrieval_metadata`'s map and `builtin_tool_defs` drift
+    /// apart silently and the loop starts telling the model to call tools that
+    /// do not exist — which reads as a broken environment, not a missing
+    /// capability. `dispatch_tool` has its own advertised-vs-dispatchable test,
+    /// so covering the offer side here is enough to close the loop.
+    #[test]
+    fn every_hinted_tool_is_actually_advertised() {
+        let advertised: BTreeSet<String> = builtin_tool_defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        for tool in crate::retrieval_metadata::every_hintable_tool() {
+            assert!(
+                advertised.contains(tool),
+                "{tool} is a Data Plane hint target but is not advertised to the model"
+            );
+        }
+    }
+
+    /// The sovereignty axis has to be POPULATED, not merely present: Data Plane
+    /// v2 reads an absent `sovereign_required` as `true`, which its Azure-hosted
+    /// embedding provider cannot satisfy, so `None` here is the outage.
+    #[test]
+    fn knowledge_search_always_declares_a_sovereignty_posture() {
+        for sovereign in [false, true] {
+            let request = knowledge_search_request("org", "query", 5, false, sovereign);
+            assert_eq!(
+                request.sovereign_required,
+                Some(sovereign),
+                "an absent sovereign_required fails closed at Data Plane v2"
+            );
+        }
+    }
+
     #[test]
     fn knowledge_search_is_claim_scoped_and_zdr_aware() {
-        let request = knowledge_search_request("org-from-claims", "query", 7, true);
+        let request = knowledge_search_request("org-from-claims", "query", 7, true, false);
 
         assert_eq!(request.org_id, "org-from-claims");
         assert_eq!(request.query, "query");
@@ -4741,6 +4987,7 @@ mod tests {
                     "",
                     None,
                     true,
+                    false,
                     &call,
                     None,
                 );
@@ -4911,6 +5158,7 @@ mod tests {
             "",
             None,
             true,
+            false,
             &call,
             None,
         )
@@ -4941,6 +5189,7 @@ mod tests {
             "",
             None,
             true,
+            false,
             &call,
             None,
         )
@@ -6421,6 +6670,7 @@ mod tests {
             "session-bearer",
             None,
             true,
+            false,
             &tool_call("reattach_context", "{}"),
             None,
         )
@@ -6454,6 +6704,7 @@ mod tests {
             "",
             None,
             true,
+            false,
             &tool_call("reattach_context", "{}"),
             None,
         )
@@ -6644,6 +6895,7 @@ mod tests {
             "",
             None,
             true,
+            false,
             &tool_call("knowledge_search", "{}"),
             None,
         )

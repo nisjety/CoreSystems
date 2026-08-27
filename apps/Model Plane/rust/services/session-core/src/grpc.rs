@@ -5509,6 +5509,23 @@ impl SessionService {
             context_budget_tokens: budget,
             context_format: Some("toon".to_owned()),
             agent_id: None,
+            // Jurisdiction axis. Populated rather than left absent because Data
+            // Plane v2 reads an absent value as `true` — fail-closed — which the
+            // configured Azure-hosted embedding provider can never satisfy, so
+            // an absent field made every one of these context-assembly
+            // retrievals fail before retrieval ran (silently: the `Err` arm
+            // below falls back to local context).
+            //
+            // The value itself is the declared no-signal default, and session-core
+            // genuinely has no signal to do better with today: this path is
+            // reached with a `DelegatedDataPlaneBearer` and no verified claims of
+            // its own, and `AssembleContextRequest` carries no privacy floor. A
+            // signed `sovereign = true` on the forwarded bearer is still honoured
+            // — retrieval-engine-rs re-applies its own floor on receipt — so this
+            // cannot relax a signed posture, only fail to raise one.
+            sovereign_required: Some(
+                mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
+            ),
         };
 
         let request = match authorize_dataplane(retrieve_req, bearer) {

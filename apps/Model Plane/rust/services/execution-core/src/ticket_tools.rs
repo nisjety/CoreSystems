@@ -288,7 +288,9 @@ impl AgentTicketActionClient {
             let anchors = reqwest::Certificate::from_pem_bundle(&pem)
                 .map_err(|_| format!("ticket action CA bundle {path} is not valid PEM"))?;
             if anchors.is_empty() {
-                return Err(format!("ticket action CA bundle {path} contains no certificate"));
+                return Err(format!(
+                    "ticket action CA bundle {path} contains no certificate"
+                ));
             }
             for anchor in anchors {
                 builder = builder.add_root_certificate(anchor);

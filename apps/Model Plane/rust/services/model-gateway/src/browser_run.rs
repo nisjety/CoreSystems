@@ -974,6 +974,7 @@ mod tests {
             aud: Some("model-gateway".to_owned()),
             scopes: Vec::new(),
             zdr,
+            sovereign: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
