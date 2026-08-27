@@ -240,6 +240,118 @@ persist_if_missing GRAFANA_ADMIN_PASSWORD "$(random_value)"
 # copying this shape to another audience.
 persist_if_missing PLANE_SERVICE_PRINCIPALS_JSON '{}'
 
+# ── Plane service principal registry ────────────────────────────────────────
+#
+# Assembled from config/plane-service-principals.json, which is COMMITTED and
+# holds the policy half of each principal: audiences, scopes, per-audience
+# scopes, per-audience retention, org binding. The secret half -- one credential
+# per principal -- is minted here and only ever written to this machine's
+# gitignored store.
+#
+# Why this exists: the registry used to be hand-maintained inside the store, so
+# a fresh checkout produced NO principals at all and every cross-plane lane was
+# closed with nothing in the repo explaining what was missing. Policy belongs in
+# git; secrets do not; this splits them.
+#
+# Credentials are never rotated by this function. An existing value is reused
+# so a re-run cannot invalidate a credential the running fleet is already
+# presenting -- the same reasoning as the persisted secrets store itself.
+# Path a NATIVE tool can open. jq/openssl on Windows are win32 binaries and
+# cannot resolve the /c/Users/... form bash hands them; `[[ -f ]]` succeeds on
+# the POSIX path while the tool fails on the very same string, so the mismatch
+# looks like a missing file rather than a path-format problem.
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
+# jq on Windows writes CRLF. Command substitution strips a trailing newline but
+# NOT the , and `read -r` keeps it too -- so an unstripped key becomes
+# "capability-core", every registry lookup for it misses, and the generator
+# quietly mints a replacement credential for a principal that already had one.
+# Every jq call in this script goes through here.
+jqr() { jq "$@" | tr -d '\015'; }
+
+plane_principals_registry() {
+  local policy_posix="$root/config/plane-service-principals.json" policy
+  policy=$(native_path "$policy_posix")
+  if [[ ! -f "$policy_posix" ]]; then
+    printf 'WARNING: %s is missing; leaving PLANE_SERVICE_PRINCIPALS_JSON untouched.\n' "$policy" >&2
+    return 0
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    # Fail loudly. A silently skipped step here would leave every cross-plane
+    # lane closed while the bring-up still looked successful -- the exact
+    # failure mode a missing `rg` produced in the cross-plane preflight.
+    printf 'ERROR: jq is required to assemble PLANE_SERVICE_PRINCIPALS_JSON from %s\n' "$policy" >&2
+    printf '       Install jq, or set PLANE_SERVICE_PRINCIPALS_JSON yourself before running.\n' >&2
+    return 1
+  fi
+
+  local existing creds='{}' name cred consumer consumer_value
+  existing=$(lookup_value PLANE_SERVICE_PRINCIPALS_JSON 2>/dev/null || printf '{}')
+  printf '%s' "$existing" | jq empty >/dev/null 2>&1 || existing='{}'
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    cred=$(printf '%s' "$existing" | jqr -r --arg n "$name" '.[$n].credential // empty')
+    consumer=$(jqr -r --arg n "$name" '.[$n].consumerEnv // empty' "$policy")
+
+    if [[ -n "$consumer" ]]; then
+      consumer_value=$(lookup_value "$consumer" 2>/dev/null || true)
+    else
+      consumer_value=""
+    fi
+
+    if [[ -z "$cred" ]]; then
+      # No registered credential yet: adopt the consumer's existing value if it
+      # has one (that is the token already being presented), else mint.
+      cred="${consumer_value:-$(random_value)}"
+    elif [[ -n "$consumer_value" && "$consumer_value" != "$cred" ]]; then
+      # Registry and consumer disagree. Report rather than silently pick a side:
+      # whichever is wrong, one end is presenting a credential the other will
+      # reject, and that is a drift bug to fix at its source -- not something to
+      # paper over on every bring-up.
+      printf 'WARNING: principal %s: %s does not match the registered credential; the presenting service will be rejected.\n' \
+        "$name" "$consumer" >&2
+    fi
+
+    # Publish to the consumer variable so both ends resolve ONE value. Existing
+    # values are left alone (persist_if_missing), so this never rotates a peer.
+    [[ -n "$consumer" ]] && persist_if_missing "$consumer" "$cred"
+
+    creds=$(printf '%s' "$creds" | jqr --arg n "$name" --arg c "$cred" '.[$n] = $c')
+  done < <(jqr -r 'keys[]' "$policy")
+
+  local registry
+  registry=$(jqr -c -n --slurpfile pol "$policy" --argjson creds "$creds" '
+    reduce ($pol[0] | keys[]) as $n ({};
+      .[$n] = {
+        credential: $creds[$n],
+        audiences: $pol[0][$n].audiences,
+        orgIds: $pol[0][$n].orgIds,
+        allowAnyOrg: $pol[0][$n].allowAnyOrg,
+        scopes: $pol[0][$n].scopes,
+        scopesByAudience: $pol[0][$n].scopesByAudience,
+        retentionByAudience: $pol[0][$n].retentionByAudience
+      })
+  ') || return 1
+
+  if [[ -n "$(lookup_value PLANE_SERVICE_PRINCIPALS_JSON 2>/dev/null || true)" ]]; then
+    # Replace in place: the assembled value is authoritative once policy exists.
+    local tmp; tmp=$(mktemp)
+    grep -v '^PLANE_SERVICE_PRINCIPALS_JSON=' "$secrets_file" > "$tmp" 2>/dev/null || true
+    printf 'PLANE_SERVICE_PRINCIPALS_JSON=%s\n' "$registry" >> "$tmp"
+    cat "$tmp" > "$secrets_file"
+    rm -f "$tmp"
+  else
+    printf 'PLANE_SERVICE_PRINCIPALS_JSON=%s\n' "$registry" >> "$secrets_file"
+  fi
+  printf 'plane service principals: %s assembled from config/plane-service-principals.json\n' \
+    "$(printf '%s' "$registry" | jqr -r 'keys | length')" >&2
+}
+plane_principals_registry
+
+
 # Session-signing and token-at-rest keys MUST be stable: rotating them logs
 # every user out and renders stored encrypted OAuth tokens undecryptable.
 persist_if_missing BETTER_AUTH_SECRET "$(random_value)"

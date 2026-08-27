@@ -1,0 +1,382 @@
+{
+  "capability-core": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "session-core",
+      "inference-core",
+      "orchestrator-core"
+    ],
+    "consumerEnv": "CAPABILITY_CORE_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "inference-core": "zdr",
+      "orchestrator-core": "persistent",
+      "session-core": "persistent"
+    },
+    "scopes": [
+      "inference:invoke",
+      "orchestration:workflow:start",
+      "orchestration:workflow:start:global",
+      "session:read",
+      "session:skills:write"
+    ],
+    "scopesByAudience": {
+      "inference-core": [
+        "inference:invoke"
+      ],
+      "orchestrator-core": [
+        "orchestration:workflow:start",
+        "orchestration:workflow:start:global"
+      ],
+      "session-core": [
+        "session:read",
+        "session:skills:write"
+      ]
+    }
+  },
+  "conversation-core": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "ingestion"
+    ],
+    "consumerEnv": "CONVERSATION_INTEGRATION_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "ingestion": "zdr"
+    },
+    "scopes": [
+      "integration:read",
+      "integration:write"
+    ],
+    "scopesByAudience": {
+      "ingestion": [
+        "integration:read",
+        "integration:write"
+      ]
+    }
+  },
+  "corpus-seeder": {
+    "allowAnyOrg": false,
+    "audiences": [
+      "data-plane"
+    ],
+    "consumerEnv": null,
+    "orgIds": [
+      "org-corpus-baseline",
+      "org-corpus-contextual"
+    ],
+    "retentionByAudience": {
+      "data-plane": "persistent"
+    },
+    "scopes": [
+      "data:quality:admin",
+      "data:read",
+      "documents:read",
+      "documents:write",
+      "graph:read"
+    ],
+    "scopesByAudience": {}
+  },
+  "embedding-engine": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "inference-core"
+    ],
+    "consumerEnv": null,
+    "orgIds": [],
+    "retentionByAudience": {
+      "inference-core": "persistent"
+    },
+    "scopes": [
+      "inference:invoke"
+    ],
+    "scopesByAudience": {
+      "inference-core": [
+        "inference:invoke"
+      ]
+    }
+  },
+  "execution-core": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "capability-core",
+      "session-core",
+      "quarry"
+    ],
+    "consumerEnv": "EXECUTION_CORE_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "capability-core": "persistent",
+      "quarry": "zdr",
+      "session-core": "persistent"
+    },
+    "scopes": [
+      "approval:deliver",
+      "browser:execute",
+      "capability:health:global:write",
+      "capability:read",
+      "scrape:write",
+      "session:heartbeat",
+      "session:terminalize"
+    ],
+    "scopesByAudience": {
+      "capability-core": [
+        "capability:health:global:write",
+        "capability:read"
+      ],
+      "quarry": [
+        "browser:execute",
+        "scrape:write"
+      ],
+      "session-core": [
+        "approval:deliver",
+        "session:heartbeat",
+        "session:terminalize"
+      ]
+    }
+  },
+  "finspo-core": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "data-plane"
+    ],
+    "consumerEnv": "FINSPO_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "data-plane": "persistent"
+    },
+    "scopes": [
+      "documents:write"
+    ],
+    "scopesByAudience": {
+      "data-plane": [
+        "documents:write"
+      ]
+    }
+  },
+  "graph-index": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "inference-core"
+    ],
+    "consumerEnv": null,
+    "orgIds": [],
+    "retentionByAudience": {
+      "inference-core": "persistent"
+    },
+    "scopes": [
+      "inference:invoke"
+    ],
+    "scopesByAudience": {
+      "inference-core": [
+        "inference:invoke"
+      ]
+    }
+  },
+  "imports-core": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "data-plane"
+    ],
+    "consumerEnv": "IMPORTS_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "data-plane": "persistent"
+    },
+    "scopes": [
+      "documents:write"
+    ],
+    "scopesByAudience": {
+      "data-plane": [
+        "documents:write"
+      ]
+    }
+  },
+  "inference-core": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "session-core"
+    ],
+    "consumerEnv": "INFERENCE_ROUTING_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "session-core": "zdr"
+    },
+    "scopes": [
+      "routing:read"
+    ],
+    "scopesByAudience": {
+      "session-core": [
+        "routing:read"
+      ]
+    }
+  },
+  "model-execution": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "ingestion"
+    ],
+    "consumerEnv": "INGESTION_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "ingestion": "zdr"
+    },
+    "scopes": [
+      "integration:read",
+      "shipping:read"
+    ],
+    "scopesByAudience": {
+      "ingestion": [
+        "integration:read",
+        "shipping:read"
+      ]
+    }
+  },
+  "model-gateway": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "session-core",
+      "quarry"
+    ],
+    "consumerEnv": "MODEL_GATEWAY_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "quarry": "zdr",
+      "session-core": "zdr"
+    },
+    "scopes": [
+      "scrape:read",
+      "search:read",
+      "session:heartbeat",
+      "session:terminalize"
+    ],
+    "scopesByAudience": {
+      "quarry": [
+        "scrape:read",
+        "search:read"
+      ],
+      "session-core": [
+        "session:heartbeat",
+        "session:terminalize"
+      ]
+    }
+  },
+  "orchestrator-core": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "session-core",
+      "inference-core",
+      "capability-core",
+      "letta-bridge"
+    ],
+    "consumerEnv": "ORCHESTRATOR_CORE_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "capability-core": "persistent",
+      "inference-core": "persistent",
+      "letta-bridge": "persistent",
+      "session-core": "persistent"
+    },
+    "scopes": [
+      "capability:read",
+      "capability:write",
+      "inference:invoke",
+      "memory:read",
+      "memory:write",
+      "session:runs:system-owner",
+      "session:write"
+    ],
+    "scopesByAudience": {
+      "capability-core": [
+        "capability:read",
+        "capability:write"
+      ],
+      "inference-core": [
+        "inference:invoke"
+      ],
+      "letta-bridge": [
+        "memory:read",
+        "memory:write"
+      ],
+      "session-core": [
+        "session:runs:system-owner",
+        "session:write"
+      ]
+    }
+  },
+  "quarry-edge": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "data-plane"
+    ],
+    "consumerEnv": "QUARRY_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "data-plane": "persistent"
+    },
+    "scopes": [
+      "data:read",
+      "documents:write",
+      "org:data:read_all"
+    ],
+    "scopesByAudience": {
+      "data-plane": [
+        "data:read",
+        "documents:write",
+        "org:data:read_all"
+      ]
+    }
+  },
+  "retrieval-engine": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "control-policy",
+      "inference-core"
+    ],
+    "consumerEnv": null,
+    "orgIds": [],
+    "retentionByAudience": {
+      "control-policy": "zdr",
+      "inference-core": "persistent"
+    },
+    "scopes": [
+      "data:authorization:decide",
+      "inference:invoke"
+    ],
+    "scopesByAudience": {
+      "control-policy": [
+        "data:authorization:decide"
+      ],
+      "inference-core": [
+        "inference:invoke"
+      ]
+    }
+  },
+  "session-core": {
+    "allowAnyOrg": true,
+    "audiences": [
+      "letta-bridge",
+      "inference-core"
+    ],
+    "consumerEnv": "SESSION_CORE_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "inference-core": "persistent",
+      "letta-bridge": "persistent"
+    },
+    "scopes": [
+      "inference:invoke",
+      "memory:read",
+      "memory:write"
+    ],
+    "scopesByAudience": {
+      "inference-core": [
+        "inference:invoke"
+      ],
+      "letta-bridge": [
+        "memory:read",
+        "memory:write"
+      ]
+    }
+  }
+}
