@@ -51,8 +51,24 @@ jobs:
       - name: Check workspace
         run: cargo check --workspace
 
-      - name: Check tests compile
-        run: cargo check --workspace --tests
+      # Was `cargo check --workspace --tests`, which COMPILED every crate's
+      # tests and then never ran them. Combined with the integration job below
+      # being scoped to `-p retrieval-engine-rs`, that left 359 tests in the
+      # other eight workspace crates typechecked but never executed (measured:
+      # 848 run by `--workspace` vs 489 by the old pair of commands) —
+      # embedding-engine-rs 103, graph-index-rs 86 (including the reconciler's
+      # cost-leak guard), index-engine-rs 59, nats-connection-rs 15,
+      # event-envelope-rs 9 (the envelope forgery/expiry suite),
+      # pg-org-scope-rs 3 (org-scoping primitives), and 84 more across
+      # quickwit-adapter-rs and meilisearch-adapter-rs. Running them subsumes
+      # checking that they compile, so this replaces the step, not adds one.
+      #
+      # No service containers on purpose: verified locally that the whole
+      # workspace passes with nothing reachable — DB/NATS-dependent tests
+      # either self-gate on TEST_DATABASE_URL or are `#[ignore]`d. The
+      # Postgres-backed job below keeps its own narrower scope.
+      - name: Unit tests — whole workspace (§16.4.5)
+        run: cargo test --workspace --tests
 
   rust-integration-tests:
     name: Rust Integration Tests
@@ -120,11 +136,22 @@ jobs:
             apps/Data Plane v2/services/data-orchestrator-go/go.sum
             apps/Data Plane v2/services/data-quality-go/go.sum
 
-      - name: Build Go services
+      - name: Build + vet + test Go services
+        # `go test ./...` was absent here, so of 295 Go tests in the plane only
+        # documents-api-go's integration-tagged internal/repo suite ran in CI
+        # (the job below) — wiki-store-go (53), data-orchestrator-go (77) and
+        # data-quality-go (49) never ran at all, and documents-api-go's ~100
+        # non-repo tests were compiled by `go vet` and then discarded.
+        #
+        # Safe without any service containers: verified locally that all four
+        # pass `go test ./...` with no env and no Postgres/NATS reachable. The
+        # DB-dependent suites are behind `//go:build integration` (excluded
+        # without `-tags`) or skip on an unset TEST_DATABASE_URL, so this stays
+        # a pure unit gate and the integration job below keeps its own scope.
         run: |
           for svc in documents-api-go wiki-store-go data-orchestrator-go data-quality-go; do
             echo "=== $svc ==="
-            (cd "services/$svc" && go build ./... && go vet ./...)
+            (cd "services/$svc" && go build ./... && go vet ./... && go test ./...)
           done
 
   documents-api-postgres-tests:

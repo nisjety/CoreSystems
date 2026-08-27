@@ -28,6 +28,28 @@ message RetrieveRequest {
   // for this request. Per-request weights (not yet on this proto) still
   // win when callers eventually start sending them.
   optional string agent_id = 13;
+  // Sovereignty posture, and the counterpart to `zdr_mode` above — which has
+  // been settable here since the contract was written, while this axis was
+  // simply never added.
+  //
+  // That omission made the whole RPC unusable for dense retrieval. The
+  // orchestrator resolves `req.sovereign_required.unwrap_or(true)` — a
+  // deliberate fail-closed default, because absence of proof is not proof that
+  // egress is permitted — and a signed `sovereign` claim of `false` or absent
+  // leaves the request value as the decider. Since `grpc_to_pipeline` had no
+  // field to read and hardcoded `None`, EVERY gRPC retrieval resolved to
+  // `sovereign_required = true`, and the configured embedding provider (Cohere
+  // Embed v4, Azure-hosted) can never satisfy sovereignty. So every gRPC dense
+  // query failed closed — reported, confusingly, as "ZDR content must not
+  // egress to the Cohere Embed v4 text path", because the embed guard is
+  // `embed_zdr || sovereign_required` and only names the first term.
+  //
+  // Verified live 2026-08-27: the same query and token returns 8 candidates
+  // over HTTP (which does expose the field) and HTTP 500 over gRPC.
+  //
+  // Additive and wire-compatible: an old client that sends nothing keeps
+  // resolving to the fail-closed default, exactly as before.
+  optional bool sovereign_required = 14;
 }
 
 message Filters {

@@ -566,3 +566,183 @@ tests that would have caught the no-op (`only_a_clean_empty_result_suppresses`,
 `a_total_provider_outage_suppresses_nothing` — the latter pinning that an outage
 must not suppress the corpus). Deploy verification is now **grep the binary for a
 string only the new code emits**, not the build's exit code.
+
+# Addendum — round 8: the three "still open" items
+
+Three items were carried as open: agentic tool routing, a CI regression gate, and
+keyword-style queries in the golden set. Two had a concrete cause inside this
+plane; one did not.
+
+## 1. Agentic routing: the gRPC retrieval RPC could not serve a dense query at all
+
+Investigating "14 typed retrieval endpoints, ~1 in use" — filed as Model Plane
+work — turned up a live break in this plane that subsumes it.
+
+**Every unary gRPC `Retrieve` failed closed on the dense arm.** The orchestrator
+resolves `req.sovereign_required.unwrap_or(true)`, a deliberate fail-closed
+default (absence of proof is not proof that egress is permitted). `RetrieveRequest`
+had no field for that axis — `zdr_mode` has been settable since the contract was
+written, sovereignty was simply never added — so `grpc_to_pipeline` hardcoded
+`None`, every gRPC request resolved to `sovereign_required = true`, and
+Azure-hosted Cohere Embed v4 can never satisfy sovereignty. The embed guard is
+`embed_zdr || sovereign_required` but its message only names the first term, so
+the failure surfaced as `ZDR content must not egress to the Cohere Embed v4 text
+path` on a request with `zdr_mode: disabled` — which is why this looked like a ZDR
+problem for as long as it did. The `retrieval.start` log line, which prints both,
+is what separated them.
+
+Verified live, same token and query, before the fix:
+
+| transport | `sovereign_required` reachable? | result |
+| --- | --- | --- |
+| HTTP `/v1/retrieve` | yes (`sovereign_required: false`) | 8 candidates |
+| gRPC `Retrieve` | no field on the message | Internal error, every time |
+
+This is the Model Plane's primary retrieval transport
+(`model-gateway/src/dataplane.rs::retrieve` → `RetrievalService`; its only HTTP
+retrieval call is a single `POST /v1/retrieve/graph`). Its own proto copy at
+`proto/dataplane/retrieval/v2/retrieval_v2.proto` has no such field either. So
+"1 of 14 typed tools in use" was not a routing preference — the general-purpose
+retrieval RPC was returning errors, and the one HTTP endpoint that worked was the
+one in use.
+
+Fixed by adding `optional bool sovereign_required = 14` (additive and
+wire-compatible: a client that sends nothing still gets the fail-closed default)
+and reading it on the gRPC path.
+
+### The duplicate construction is why the first fix missed
+
+The first attempt wired the field into `grpc_to_pipeline` only — and the live RPC
+kept failing, with the unit test green. `grpc_to_pipeline` serves
+`RetrieveStream`; the unary `Retrieve` handler carried its own hand-maintained
+copy of the same field-by-field mapping, which still said
+`sovereign_required: None`. Its comment asserted that `None` was "exactly right"
+because `apply_verified_context` floors the value from the signed claim — but
+flooring only ever *raises*: `effective_sovereign_required` returns `Some(true)`
+for a signed `sovereign=true` and otherwise hands back the request's value. With
+no wire field that value was always `None`. The comment described a safety
+property the code did not have.
+
+Collapsed the two into one call to `grpc_to_pipeline`. Behaviour-preserving: the
+copy differed only by pre-seeding `org_id`, `user_id`, `verified_bearer` and
+`admin_read_all` from the context, and `apply_verified_context` overwrites all
+four unconditionally on the very next line. One construction, one test, no drift.
+
+Verified live after the fix — 8 candidates over gRPC, identical to HTTP, with the
+planner hints on the response:
+
+```json
+{"candidates": 8, "retrievalMetadata": {"suggested_next_tools": ["/v1/retrieve/contradictions"]}}
+```
+
+## 1b. The planner hints were computed and thrown away
+
+A second, independent defect on the same surface, found while fixing the first.
+`pipeline/orchestrator.rs` computes
+`suggested_next_tools` on every retrieval — the honest, signal-derived hints
+about which typed endpoint is worth trying next (low confidence → graph + wiki;
+≥3 sources → contradictions; nothing retrieved → wiki + knowledge/search). The
+HTTP surface serialises them, because the handler returns the pipeline's
+`RetrievalResponse` verbatim. The gRPC surface hardcoded:
+
+```rust
+retrieval_metadata: None,
+```
+
+while the HTTP handler returns the pipeline's `RetrievalResponse` verbatim, which
+serialises them. So on the Model Plane's transport the hints were computed on
+every request and delivered to nobody. Even once the RPC returns results again,
+nothing would have told the consumer which other endpoints exist, let alone when
+to reach for them.
+
+Same defect, more serious, on the second field: `zdr_actions_applied` — which ZDR
+enforcement actions this retrieval actually applied — was also HTTP-only. A
+caller that cannot observe enforcement cannot propagate it, and ZDR has to
+survive every content-carrying boundary.
+
+Fixed by populating `retrieval_metadata` — proto field 10, already on the
+contract, so this half needed no schema change at all — with both lists, via a
+pure `retrieval_metadata()` helper and 4 tests that decode the `Struct` the way a
+client would. `None` is still returned when both are empty, so a confident
+retrieval with ZDR off stays byte-identical on the wire. `google.protobuf.Struct`
+rather than new typed fields is deliberate for advisory data; promote to typed
+fields if these ever become load-bearing.
+
+**Not closed, and not closeable here:** `model-gateway` contains no reference to
+`retrieval_metadata` or `suggested_next_tools` — it ignores the field. Surfacing
+the hints to the execution loop as tool affordances is Model Plane work
+(CLAUDE.md: Model Plane owns execution loops). What changed is that the contract
+now carries the data, so that work is no longer blocked on this plane.
+
+## 2. CI gate: 654 tests were compiled and thrown away
+
+The retrieval-quality gate (`make eval-gate`) was verified in both directions in
+round 6 but nothing invoked it in a pipeline. Investigating that surfaced a much
+larger and cheaper gap in the CI that already exists
+(`.github/workflows/dataplane-v2-ci.yml`):
+
+| step | did | left out |
+| --- | --- | --- |
+| `cargo check --workspace --tests` | compiled every crate's tests | never ran them |
+| `cargo test -p retrieval-engine-rs --tests` | ran 489 | the other 8 crates |
+| `go build ./... && go vet ./...` | compiled 4 services | ran no Go tests |
+| `go test -tags=integration ./internal/repo/...` | ran documents-api's repo suite | its other ~100 tests |
+
+Measured: `cargo test --workspace --tests` runs **848** tests versus **489** for
+the old pair of commands — **359** were typechecked and discarded, including
+`event-envelope-rs`'s envelope forgery/expiry suite (9), `pg-org-scope-rs`'s
+org-scoping primitives (3), and `graph-index-rs` (86) — which is where the
+reconciler's cost-leak guard from round 7 lives. Plus **295** Go tests, of which
+only documents-api's integration-tagged repo suite ran.
+
+Both are now wired. Verified locally first, since the value of the change is
+entirely in whether it is green on arrival:
+
+- `cargo test --workspace --tests` → **848 passed, 0 failed, exit 0**, with no
+  Postgres/NATS/Qdrant reachable. DB-dependent tests self-gate on
+  `TEST_DATABASE_URL` or are `#[ignore]`d, so this is a pure unit gate and the
+  existing Postgres-backed job keeps its narrower scope.
+- `go test ./...` → clean for all four services with no env and no containers.
+
+Running the tests subsumes checking that they compile, so the `cargo check
+--tests` step was replaced rather than added to.
+
+### The fmt gate was already red
+
+`cargo fmt --all -- --check` (step 1 of the existing CI) exits **1** on
+**57 diffs across 21 files**, 20 of them committed. So DP2's CI was failing its
+own first gate before any of this. Reformatted — semantics-preserving, and it
+would have made the stricter test gate land red on arrival for an unrelated
+reason.
+
+Note on method: `cargo fmt ... | head` reported `exit=0` because the pipe returns
+`head`'s status. This is the third instance of that same trap in this work
+(`docker compose build | tail`, `eval-gate.py | tail`). Redirect to a log and
+check `$?` on the command itself.
+
+**Still not closed:** the retrieval-quality gate itself cannot run on
+GitHub-hosted runners. `eval-retrieval` needs `auth-service` (a *Control Plane*
+container) to mint tokens, a service credential, an ingested corpus in two
+fixture orgs, the `dpv2-net` network, and paid Cohere embed + rerank keys — and
+takes ~40 minutes and real money per run. It is an operator-run gate with a
+committed baseline (`scripts/eval-baseline.json`), and putting it on the PR path
+would need a self-hosted runner holding the corpus and the secrets. That is a
+deployment decision, not a code change.
+
+## 3. Keyword-style queries: already in, but not in the gate
+
+This one was mis-filed as open — the work landed in round 6.
+`scripts/eval-mine-lexical-queries.py` (committed) mines identifier-shaped
+queries whose answer is correct *by construction*: tokens occurring in exactly
+one corpus document, with 2-document terms keeping both as relevant and 3+
+dropped as ambiguous. 25 queries, and they produced the round-6 headline —
+`w_bm25` worth **+0.37 nDCG / +0.20 recall** on that class, against costing nDCG
+on natural-language questions.
+
+The residual gap is narrower than "missing queries": the miner writes
+`golden-lexical*.json` to a scratch dir and does not seed the durable
+`eval_golden_judgments` table, and `eval-baseline.json` is derived only from the
+natural-language set. So the class is measured and reproducible, but **not
+gated** — a regression specific to lexical retrieval would not trip the gate.
+Closing that means a baselined lexical cell, which needs the same operator-run
+eval as item 2.

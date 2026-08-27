@@ -15,6 +15,71 @@ use super::pb_retrieval::*;
 
 type StreamResp<T> = Pin<Box<dyn futures::Stream<Item = Result<T, Status>> + Send + 'static>>;
 
+/// Build `RetrieveResponse.retrieval_metadata` (proto field 10).
+///
+/// The pipeline computes two things that the gRPC surface used to throw away by
+/// hardcoding `retrieval_metadata: None`:
+///
+/// * `suggested_next_tools` — the agent planner hints (which of the typed
+///   retrieval endpoints are likely productive next, given this response's
+///   signal). The HTTP surface serialises them; gRPC did not. gRPC is the path
+///   the Model Plane's agent loop actually calls, so the hints were computed on
+///   every request and delivered to nobody. That is the concrete reason 14
+///   typed retrieval endpoints saw ~1 in use: the Data Plane never told its
+///   primary consumer the others existed, let alone when to reach for them.
+/// * `zdr_actions_applied` — which Zero Data Retention enforcement actions this
+///   retrieval actually took. Also HTTP-only before this. A caller that cannot
+///   observe enforcement cannot propagate it, and ZDR has to survive every
+///   content-carrying boundary, so dropping it on the primary transport was the
+///   more serious of the two omissions.
+///
+/// `google.protobuf.Struct` is used rather than new typed proto fields on
+/// purpose: field 10 is already in the frozen contract, so this needs no
+/// regeneration and no coordinated cross-plane roll. If these hints ever become
+/// load-bearing rather than advisory, promote them to typed fields then.
+///
+/// Returns `None` — not an empty `Struct` — when there is nothing to report, so
+/// a quiet response stays byte-identical on the wire to its old form.
+fn retrieval_metadata(
+    suggested_next_tools: &[String],
+    zdr_actions_applied: &[String],
+) -> Option<prost_types::Struct> {
+    fn string_list(values: &[String]) -> prost_types::Value {
+        prost_types::Value {
+            kind: Some(prost_types::value::Kind::ListValue(
+                prost_types::ListValue {
+                    values: values
+                        .iter()
+                        .map(|v| prost_types::Value {
+                            kind: Some(prost_types::value::Kind::StringValue(v.clone())),
+                        })
+                        .collect(),
+                },
+            )),
+        }
+    }
+
+    let mut fields = std::collections::BTreeMap::new();
+    if !suggested_next_tools.is_empty() {
+        fields.insert(
+            "suggested_next_tools".to_string(),
+            string_list(suggested_next_tools),
+        );
+    }
+    if !zdr_actions_applied.is_empty() {
+        fields.insert(
+            "zdr_actions_applied".to_string(),
+            string_list(zdr_actions_applied),
+        );
+    }
+
+    if fields.is_empty() {
+        None
+    } else {
+        Some(prost_types::Struct { fields })
+    }
+}
+
 pub struct RetrievalSvc {
     pipeline: Arc<RetrievalPipeline>,
 }
@@ -86,6 +151,15 @@ impl RetrievalSvc {
     }
 }
 
+// `tonic::Status` is 176 bytes, over clippy's 128-byte `result_large_err`
+// threshold. Every fallible function in this file returns `Result<_, Status>` —
+// it is tonic's own error contract, not a choice we can make differently — and
+// this is the only one the lint fires on, because it is the only one whose Ok
+// variant (`Option<&str>`, 16 bytes) is small enough for the ratio to trip.
+// Boxing the error here would make one function inconsistent with the trait
+// impls around it and change nothing about the actual cost. Allowed rather than
+// worked around; revisit if tonic ever shrinks `Status`.
+#[allow(clippy::result_large_err)]
 fn space_decision_from_metadata(metadata: &MetadataMap) -> Result<Option<&str>, Status> {
     metadata
         .get("x-space-decision")
@@ -184,52 +258,18 @@ impl RetrievalService for RetrievalSvc {
             .await?;
         let req = request.into_inner();
 
-        let filters = req.filters.clone().unwrap_or_default();
-        let zdr_mode = parse_zdr_mode(req.zdr_mode.clone()).map_err(Status::invalid_argument)?;
-        let mut pipeline_req = PipelineReq {
-            org_id: ctx.org_id.clone(),
-            query: req.query.clone(),
-            top_k: if req.top_k > 0 {
-                Some(req.top_k as usize)
-            } else {
-                None
-            },
-            top_n: req.top_k_before_rerank.map(|v| v as usize),
-            filters: RetrievalFiltersInput {
-                document_types: filters.document_types,
-                departments: filters.departments,
-                languages: filters.languages,
-                document_ids: filters.document_ids,
-                sources: filters.sources,
-                region: if filters.region.is_empty() {
-                    None
-                } else {
-                    Some(filters.region)
-                },
-                workspaces: filters.workspace_ids,
-                collections: filters.collection_ids,
-                acl_tags: vec![],
-            },
-            // Viewer bound from trusted transport (NOT the body) — see above.
-            user_id: ctx.user_id.clone(),
-            verified_bearer: ctx.verified_bearer.clone(),
-            query_expansion: req.query_expansion,
-            reranker_model: req.reranker_model,
-            zdr_mode,
-            // gRPC clients don't send per-request sovereignty yet either — no
-            // wire field exists on `RetrieveRequest` for it. `None` here is
-            // exactly right: `apply_verified_context` below floors it from
-            // the signed claim regardless, same as `zdr_mode` above.
-            sovereign_required: None,
-            // gRPC clients don't send per-request mode_mix yet — config defaults apply.
-            mode_mix: None,
-            context_budget_tokens: req.context_budget_tokens.map(|v| v as usize),
-            context_format: req.context_format,
-            // §16.1.4 — agent_id now on the proto contract (field 13).
-            agent_id: req.agent_id,
-            admin_read_all: ctx.scopes.iter().any(|scope| scope == "org:data:read_all"),
-            space_scope: None,
-        };
+        // Was a second, hand-maintained copy of `grpc_to_pipeline`'s field-by-field
+        // construction. The two drifted, and that is what took this RPC down: the
+        // per-request sovereignty fix landed in `grpc_to_pipeline` (which serves
+        // `RetrieveStream`) while this copy — the path the Model Plane's agent loop
+        // actually calls — kept its own `sovereign_required: None`. The unit test
+        // covering the mapping passed the whole time, because it tested the helper.
+        //
+        // Collapsing them is behaviour-preserving: this copy differed only by
+        // pre-seeding `org_id`, `user_id`, `verified_bearer` and `admin_read_all`
+        // from the context, and `apply_verified_context` overwrites all four
+        // unconditionally on the next line. One construction, one test, no drift.
+        let mut pipeline_req = grpc_to_pipeline(req).map_err(Status::invalid_argument)?;
         apply_verified_context(&ctx, &mut pipeline_req);
         self.apply_space_decision(&ctx, space_decision.as_deref(), &mut pipeline_req)
             .await?;
@@ -309,7 +349,10 @@ impl RetrievalService for RetrievalSvc {
             zdr_mode: resp.zdr_mode,
             low_confidence: resp.low_confidence,
             context_pack,
-            retrieval_metadata: None,
+            retrieval_metadata: retrieval_metadata(
+                &resp.suggested_next_tools,
+                &resp.zdr_actions_applied,
+            ),
         });
         let burst = std::env::var("DPV2_RATE_LIMIT_PER_ORG_BURST")
             .ok()
@@ -651,7 +694,12 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
         query_expansion: req.query_expansion,
         reranker_model: req.reranker_model,
         zdr_mode,
-        sovereign_required: None,
+        // Proto field 14. Was hardcoded `None`, which the orchestrator resolves
+        // to the fail-closed `true` — unsatisfiable by the configured embedding
+        // provider, so it took every gRPC dense retrieval down. `None` still
+        // means "caller said nothing" and still fails closed; the point is that
+        // a caller can now say something, as it always could over HTTP.
+        sovereign_required: req.sovereign_required,
         mode_mix: None,
         context_budget_tokens: req.context_budget_tokens.map(|v| v as usize),
         context_format: req.context_format,
@@ -659,6 +707,86 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
         admin_read_all: false,
         space_scope: None,
     })
+}
+
+#[cfg(test)]
+mod retrieval_metadata_tests {
+    use super::retrieval_metadata;
+
+    /// Reads a `ListValue` of strings back out of the Struct, so the assertions
+    /// below check what a client would actually decode rather than just that
+    /// some key is present.
+    fn list(md: &prost_types::Struct, key: &str) -> Vec<String> {
+        let Some(prost_types::Value {
+            kind: Some(prost_types::value::Kind::ListValue(l)),
+        }) = md.fields.get(key)
+        else {
+            panic!("{key} missing or not a list: {:?}", md.fields.get(key));
+        };
+        l.values
+            .iter()
+            .map(|v| match &v.kind {
+                Some(prost_types::value::Kind::StringValue(s)) => s.clone(),
+                other => panic!("non-string list entry: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn planner_hints_reach_the_grpc_caller() {
+        let md = retrieval_metadata(
+            &[
+                "/v1/retrieve/graph".to_string(),
+                "/v1/retrieve/wiki".to_string(),
+            ],
+            &[],
+        )
+        .expect("hints present, so metadata must be populated");
+        assert_eq!(
+            list(&md, "suggested_next_tools"),
+            vec!["/v1/retrieve/graph", "/v1/retrieve/wiki"]
+        );
+        // Absent rather than an empty list: nothing was enforced, and an empty
+        // list would read as "enforcement ran and did nothing".
+        assert!(!md.fields.contains_key("zdr_actions_applied"));
+    }
+
+    #[test]
+    fn zdr_enforcement_reaches_the_grpc_caller() {
+        // The regression this guards: ZDR actions were HTTP-only, so a gRPC
+        // caller could not observe — and therefore could not propagate —
+        // enforcement that had actually been applied to its own results.
+        let md = retrieval_metadata(&[], &["reject_mode_filtered_restricted".to_string()])
+            .expect("zdr actions present, so metadata must be populated");
+        assert_eq!(
+            list(&md, "zdr_actions_applied"),
+            vec!["reject_mode_filtered_restricted"]
+        );
+    }
+
+    #[test]
+    fn hint_order_is_preserved() {
+        // Order is the pipeline's confidence ordering — most-productive first.
+        // A BTreeMap keys the Struct, but the LIST inside a key must not be
+        // reordered, or the top hint stops being the top hint.
+        let hints: Vec<String> = [
+            "/v1/retrieve/wiki",
+            "/v1/knowledge/search",
+            "/v1/retrieve/graph",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let md = retrieval_metadata(&hints, &[]).expect("populated");
+        assert_eq!(list(&md, "suggested_next_tools"), hints);
+    }
+
+    #[test]
+    fn a_quiet_response_stays_off_the_wire() {
+        // Not `Some(empty Struct)`: a confident retrieval with ZDR off must
+        // encode exactly as it did before this field was populated.
+        assert!(retrieval_metadata(&[], &[]).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -694,6 +822,30 @@ mod zdr_boundary_tests {
             query: "synthetic boundary query".into(),
             zdr_mode: zdr_mode.map(str::to_owned),
             ..Default::default()
+        }
+    }
+
+    /// A gRPC caller can state its sovereignty posture at all.
+    ///
+    /// This was hardcoded `None`, and the orchestrator resolves `None` to the
+    /// fail-closed `true`, which the configured embedding provider cannot
+    /// satisfy — so every gRPC dense retrieval returned an error, while the same
+    /// query over HTTP (where the field has always existed) returned results.
+    /// The test is about the field being *carried*, not about which default is
+    /// right: `None` still means "said nothing" and still fails closed.
+    #[test]
+    fn sovereignty_posture_survives_the_grpc_boundary() {
+        for requested in [None, Some(false), Some(true)] {
+            let req = RetrieveRequest {
+                sovereign_required: requested,
+                ..request(Some("disabled"))
+            };
+            let pipeline = grpc_to_pipeline(req).expect("valid request");
+            assert_eq!(
+                pipeline.sovereign_required, requested,
+                "gRPC must forward the caller's sovereignty posture verbatim, \
+                 including the absence of one"
+            );
         }
     }
 
