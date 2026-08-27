@@ -193,6 +193,18 @@ if ! lookup_value CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 >/dev/null 2>&1 \
   fi
 fi
 
+# AES-256-GCM key for Model Plane session-core's approval-continuation
+# descriptors. NOT the base64url form used above: continuation_crypto.rs decodes
+# with base64::STANDARD and then hard-requires exactly 32 bytes, so this is
+# padded standard base64 of 32 random bytes. Using base64url_no_pad here would
+# decode to the wrong bytes on any key containing - or _, and silently only for
+# some keys.
+#
+# Without it the HITL boundary does not merely fail to resume -- session-core
+# treats a missing key as "descriptor boundary unavailable", so the PAUSE
+# itself returns unavailable and an approval can never even be requested.
+persist_if_missing SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY "$(openssl rand -base64 32)"
+
 # Keep local database URLs internally consistent with the generated database
 # password. Existing non-empty service-local values always win.
 db_user=$(lookup_value DB_USER || database_value_from_urls user || printf 'coresystem')
@@ -249,6 +261,23 @@ required_credentials=(
   DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD DATA_QUALITY_GDPR_NATS_PASSWORD
   EMBEDDING_ENGINE_GDPR_NATS_PASSWORD EXECUTION_ORG_CORE_SERVICE_TOKEN
   EXECUTION_CORE_USER_CORE_GRPC_TOKEN
+  # The governed agent ticket-action lane: execution-core -> user-core
+  # run-action decision -> conversation-core owner effect. Minted HERE, once,
+  # because every one of these is read by BOTH ends. user-core validates the
+  # two Control tokens against USER_CORE_SERVICE_CREDENTIALS while
+  # execution-core presents them, and conversation-core validates
+  # CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN as its execution-core delegation
+  # key while execution-core presents that one too. Minting either end
+  # independently is precisely what produced the credential mismatches this
+  # fleet has been carrying.
+  EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN
+  EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN
+  CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN
+  # Presented BY conversation-core TO user-core for the two owner-effect
+  # checks that fence a governed ticket action (current authority, then the
+  # reservation/commit pair).
+  CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN
+  CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN
   GRAPH_INDEX_GDPR_NATS_PASSWORD INDEX_ENGINE_GDPR_NATS_PASSWORD
   NOTIFICATION_CORE_GDPR_NATS_PASSWORD QUARRY_CONTROL_GDPR_NATS_PASSWORD
   QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD
