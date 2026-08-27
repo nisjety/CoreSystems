@@ -60,7 +60,7 @@
     "audiences": [
       "data-plane"
     ],
-    "consumerEnv": null,
+    "consumerEnv": "DATA_PLANE_CORPUS_SEEDER_API_KEY",
     "orgIds": [
       "org-corpus-baseline",
       "org-corpus-contextual"
@@ -82,7 +82,7 @@
     "audiences": [
       "inference-core"
     ],
-    "consumerEnv": null,
+    "consumerEnv": "MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
       "inference-core": "persistent"
@@ -159,7 +159,7 @@
     "audiences": [
       "inference-core"
     ],
-    "consumerEnv": null,
+    "consumerEnv": "MODEL_PLANE_INFERENCE_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
       "inference-core": "persistent"
@@ -333,7 +333,7 @@
       "control-policy",
       "inference-core"
     ],
-    "consumerEnv": null,
+    "consumerEnv": "CONTROL_POLICY_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
       "control-policy": "zdr",

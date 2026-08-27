@@ -13,7 +13,18 @@
 set -u
 SP="$1"
 SPW=$(cygpath -w "$SP" 2>/dev/null || echo "$SP")
-CRED=$(cat "$SP/seed-cred.txt")
+# Control Plane owns the `corpus-seeder` principal and publishes its credential
+# as DATA_PLANE_CORPUS_SEEDER_API_KEY. Prefer that over a hand-pasted copy: a
+# stale seed-cred.txt authenticates as nothing, and the failure surfaces much
+# later as an opaque 401 from auth-service. The tr strips surrounding
+# whitespace including a trailing CR, which a file saved on Windows carries
+# and $(cat) does NOT remove -- that lone byte makes the credential wrong
+# while looking correct. [:space:] avoids backslash escapes entirely.
+CRED="${DATA_PLANE_CORPUS_SEEDER_API_KEY:-}"
+if [ -z "$CRED" ] && [ -f "$SP/seed-cred.txt" ]; then
+  CRED=$(tr -d '[:space:]' < "$SP/seed-cred.txt")
+fi
+[ -n "$CRED" ] || { echo "no corpus-seeder credential: export DATA_PLANE_CORPUS_SEEDER_API_KEY (Control Plane .env.generated-secrets) or place seed-cred.txt in $SP" >&2; exit 1; }
 CHUNK="${CHUNK:-25}"
 TOTAL="${TOTAL:-87}"
 

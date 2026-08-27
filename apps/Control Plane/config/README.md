@@ -36,11 +36,38 @@ Edit this file, then re-run the plane runner. The generator:
   two disagree, one end is presenting a credential the other will reject, and
   that is a drift bug to fix at its source.
 
-`consumerEnv: null` means the consuming service resolves the credential from its
-own plane's environment rather than from Control's store. Those principals are
-still registered here, but the generator cannot publish their value — currently
-`embedding-engine`, `graph-index` and `retrieval-engine` (whose Data Plane
-containers each read a same-named, per-container variable) and `corpus-seeder`.
+`consumerEnv` names the variable the generator publishes the credential to. All
+fifteen principals declare one, so a fresh checkout resolves every lane from
+Control's store alone.
+
+Three of them were briefly assumed unpublishable because their Data Plane
+containers all read a variable called `MODEL_PLANE_INFERENCE_SERVICE_API_KEY`.
+That is the *container-internal* name; the host-side variable each one
+interpolates from is already distinct, and it is the host-side name that belongs
+here:
+
+| principal | host-side variable |
+| --- | --- |
+| `embedding-engine` | `MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY` |
+| `graph-index` | `MODEL_PLANE_INFERENCE_SERVICE_API_KEY` |
+| `retrieval-engine` | `CONTROL_POLICY_SERVICE_API_KEY` (feeds both of its container variables — one principal, one credential, two audiences) |
+
+`corpus-seeder` is not a service. It is the identity the Data Plane retrieval
+evaluation scripts present, and its credential used to be hand-pasted into a
+`seed-cred.txt`. It now publishes to `DATA_PLANE_CORPUS_SEEDER_API_KEY`, which
+those scripts read directly.
+
+### The plane's own copy still wins
+
+Data Plane v2 keeps its own copies of the three host-side variables in its
+`.env`, and `build-verevon-services.sh` loads Control's store *first* — so the
+plane's value shadows Control's whenever both exist. That is the established
+arrangement for the nine GDPR NATS passwords too, and it is why publishing from
+Control is necessary but not by itself sufficient: it makes a fresh checkout
+work, and it gives drift something to be measured against, but it does not stop
+a stale copy in the plane's `.env` from being the value that actually runs.
+`make cross-plane-env` checks those names are non-empty; it does not check they
+match this registry.
 
 ### Retention markers are a data-retention decision
 

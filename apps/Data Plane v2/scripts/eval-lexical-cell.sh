@@ -35,7 +35,9 @@
 # Usage:
 #   ./scripts/eval-lexical-cell.sh <work-dir>
 #
-# Requires, in <work-dir>: seed-cred.txt (corpus-seeder service key),
+# Requires the corpus-seeder credential in DATA_PLANE_CORPUS_SEEDER_API_KEY
+# (Control Plane publishes it; a seed-cred.txt in <work-dir> still works as a
+# fallback). Also requires, in <work-dir>:
 # run_eval_hybrid.py (copy of scripts/eval-run-retrieval.py), and the
 # golden-lexical*.json pair from scripts/eval-mine-lexical-queries.py.
 # Requires running: the DP2 stack on dpv2-net, and Control Plane's auth-service.
@@ -45,7 +47,18 @@
 set -u
 SP="$1"
 SPW=$(cygpath -w "$SP" 2>/dev/null || echo "$SP")
-CRED=$(cat "$SP/seed-cred.txt")
+# Control Plane owns the `corpus-seeder` principal and publishes its credential
+# as DATA_PLANE_CORPUS_SEEDER_API_KEY. Prefer that over a hand-pasted copy: a
+# stale seed-cred.txt authenticates as nothing, and the failure surfaces much
+# later as an opaque 401 from auth-service. The tr strips surrounding
+# whitespace including a trailing CR, which a file saved on Windows carries
+# and $(cat) does NOT remove -- that lone byte makes the credential wrong
+# while looking correct. [:space:] avoids backslash escapes entirely.
+CRED="${DATA_PLANE_CORPUS_SEEDER_API_KEY:-}"
+if [ -z "$CRED" ] && [ -f "$SP/seed-cred.txt" ]; then
+  CRED=$(tr -d '[:space:]' < "$SP/seed-cred.txt")
+fi
+[ -n "$CRED" ] || { echo "no corpus-seeder credential: export DATA_PLANE_CORPUS_SEEDER_API_KEY (Control Plane .env.generated-secrets) or place seed-cred.txt in $SP" >&2; exit 1; }
 
 for f in run_eval_hybrid.py golden-lexical.json golden-lexical-ctx.json; do
   [ -f "$SP/$f" ] || { echo "missing $SP/$f — see header"; exit 1; }
