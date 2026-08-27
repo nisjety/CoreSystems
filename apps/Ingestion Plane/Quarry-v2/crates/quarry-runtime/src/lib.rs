@@ -138,6 +138,7 @@ pub use mp_client::{
     ModelPlaneClient, ModelPlaneInvokeRequest, ModelPlaneInvokeResponse, ModelPlanePlanner,
 };
 pub use nats_event_bus::{NatsConfig, NatsEventBus};
+pub use observation::build_dom_summary;
 pub use pipeline::PageRunner;
 pub use planner::{MockPlanner, Planner, PlannerDecision};
 pub use policy::{

@@ -1447,6 +1447,10 @@ pub async fn run_deep_research(
     inference_bearer: &str,
     session_bearer: &str,
     zdr: bool,
+    // Turn's minimum privacy tier (wire numeric). Every derived research
+    // inference inherits it: a planning or synthesis call must never reach a
+    // provider the main chat chain would refuse.
+    min_privacy_tier: i32,
     model: &str,
     base_messages: Vec<ChatMessage>,
     question: &str,
@@ -1509,6 +1513,7 @@ pub async fn run_deep_research(
             org_id,
             inference_bearer,
             zdr,
+            min_privacy_tier,
             question,
             plan_limit,
             model,
@@ -1763,6 +1768,7 @@ pub async fn run_deep_research(
             org_id,
             inference_bearer,
             zdr,
+            min_privacy_tier,
             model,
             &prompt,
         ),
@@ -1960,6 +1966,7 @@ async fn plan_sub_queries(
     org_id: &str,
     inference_bearer: &str,
     zdr: bool,
+    min_privacy_tier: i32,
     question: &str,
     limit: usize,
     turn_model: &str,
@@ -1973,6 +1980,7 @@ async fn plan_sub_queries(
         org_id,
         inference_bearer,
         zdr,
+        min_privacy_tier,
         question,
         limit,
         &configured,
@@ -1997,6 +2005,7 @@ async fn plan_sub_queries(
             org_id,
             inference_bearer,
             zdr,
+            min_privacy_tier,
             question,
             limit,
             turn_model,
@@ -2034,6 +2043,7 @@ async fn plan_once(
     org_id: &str,
     inference_bearer: &str,
     zdr: bool,
+    min_privacy_tier: i32,
     question: &str,
     limit: usize,
     model: &str,
@@ -2056,6 +2066,9 @@ async fn plan_once(
                 temperature: 0.2,
                 max_tokens: PLAN_MAX_TOKENS,
                 zdr,
+                // Derived research calls inherit the turn's floor: planning
+                // must never reach a provider the main chain would refuse.
+                min_privacy_tier,
                 ..Default::default()
             },
             inference_bearer,
@@ -2245,6 +2258,7 @@ async fn synthesize_report(
     org_id: &str,
     inference_bearer: &str,
     zdr: bool,
+    min_privacy_tier: i32,
     model: &str,
     prompt: &str,
 ) -> Option<(String, Option<String>)> {
@@ -2267,6 +2281,9 @@ async fn synthesize_report(
                 temperature: 0.2,
                 max_tokens: report_token_budget(),
                 zdr,
+                // Report synthesis inherits the turn's floor for the same
+                // reason planning does.
+                min_privacy_tier,
                 ..Default::default()
             },
             inference_bearer,

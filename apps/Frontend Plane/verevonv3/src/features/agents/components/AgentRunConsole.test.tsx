@@ -64,6 +64,11 @@ vi.mock('@/shared/api/orchestration-client', async (importOriginal) => {
     decideApproval: mockDecideApproval,
     resumeRun: mockResumeRun,
     cancelRun: mockCancelRun,
+    // The plan panel's resource fires as soon as a run id exists. Stubbed so
+    // console tests stay deterministic and offline; PlanPanel's own rendering is
+    // asserted directly below.
+    listPlans: vi.fn(async () => []),
+    listTodos: vi.fn(async () => []),
   }
 })
 vi.mock('@/shared/api/runs-client', () => ({
@@ -75,7 +80,7 @@ vi.mock('@/shared/api/runs-client', () => ({
   getRunWatchStatus: mockGetRunWatchStatus,
 }))
 
-import AgentRunConsole from './AgentRunConsole'
+import AgentRunConsole, { BrowserObservationShot, PlanPanel } from './AgentRunConsole'
 
 // jsdom doesn't implement scrollIntoView; the approval-deck effect calls it
 // unconditionally when a pending approval appears (unrelated pre-existing gap).
@@ -551,5 +556,130 @@ describe('AgentRunConsole run watcher toggle', () => {
     // A failed registration must not leave the button falsely claiming it
     // succeeded — it reverts to "Notify me" rather than staying on "Watching".
     await waitFor(() => expect(screen.getByRole('button', { name: /varsle meg/i })).toBeTruthy())
+  })
+})
+
+describe('AgentRunConsole chat thread origin', () => {
+  beforeEach(() => {
+    mockStreamChat.mockReset()
+    mockListApprovals.mockReset().mockResolvedValue([])
+    mockGetRun.mockReset().mockResolvedValue(null)
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
+  })
+
+  // Regression coverage: with no sessionKey, model-gateway's create_thread
+  // falls back to a random session key, which session-core's
+  // resolve_thread_origin classifies as "chat" — landing this console's runs
+  // in the Verevon chat history it must stay invisible to (see
+  // apps/gateway/src/domains/chat/history.rs's `chat_history_sessions`).
+  it('tags the chat stream with an agent_run/ scoped session key, not a bare chat thread', async () => {
+    mockStreamChat.mockImplementation(() => new Promise<void>(() => {}))
+
+    renderConsole()
+
+    fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Book a shipment' } })
+    fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
+
+    await waitFor(() => expect(mockStreamChat).toHaveBeenCalled())
+    const [request] = mockStreamChat.mock.calls[0] as [{ sessionKey?: string }]
+    expect(request.sessionKey).toMatch(
+      /^agent_run\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    )
+  })
+})
+
+describe('PlanPanel', () => {
+  it('states absence rather than rendering an empty panel', () => {
+    // An empty panel reads as a loading failure. A run with no plan is an
+    // ordinary outcome and has to say so — same honesty rule as the Support
+    // rail's "not reported".
+    const { container, unmount } = render(() => (
+      <PlanPanel plans={[]} todos={[]} loading={false} />
+    ))
+    expect(container.textContent).toContain('Ingen plan registrert for denne kjøringen.')
+    unmount()
+  })
+
+  it('distinguishes loading from empty', () => {
+    const { container, unmount } = render(() => (
+      <PlanPanel plans={[]} todos={[]} loading={true} />
+    ))
+    expect(container.textContent).toContain('Laster')
+    expect(container.textContent).not.toContain('Ingen plan registrert')
+    unmount()
+  })
+
+  it('renders the plan content the timeline cannot show', () => {
+    const { container, unmount } = render(() => (
+      <PlanPanel
+        plans={[{ id: 'p1', state: 'EXECUTING', summary: 'Reconcile the July invoices' }]}
+        todos={[
+          { id: 't1', state: 'COMPLETED', title: 'Fetch invoice list' },
+          { id: 't2', state: 'PENDING', title: 'Match against ledger' },
+        ]}
+        loading={false}
+      />
+    ))
+    const text = container.textContent ?? ''
+    // The point of the panel: the plan's CONTENT, not just its transitions.
+    expect(text).toContain('Reconcile the July invoices')
+    expect(text).toContain('Fetch invoice list')
+    expect(text).toContain('Match against ledger')
+    // Provider enum names are rendered as-is, not relabelled.
+    expect(text).toContain('EXECUTING')
+    expect(text).toContain('PENDING')
+    unmount()
+  })
+
+  it('names a missing summary instead of showing a blank row', () => {
+    const { container, unmount } = render(() => (
+      <PlanPanel plans={[{ id: 'p1', state: 'DRAFT' }]} todos={[]} loading={false} />
+    ))
+    expect(container.textContent).toContain('(ingen sammendrag)')
+    unmount()
+  })
+})
+
+describe('BrowserObservationShot', () => {
+  it('loads the screenshot by REFERENCE through the gateway, never inline bytes', () => {
+    const { container, unmount } = render(() => (
+      <BrowserObservationShot artifactId="art_abc123" pageUrl="https://example.test/a" />
+    ))
+    const img = container.querySelector('img')
+    expect(img?.getAttribute('src')).toBe('/api/v1/chat/browser-artifacts/art_abc123')
+    // Lazy: a long browser run can produce many observations, and eagerly
+    // fetching every screenshot would pull megabytes through the gateway for
+    // steps the user never scrolls to.
+    expect(img?.getAttribute('loading')).toBe('lazy')
+    // The alt text names the page, so the image is described rather than decorative.
+    expect(img?.getAttribute('alt')).toContain('example.test')
+    unmount()
+  })
+
+  it('encodes the artifact id rather than interpolating it raw', () => {
+    const { container, unmount } = render(() => (
+      <BrowserObservationShot artifactId="a/b?c=1" />
+    ))
+    const src = container.querySelector('img')?.getAttribute('src') ?? ''
+    expect(src).not.toContain('a/b?c=1')
+    expect(src).toContain(encodeURIComponent('a/b?c=1'))
+    unmount()
+  })
+
+  it('names a load failure instead of leaving a blank gap', () => {
+    // A screenshot that existed and could not be loaded is a different state
+    // from a step that never had one, and only the former is a problem.
+    const { container, unmount } = render(() => (
+      <BrowserObservationShot artifactId="art_gone" />
+    ))
+    const img = container.querySelector('img')
+    expect(img).toBeTruthy()
+    img!.dispatchEvent(new Event('error'))
+    expect(container.textContent).toContain('Kunne ikke laste skjermbildet')
+    expect(container.querySelector('img')).toBeNull()
+    unmount()
   })
 })

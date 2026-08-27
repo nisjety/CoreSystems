@@ -12,8 +12,8 @@ use super::routing_policy::RoutingPolicy;
 use super::{
     anthropic::AnthropicProvider, endpoint_region_is_non_eu, intent, is_eu_region,
     normalize_region_token, openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk,
-    InferRequest, InferResponse, ModelFamily, ModelInfo, ProviderCapabilities, ProviderError,
-    ProviderRouter, Residency,
+    InferRequest, InferResponse, ModelFamily, ModelInfo, PrivacyTier, ProviderCapabilities,
+    ProviderError, ProviderRouter, Residency,
 };
 use crate::cache::PromptCache;
 use crate::config::InferenceConfig;
@@ -188,6 +188,39 @@ pub struct EmbeddingResidency {
     pub configured_region: String,
 }
 
+impl FallbackChain {
+    /// EU embedding residency — REQUEST-time deny-by-default gate. Rejects
+    /// BEFORE any network call when the resolved region is non-EU and the
+    /// operator has not explicitly opted in. The resolved region is the
+    /// request's `region` when set, else the configured deployment region.
+    /// Mirrors the speech.rs allow-flag shape but REJECTS (does not
+    /// warn-and-fallback): an EU/ZDR posture must fail closed.
+    fn reject_non_eu_embedding_region(&self, req: &EmbedRequest) -> Result<(), ProviderError> {
+        if self.residency.allow_non_eu {
+            return Ok(());
+        }
+        let requested = normalize_region_token(&req.region);
+        let resolved = if requested.is_empty() {
+            self.residency.configured_region.as_str()
+        } else {
+            requested.as_str()
+        };
+        if !is_eu_region(resolved) {
+            warn!(
+                request_id = %req.request_id,
+                region = %resolved,
+                "embedding rejected: non-EU residency region and \
+                 MODEL_PLANE_ALLOW_NON_EU_EMBEDDING is off"
+            );
+            return Err(ProviderError::ResidencyViolation(format!(
+                "embedding region `{resolved}` is outside the EU residency boundary and \
+                 MODEL_PLANE_ALLOW_NON_EU_EMBEDDING is off"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// True when the caller didn't pin a model — empty or a "let the gateway pick"
 /// sentinel. Such requests resolve to the per-provider default so "Verevon Auto"
 /// works against whatever provider is actually configured.
@@ -225,6 +258,28 @@ const AZURE_MODEL_ROUTER: &str = "model-router";
 /// default is deliberately small.
 const DEFAULT_RATE_LIMIT_MAX_WAIT_MS: u64 = 8_000;
 
+/// True when a provider may serve a request requiring `min_privacy_tier`.
+///
+/// The tier combines the two independent axes — geography and retention — into
+/// one comparison: derive the provider's strongest tier from its declared
+/// capabilities ([`PrivacyTier::classify`]) and require `>=`. `Unspecified`
+/// imposes no constraint, so pre-tier behavior stays byte-identical. A
+/// provider below the floor is skipped BEFORE any network call, the same way a
+/// non-ZDR provider is skipped when `zdr` is set.
+fn provider_meets_privacy_tier(caps: &ProviderCapabilities, min_privacy_tier: PrivacyTier) -> bool {
+    min_privacy_tier == PrivacyTier::Unspecified || PrivacyTier::classify(caps) >= min_privacy_tier
+}
+
+/// The typed exhaustion error for a tier-constrained request whose entire
+/// matching chain was skipped. Names the REQUIRED tier so callers see exactly
+/// what could not be honored; never a silent downgrade.
+fn tier_unavailable_error(required: PrivacyTier) -> ProviderError {
+    ProviderError::TierUnavailable(format!(
+        "no configured provider satisfies privacy tier `{}`",
+        required.label()
+    ))
+}
+
 fn rate_limit_max_wait() -> Duration {
     static MAX_WAIT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *MAX_WAIT.get_or_init(|| {
@@ -241,11 +296,22 @@ fn rate_limit_max_wait() -> Duration {
 /// Kept separate from the generic failure count because the two need different
 /// answers: a throttled chain is worth waiting for or reporting with a time, and
 /// a broken one is not.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct ThrottleState {
     /// Shortest `retry_after_ms` any throttled provider asked for — the soonest
     /// moment a retry could plausibly succeed.
     soonest_retry_ms: Option<u64>,
+    /// The first `TooLong` detail any provider returned during the walk.
+    ///
+    /// Recorded so exhaustion can surface the TYPED overflow instead of a
+    /// generic `AllExhausted`. Until this field existed, `classify_http_failure`
+    /// produced `ProviderError::TooLong` at five call sites and every chain
+    /// discarded it in a `Err(e) => warn!` arm — so `grpc.rs`'s `too_long_status`
+    /// (and its `x-mp-provider-error: too_long` trailer, and the gateway's
+    /// context-length recovery keyed on it) had zero production callers. The
+    /// walk still CONTINUES past a TooLong on purpose: a later provider with a
+    /// larger window is the recovery path, and only exhaustion reports it.
+    too_long_detail: Option<String>,
 }
 
 impl ThrottleState {
@@ -256,13 +322,19 @@ impl ThrottleState {
         });
     }
 
-    fn throttled(self) -> bool {
+    fn record_too_long(&mut self, detail: &str) {
+        if self.too_long_detail.is_none() {
+            self.too_long_detail = Some(detail.to_owned());
+        }
+    }
+
+    fn throttled(&self) -> bool {
         self.soonest_retry_ms.is_some()
     }
 
     /// The wait to honor before retrying the chain, or `None` when the provider's
     /// own retry-after exceeds what an interactive request should absorb.
-    fn affordable_wait(self) -> Option<Duration> {
+    fn affordable_wait(&self) -> Option<Duration> {
         let wait = Duration::from_millis(self.soonest_retry_ms?);
         (wait <= rate_limit_max_wait()).then_some(wait)
     }
@@ -273,10 +345,22 @@ impl ThrottleState {
     /// retry-after, so a caller can say "try again in about a minute" instead of
     /// reporting a generic failure for something that is neither permanent nor
     /// the user's fault.
-    fn exhausted_error(self, attempts: u32) -> ProviderError {
-        match self.soonest_retry_ms {
-            Some(retry_after_ms) => ProviderError::RateLimited { retry_after_ms },
-            None => ProviderError::AllExhausted { attempts },
+    fn exhausted_error(&self, attempts: u32) -> ProviderError {
+        // Priority order is deliberate. RateLimited first: a throttled provider
+        // might genuinely serve this exact prompt after the wait, so "try again
+        // shortly" is still the true story. TooLong next: it is deterministic —
+        // the same prompt overflows the same providers every time — so once no
+        // retry can help, the caller needs the typed overflow to trigger
+        // compaction, not a generic exhaustion. AllExhausted only when the walk
+        // learned nothing more specific.
+        match (&self.soonest_retry_ms, &self.too_long_detail) {
+            (Some(retry_after_ms), _) => ProviderError::RateLimited {
+                retry_after_ms: *retry_after_ms,
+            },
+            (None, Some(detail)) => ProviderError::TooLong {
+                detail: detail.clone(),
+            },
+            (None, None) => ProviderError::AllExhausted { attempts },
         }
     }
 }
@@ -329,6 +413,35 @@ fn provider_serves_model(
     // sovereign provider misconfigured with no catalog must go quiet, not become
     // a wildcard.
     catalog.is_some_and(|models| models.iter().any(|known| known.eq_ignore_ascii_case(model)))
+}
+
+/// Validates `req.min_residency` before any provider is tried. Fails loud on
+/// an unrecognized token rather than silently treating a typo as "no floor"
+/// — the same reasoning as `Residency::parse`'s own doc comment. Empty is
+/// always valid (no floor requested).
+fn validate_min_residency(req: &InferRequest) -> Result<(), ProviderError> {
+    let requested = req.min_residency.trim();
+    if requested.is_empty() || Residency::parse(requested).is_some() {
+        return Ok(());
+    }
+    Err(ProviderError::ResidencyViolation(format!(
+        "unrecognized min_residency token `{requested}`"
+    )))
+}
+
+/// Whether `caps_residency` fails to meet the request's residency floor.
+/// Called once per candidate provider, the way the ZDR gate already is.
+///
+/// An unparseable token cannot reach here in production: `infer`/`infer_stream`
+/// both call [`validate_min_residency`] before trying any provider. Treating it
+/// as "no floor" here rather than panicking is a defensive fallback only, not
+/// a second enforcement path.
+fn residency_gate_blocks(req: &InferRequest, caps_residency: Residency) -> bool {
+    let requested = req.min_residency.trim();
+    if requested.is_empty() {
+        return false;
+    }
+    Residency::parse(requested).is_some_and(|required| caps_residency < required)
 }
 
 impl FallbackChain {
@@ -686,12 +799,12 @@ impl FallbackChain {
         // and nothing is silently misrepresented: `Global` is what gets recorded
         // and logged.
         //
-        // Real enforcement belongs on the request path, where a caller asks for a
-        // minimum residency and a provider that cannot meet it is skipped the way
-        // a non-ZDR provider already is. That needs a residency field on
-        // InferRequest, which needs the proto, and is deferred with the rest of the
-        // request-side work (strategy doc Phase 2). Until then this is disclosure,
-        // not a control -- and it is labelled as such rather than dressed up.
+        // Request-side enforcement now exists too (`InferRequest.min_residency`,
+        // gated in `infer_one_model`/`stream_one_model` via `residency_gate_blocks`
+        // exactly the way a non-ZDR provider is skipped). This boot-time block
+        // stays disclosure-only on purpose: it reports the STATIC fleet's posture
+        // once at startup for operator visibility, independent of whether any
+        // given request asks for a floor at all.
         for (name, provider) in &providers {
             let declared = provider.capabilities_dyn().residency;
             if declared > Residency::Global {
@@ -943,6 +1056,7 @@ impl FallbackChain {
             .as_ref()
             .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+        validate_min_residency(req)?;
 
         // Check cache first
         if let Some(cached) = self.cache.get(req) {
@@ -996,10 +1110,17 @@ impl FallbackChain {
             }
         }
 
-        if req.zdr && total_attempts == 0 {
+        if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
+            Err(tier_unavailable_error(req.min_privacy_tier))
+        } else if req.zdr && total_attempts == 0 {
             Err(ProviderError::ZdrUnavailable(
                 "no matching provider deployment has verified ZDR support".to_owned(),
             ))
+        } else if !req.min_residency.trim().is_empty() && total_attempts == 0 {
+            Err(ProviderError::ResidencyViolation(format!(
+                "no matching provider deployment meets the requested `{}` residency floor",
+                req.min_residency.trim()
+            )))
         } else {
             Err(throttle.exhausted_error(total_attempts))
         }
@@ -1057,6 +1178,32 @@ impl FallbackChain {
                 );
                 continue;
             }
+            // Privacy-tier gate: a provider below the requested minimum is
+            // skipped before any network call, mirroring the ZDR gate above.
+            if !provider_meets_privacy_tier(&caps, req.min_privacy_tier) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    required_tier = req.min_privacy_tier.label(),
+                    provider_tier = PrivacyTier::classify(&caps).label(),
+                    "provider skipped: privacy tier below the requested minimum"
+                );
+                continue;
+            }
+            // Residency-floor gate: the tier gate above answers "is this
+            // deployment's posture strong enough"; this one answers the
+            // caller's explicit `min_residency` token. Both run before any
+            // network call, and a provider must clear BOTH to be tried.
+            if residency_gate_blocks(req, caps.residency) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    required = %req.min_residency,
+                    declared = caps.residency.as_str(),
+                    "provider skipped: residency floor not met"
+                );
+                continue;
+            }
             let call_req = self.request_for(req, model, name);
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
@@ -1087,6 +1234,11 @@ impl FallbackChain {
                         // DeploymentNotFound. The provider-reported id stays in
                         // the log line above for traceability.
                         call_req.model.clone_into(&mut response.model_used);
+                        // Stamp serving provenance (Phase-4 receipt inputs):
+                        // which deployment processed this content and under
+                        // what declared residency.
+                        response.provider_used.clone_from(name);
+                        caps.residency.as_str().clone_into(&mut response.residency);
                         return Some(response);
                     }
                     Err(ProviderError::RateLimited { retry_after_ms }) => {
@@ -1098,6 +1250,15 @@ impl FallbackChain {
                         );
                         throttle.record(retry_after_ms);
                         break; // Skip remaining retries for this provider
+                    }
+                    Err(ProviderError::TooLong { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "prompt too long for this provider; walking on for a larger window"
+                        );
+                        throttle.record_too_long(&detail);
+                        break; // Deterministic for this provider — retrying cannot help.
                     }
                     Err(e) => {
                         warn!(
@@ -1166,6 +1327,34 @@ impl FallbackChain {
         std::borrow::Cow::Owned(rewritten)
     }
 
+    /// Fill serving-provider provenance on every chunk of a stream. Final
+    /// chunks carry it verbatim; non-final chunks keep empty fields so callers
+    /// reading only terminal frames still see the truth about who served the
+    /// turn.
+    fn stamp_stream_provenance(
+        mut rx: mpsc::Receiver<InferChunk>,
+        provider_used: String,
+        residency: String,
+    ) -> mpsc::Receiver<InferChunk> {
+        let (tx, out_rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            while let Some(mut chunk) = rx.recv().await {
+                if chunk.done || chunk.provider_used.is_empty() {
+                    chunk.provider_used.clone_from(&provider_used);
+                    chunk.residency.clone_from(&residency);
+                }
+                let done = chunk.done;
+                if tx.send(chunk).await.is_err() {
+                    break;
+                }
+                if done {
+                    break;
+                }
+            }
+        });
+        out_rx
+    }
+
     /// Perform streaming inference with fallback (no caching for streams).
     ///
     /// # Errors
@@ -1181,6 +1370,7 @@ impl FallbackChain {
             .as_ref()
             .map_or_else(Vec::new, |resolved| self.tool_ladder(&resolved.model));
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
+        validate_min_residency(req)?;
 
         let mut total_attempts: u32 = 0;
         let mut throttle = ThrottleState::default();
@@ -1224,10 +1414,17 @@ impl FallbackChain {
             }
         }
 
-        if req.zdr && total_attempts == 0 {
+        if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
+            Err(tier_unavailable_error(req.min_privacy_tier))
+        } else if req.zdr && total_attempts == 0 {
             Err(ProviderError::ZdrUnavailable(
                 "no matching streaming provider deployment has verified ZDR support".to_owned(),
             ))
+        } else if !req.min_residency.trim().is_empty() && total_attempts == 0 {
+            Err(ProviderError::ResidencyViolation(format!(
+                "no matching streaming provider deployment meets the requested `{}` residency floor",
+                req.min_residency.trim()
+            )))
         } else {
             Err(throttle.exhausted_error(total_attempts))
         }
@@ -1257,6 +1454,30 @@ impl FallbackChain {
                 );
                 continue;
             }
+            // Privacy-tier gate on the streaming path, same as unary.
+            if !provider_meets_privacy_tier(&caps, req.min_privacy_tier) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    required_tier = req.min_privacy_tier.label(),
+                    provider_tier = PrivacyTier::classify(&caps).label(),
+                    "stream provider skipped: privacy tier below the requested minimum"
+                );
+                continue;
+            }
+            // Residency-floor gate on the streaming path, same as unary: an
+            // operator-declared residency weaker than the requested floor is
+            // skipped before any stream is opened.
+            if residency_gate_blocks(req, caps.residency) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    required = %req.min_residency,
+                    declared = caps.residency.as_str(),
+                    "stream provider skipped: residency floor not met"
+                );
+                continue;
+            }
             let call_req = self.request_for(req, model, name);
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
@@ -1281,7 +1502,12 @@ impl FallbackChain {
                         // snapshot), which downstream must never reuse as a
                         // request model. Rewrite in-flight, preserving WHICH
                         // chunks carry an id — only the value is normalized.
-                        return Some(Self::normalize_stream_model(rx, call_req.model.clone()));
+                        // Provenance is stamped alongside so every final chunk
+                        // carries the serving deployment + declared residency.
+                        let residency = caps.residency.as_str().to_owned();
+                        let provider_name = name.clone();
+                        let rx = Self::normalize_stream_model(rx, call_req.model.clone());
+                        return Some(Self::stamp_stream_provenance(rx, provider_name, residency));
                     }
                     Err(ProviderError::RateLimited { retry_after_ms }) => {
                         warn!(
@@ -1292,6 +1518,15 @@ impl FallbackChain {
                         );
                         throttle.record(retry_after_ms);
                         break;
+                    }
+                    Err(ProviderError::TooLong { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "prompt too long for this provider; walking on for a larger window"
+                        );
+                        throttle.record_too_long(&detail);
+                        break; // Deterministic for this provider — retrying cannot help.
                     }
                     Err(e) => {
                         warn!(
@@ -1318,33 +1553,8 @@ impl FallbackChain {
         &self,
         req: &EmbedRequest,
     ) -> Result<EmbedResponse, ProviderError> {
-        // EU embedding residency — REQUEST-time deny-by-default gate. Reject
-        // BEFORE any network call when the resolved region is non-EU and the
-        // operator has not explicitly opted in. The resolved region is the
-        // request's `region` when set, else the configured deployment region.
-        // Mirrors the speech.rs allow-flag shape but REJECTS (does not
-        // warn-and-fallback): an EU/ZDR posture must fail closed.
-        if !self.residency.allow_non_eu {
-            let requested = normalize_region_token(&req.region);
-            let resolved = if requested.is_empty() {
-                self.residency.configured_region.as_str()
-            } else {
-                requested.as_str()
-            };
-            if !is_eu_region(resolved) {
-                warn!(
-                    request_id = %req.request_id,
-                    region = %resolved,
-                    "embedding rejected: non-EU residency region and \
-                     MODEL_PLANE_ALLOW_NON_EU_EMBEDDING is off"
-                );
-                return Err(ProviderError::ResidencyViolation(format!(
-                    "embedding region `{resolved}` is outside the EU residency boundary and \
-                     MODEL_PLANE_ALLOW_NON_EU_EMBEDDING is off"
-                )));
-            }
-        }
-
+        self.reject_non_eu_embedding_region(req)?;
+        let mut throttle = ThrottleState::default();
         let mut total_attempts: u32 = 0;
 
         for (name, provider) in &self.providers {
@@ -1357,6 +1567,19 @@ impl FallbackChain {
                     provider = %name,
                     request_id = %req.request_id,
                     "embedding provider skipped: ZDR was required but is not verified for this deployment"
+                );
+                continue;
+            }
+            // Privacy-tier gate on the embedding path. Embeddings carry no tier
+            // field on today's wire contract; honoring the chat contract's
+            // semantics keeps all three chain paths consistent.
+            if !provider_meets_privacy_tier(&caps, req.min_privacy_tier) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    required_tier = req.min_privacy_tier.label(),
+                    provider_tier = PrivacyTier::classify(&caps).label(),
+                    "embedding provider skipped: privacy tier below the requested minimum"
                 );
                 continue;
             }
@@ -1403,7 +1626,17 @@ impl FallbackChain {
                             retry_after_ms = retry_after_ms,
                             "rate limited, moving to next provider"
                         );
+                        throttle.record(retry_after_ms);
                         break;
+                    }
+                    Err(ProviderError::TooLong { detail }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            "prompt too long for this provider; walking on for a larger window"
+                        );
+                        throttle.record_too_long(&detail);
+                        break; // Deterministic for this provider — retrying cannot help.
                     }
                     Err(e) => {
                         warn!(
@@ -1417,14 +1650,17 @@ impl FallbackChain {
             }
         }
 
-        if req.zdr && total_attempts == 0 {
+        if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
+            Err(tier_unavailable_error(req.min_privacy_tier))
+        } else if req.zdr && total_attempts == 0 {
             Err(ProviderError::ZdrUnavailable(
                 "no matching embedding provider deployment has verified ZDR support".to_owned(),
             ))
         } else {
-            Err(ProviderError::AllExhausted {
-                attempts: total_attempts,
-            })
+            // Surfaces RateLimited (with retry-after) or TooLong when the walk
+            // recorded one — an embedding input over the model limit was
+            // previously reported as generic exhaustion, which callers retried.
+            Err(throttle.exhausted_error(total_attempts))
         }
     }
 
@@ -1746,6 +1982,10 @@ mod resolution_tests {
     struct RecordingProvider {
         seen_model: Arc<Mutex<Option<String>>>,
         zdr_supported: bool,
+        /// Declared residency. `Default` gives `Eu` so the pre-existing tests
+        /// exercise routing, never the residency registration posture; the
+        /// residency-floor and privacy-tier tests override it explicitly.
+        residency: Residency,
         /// Which family this double stands in for.
         ///
         /// Routing reads the family from the provider's own declaration rather
@@ -1761,6 +2001,7 @@ mod resolution_tests {
             Self {
                 seen_model: Arc::new(Mutex::new(None)),
                 zdr_supported: false,
+                residency: Residency::Eu,
                 family: ModelFamily::OpenAiCompatible,
             }
         }
@@ -1772,9 +2013,7 @@ mod resolution_tests {
             crate::provider::ProviderCapabilities {
                 supports_zdr: self.zdr_supported,
                 model_family: self.family,
-                // Doubles are registered under real ids; declare EU so the
-                // residency registration gate is not what these tests exercise.
-                residency: Residency::Eu,
+                residency: self.residency,
                 ..crate::provider::ProviderCapabilities::default()
             }
         }
@@ -1789,13 +2028,15 @@ mod resolution_tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 tool_calls: Vec::new(),
+                ..InferResponse::default()
             })
         }
 
         async fn infer_stream(
             &self,
-            _req: &InferRequest,
+            req: &InferRequest,
         ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            *self.seen_model.lock().unwrap() = Some(req.model.clone());
             let (_tx, rx) = mpsc::channel(1);
             Ok(rx)
         }
@@ -1804,8 +2045,8 @@ mod resolution_tests {
     fn chain_with(seen: Arc<Mutex<Option<String>>>) -> FallbackChain {
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen,
-            zdr_supported: false,
             family: ModelFamily::Anthropic,
+            ..RecordingProvider::default()
         });
         FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
     }
@@ -1815,6 +2056,7 @@ mod resolution_tests {
         let seen = Arc::new(Mutex::new(None));
         let chain = chain_with(seen.clone());
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "r1".to_owned(),
             model: String::new(),
             ..Default::default()
@@ -1836,6 +2078,7 @@ mod resolution_tests {
         let seen = Arc::new(Mutex::new(None));
         let chain = chain_with(seen.clone());
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "r2".to_owned(),
             model: "claude-opus-4-20250514".to_owned(),
             ..Default::default()
@@ -1864,6 +2107,7 @@ mod resolution_tests {
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1)
                 .with_intent_enabled(true);
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "r3".to_owned(),
             model: "verevon-budget".to_owned(),
             messages: vec![crate::provider::ChatMessage {
@@ -1893,6 +2137,7 @@ mod resolution_tests {
         let chain =
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "r4".to_owned(),
             model: "verevon-genius".to_owned(),
             ..Default::default()
@@ -1923,6 +2168,7 @@ mod resolution_tests {
             1,
         );
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "zdr-1".to_owned(),
             model: "gpt-4o-mini".to_owned(),
             zdr: true,
@@ -1946,11 +2192,397 @@ mod resolution_tests {
         assert!(unavailable_seen.lock().unwrap().is_none());
     }
 
+    // ---------------------------------------------------------------------
+    // Privacy-tier gating — one section per chain path.
+    //
+    // These are MUTATION tests by construction: each asserts BOTH that the
+    // weaker provider was never reached AND the exact typed error when nothing
+    // remains. Deleting any `provider_meets_privacy_tier` skip turns the first
+    // assertion of the matching test into a failure (the weak provider serves);
+    // deleting a `tier_unavailable_error` exhaustion branch turns the second
+    // into a failure (generic AllExhausted instead of the named-tier error).
+    // ---------------------------------------------------------------------
+
+    /// Unary path: a Global provider is skipped in favor of an EU one, and a
+    /// Global-only chain fails with the REQUIRED tier named.
+    #[tokio::test]
+    async fn tier_gate_skips_weaker_provider_on_unary_path_or_fails_naming_the_tier() {
+        let weak_seen = Arc::new(Mutex::new(None));
+        let strong_seen = Arc::new(Mutex::new(None));
+        let weak: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: weak_seen.clone(),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let strong: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: strong_seen.clone(),
+            residency: Residency::Eu,
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                ("openai".to_owned(), weak),
+                ("azure-openai".to_owned(), strong),
+            ],
+            1,
+        );
+        let req = InferRequest {
+            request_id: "tier-u1".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_privacy_tier: PrivacyTier::EuResident,
+            ..Default::default()
+        };
+
+        let resp = chain
+            .infer(&req)
+            .await
+            .expect("the EU provider satisfies the minimum");
+        assert!(
+            weak_seen.lock().unwrap().is_none(),
+            "a provider below the requested tier must be skipped BEFORE any call"
+        );
+        assert!(strong_seen.lock().unwrap().is_some());
+        // Provenance discloses the posture that was actually met.
+        assert_eq!(resp.provider_used, "azure-openai");
+        assert_eq!(resp.residency, "eu");
+
+        // No provider left at the floor: typed error NAMING the required tier,
+        // never a silent downgrade to the weaker provider.
+        let weak_only: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: Arc::new(Mutex::new(None)),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let weak_chain =
+            FallbackChain::new_with_providers(vec![("openai".to_owned(), weak_only)], 1);
+        let err = weak_chain.infer(&req).await.unwrap_err();
+        match err {
+            ProviderError::TierUnavailable(message) => {
+                assert!(
+                    message.contains("eu_resident"),
+                    "the error must NAME the required tier, got: {message}"
+                );
+            }
+            other => panic!("expected TierUnavailable, got {other:?}"),
+        }
+    }
+
+    /// An UNSPECIFIED minimum imposes no constraint: today's Global-catalog
+    /// deployments keep serving exactly as before the tier system existed.
+    #[tokio::test]
+    async fn unspecifed_minimum_keeps_global_catalog_serving_unchanged() {
+        let seen = Arc::new(Mutex::new(None));
+        let provider: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(vec![("openai".to_owned(), provider)], 1);
+        let req = InferRequest {
+            request_id: "tier-u2".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            ..Default::default()
+        };
+        chain
+            .infer(&req)
+            .await
+            .expect("no constraint means no skipping");
+        assert!(seen.lock().unwrap().is_some());
+    }
+
+    /// A streaming double with declared residency, emitting one final chunk so
+    /// the provenance stamp can be asserted end-to-end through
+    /// `stamp_stream_provenance`.
+    struct TierStreamProvider {
+        reached: Arc<Mutex<bool>>,
+        residency: Residency,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for TierStreamProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                residency: self.residency,
+                ..crate::provider::ProviderCapabilities::default()
+            }
+        }
+
+        async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            Err(ProviderError::UnsupportedModel("stream double".to_owned()))
+        }
+
+        async fn infer_stream(
+            &self,
+            req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            *self.reached.lock().unwrap() = true;
+            let (tx, rx) = mpsc::channel(1);
+            let chunk = InferChunk {
+                request_id: req.request_id.clone(),
+                delta: String::new(),
+                done: true,
+                model_used: req.model.clone(),
+                input_tokens: 1,
+                output_tokens: 1,
+                // A final chunk on the merged contract carries the honest
+                // termination signal and the (empty) reasoning channel too.
+                stop_reason: "end_turn".to_owned(),
+                reasoning_delta: String::new(),
+                provider_used: String::new(),
+                residency: String::new(),
+            };
+            tokio::spawn(async move {
+                let _ = tx.send(chunk).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// Streaming path: same skip semantics, plus the final chunk carries WHO
+    /// served the stream and under what declared residency.
+    #[tokio::test]
+    async fn tier_gate_skips_weaker_provider_on_stream_path_or_fails_naming_the_tier() {
+        let weak_reached = Arc::new(Mutex::new(false));
+        let strong_reached = Arc::new(Mutex::new(false));
+        let weak: BoxedProvider = Arc::new(TierStreamProvider {
+            reached: weak_reached.clone(),
+            residency: Residency::Global,
+        });
+        let strong: BoxedProvider = Arc::new(TierStreamProvider {
+            reached: strong_reached.clone(),
+            residency: Residency::Eu,
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                ("openai".to_owned(), weak),
+                ("azure-openai".to_owned(), strong),
+            ],
+            1,
+        );
+        let req = InferRequest {
+            request_id: "tier-s1".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_privacy_tier: PrivacyTier::EuResident,
+            ..Default::default()
+        };
+
+        let mut rx = chain
+            .infer_stream(&req)
+            .await
+            .expect("the EU provider streams for the tier floor");
+        let mut last = None;
+        while let Some(chunk) = rx.recv().await {
+            last = Some(chunk);
+        }
+        let final_chunk = last.expect("the stream must produce its final chunk");
+        assert!(
+            !*weak_reached.lock().unwrap(),
+            "the weak provider must be skipped before opening any stream"
+        );
+        assert!(*strong_reached.lock().unwrap());
+        assert_eq!(final_chunk.provider_used, "azure-openai");
+        assert_eq!(final_chunk.residency, "eu");
+
+        // Weak-only chain: the typed, tier-naming error — also on streams.
+        let only_weak_reached = Arc::new(Mutex::new(false));
+        let only_weak: BoxedProvider = Arc::new(TierStreamProvider {
+            reached: only_weak_reached.clone(),
+            residency: Residency::Global,
+        });
+        let weak_chain =
+            FallbackChain::new_with_providers(vec![("openai".to_owned(), only_weak)], 1);
+        let err = weak_chain.infer_stream(&req).await.unwrap_err();
+        assert!(!*only_weak_reached.lock().unwrap());
+        assert!(
+            matches!(err, ProviderError::TierUnavailable(message) if message.contains("eu_resident"))
+        );
+    }
+
+    /// Embedding path: the gate runs AFTER the EU-region gate but still BEFORE
+    /// any network call, and exhausts with the named tier.
+    #[tokio::test]
+    async fn tier_gate_skips_weaker_provider_on_embedding_path_or_fails_naming_the_tier() {
+        let reached = Arc::new(Mutex::new(false));
+        let global_embed: BoxedProvider = Arc::new(RecordingEmbedProvider {
+            reached: reached.clone(),
+            zdr_supported: false,
+            residency: Residency::Global,
+        });
+        let chain =
+            FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), global_embed)], 1);
+        let req = EmbedRequest {
+            request_id: "tier-e1".to_owned(),
+            provider_hint: "azure-openai".to_owned(),
+            text: "hello".to_owned(),
+            model: "text-embedding-3-large".to_owned(),
+            region: "swedencentral".to_owned(),
+            min_privacy_tier: PrivacyTier::EuResident,
+            ..EmbedRequest::default()
+        };
+
+        // The region gate passes (swedencentral is EU); the TIER gate is what
+        // rejects — proving both gates compose and the tier one is present.
+        let err = chain.create_embedding(&req).await.unwrap_err();
+        assert!(
+            !*reached.lock().unwrap(),
+            "embedding provider below the tier must never see a network call"
+        );
+        assert!(matches!(
+            err,
+            ProviderError::TierUnavailable(message) if message.contains("eu_resident")
+        ));
+
+        // And with no constraint, the very same deployment serves fine.
+        let unconstrained = EmbedRequest {
+            min_privacy_tier: PrivacyTier::Unspecified,
+            ..req
+        };
+        chain
+            .create_embedding(&unconstrained)
+            .await
+            .expect("Unspecified imposes no constraint");
+        assert!(*reached.lock().unwrap());
+    }
+
+    // ---------------------------------------------------------------------
+    // Residency-floor gating — the `min_residency` half of the same
+    // provider-selection contract as the tier tests above. Kept as its own
+    // section because the floor is expressed as an operator TOKEN (parsed,
+    // typo-rejecting) rather than as a tier enum, and it fails closed with
+    // `ResidencyViolation` instead of `TierUnavailable`.
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn residency_floor_skips_a_provider_declaring_weaker_residency() {
+        let global_seen = Arc::new(Mutex::new(None));
+        let eu_seen = Arc::new(Mutex::new(None));
+        let global: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: global_seen.clone(),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let eu: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: eu_seen.clone(),
+            residency: Residency::Eu,
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                ("openai".to_owned(), global),
+                ("azure-openai".to_owned(), eu),
+            ],
+            1,
+        );
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "res-1".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_residency: "eu".to_owned(),
+            ..Default::default()
+        };
+
+        chain
+            .infer(&req)
+            .await
+            .expect("EU provider meets the floor");
+        assert!(
+            global_seen.lock().unwrap().is_none(),
+            "the Global provider must never be reached once an EU floor is requested"
+        );
+        assert!(eu_seen.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn residency_floor_fails_closed_without_a_compliant_route() {
+        let seen = Arc::new(Mutex::new(None));
+        let global: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(vec![("openai".to_owned(), global)], 1);
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "res-2".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_residency: "norway".to_owned(),
+            ..Default::default()
+        };
+
+        let error = chain.infer(&req).await.unwrap_err();
+        assert!(matches!(error, ProviderError::ResidencyViolation(_)));
+        assert!(seen.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unrecognized_residency_token_is_rejected_before_any_provider_is_tried() {
+        let seen = Arc::new(Mutex::new(None));
+        let provider: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: seen.clone(),
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(vec![("openai".to_owned(), provider)], 1);
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "res-3".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_residency: "atlantis".to_owned(),
+            ..Default::default()
+        };
+
+        let error = chain.infer(&req).await.unwrap_err();
+        assert!(matches!(error, ProviderError::ResidencyViolation(_)));
+        assert!(
+            seen.lock().unwrap().is_none(),
+            "a typo'd token must fail before any provider is even tried"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_streaming_path_also_honors_the_residency_floor() {
+        let global_seen = Arc::new(Mutex::new(None));
+        let norway_seen = Arc::new(Mutex::new(None));
+        let global: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: global_seen.clone(),
+            residency: Residency::Global,
+            ..RecordingProvider::default()
+        });
+        let norway: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: norway_seen.clone(),
+            residency: Residency::Norway,
+            ..RecordingProvider::default()
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                ("openai".to_owned(), global),
+                ("azure-openai".to_owned(), norway),
+            ],
+            1,
+        );
+        let req = InferRequest {
+            thinking_budget_tokens: 0,
+            request_id: "res-4".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            min_residency: "sovereign".to_owned(),
+            ..Default::default()
+        };
+
+        chain
+            .infer_stream(&req)
+            .await
+            .expect("the Norway-resident provider meets a sovereign floor");
+        assert!(global_seen.lock().unwrap().is_none());
+        assert!(norway_seen.lock().unwrap().is_some());
+    }
+
     /// An embedding provider that records whether it was reached. Used to prove
     /// the residency gate rejects BEFORE any provider (network) call.
     struct RecordingEmbedProvider {
         reached: Arc<Mutex<bool>>,
         zdr_supported: bool,
+        /// Declared residency; EU for the pre-existing residency-gate tests,
+        /// Global for the tier-gate tests.
+        residency: Residency,
     }
 
     #[async_trait::async_trait]
@@ -1959,7 +2591,7 @@ mod resolution_tests {
             crate::provider::ProviderCapabilities {
                 supports_embeddings: true,
                 supports_zdr: self.zdr_supported,
-                residency: Residency::Eu,
+                residency: self.residency,
                 ..crate::provider::ProviderCapabilities::default()
             }
         }
@@ -1996,6 +2628,7 @@ mod resolution_tests {
         let provider: BoxedProvider = Arc::new(RecordingEmbedProvider {
             reached,
             zdr_supported: false,
+            residency: Residency::Eu,
         });
         let mut chain =
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
@@ -2016,6 +2649,7 @@ mod resolution_tests {
             model: "text-embedding-3-large".to_owned(),
             zdr: false,
             region: "eastus2".to_owned(),
+            min_privacy_tier: PrivacyTier::Unspecified,
         };
         let err = chain.create_embedding(&req).await.unwrap_err();
         assert!(
@@ -2047,6 +2681,53 @@ mod resolution_tests {
             throttle.affordable_wait(),
             Some(Duration::from_millis(1_200))
         );
+    }
+
+    /// The typed overflow must survive exhaustion. Before this state existed,
+    /// `classify_http_failure` produced `TooLong` at five provider call sites
+    /// and every chain discarded it in a generic `Err(e) => warn!` arm — so
+    /// `too_long_status` and the `x-mp-provider-error: too_long` trailer had
+    /// ZERO production callers, and the gateway's context-length recovery,
+    /// keyed on that trailer, could never trigger from the typed path.
+    #[test]
+    fn an_exhausted_walk_that_saw_too_long_reports_too_long_not_generic_exhaustion() {
+        let mut throttle = ThrottleState::default();
+        throttle.record_too_long("400: prompt is 250000 tokens, maximum is 128000");
+        match throttle.exhausted_error(4) {
+            ProviderError::TooLong { detail } => {
+                assert!(
+                    detail.contains("250000"),
+                    "the provider's own text survives"
+                );
+            }
+            other => panic!("expected TooLong, got {other:?}"),
+        }
+        // First detail wins — the walk's earliest overflow names the model the
+        // request was actually routed to.
+        let mut throttle = ThrottleState::default();
+        throttle.record_too_long("first");
+        throttle.record_too_long("second");
+        assert!(matches!(
+            throttle.exhausted_error(2),
+            ProviderError::TooLong { detail } if detail == "first"
+        ));
+    }
+
+    /// RateLimited outranks TooLong on purpose: a throttled provider might
+    /// genuinely serve this exact prompt after the wait (larger window,
+    /// different limit), so "try again shortly" is still the true story; the
+    /// overflow only becomes the answer when no retry can help.
+    #[test]
+    fn a_throttled_walk_outranks_the_overflow() {
+        let mut throttle = ThrottleState::default();
+        throttle.record_too_long("overflow");
+        throttle.record(2_000);
+        assert!(matches!(
+            throttle.exhausted_error(3),
+            ProviderError::RateLimited {
+                retry_after_ms: 2_000
+            }
+        ));
     }
 
     #[test]
@@ -2102,6 +2783,7 @@ mod resolution_tests {
             model: "text-embedding-3-large".to_owned(),
             zdr: false,
             region: "swedencentral".to_owned(),
+            min_privacy_tier: PrivacyTier::Unspecified,
         };
         let resp = chain.create_embedding(&req).await.unwrap();
         assert_eq!(resp.vector.len(), 3);
@@ -2127,6 +2809,7 @@ mod resolution_tests {
             model: "text-embedding-3-large".to_owned(),
             zdr: false,
             region: String::new(),
+            min_privacy_tier: PrivacyTier::Unspecified,
         };
         chain.create_embedding(&req).await.unwrap();
         assert!(*reached.lock().unwrap());
@@ -2149,6 +2832,7 @@ mod resolution_tests {
             model: "text-embedding-3-large".to_owned(),
             zdr: false,
             region: String::new(),
+            min_privacy_tier: PrivacyTier::Unspecified,
         };
         let err = chain.create_embedding(&req).await.unwrap_err();
         assert!(matches!(err, ProviderError::ResidencyViolation(_)));
@@ -2171,6 +2855,7 @@ mod resolution_tests {
             model: "text-embedding-3-large".to_owned(),
             zdr: false,
             region: "eastus2".to_owned(),
+            min_privacy_tier: PrivacyTier::Unspecified,
         };
         chain.create_embedding(&req).await.unwrap();
         assert!(*reached.lock().unwrap());
@@ -2228,6 +2913,7 @@ mod resolution_tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 tool_calls: Vec::new(),
+                ..InferResponse::default()
             })
         }
 
@@ -2275,6 +2961,7 @@ mod resolution_tests {
     /// `Complex` and therefore resolves to `claude-sonnet-4-6`.
     fn tool_turn(request_id: &str, model: &str) -> InferRequest {
         InferRequest {
+            thinking_budget_tokens: 0,
             request_id: request_id.to_owned(),
             model: model.to_owned(),
             messages: vec![crate::provider::ChatMessage {
@@ -2306,6 +2993,7 @@ mod resolution_tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 tool_calls: Vec::new(),
+                ..InferResponse::default()
             })
         }
 
@@ -2327,6 +3015,10 @@ mod resolution_tests {
                         model_used: String::new(),
                         input_tokens: 0,
                         output_tokens: 0,
+                        stop_reason: String::new(),
+                        reasoning_delta: String::new(),
+                        provider_used: String::new(),
+                        residency: String::new(),
                     })
                     .await;
                 let _ = tx
@@ -2337,6 +3029,10 @@ mod resolution_tests {
                         model_used: versioned,
                         input_tokens: 3,
                         output_tokens: 1,
+                        stop_reason: "end_turn".to_owned(),
+                        reasoning_delta: String::new(),
+                        provider_used: String::new(),
+                        residency: String::new(),
                     })
                     .await;
             });
@@ -2358,6 +3054,7 @@ mod resolution_tests {
         // a caller can safely request again.
         let response = version_echo_chain()
             .infer(&InferRequest {
+                thinking_budget_tokens: 0,
                 request_id: "norm-1".to_owned(),
                 model: "gpt-4o-mini".to_owned(),
                 ..Default::default()
@@ -2372,6 +3069,7 @@ mod resolution_tests {
     async fn streamed_chunks_carry_the_requested_id_and_keep_their_shape() {
         let mut rx = version_echo_chain()
             .infer_stream(&InferRequest {
+                thinking_budget_tokens: 0,
                 request_id: "norm-2".to_owned(),
                 model: "gpt-4o-mini".to_owned(),
                 ..Default::default()
@@ -2614,6 +3312,7 @@ mod resolution_tests {
             azure_anthropic: "claude-haiku-4-5".to_owned(),
         };
         let req = InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "cfg-default-1".to_owned(),
             model: String::new(),
             ..Default::default()
@@ -2636,6 +3335,7 @@ mod resolution_tests {
             model: "text-embedding-3-large".to_owned(),
             zdr: true,
             region: "swedencentral".to_owned(),
+            min_privacy_tier: PrivacyTier::Unspecified,
         };
 
         let error = chain.create_embedding(&req).await.unwrap_err();

@@ -658,6 +658,11 @@ impl LettaMemoryAdapter {
         &self,
         org_id: &str,
         thread_id: &str,
+        // The thread's owner. Forwarded so the semantic tier applies the same
+        // per-user visibility rule as the durable query
+        // (`scope = 'user' AND owner = $3`) instead of relying on `thread_id`
+        // being non-empty to keep one user's memories out of another's recall.
+        owner_user_id: &str,
         query: &str,
         topic_filter: &[String],
         limit: u32,
@@ -684,6 +689,7 @@ impl LettaMemoryAdapter {
                 limit,
                 org_id: org_id.to_owned(),
                 updated_after: None,
+                user_id: owner_user_id.to_owned(),
             },
             &token,
         ) {
@@ -999,7 +1005,7 @@ mod tests {
         );
 
         let outcome = adapter
-            .search_detailed("org-a", "thread-a", "query", &[], 5)
+            .search_detailed("org-a", "thread-a", "user-a", "query", &[], 5)
             .await;
 
         assert!(outcome.entries.is_empty());
@@ -1035,7 +1041,7 @@ mod tests {
             "session-core-test-credential",
         );
         let outcome = adapter
-            .search_detailed("org-a", "thread-a", "query", &[], 5)
+            .search_detailed("org-a", "thread-a", "user-a", "query", &[], 5)
             .await;
 
         assert!(outcome.entries.is_empty());
@@ -1072,7 +1078,7 @@ mod tests {
             "session-core-test-credential",
         );
         let outcome = adapter
-            .search_detailed("org-a", "thread-a", "query", &[], 5)
+            .search_detailed("org-a", "thread-a", "user-a", "query", &[], 5)
             .await;
         stalled.abort();
 

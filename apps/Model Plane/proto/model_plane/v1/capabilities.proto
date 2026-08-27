@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "model_plane/v1/inference.proto";
+
 package model_plane.v1;
 
 option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
@@ -105,6 +107,16 @@ message CapabilityDetail {
   // RFC3339 timestamp for the runtime health attestation; empty means no
   // attestation and MUST derive to unavailable.
   string health_checked_at = 15;
+
+  // model-kind only: strongest privacy tier this model's serving providers can
+  // honor (registry-declared; startup-cached — see capability-core models
+  // table). UNSPECIFIED means no declared posture. The enum itself is declared
+  // once in inference.proto (shared package namespace).
+  PrivacyTier privacy_tier = 16;
+
+  // model-kind only: declared residency label ("global", "eu", "norway").
+  // Empty means undeclared.
+  string residency = 17;
 }
 
 // EvaluatePolicy — check whether a tool invocation is allowed.

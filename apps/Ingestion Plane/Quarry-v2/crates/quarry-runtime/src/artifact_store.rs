@@ -116,6 +116,26 @@ pub trait ArtifactStore: Send + Sync {
     /// itself authority to read the bytes.
     async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>>;
 
+    /// Bytes plus the object key they were stored under.
+    ///
+    /// Every backend already resolves the key on the way to the bytes and then
+    /// throws it away — and the key is the only authoritative record of what the
+    /// artifact IS (the producer chose the kind at `put` time and
+    /// `quarry_core::artifact::object_key` encoded it). Discarding it is why the
+    /// HTTP route had to serve everything as `application/octet-stream`, which
+    /// made a captured screenshot an opaque download with nowhere to render.
+    ///
+    /// Defaults to `get` with an empty key so a third-party backend keeps
+    /// compiling; an empty key resolves to the same opaque default it had
+    /// before, never to a wrong type.
+    async fn get_with_key(
+        &self,
+        org_id: &str,
+        id: &ArtifactKind,
+    ) -> QuarryResult<(Vec<u8>, String)> {
+        Ok((self.get(org_id, id).await?, String::new()))
+    }
+
     /// Cycle 22 / cluster #4 part 1 — paginated list of artifacts
     /// scoped to a single tenant. Returns an empty page by default so
     /// backends that don't index (e.g. S3 without a separate index) can
@@ -194,12 +214,20 @@ impl ArtifactStore for InMemoryStore {
     }
 
     async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+        Ok(self.get_with_key(org_id, id).await?.0)
+    }
+
+    async fn get_with_key(
+        &self,
+        org_id: &str,
+        id: &ArtifactKind,
+    ) -> QuarryResult<(Vec<u8>, String)> {
         let map = self.inner.read().await;
         let id_str = id.to_string();
         for (k, v) in map.iter() {
             if k.ends_with(&id_str) {
                 ensure_org_owns(org_id, k, id)?;
-                return Ok(v.clone());
+                return Ok((v.clone(), k.clone()));
             }
         }
         Err(QuarryError::new(
@@ -422,17 +450,26 @@ impl ArtifactStore for FilesystemStore {
     }
 
     async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+        Ok(self.get_with_key(org_id, id).await?.0)
+    }
+
+    async fn get_with_key(
+        &self,
+        org_id: &str,
+        id: &ArtifactKind,
+    ) -> QuarryResult<(Vec<u8>, String)> {
         let key = self.lookup_index(id).await?.ok_or_else(|| {
             QuarryError::new(ErrorCode::NotFound, format!("artifact {id} not found"))
         })?;
         ensure_org_owns(org_id, &key, id)?;
         let path = self.abs_path(&key);
-        tokio::fs::read(&path).await.map_err(|e| {
+        let bytes = tokio::fs::read(&path).await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::Internal,
                 format!("fs read {}: {e}", path.display()),
             )
-        })
+        })?;
+        Ok((bytes, key))
     }
 }
 
@@ -511,6 +548,14 @@ impl ArtifactStore for S3Store {
     }
 
     async fn get(&self, org_id: &str, id: &ArtifactKind) -> QuarryResult<Vec<u8>> {
+        Ok(self.get_with_key(org_id, id).await?.0)
+    }
+
+    async fn get_with_key(
+        &self,
+        org_id: &str,
+        id: &ArtifactKind,
+    ) -> QuarryResult<(Vec<u8>, String)> {
         let idx_key = Self::index_key(id);
         let idx_resp = self
             .client
@@ -546,7 +591,7 @@ impl ArtifactStore for S3Store {
             .await
             .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("s3 body read: {e}")))?
             .into_bytes();
-        Ok(body.to_vec())
+        Ok((body.to_vec(), key))
     }
 }
 

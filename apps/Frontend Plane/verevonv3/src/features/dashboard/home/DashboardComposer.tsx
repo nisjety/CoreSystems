@@ -84,6 +84,14 @@ import {
 	type ModelGroup,
 	type ModelInfo,
 } from "@/shared/api/chat-client";
+import {
+	isClaimedPrivacyTier,
+	isSelectablePrivacyTier,
+	privacyTierBadgeLabel,
+	privacyTierBadgeTitle,
+	sovereignCatalogNotice,
+	type PrivacyTier,
+} from "@/shared/api/privacy-tier";
 import { useI18n } from "@/shared/i18n";
 import { cn } from "@/shared/lib/cn";
 
@@ -193,6 +201,23 @@ export type DashboardComposerSubmitPayload = {
 	tools: Array<"image" | "reason" | "research" | "search">;
 	/** Temporary chat (Zero Data Retention) toggle state at send time. */
 	zdr?: boolean;
+	/**
+	 * Privacy tier of the SELECTED CATALOG MODEL, carried only when the user
+	 * picked one (intent modes carry none — the backend resolves them
+	 * server-side). Omitted from the wire unless set: unspecified means no
+	 * constraint, byte-identical to today's behavior.
+	 */
+	minPrivacyTier?: PrivacyTier;
+	/**
+	 * Reasoning effort from the response-mode selector: "Raskt svar" → 'quick',
+	 * "Dyp research" → 'deep'; Auto carries nothing. Maps to the wire's
+	 * `effort` field, which model-gateway turns into a real thinking budget
+	 * (quick=1024, deep=4096 tokens). This selector existed and rode the
+	 * payload as `responseMode` with ZERO downstream readers — the dial's read
+	 * path was fully built (gateway → provider → reasoning_delta → the Innsikt
+	 * popover) while no product surface ever wrote it.
+	 */
+	effort?: "quick" | "deep";
 };
 
 type PanelPosition = {
@@ -447,6 +472,21 @@ export function DashboardComposer(props: {
 	) => Promise<void> | void;
 	showTurnReceipt?: boolean;
 	submitting?: boolean;
+	/**
+	 * Let Enter submit while `submitting` is true, so a message typed during a
+	 * live stream becomes a MID-RUN delivery instead of being swallowed.
+	 *
+	 * Off by default: the dashboard composer's `submitting` window is its own
+	 * send round-trip, where a second submit would double-send. The chat page
+	 * opts in because there `submitting` spans the whole model stream and the
+	 * controller's `sendContent` routes a streaming-time submit into
+	 * `deliverMidRun` (persist to thread -> queue into the run). Until this
+	 * prop existed the guard below returned silently for the entire stream, so
+	 * the server-side queued-input machinery was client-side dead and mid-run
+	 * messages were still dropped — the exact bug it was built to fix. The
+	 * Stop button is unaffected; it still replaces the send button.
+	 */
+	allowMidRunSubmit?: boolean;
 	/** "Midlertidig samtale" (ChatGPT's Temporary Chat) — maps to the request's ZDR flag. */
 	temporaryChat?: boolean;
 	onTemporaryChatChange?: (value: boolean) => void;
@@ -542,6 +582,12 @@ export function DashboardComposer(props: {
 			id
 		);
 	};
+	// The selected model's attested privacy tier, if any. Only a real catalog
+	// selection can carry one: the pinned intent modes are resolved server-side,
+	// so they never claim a tier here.
+	const selectedPrivacyTier = createMemo(() =>
+		flatChatModels().find((model) => model.id === selectedModel())?.privacyTier,
+	);
 	const selectModel = (id: string) => {
 		setSelectedModel(id);
 		setModelOpen(false);
@@ -589,7 +635,7 @@ export function DashboardComposer(props: {
 	const submitEnabled = createMemo(() =>
 		isComposerSubmitEnabled({
 			hasContent: hasContent(),
-			submitting: props.submitting,
+			submitting: props.submitting && !props.allowMidRunSubmit,
 			voiceMode: voiceMode(),
 			voiceRecording: voiceRecording(),
 		}),
@@ -1374,7 +1420,7 @@ export function DashboardComposer(props: {
 			!hasContent() ||
 			voiceMode() ||
 			voiceRecording() ||
-			props.submitting
+			(props.submitting && !props.allowMidRunSubmit)
 		)
 			return;
 
@@ -1385,6 +1431,7 @@ export function DashboardComposer(props: {
 			deepSearch: deepSearch(),
 			files: snapshot.files,
 			imageMode: imageMode(),
+			minPrivacyTier: selectedPrivacyTier(),
 			model: selectedModel(),
 			responseMode: responseMode(),
 			text: snapshot.submittedText,
@@ -1597,11 +1644,34 @@ export function DashboardComposer(props: {
 															</span>
 														</span>
 														<span class="dashboard-composer-model-menu__right">
+															{/* `unspecified` states nothing — no badge for it either.
+																Evaluates to the tier or false so the Show callback narrows. */}
 															<Show
-																when={isExpensiveModel(
-																	model,
-																)}
+																when={isSelectablePrivacyTier(model.privacyTier)
+																	? model.privacyTier
+																	: false}
 															>
+																{(tier) => (
+																	<span
+																		class={cn(
+																			"dashboard-composer-model-badge",
+																			privacyTierBadgeClass(tier()),
+																		)}
+																		data-tone={
+																			isClaimedPrivacyTier(tier())
+																				? "claimed"
+																				: "plain"
+																		}
+																		title={privacyTierBadgeTitle(
+																			i18n,
+																			tier(),
+																		)}
+																	>
+																		{privacyTierBadgeLabel(i18n, tier())}
+																	</span>
+																)}
+															</Show>
+															<Show when={isExpensiveModel(model)}>
 																<span
 																	class="dashboard-composer-model-badge dashboard-composer-model-badge--premium"
 																	title={i18n.tr(
@@ -1612,12 +1682,7 @@ export function DashboardComposer(props: {
 																	$$
 																</span>
 															</Show>
-															<Show
-																when={
-																	selectedModel() ===
-																	model.id
-																}
-															>
+															<Show when={selectedModel() === model.id}>
 																<Check class="size-4" />
 															</Show>
 														</span>
@@ -1627,11 +1692,17 @@ export function DashboardComposer(props: {
 										</div>
 									)}
 								</For>
+								<Show when={selectedPrivacyTier() === "sovereign"}>
+									<p class="dashboard-composer-model-tier-note" role="note">
+										{sovereignCatalogNotice(i18n)}
+									</p>
+								</Show>
 							</div>
 						</Show>
-					</div>
+				</div>
 
 					<a
+						link
 						href="/agents"
 						title={i18n.tr("Opprett agent", "Create agent")}
 						class="dashboard-composer-agent-button verevon-composer-control"
@@ -2191,6 +2262,10 @@ function iconForAction(action: SpecializedAction): Component<LucideProps> {
 	return iconForKind(action.kind);
 }
 
+function privacyTierBadgeClass(tier: PrivacyTier): string {
+	return `dashboard-composer-model-badge--tier-${tier}`;
+}
+
 function getComposerTools(input: {
 	browseWeb: boolean;
 	deepSearch: boolean;
@@ -2216,6 +2291,7 @@ function createComposerSubmitPayload(input: {
 	deepSearch: boolean;
 	files: ComposerFile[];
 	imageMode: boolean;
+	minPrivacyTier?: PrivacyTier;
 	model: string;
 	responseMode: ResponseMode;
 	text: string;
@@ -2231,16 +2307,26 @@ function createComposerSubmitPayload(input: {
 			type: file.type || "application/octet-stream",
 			url: file.url,
 		})),
-		model: input.model || undefined,
-		text: input.text,
-		tools: getComposerTools({
-			browseWeb: input.browseWeb,
-			deepSearch: input.deepSearch,
-			imageMode: input.imageMode,
-			message: input.trimmedMessage,
-			responseMode: input.responseMode,
-		}),
-		zdr: input.zdr || undefined,
+			model: input.model || undefined,
+			// Key omitted entirely when no tier applies (intent modes, unspecified):
+			// callers and tests treat presence as "the user pinned a tier".
+			...(input.minPrivacyTier ? { minPrivacyTier: input.minPrivacyTier } : {}),
+			text: input.text,
+			tools: getComposerTools({
+				browseWeb: input.browseWeb,
+				deepSearch: input.deepSearch,
+				imageMode: input.imageMode,
+				message: input.trimmedMessage,
+				responseMode: input.responseMode,
+			}),
+			zdr: input.zdr || undefined,
+		// Presence-only, like minPrivacyTier: Auto omits the key so the wire
+		// body stays byte-identical for the default mode.
+		...(input.responseMode === "quick"
+			? { effort: "quick" as const }
+			: input.responseMode === "deep"
+				? { effort: "deep" as const }
+				: {}),
 	};
 }
 

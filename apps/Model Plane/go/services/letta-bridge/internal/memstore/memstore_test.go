@@ -93,7 +93,7 @@ func TestPutAndSearchRoundTrip(t *testing.T) {
 				t.Fatalf("Put: unexpected error: %v", err)
 			}
 
-			hits := s.Search(tt.orgID, "", tt.query, nil, time.Time{}, 10)
+			hits := s.Search(tt.orgID, "", "", tt.query, nil, time.Time{}, 10)
 			if len(hits) != tt.wantHits {
 				t.Errorf("Search(%q): got %d hits, want %d", tt.query, len(hits), tt.wantHits)
 			}
@@ -166,7 +166,7 @@ func TestTopicFiltering(t *testing.T) {
 				}
 			}
 
-			hits := s.Search("org-1", "", "", tt.topicFilter, time.Time{}, 100)
+			hits := s.Search("org-1", "", "", "", tt.topicFilter, time.Time{}, 100)
 			if len(hits) != tt.wantHits {
 				t.Errorf("got %d hits, want %d", len(hits), tt.wantHits)
 			}
@@ -229,7 +229,7 @@ func TestTimeRangeFiltering(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hits := s.Search("org-1", "", "", nil, tt.updatedAfter, 100)
+			hits := s.Search("org-1", "", "", "", nil, tt.updatedAfter, 100)
 			if len(hits) != tt.wantHits {
 				t.Errorf("got %d hits, want %d", len(hits), tt.wantHits)
 			}
@@ -259,7 +259,7 @@ func TestConcurrentAccess(t *testing.T) {
 				}
 
 				// Interleave reads with writes.
-				s.Search("org-concurrent", "", "content", nil, time.Time{}, 10)
+				s.Search("org-concurrent", "", "", "content", nil, time.Time{}, 10)
 			}
 		}(g)
 	}
@@ -267,7 +267,7 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 
 	// After all goroutines complete, verify the total count.
-	allHits := s.Search("org-concurrent", "", "", nil, time.Time{}, 0)
+	allHits := s.Search("org-concurrent", "", "", "", nil, time.Time{}, 0)
 	expected := goroutines * opsPerGoroutine
 	if len(allHits) != expected {
 		t.Errorf("expected %d records, got %d", expected, len(allHits))
@@ -288,7 +288,7 @@ func TestSearchResultOrder(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	hits := s.Search("org-1", "", "hello", nil, time.Time{}, 100)
+	hits := s.Search("org-1", "", "", "hello", nil, time.Time{}, 100)
 	if len(hits) != 2 {
 		t.Fatalf("expected 2 hits, got %d", len(hits))
 	}
@@ -318,7 +318,7 @@ func TestThreadIDScoping(t *testing.T) {
 	}
 
 	// Search scoped to thread-A should only return 1 hit.
-	hits := s.Search("org-1", "thread-A", "", nil, time.Time{}, 100)
+	hits := s.Search("org-1", "thread-A", "", "", nil, time.Time{}, 100)
 	if len(hits) != 1 {
 		t.Errorf("thread-A: got %d hits, want 1", len(hits))
 	}
@@ -327,7 +327,7 @@ func TestThreadIDScoping(t *testing.T) {
 	}
 
 	// Search without thread filter should return both.
-	allHits := s.Search("org-1", "", "", nil, time.Time{}, 100)
+	allHits := s.Search("org-1", "", "", "", nil, time.Time{}, 100)
 	if len(allHits) != 2 {
 		t.Errorf("unscoped: got %d hits, want 2", len(allHits))
 	}
@@ -343,7 +343,7 @@ func TestPutOverwritesExistingRecord(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	hits := s.Search("org-1", "", "", nil, time.Time{}, 100)
+	hits := s.Search("org-1", "", "", "", nil, time.Time{}, 100)
 	if len(hits) != 1 {
 		t.Fatalf("expected 1 record after overwrite, got %d", len(hits))
 	}
@@ -361,13 +361,13 @@ func TestTopKLimit(t *testing.T) {
 		}
 	}
 
-	hits := s.Search("org-1", "", "", nil, time.Time{}, 3)
+	hits := s.Search("org-1", "", "", "", nil, time.Time{}, 3)
 	if len(hits) != 3 {
 		t.Errorf("expected topK=3 to return 3 hits, got %d", len(hits))
 	}
 
 	// topK=0 should return all.
-	allHits := s.Search("org-1", "", "", nil, time.Time{}, 0)
+	allHits := s.Search("org-1", "", "", "", nil, time.Time{}, 0)
 	if len(allHits) != 10 {
 		t.Errorf("expected topK=0 to return all 10, got %d", len(allHits))
 	}
@@ -383,7 +383,7 @@ func TestDeleteScopedByOwner(t *testing.T) {
 	if deleted := s.Delete("org-1", "user-b", "m1"); deleted {
 		t.Fatal("Delete with the wrong userID reported success")
 	}
-	if hits := s.Search("org-1", "", "", nil, time.Time{}, 100); len(hits) != 1 {
+	if hits := s.Search("org-1", "", "", "", nil, time.Time{}, 100); len(hits) != 1 {
 		t.Fatalf("record should survive a wrong-owner delete attempt, got %d hits", len(hits))
 	}
 
@@ -401,12 +401,52 @@ func TestDeleteScopedByOwner(t *testing.T) {
 	if deleted := s.Delete("org-1", "user-a", "m1"); !deleted {
 		t.Fatal("Delete with the correct owner reported failure")
 	}
-	if hits := s.Search("org-1", "", "", nil, time.Time{}, 100); len(hits) != 0 {
+	if hits := s.Search("org-1", "", "", "", nil, time.Time{}, 100); len(hits) != 0 {
 		t.Fatalf("record should be gone after owner delete, got %d hits", len(hits))
 	}
 
 	// Deleting again is a clean, non-erroring false -- not a repeat success.
 	if deleted := s.Delete("org-1", "user-a", "m1"); deleted {
 		t.Fatal("second Delete of an already-removed record reported success")
+	}
+}
+
+// TestSearchScopesUserOwnedMemories pins the per-user visibility rule.
+//
+// Before `userID` reached Search, the only scoping was org + optional thread, so
+// a search with no thread filter returned every user's personal memories in the
+// org. That was safe in production only because the single caller
+// (session-core's SearchMemory) always passed a thread id and a thread has one
+// owner — the boundary itself enforced nothing. This asserts the boundary.
+//
+// The rule mirrors session-core's durable query (`scope = 'user' AND owner = $3`):
+// your own user-owned memories, plus everything owned by nobody.
+func TestSearchScopesUserOwnedMemories(t *testing.T) {
+	s := NewStore()
+	// Two users' personal memories plus one org-level memory (no owner).
+	s.Put("org-1", "thread-a", "USER", "mem-alice", "alice", "alice prefers metric units")
+	s.Put("org-1", "thread-b", "USER", "mem-bob", "bob", "bob prefers imperial units")
+	s.Put("org-1", "thread-c", "POLICY", "mem-org", "", "invoices are approved by finance")
+
+	// No thread filter — the case the old code answered org-wide.
+	hits := s.Search("org-1", "", "alice", "prefers", nil, time.Time{}, 100)
+	ids := make([]string, 0, len(hits))
+	for _, h := range hits {
+		ids = append(ids, h.MemoryID)
+	}
+	if len(ids) != 1 || ids[0] != "mem-alice" {
+		t.Fatalf("alice must see only her own personal memory, got %v", ids)
+	}
+
+	// Org-level memories are owned by nobody and stay visible to everyone.
+	orgHits := s.Search("org-1", "", "alice", "invoices", nil, time.Time{}, 100)
+	if len(orgHits) != 1 || orgHits[0].MemoryID != "mem-org" {
+		t.Fatalf("an unowned org memory must remain visible, got %v", orgHits)
+	}
+
+	// And the regression itself: without a user filter the old behaviour returns.
+	unscoped := s.Search("org-1", "", "", "prefers", nil, time.Time{}, 100)
+	if len(unscoped) != 2 {
+		t.Fatalf("an empty user id is documented as no filter (org-wide); got %d hits, want 2", len(unscoped))
 	}
 }

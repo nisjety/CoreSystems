@@ -15,8 +15,8 @@ use std::fmt::Write as _;
 use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
-    ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest,
-    ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition, WebSearchRequest,
+    ChatMessage, FinalizeToolActionRequest, InferRequest, ReserveToolActionRequest,
+    SearchMemoryRequest, ToolCall, ToolDefinition, WebSearchRequest,
 };
 use mp_events::publisher::EventPublisher;
 use serde_json::Value;
@@ -457,6 +457,69 @@ pub(crate) fn inline_tool_allowed(name: &str) -> bool {
         && !name.starts_with("mcp__")
         && name != "mcp_call"
         && name != "mcp_catalog"
+}
+
+/// Prompt guidance for tools whose required arguments only the user can
+/// supply.
+///
+/// Byte-identical to execution-core's `SNIPPET_USER_SUPPLIED_ARGS`, pinned by
+/// the cross-loop contract test: the two loops must describe the same rule in
+/// the same words, or an operator reading two transcripts learns two rules.
+/// Measured on the agent loop 2026-08-25: +18.3 pp correct elicitation
+/// (p=0.016) with zero under-calling regression at n=60. Chat had NOTHING —
+/// its system stack (instructions, grounding, temporal, identity, memory)
+/// carries no tool guidance at all, and chat measured **20/20 fabricated**
+/// on the same queries. Here the grounding gate refuses those calls, so the
+/// snippet's job on chat is to save the wasted round-trip, not correctness.
+///
+/// # Why the wording changed on 2026-08-26
+///
+/// The first version ended "...that is asking for a fact, not asking
+/// permission, and the rule against asking permission does not apply to it" —
+/// a cross-reference to [`PREAMBLE_CORE`]'s anti-permission sentence. That
+/// reference resolves in the agent loop and DANGLES in chat, whose system stack
+/// (authored instructions, grounding, temporal, identity, memory) carries no
+/// tool guidance at all: the model was pointed at a rule it could not find.
+/// Rewritten to be self-contained — it now states the permission distinction
+/// inline and names the required action exclusively ("do not call the tool at
+/// all — reply with one short question"), because the measured failure was the
+/// model calling anyway rather than misunderstanding.
+const SNIPPET_USER_SUPPLIED_ARGS: &str = "Some offered tools require values only the user can \
+supply — a street address, a postal code, package dimensions, a price. Fill required arguments \
+freely when the request states them or when they are public fact (a Norwegian city's coordinates, \
+a registered company's name), but never invent a user-only value: a call built on a guessed postal \
+code or guessed dimensions still succeeds, and returns a real, plausible, wrong answer that nobody \
+can tell apart from a correct one. When such a value is missing, do not call the tool at \
+all — reply with one short question naming exactly the values you need. Asking for a missing fact \
+is not asking permission: never ask whether to proceed with a call you can already make.";
+
+/// The chat loop's spellings of the tools that need the snippet. Chat has no
+/// `book_shipment`; its shipping tool is `shipping_get_quotes`, plus the
+/// Console's client-declared dotted alias the dispatch arm also accepts.
+/// Every name here must have a `GROUNDED_ARGUMENT_PATHS` entry (contract-
+/// tested): a warned-but-unchecked tool is advice already measured ignored,
+/// and a checked-but-unwarned tool is a refusal the model cannot anticipate.
+const USER_SUPPLIED_ARG_TOOLS: &[&str] = &["shipping_get_quotes", "shipping.get_quotes"];
+
+/// The system message carrying [`SNIPPET_USER_SUPPLIED_ARGS`], when this
+/// turn's offered set contains a tool that needs it. Pure so it is testable
+/// without the SSE machinery; `None` when no offered tool qualifies, because
+/// advice about tools that are not offered is noise the model has to discount.
+#[must_use]
+pub(crate) fn user_supplied_args_notice(
+    tool_defs: &[mp_contracts::model_plane::v1::ToolDefinition],
+) -> Option<mp_contracts::model_plane::v1::ChatMessage> {
+    if !tool_defs
+        .iter()
+        .any(|def| USER_SUPPLIED_ARG_TOOLS.contains(&def.name.as_str()))
+    {
+        return None;
+    }
+    Some(mp_contracts::model_plane::v1::ChatMessage {
+        role: "system".to_owned(),
+        content: SNIPPET_USER_SUPPLIED_ARGS.to_owned(),
+        name: String::new(),
+    })
 }
 
 /// Split `mcp__<server_id>__<tool>` into `(server_id, tool)`. Mirrors
@@ -1492,6 +1555,57 @@ fn knowledge_search_request(org_id: &str, query: &str, top_k: i32, zdr: bool) ->
 /// service's JWT interceptor accepts the call. The inline tool loop previously
 /// issued bare gRPC requests to inference-core / session-core, which reject
 /// them Unauthenticated — killing every model-decided tool round in prod.
+/// The repair message for a builtin tool call whose arguments do not match its
+/// declared schema, or `None` when there is nothing to say.
+///
+/// The schema comes from `builtin_tool_defs()` — the same list that decides what
+/// the model was offered — so the thing being validated against is exactly the
+/// thing the model was shown. A tool not in that list (a client-declared tool, an
+/// MCP tool) has no schema here and is left alone; validating against a schema we
+/// do not hold would be guessing.
+fn builtin_argument_problem(
+    tool_name: &str,
+    arguments_json: &str,
+    conversation: &str,
+) -> Option<String> {
+    // Schema validation only where we HOLD the schema (a builtin). A
+    // client-declared tool is validated against nothing here on purpose —
+    // guessing a schema is worse than none. Grounding, below, is different:
+    // it needs no schema, only the conversation, so it must NOT hide behind
+    // this lookup. It used to: the dispatch arm accepts the Console's
+    // client-declared `shipping.get_quotes` alias, which is not a builtin, so
+    // the early `?` skipped grounding too and the alias walked past the gate
+    // into the real shipping executor.
+    if let Some(def) = builtin_tool_defs()
+        .into_iter()
+        .find(|def| def.name == tool_name)
+    {
+        let errors =
+            mp_contracts::tool_arguments::validate_arguments(&def.parameters_json, arguments_json);
+        if !errors.is_empty() {
+            return Some(mp_contracts::tool_arguments::repair_message(
+                tool_name,
+                &errors,
+                &def.parameters_json,
+            ));
+        }
+    }
+    // Schema-shaped is not the same as true: a required value the user never
+    // gave is well-formed and clears every check above this one. Kept identical
+    // to execution-core's `argument_problem`, including the order — the two
+    // loops must agree on what counts as grounded or the same call is refused on
+    // one surface and executed on the other.
+    let ungrounded =
+        mp_contracts::tool_arguments::ungrounded_arguments(tool_name, arguments_json, conversation);
+    if !ungrounded.is_empty() {
+        return Some(mp_contracts::tool_arguments::grounding_message(
+            tool_name,
+            &ungrounded,
+        ));
+    }
+    None
+}
+
 fn with_authorization<T>(value: T, bearer: &str) -> tonic::Request<T> {
     let mut request = tonic::Request::new(value);
     if bearer.is_empty() {
@@ -1619,6 +1733,12 @@ pub async fn dispatch_tool(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    prompt_contents: &[String],
+    // Every turn except the system prompt, for grounding supplied arguments.
+    // Separate from `prompt_contents` because that one keeps the system turn
+    // (reattachment needs it) and drops roles, and grounding must not treat the
+    // preamble as something the user said.
+    conversation: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
     execution_bearer: Option<&VerifiedExecutionBearer>,
     inference_bearer: &str,
@@ -1638,6 +1758,24 @@ pub async fn dispatch_tool(
             call,
             "side-effecting tools require governed agentic execution and approval",
         );
+    }
+
+    // Check the arguments against the tool's OWN declared schema before anything
+    // is dispatched (`mp_contracts::tool_arguments`).
+    //
+    // Without this a mismatched argument fails somewhere downstream — in an
+    // executor, or at a remote server answering "Invalid request" with no
+    // indication of which field was at fault — and the model's only recourse is
+    // to guess. Here it gets the exact field problems and the schema, and can
+    // repair in one round.
+    //
+    // Fails OPEN by construction: the validator has no opinion on an unparseable
+    // or unusual schema, an undeclared field, or a coercion executors accept
+    // anyway. So this cannot refuse a call that would have worked — which is the
+    // only way a pre-dispatch check is safe to add to a live path.
+    if let Some(problem) = builtin_argument_problem(&call.name, &call.arguments_json, conversation)
+    {
+        return err_outcome(call, problem);
     }
 
     match call.name.as_str() {
@@ -2029,6 +2167,9 @@ pub async fn dispatch_tool(
             match client
                 .search_memory(with_authorization(
                     SearchMemoryRequest {
+                        // Empty on purpose: session-core derives the owner from
+                        // the verified thread, never from the caller.
+                        user_id: String::new(),
                         thread_id: thread_id.to_owned(),
                         query,
                         topic_filter: Vec::new(),
@@ -2075,60 +2216,132 @@ pub async fn dispatch_tool(
                 Err(e) => err_outcome(call, format!("recall_memory failed: {}", e.message())),
             }
         }
-        "save_memory" => {
-            if zdr {
+        // `save_memory` deliberately has NO arm here. It USED to: ~60 lines of
+        // live-looking dispatch sat behind `inline_tool_allowed`'s hard
+        // early-return and could never execute — dead code that two separate
+        // audits misread as "memory writes are wired" (the exact
+        // reads-as-wired hazard claude-hermes-deepseek.md §13.3 flags in
+        // Claude Code). The write path now lives where the authority model
+        // says it must: execution-core's governed loop (`save_memory` in
+        // runtime_loop). This loop stays read-only; `recall_memory` above is
+        // its full memory surface.
+        // Recover conversation the prompt no longer carries. Compaction edits
+        // the PROMPT, not the durable thread, so "I cannot see that" was only
+        // ever true of the request — see `crate::context_reattach`.
+        //
+        // Read-only and scoped to this thread by construction: `thread_id` and
+        // `org_id` are the verified request's, never model input, so the model
+        // cannot aim this at another conversation or another tenant.
+        "reattach_context" => {
+            use mp_contracts::model_plane::v1::ListConversationRequest;
+
+            if thread_id.trim().is_empty() {
                 return err_outcome(
                     call,
-                    "save_memory is unavailable in Zero Data Retention mode",
+                    "reattach_context needs a durable thread; this turn has none",
                 );
             }
-            let content = arg_str(&call.arguments_json, "content");
-            if content.trim().is_empty() {
-                return err_outcome(call, "save_memory requires a 'content' argument");
+            let query = arg_str(&call.arguments_json, "query");
+            // An unauthenticated read would come back empty from session-core's
+            // interceptor, which looks identical to "there is nothing earlier".
+            // Say which one it is instead of letting the model conclude the
+            // history is empty.
+            if session_bearer.is_empty() {
+                return err_outcome(
+                    call,
+                    "reattach_context requires a verified session credential",
+                );
             }
-            let topic = {
-                let t = arg_str(&call.arguments_json, "topic");
-                if t.is_empty() {
-                    "MEMORY".to_owned()
-                } else {
-                    t
-                }
-            };
-            let mut client = state.memory_client.clone();
-            match client
-                .index_memory(with_authorization(
-                    IndexMemoryRequest {
-                        thread_id: thread_id.to_owned(),
-                        topic,
-                        content,
-                        org_id: org_id.to_owned(),
-                        // Empty means "assign a fresh id" -- this call site never
-                        // has an existing memory to update, per
-                        // letta_adapter.rs's documented contract for this field.
-                        memory_id: String::new(),
-                        user_id: user_id.to_owned(),
-                    },
-                    session_bearer,
-                ))
+            let request = with_authorization(
+                ListConversationRequest {
+                    org_id: org_id.to_owned(),
+                    thread_id: thread_id.to_owned(),
+                },
+                session_bearer,
+            );
+            let messages = match state
+                .session_client
+                .clone()
+                .list_conversation(request)
                 .await
             {
-                Ok(resp) => {
-                    let output = serde_json::json!({
-                        "memory_id": resp.into_inner().memory_id,
-                        "saved": true,
-                    })
-                    .to_string();
-                    ToolOutcome {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        provenance: crate::moderation::ToolProvenance::unscreened(
-                            &call.name, &output,
-                        ),
-                        output,
-                        error: None,
-                    }
+                Ok(response) => response.into_inner().messages,
+                Err(error) => {
+                    tracing::warn!(%error, %thread_id, "reattach_context read failed");
+                    return err_outcome(
+                        call,
+                        "reattach_context could not read this conversation right now",
+                    );
                 }
-                Err(e) => err_outcome(call, format!("save_memory failed: {}", e.message())),
+            };
+            let result =
+                crate::context_reattach::select_reattachment(&messages, &query, prompt_contents);
+            let output = crate::context_reattach::render_reattachment(&result);
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &output),
+                output,
+                error: None,
+            }
+        }
+        // Recover a skill the per-prompt budget cut. `skill_budget` degrades
+        // before dropping and marks what it cut — honest, and until now
+        // unrecoverable: the model read "truncated" and had no way to obtain the
+        // rest. An instruction is the worst thing to leave half-read.
+        //
+        // Org-scoped by construction: `org_id` is the verified request's, never
+        // model input, so this cannot read another tenant's skills.
+        "reattach_skill" => {
+            use mp_contracts::model_plane::v1::ListAgentSkillsRequest;
+
+            let name = arg_str(&call.arguments_json, "name");
+            if name.trim().is_empty() {
+                return err_outcome(
+                    call,
+                    "reattach_skill requires the skill's 'name' as shown in its block",
+                );
+            }
+            if session_bearer.is_empty() {
+                return err_outcome(
+                    call,
+                    "reattach_skill requires a verified session credential",
+                );
+            }
+            let request = with_authorization(
+                ListAgentSkillsRequest {
+                    org_id: org_id.to_owned(),
+                    // Everything, not just enabled: a disabled skill must be
+                    // reported as disabled rather than as missing, and that
+                    // distinction is only available if it comes back.
+                    enabled_only: false,
+                },
+                session_bearer,
+            );
+            let skills = match state
+                .session_client
+                .clone()
+                .list_agent_skills(request)
+                .await
+            {
+                Ok(response) => response.into_inner().skills,
+                Err(error) => {
+                    tracing::warn!(%error, %org_id, "reattach_skill: skill read failed");
+                    return err_outcome(
+                        call,
+                        "reattach_skill could not read this organization's skills right now",
+                    );
+                }
+            };
+            let output = crate::skills::render_recovered_skill(
+                &mp_contracts::skill_recovery::recover_skill(&skills, &name),
+            );
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &output),
+                output,
+                error: None,
             }
         }
         // Knowledge-base RAG — searches the org's OWN ingested documents via
@@ -2522,6 +2735,12 @@ async fn dispatch_audited_tool(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    prompt_contents: &[String],
+    // Every turn except the system prompt, for grounding supplied arguments.
+    // Separate from `prompt_contents` because that one keeps the system turn
+    // (reattachment needs it) and drops roles, and grounding must not treat the
+    // preamble as something the user said.
+    conversation: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
     execution_bearer: Option<&VerifiedExecutionBearer>,
     inference_bearer: &str,
@@ -2550,22 +2769,57 @@ async fn dispatch_audited_tool(
         .await
         .map_err(|_| "tool audit reservation failed")?;
 
-    let outcome = dispatch_tool(
-        state,
-        run_id,
-        org_id,
-        user_id,
-        thread_id,
-        data_plane_bearer,
-        execution_bearer,
-        inference_bearer,
-        session_bearer,
-        capability_bearer,
-        zdr,
-        call,
-        ingestion_bearer,
-    )
-    .await;
+    // Bounded transient-failure retry, deliberately INSIDE the audit
+    // reserve/finalize pair: this is one logical tool call that took N
+    // transport attempts, not N tool calls. Reserving per attempt would
+    // inflate the audit trail with actions the model never asked for.
+    //
+    // No side-effect gate is needed here (unlike execution-core's copy) —
+    // `inline_tool_allowed` already refused every side-effecting tool before
+    // this point, so a replay costs latency, never a duplicated effect. See
+    // `crate::tool_retry`'s module doc.
+    let mut outcome = None;
+    for attempt in 1..=crate::tool_retry::MAX_TOOL_ATTEMPTS {
+        if attempt > 1 {
+            tokio::time::sleep(crate::tool_retry::backoff_before_attempt(attempt)).await;
+        }
+        let result = dispatch_tool(
+            state,
+            run_id,
+            org_id,
+            user_id,
+            thread_id,
+            prompt_contents,
+            conversation,
+            data_plane_bearer,
+            execution_bearer,
+            inference_bearer,
+            session_bearer,
+            capability_bearer,
+            zdr,
+            call,
+            ingestion_bearer,
+        )
+        .await;
+        let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
+            && result
+                .error
+                .as_deref()
+                .is_some_and(crate::tool_retry::is_transient_tool_failure);
+        if !should_retry {
+            outcome = Some(result);
+            break;
+        }
+        tracing::warn!(
+            request_id = %request_id,
+            tool = %call.name,
+            attempt,
+            error = result.error.as_deref().unwrap_or_default(),
+            "chat tool loop: retrying after a transient failure"
+        );
+        outcome = Some(result);
+    }
+    let outcome = outcome.expect("MAX_TOOL_ATTEMPTS >= 1 always yields an outcome");
     let finalize = FinalizeToolActionRequest {
         run_id: run_id.to_owned(),
         action_id,
@@ -2619,6 +2873,14 @@ pub(crate) async fn dispatch_web_tool_audited(
         org_id,
         user_id,
         thread_id,
+        // Web tools only on these paths, and `reattach_context` is not one of
+        // them — there is no prompt to exclude from a recovery that cannot
+        // happen here.
+        &[],
+        // Nothing to ground against, and nothing needing it: the ground-checked
+        // tools are the two shipping ones and neither is reachable from a
+        // web-only dispatch. Empty means "cannot judge", which fails open.
+        "",
         None,
         None,
         "",
@@ -2642,6 +2904,16 @@ pub(crate) async fn dispatch_web_tool_audited(
 #[must_use]
 pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
     vec![
+        ToolDefinition {
+            name: "reattach_context".to_owned(),
+            description: "Read back earlier messages from THIS conversation that were compacted out of your prompt to fit the context window. Use it when the user refers to something you cannot see, or when a conversation summary only gestures at a detail you now need. Give a short query naming what you are looking for, or omit it to read the oldest history. This reads only this conversation — it is not a search over documents or memory.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"What to look for in the earlier conversation. Omit to read the oldest messages."}}}"#.to_owned(),
+        },
+        ToolDefinition {
+            name: "reattach_skill".to_owned(),
+            description: "Read one of this organization's skill instructions back IN FULL. Use it when a skill block in your context ends with a truncation marker, or when a rule you are about to follow looks cut off — acting on half an instruction is worse than pausing to read the rest. Give the skill's name exactly as it appears in the block.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"name":{"type":"string","description":"The skill's name, exactly as shown in its block"}},"required":["name"]}"#.to_owned(),
+        },
         ToolDefinition {
             name: "web_search".to_owned(),
             description: "Search the public web for current information. Returns ranked results with title, url, and snippet. Use this when the answer depends on facts that may have changed since your training (statistics, prices, news, versions, current office-holders). Do NOT use it for timeless questions (math, definitions, how-to, code), for weather (use get_weather), or for the organization's own data (use knowledge_search).".to_owned(),
@@ -2942,6 +3214,14 @@ pub async fn run_forced_web_search(
         org_id,
         user_id,
         thread_id,
+        // Web tools only on these paths, and `reattach_context` is not one of
+        // them — there is no prompt to exclude from a recovery that cannot
+        // happen here.
+        &[],
+        // Nothing to ground against, and nothing needing it: the ground-checked
+        // tools are the two shipping ones and neither is reachable from a
+        // web-only dispatch. Empty means "cannot judge", which fails open.
+        "",
         None,
         None,
         "",
@@ -3252,6 +3532,10 @@ pub async fn run_tool_rounds(
     session_bearer: &str,
     capability_bearer: Option<&str>,
     zdr: bool,
+    // Caller-selected minimum privacy tier (wire numeric). Every tool-round
+    // infer carries it so a derived call never reaches a provider the main
+    // chain would refuse.
+    min_privacy_tier: i32,
     model: &str,
     base_messages: Vec<ChatMessage>,
     tools: Vec<ToolDefinition>,
@@ -3301,11 +3585,39 @@ pub async fn run_tool_rounds(
             );
         }
 
+        // The tool-round boundary: the one point in a run where the loop is
+        // between actions rather than mid-call, and so the only place a message
+        // the user typed mid-run can arrive without cutting a tool off. It
+        // arrives as a PAUSE (see `queued_input`) — the model classifies it as a
+        // redirect or a follow-up and acts accordingly, rather than the caller
+        // having had to guess which it was before the model read it.
+        //
+        // Drained here rather than after the round's tools so an injected
+        // message is never a candidate for this round's own payload clearing,
+        // and so a message that landed before the first inference still reaches
+        // the model's first look at the turn.
+        let queued = state.queued_inputs.drain(request_id);
+        if !queued.is_empty() {
+            tracing::info!(
+                %request_id,
+                delivered = queued.len(),
+                "delivering mid-run user input at a tool-round boundary"
+            );
+            messages.extend(crate::queued_input::delivery_messages(&queued));
+            // Emitted at DELIVERY, not at enqueue: the POST already confirmed
+            // acceptance, and what the client cannot otherwise know is when the
+            // agent actually saw it.
+            events
+                .push(ChatEvent::QueuedInput { messages: queued })
+                .await;
+        }
+
         let mut client = state.inference_client.clone();
         // Forward the delegated inference bearer — inference-core rejects a bare
         // Infer, which silently killed every model-decided tool round in prod.
         let infer = client.infer(with_authorization(
             InferRequest {
+                thinking_budget_tokens: 0,
                 request_id: request_id.to_owned(),
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
@@ -3315,8 +3627,14 @@ pub async fn run_tool_rounds(
                 max_tokens: TOOL_ROUND_TOKENS,
                 structured_output_schema: String::new(),
                 zdr,
+                // Same caller privacy floor as the answer stream: a tool-round
+                // infer must never reach a provider the main chain would refuse.
+                min_privacy_tier,
                 tools: tools.clone(),
                 tool_choice: tool_choice.clone(),
+                // No caller here has a residency floor to express yet; left for
+                // a future org-policy wiring (see inference.proto's field doc).
+                min_residency: String::new(),
             },
             inference_bearer,
         ));
@@ -3379,6 +3697,30 @@ pub async fn run_tool_rounds(
             None
         };
 
+        // What the model can already see this round. `reattach_context`
+        // excludes these, so a recovery spends its budget on what compaction
+        // actually dropped — and so "nothing matched" means the history really
+        // lacks it rather than the match being a message already in front of
+        // the model. Snapshotted per round because a tool result appended last
+        // round is visible this round.
+        let prompt_contents: Vec<String> = messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect();
+        // `&[String]` is Copy, so each per-call future can capture it; moving
+        // the Vec into the first closure would not compile.
+        let prompt_contents: &[String] = &prompt_contents;
+        // Grounding view: same turns minus the system prompt. `from.name:
+        // "Verevon"` was a measured fabrication and that string appears only in
+        // the preamble, so including it would ground the very value it invented.
+        let grounding_conversation: String = messages
+            .iter()
+            .filter(|message| message.role != "system")
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let grounding_conversation: &str = &grounding_conversation;
+
         let mut prepared = Vec::with_capacity(resp.tool_calls.len());
         for (index, call) in resp.tool_calls.iter().enumerate() {
             let args = serde_json::from_str::<serde_json::Value>(&call.arguments_json)
@@ -3432,6 +3774,8 @@ pub async fn run_tool_rounds(
                     org_id,
                     user_id,
                     thread_id,
+                    &prompt_contents,
+                    grounding_conversation,
                     data_plane_bearer,
                     execution_bearer,
                     inference_bearer,
@@ -3722,6 +4066,8 @@ mod tests {
             "org_test",
             "user_test",
             "thread_test",
+            &[],
+            "",
             None,
             None,
             "",
@@ -3881,7 +4227,21 @@ mod tests {
         let call = tool_call("result_query", r#"{"handle_id":"res_does_not_exist"}"#);
 
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            &call,
+            None,
         )
         .await;
 
@@ -3914,7 +4274,21 @@ mod tests {
             ),
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            &call,
+            None,
         )
         .await;
 
@@ -3949,7 +4323,21 @@ mod tests {
             &format!(r#"{{"handle_id":"{handle_id}","aggregate":{{"op":"count"}}}}"#),
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            &call,
+            None,
         )
         .await;
 
@@ -3978,7 +4366,21 @@ mod tests {
         let call = tool_call("result_query", &format!(r#"{{"handle_id":"{handle_id}"}}"#));
         let outcome = dispatch_tool(
             // Same org, different user.
-            &state, "run", "org", "user_b", "thread", None, None, "", "", None, false, &call, None,
+            &state,
+            "run",
+            "org",
+            "user_b",
+            "thread",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            &call,
+            None,
         )
         .await;
 
@@ -4044,7 +4446,21 @@ mod tests {
             r#"{"tool_name":"mcp__srv__create_order","arguments":{"order_id":{"nested":1}}}"#,
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            &call,
+            None,
         )
         .await;
 
@@ -4065,7 +4481,21 @@ mod tests {
             r#"{"tool_name":"mcp__srv__create_order","arguments":{"order_id":"SO-1","segment":"b2b"}}"#,
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            &call,
+            None,
         )
         .await;
 
@@ -4089,7 +4519,21 @@ mod tests {
             r#"{"tool_name":"mcp__srv__delete_everything","arguments":{}}"#,
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            &call,
+            None,
         )
         .await;
 
@@ -4109,7 +4553,21 @@ mod tests {
             r#"{"order_id":"SO-1","segment":"b2b"}"#,
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            &call,
+            None,
         )
         .await;
         let error = outcome.error.expect("direct MCP must be denied");
@@ -4130,6 +4588,8 @@ mod tests {
             "org",
             "user",
             "thread",
+            &[],
+            "",
             None,
             None,
             "",
@@ -4259,7 +4719,11 @@ mod tests {
         let checks = builtin_tool_defs().into_iter().map(|def| {
             let state = &state;
             async move {
-                let call = tool_call(&def.name, "{}");
+                // Minimally schema-valid arguments, not `{}`. Pre-dispatch
+                // validation now short-circuits a call with a missing required
+                // field, so `{}` would leave this test passing while never
+                // reaching the arm it exists to prove is there.
+                let call = tool_call(&def.name, &minimal_valid_arguments(&def.parameters_json));
                 let dispatch = dispatch_tool(
                     state,
                     "run_test",
@@ -4269,6 +4733,8 @@ mod tests {
                     "org_test",
                     "user_test",
                     "thread_test",
+                    &[],
+                    "",
                     None,
                     None,
                     "",
@@ -4288,6 +4754,13 @@ mod tests {
         });
 
         for (name, error) in futures::future::join_all(checks).await {
+            assert!(
+                !error.contains("was NOT called"),
+                "advertised tool '{name}' was refused by pre-dispatch argument validation even \
+                 with minimally valid arguments — either its schema disagrees with itself or \
+                 `minimal_valid_arguments` cannot satisfy it, and either way this test is no \
+                 longer proving the dispatch arm exists: {error}"
+            );
             assert!(
                 !error.contains("unknown tool"),
                 "advertised tool '{name}' has no dispatch arm in dispatch_tool — it would fail on \
@@ -4425,7 +4898,20 @@ mod tests {
         let state = crate::state::AppState::new();
         let call = tool_call("social_list_accounts", "{}");
         let outcome = dispatch_tool(
-            &state, "run_1", "org_1", "user_1", "thread_1", None, None, "", "", None, true, &call,
+            &state,
+            "run_1",
+            "org_1",
+            "user_1",
+            "thread_1",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            true,
+            &call,
             None,
         )
         .await;
@@ -4442,7 +4928,20 @@ mod tests {
         let state = crate::state::AppState::new();
         let call = tool_call("knowledge_list_documents", r#"{"limit":5}"#);
         let outcome = dispatch_tool(
-            &state, "run_1", "org_1", "user_1", "thread_1", None, None, "", "", None, true, &call,
+            &state,
+            "run_1",
+            "org_1",
+            "user_1",
+            "thread_1",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            true,
+            &call,
             None,
         )
         .await;
@@ -4567,6 +5066,40 @@ mod tests {
             events.push(event).await;
         }
         assert_eq!(events.into_buffer().len(), 2);
+    }
+
+    /// Smallest object satisfying a tool's declared `required` fields.
+    ///
+    /// Only what the schema states: a required string gets `"x"`, a number `1`, a
+    /// boolean `true`, an array `[]`, an object `{}`, and an enum its first
+    /// declared value. Nothing optional is invented — the point is to clear
+    /// validation, not to exercise the tool.
+    fn minimal_valid_arguments(parameters_json: &str) -> String {
+        let Ok(schema) = serde_json::from_str::<serde_json::Value>(parameters_json) else {
+            return "{}".to_owned();
+        };
+        let props = schema.get("properties").and_then(|p| p.as_object());
+        let required = schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|r| r.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut out = serde_json::Map::new();
+        for field in required {
+            let spec = props.and_then(|p| p.get(field));
+            let value = match spec.and_then(|s| s.get("enum")).and_then(|e| e.as_array()) {
+                Some(values) if !values.is_empty() => values[0].clone(),
+                _ => match spec.and_then(|s| s.get("type")).and_then(|t| t.as_str()) {
+                    Some("number" | "integer") => serde_json::json!(1),
+                    Some("boolean") => serde_json::json!(true),
+                    Some("array") => serde_json::json!([]),
+                    Some("object") => serde_json::json!({}),
+                    _ => serde_json::json!("x"),
+                },
+            };
+            out.insert(field.to_owned(), value);
+        }
+        serde_json::Value::Object(out).to_string()
     }
 
     fn tool_call(name: &str, args_json: &str) -> ToolCall {
@@ -5829,6 +6362,296 @@ mod tests {
             outcome.output.contains("WEAK EVIDENCE"),
             "a relaxed gate must be stated, not hidden: {}",
             outcome.output
+        );
+    }
+
+    // --- reattach_context: the recovery half of compaction -------------------
+    //
+    // Compaction edits the PROMPT; the durable thread keeps everything. These
+    // tests pin the three ways that recovery could quietly become a lie.
+
+    /// The two compaction notices TELL the model to call `reattach_context`. If
+    /// the tool is renamed or dropped, those notices point at nothing and the
+    /// model burns a round calling a tool that does not exist — while believing
+    /// recovery was available. Nothing else couples the notice text to the tool
+    /// table, so this test is that coupling.
+    #[test]
+    fn the_compaction_notices_name_a_tool_that_actually_exists() {
+        let advertised: BTreeSet<String> = builtin_tool_defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        assert!(
+            advertised.contains("reattach_context"),
+            "reattach_context is not advertised, but compaction tells the model to call it"
+        );
+        for notice in [
+            crate::compaction::DROPPED_HISTORY_NOTICE,
+            crate::compaction::SUMMARY_PREFIX,
+        ] {
+            assert!(
+                notice.contains("reattach_context"),
+                "a compaction notice stopped offering recovery: {notice}"
+            );
+        }
+        // The gate is a denylist, so a new read-only tool passes by default —
+        // but "by default" is exactly the kind of thing a later edit breaks.
+        assert!(
+            inline_tool_allowed("reattach_context"),
+            "recovery is read-only and must survive this loop's gate"
+        );
+    }
+
+    /// A turn with no durable thread has no history to recover. Saying so beats
+    /// returning an empty result the model would read as "there was nothing".
+    #[tokio::test]
+    async fn reattach_context_without_a_thread_says_so() {
+        let state = crate::state::AppState::new();
+        let outcome = dispatch_tool(
+            &state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "session-bearer",
+            None,
+            true,
+            &tool_call("reattach_context", "{}"),
+            None,
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(
+            error.contains("durable thread"),
+            "expected a stated reason, got {error:?}"
+        );
+    }
+
+    /// THE honesty property. session-core's interceptor answers an
+    /// unauthenticated ListConversation with a rejection, and a rejection
+    /// reduced to "no messages" is indistinguishable from a genuinely empty
+    /// history — so the model would tell the user their earlier message never
+    /// existed. Fail loudly instead, before any I/O.
+    #[tokio::test]
+    async fn reattach_context_without_a_credential_never_reports_an_empty_conversation() {
+        let state = crate::state::AppState::new();
+        let outcome = dispatch_tool(
+            &state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            true,
+            &tool_call("reattach_context", "{}"),
+            None,
+        )
+        .await;
+        let error = outcome.error.clone().unwrap_or_default();
+        assert!(
+            error.contains("session credential"),
+            "expected a credential error, got {error:?}"
+        );
+        assert!(
+            !outcome
+                .output
+                .contains(crate::context_reattach::REATTACH_NO_MATCH_NOTICE),
+            "an unauthenticated read must never be presented as an empty history"
+        );
+    }
+
+    /// The tool reads ONE conversation. The description is the only thing that
+    /// stops the model reaching for it as a document or memory search, which
+    /// would waste a round and then mislead when it came back empty.
+    #[test]
+    fn reattach_context_is_described_as_conversation_only() {
+        let defs = builtin_tool_defs();
+        let def = defs
+            .iter()
+            .find(|def| def.name == "reattach_context")
+            .expect("advertised");
+        let described = def.description.to_lowercase();
+        assert!(
+            described.contains("this conversation"),
+            "the description must scope the tool to one conversation: {described}"
+        );
+        assert!(
+            described.contains("not a search"),
+            "the description must say what it is NOT, or the model will aim it at documents"
+        );
+    }
+
+    // --- pre-dispatch argument validation ----------------------------------
+    //
+    // `mp_contracts::tool_arguments` was 393 lines and 12 tests reachable from
+    // NOTHING — its doc claimed it was wired to an `mcp_call` arm that does not
+    // exist. These pin the wiring, and pin the property that makes wiring it to a
+    // live path safe.
+
+    /// THE safety property. A pre-dispatch validator that rejects a call the
+    /// executor would have accepted breaks working tools for the sake of
+    /// tidiness — so it must have no opinion on any legitimate call against our
+    /// own catalogue. Every advertised tool, given exactly its required fields,
+    /// must pass.
+    #[test]
+    fn validation_never_objects_to_a_legitimate_call_on_our_own_catalogue() {
+        for def in builtin_tool_defs() {
+            let args = minimal_valid_arguments(&def.parameters_json);
+            assert!(
+                builtin_argument_problem(&def.name, &args, "").is_none(),
+                "'{}' rejects its own minimally valid arguments {args} — a false positive here \
+                 breaks a working tool",
+                def.name
+            );
+        }
+    }
+
+    /// The Console's client-declared `shipping.get_quotes` alias is not a
+    /// builtin, so it used to skip BOTH the schema check and the grounding gate
+    /// via the early def-lookup bail — and then dispatch to the real shipping
+    /// executor anyway. Grounding needs no schema, so it must fire on every
+    /// dispatchable spelling.
+    #[test]
+    fn the_client_declared_shipping_alias_cannot_bypass_grounding() {
+        let fabricated = r#"{"from":{"name":"Bergen","postal_code":"5000"},
+            "to":{"name":"Stavanger","postal_code":"4000"},
+            "package":{"weight_kg":3,"length_cm":30,"width_cm":20,"height_cm":10},
+            "segment":"b2c"}"#;
+        let problem = builtin_argument_problem(
+            "shipping.get_quotes",
+            fabricated,
+            "hva vil det koste å sende 3 kg fra Bergen til Stavanger?",
+        )
+        .expect("invented postal codes and dimensions must be refused on the alias too");
+        assert!(problem.contains("appear nowhere in this conversation"));
+
+        // Fully stated → the alias passes, exactly like the canonical name.
+        let grounded = r#"{"from":{"name":"Storgata 1","postal_code":"0155"},
+            "to":{"name":"Kongens gate 2","postal_code":"7011"},
+            "package":{"weight_kg":5,"length_cm":30,"width_cm":20,"height_cm":15},
+            "segment":"b2b"}"#;
+        assert!(builtin_argument_problem(
+            "shipping.get_quotes",
+            grounded,
+            "compare shipping prices for a 5 kg parcel, 30x20x15 cm, from Storgata 1, \
+             0155 Oslo to Kongens gate 2, 7011 Trondheim",
+        )
+        .is_none());
+    }
+
+    /// The elicitation notice rides only on turns whose FINAL offered set
+    /// contains a tool that needs it — guidance about an unoffered tool is
+    /// noise the model has to discount.
+    #[test]
+    fn the_elicitation_notice_is_gated_on_the_offered_set() {
+        let def = |name: &str| mp_contracts::model_plane::v1::ToolDefinition {
+            name: name.to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        };
+        assert!(user_supplied_args_notice(&[def("web_search"), def("yr_weather")]).is_none());
+        for shipping in ["shipping_get_quotes", "shipping.get_quotes"] {
+            let notice = user_supplied_args_notice(&[def("web_search"), def(shipping)])
+                .expect("a shipping tool in the offered set needs the guidance");
+            assert_eq!(notice.role, "system");
+            assert!(notice.content.contains("never invent a user-only value"));
+        }
+    }
+
+    /// And it must stay silent on the things it deliberately has no opinion
+    /// about, because that fail-open posture is what makes it safe on a live
+    /// path. An undeclared extra field is the common case: servers usually accept
+    /// them, so rejecting one is a pure false positive.
+    #[test]
+    fn validation_stays_silent_on_what_it_cannot_judge() {
+        // An extra field the schema never mentions.
+        assert!(builtin_argument_problem(
+            "knowledge_search",
+            r#"{"query":"x","some_future_field":true}"#,
+            ""
+        )
+        .is_none());
+        // A tool we hold no schema for — a client-declared or MCP tool. Guessing
+        // against a schema we do not have would be worse than not checking.
+        assert!(builtin_argument_problem("mcp__acme__do_thing", "{}", "").is_none());
+    }
+
+    /// The asymmetry that makes the fail-open posture coherent, and which I got
+    /// backwards on the first pass: an unparseable **schema** silences the
+    /// validator (we cannot form an opinion from something we cannot read), while
+    /// unparseable **arguments** are reported (the model's own output did not
+    /// parse — that is never ambiguous). Naming the real cause beats reporting it
+    /// as a missing field, which is what treating bad JSON as `{}` would do.
+    #[test]
+    fn unparseable_arguments_are_named_as_such_not_reported_as_a_missing_field() {
+        let problem = builtin_argument_problem("knowledge_search", "{not json", "")
+            .expect("malformed arguments are unambiguously wrong");
+        assert!(
+            problem.contains("did not parse"),
+            "the diagnosis must be the parse failure: {problem}"
+        );
+        assert!(
+            !problem.contains("is required"),
+            "reporting malformed JSON as a missing field sends the model to fix the wrong \
+             thing: {problem}"
+        );
+    }
+
+    /// What it DOES catch, and what the model is told. A missing required field is
+    /// the dominant real failure, and the message has to name the field and carry
+    /// the schema or the model can only guess again.
+    #[tokio::test]
+    async fn a_missing_required_argument_is_refused_before_dispatch_with_the_schema() {
+        let problem = builtin_argument_problem("knowledge_search", "{}", "")
+            .expect("knowledge_search requires 'query'");
+        assert!(
+            problem.contains("query"),
+            "the field must be named: {problem}"
+        );
+        assert!(
+            problem.contains("was NOT called"),
+            "the model must know nothing was sent: {problem}"
+        );
+        assert!(
+            problem.contains("\"query\""),
+            "the schema must be included so the repair is one round, not two: {problem}"
+        );
+
+        // And it really does short-circuit the real dispatcher, before any I/O.
+        let state = crate::state::AppState::new();
+        let outcome = dispatch_tool(
+            &state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            true,
+            &tool_call("knowledge_search", "{}"),
+            None,
+        )
+        .await;
+        let error = outcome.error.unwrap_or_default();
+        assert!(
+            error.contains("was NOT called"),
+            "validation must run before the arm's own credential check: {error}"
         );
     }
 }

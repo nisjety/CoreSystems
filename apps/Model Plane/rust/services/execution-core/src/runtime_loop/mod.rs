@@ -1,6 +1,9 @@
 //! Runtime loop orchestration for one execution step.
 
 pub mod agent;
+pub mod retry;
+pub(crate) mod skill_budget;
+pub mod subagent_results;
 
 use mp_contracts::model_plane::v1::{
     self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
@@ -49,6 +52,31 @@ const QUARRY_MCP_WEB_READ_TOOL: &str = "web.read";
 /// RAG over the org's own ingested knowledge via Data Plane v2 retrieval
 /// (`knowledge_tools`). Async, read-only. `org_id` comes from the run context.
 const KNOWLEDGE_SEARCH_TOOL: &str = "knowledge_search";
+
+/// Model-callable long-term memory write (harness-adoption §7.9). This is the
+/// FIRST reachable memory-write path in the plane: model-gateway's old
+/// `save_memory` arm sat behind `inline_tool_allowed`'s unconditional refusal
+/// and could never execute — the inline chat loop refuses side effects by
+/// design, so the governed agentic loop here is memory-write's one legitimate
+/// home. session-core's `MemoryService` enforces org/user scoping and refuses
+/// ZDR credentials server-side; the executor below adds the same refusal
+/// locally so a ZDR run gets an honest, immediate explanation instead of a
+/// gRPC error it might misread as transient.
+const SAVE_MEMORY_TOOL: &str = "save_memory";
+
+/// Model-callable long-term memory recall — the active twin of the chat
+/// path's passive prefetch. A deployed agent decides WHEN it needs to
+/// remember something (Hermes exposes recall as a provider tool the same
+/// way); the chat path instead prefetches per turn.
+const RECALL_MEMORY_TOOL: &str = "recall_memory";
+
+/// Read one of the org's skill instructions back in full.
+///
+/// Offered in BOTH loops because the skill budget is shared: `skill_budget`
+/// degrades before dropping and marks what it cut, and until this tool existed
+/// the marker was a dead end. A deployed agent must not be left acting on half a
+/// rule that chat could have read whole.
+const REATTACH_SKILL_TOOL: &str = "reattach_skill";
 
 /// Norwegian real-time read tools backed by the Application Plane
 /// `information-core` service (`info_tools`) plus the public Brønnøysund
@@ -243,6 +271,10 @@ pub async fn execute_step(
     user_id: &str,
     run_id: &str,
     step_id: &str,
+    // Thread the step's run belongs to. Empty for callers with no thread
+    // context (the direct ExecuteStep RPC, scheduled steps) — memory tools
+    // fail closed there, same authority class as subagent delegation.
+    thread_id: &str,
     session_channel: Option<Channel>,
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
@@ -261,6 +293,7 @@ pub async fn execute_step(
         user_id,
         run_id,
         step_id,
+        thread_id,
         session_channel,
         browser_event_sink,
         state,
@@ -289,6 +322,10 @@ pub(crate) async fn execute_step_with_browser_grant(
     user_id: &str,
     run_id: &str,
     step_id: &str,
+    // Thread the step's run belongs to. Empty for callers with no thread
+    // context (the direct ExecuteStep RPC, scheduled steps) — memory tools
+    // fail closed there, same authority class as subagent delegation.
+    thread_id: &str,
     session_channel: Option<Channel>,
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
@@ -308,6 +345,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         user_id,
         run_id,
         step_id,
+        thread_id,
         session_channel,
         browser_event_sink,
         state,
@@ -341,6 +379,10 @@ pub(crate) async fn execute_step_with_subagent(
     user_id: &str,
     run_id: &str,
     step_id: &str,
+    // Thread the step's run belongs to. Empty for callers with no thread
+    // context (the direct ExecuteStep RPC, scheduled steps) — memory tools
+    // fail closed there, same authority class as subagent delegation.
+    thread_id: &str,
     session_channel: Option<Channel>,
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
@@ -360,6 +402,7 @@ pub(crate) async fn execute_step_with_subagent(
         user_id,
         run_id,
         step_id,
+        thread_id,
         session_channel,
         browser_event_sink,
         state,
@@ -384,6 +427,10 @@ async fn execute_step_inner(
     user_id: &str,
     run_id: &str,
     step_id: &str,
+    // Thread the step's run belongs to. Empty for callers with no thread
+    // context (the direct ExecuteStep RPC, scheduled steps) — memory tools
+    // fail closed there, same authority class as subagent delegation.
+    thread_id: &str,
     session_channel: Option<Channel>,
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
@@ -490,6 +537,48 @@ async fn execute_step_inner(
         execute_web_fetch(tool_input, org_id).await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
         execute_knowledge_search(tool_input, org_id, user_id, zdr, data_plane_bearer).await
+    } else if tool_name == SAVE_MEMORY_TOOL {
+        execute_save_memory(
+            tool_input,
+            org_id,
+            user_id,
+            thread_id,
+            zdr,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
+    } else if tool_name == REATTACH_SKILL_TOOL {
+        execute_reattach_skill(tool_input, org_id, session_channel.as_ref(), session_bearer).await
+    } else if tool_name == subagent_results::LIST_TOOL {
+        subagent_results::execute_list(
+            org_id,
+            run_id,
+            thread_id,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
+    } else if tool_name == subagent_results::READ_TOOL {
+        subagent_results::execute_read(
+            tool_input,
+            org_id,
+            run_id,
+            thread_id,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
+    } else if tool_name == RECALL_MEMORY_TOOL {
+        execute_recall_memory(
+            tool_input,
+            org_id,
+            thread_id,
+            zdr,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
     } else if tool_name == YR_WEATHER_TOOL {
         execute_yr_weather(tool_input).await
     } else if tool_name == TRAFFIC_TOOL {
@@ -1464,7 +1553,10 @@ async fn resolve_write_approval(
     }
 }
 
-fn authenticated_session_request<T>(value: T, bearer: &str) -> Result<tonic::Request<T>, String> {
+pub(crate) fn authenticated_session_request<T>(
+    value: T,
+    bearer: &str,
+) -> Result<tonic::Request<T>, String> {
     let mut request = tonic::Request::new(value);
     request.metadata_mut().insert(
         "authorization",
@@ -1475,10 +1567,382 @@ fn authenticated_session_request<T>(value: T, bearer: &str) -> Result<tonic::Req
     Ok(request)
 }
 
+#[cfg(test)]
+mod memory_tool_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn save_memory_is_refused_on_zdr_with_an_honest_explanation() {
+        // ZDR is checked FIRST, before channel/bearer — a ZDR run gets the
+        // real reason, not a plumbing error. session-core enforces the same
+        // server-side; this is the model-facing half.
+        let out = execute_save_memory(
+            r#"{"content":"user prefers NOK"}"#,
+            "org-1",
+            "user-1",
+            "thread-1",
+            true,
+            None,
+            Some("bearer"),
+        )
+        .await;
+        let error = out.error.expect("must refuse");
+        assert!(error.contains("Zero-Data-Retention"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn memory_tools_fail_closed_without_a_thread_context() {
+        // The direct ExecuteStep RPC and scheduled steps pass thread_id="" —
+        // memory is thread-scoped, so there is nothing to scope to. Same
+        // fail-closed class as subagent delegation on that path.
+        let out = execute_recall_memory(
+            r#"{"query":"carrier"}"#,
+            "org-1",
+            "",
+            false,
+            None,
+            Some("bearer"),
+        )
+        .await;
+        let error = out.error.expect("must refuse");
+        assert!(error.contains("agent-loop thread context"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn memory_tools_validate_input_before_any_precondition_noise() {
+        let out =
+            execute_save_memory("not json", "org-1", "user-1", "t-1", false, None, None).await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("invalid save_memory input"));
+        let out = execute_save_memory(
+            r#"{"content":"  "}"#,
+            "org-1",
+            "user-1",
+            "t-1",
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("must not be empty"));
+    }
+}
+
 fn tool_error(message: String) -> tool_bridge::ToolExecution {
     tool_bridge::ToolExecution {
         output: String::new(),
         error: Some(message),
+    }
+}
+
+/// `reattach_skill` — the full text of one org skill, by name.
+///
+/// Org-scoped by construction: `org_id` is the verified request's, never model
+/// input. The selection rule and the bounds live in
+/// `mp_contracts::skill_recovery` so both loops recover the same skill the same
+/// way; only the rendering is local.
+async fn execute_reattach_skill(
+    tool_input: &str,
+    org_id: &str,
+    session_channel: Option<&tonic::transport::Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    use mp_contracts::model_plane::v1::{
+        session_core_client::SessionCoreClient, ListAgentSkillsRequest,
+    };
+    use mp_contracts::skill_recovery::{recover_skill, RecoveredSkill};
+
+    #[derive(serde::Deserialize)]
+    struct SkillInput {
+        name: String,
+    }
+    let input: SkillInput = match serde_json::from_str(tool_input) {
+        Ok(input) => input,
+        Err(error) => return tool_error(format!("invalid {REATTACH_SKILL_TOOL} input: {error}")),
+    };
+    if input.name.trim().is_empty() {
+        return tool_error(format!(
+            "{REATTACH_SKILL_TOOL} requires the skill's 'name' as shown in its block"
+        ));
+    }
+    let (Some(channel), Some(bearer)) = (session_channel, session_bearer) else {
+        return tool_error(format!(
+            "{REATTACH_SKILL_TOOL} requires a verified session credential"
+        ));
+    };
+    let request = match authenticated_session_request(
+        ListAgentSkillsRequest {
+            org_id: org_id.to_owned(),
+            // Everything, not just enabled: a disabled skill must be reported as
+            // disabled rather than as missing, and that distinction only exists
+            // if the row comes back.
+            enabled_only: false,
+        },
+        bearer,
+    ) {
+        Ok(request) => request,
+        Err(_) => {
+            return tool_error(format!(
+                "{REATTACH_SKILL_TOOL}: credential is not forwardable"
+            ))
+        }
+    };
+    let skills = match SessionCoreClient::new(channel.clone())
+        .list_agent_skills(request)
+        .await
+    {
+        Ok(response) => response.into_inner().skills,
+        Err(error) => {
+            tracing::warn!(code = ?error.code(), %org_id, "reattach_skill: skill read failed");
+            return tool_error(format!(
+                "{REATTACH_SKILL_TOOL} could not read this organization's skills right now"
+            ));
+        }
+    };
+
+    let output = match recover_skill(&skills, &input.name) {
+        RecoveredSkill::Found {
+            name,
+            description,
+            content,
+            truncated,
+        } => serde_json::json!({
+            "status": "ok",
+            "name": name,
+            "description": description,
+            "instruction": content,
+            "truncated": truncated,
+        }),
+        RecoveredSkill::Disabled { name } => serde_json::json!({
+            "status": "disabled",
+            "name": name,
+            "detail": "this skill is switched off for the organization; do not follow it, and do \
+                       not describe it as a current rule",
+        }),
+        RecoveredSkill::NotFound { available } => serde_json::json!({
+            "status": "not_found",
+            "available": available,
+            "detail": "no skill by that name. Use one of the names listed, exactly as written, or \
+                       proceed without it — do not guess at the missing instruction",
+        }),
+    };
+    tool_bridge::ToolExecution {
+        output: output.to_string(),
+        error: None,
+    }
+}
+
+/// Shared preconditions for both memory tools. Returns the connected client on
+/// success, or the honest refusal the model should read. ZDR is refused HERE,
+/// before the wire, with an explanation the model can act on — session-core
+/// refuses ZDR credentials anyway (`failed_precondition`), but that surfaces
+/// as an opaque gRPC error the retry classifier and the model both have to
+/// guess about; "this run is ZDR" is not a guess.
+#[allow(clippy::result_large_err)]
+fn memory_tool_preflight<'a>(
+    tool_name: &str,
+    org_id: &str,
+    thread_id: &str,
+    zdr: bool,
+    session_channel: Option<&'a Channel>,
+    session_bearer: Option<&str>,
+) -> Result<(&'a Channel, String), tool_bridge::ToolExecution> {
+    if zdr {
+        return Err(tool_error(format!(
+            "{tool_name} unavailable: this run is Zero-Data-Retention, so no durable memory may \
+             be read or written. Answer from the conversation itself."
+        )));
+    }
+    if org_id.trim().is_empty() {
+        return Err(tool_error(format!(
+            "{tool_name} unavailable: no org context"
+        )));
+    }
+    if thread_id.trim().is_empty() {
+        // The direct ExecuteStep RPC and scheduled steps carry no thread —
+        // memory is thread-scoped, so there is nothing to scope a read or
+        // write to. Same fail-closed class as subagent delegation there.
+        return Err(tool_error(format!(
+            "{tool_name} unavailable outside an agent-loop thread context"
+        )));
+    }
+    let Some(channel) = session_channel else {
+        return Err(tool_error(format!(
+            "{tool_name} unavailable: session-core channel not configured"
+        )));
+    };
+    let Some(bearer) = session_bearer.filter(|b| !b.trim().is_empty()) else {
+        return Err(tool_error(format!(
+            "{tool_name} unavailable: no session credential"
+        )));
+    };
+    Ok((channel, bearer.to_owned()))
+}
+
+/// `save_memory` — input JSON `{"content": string, "topic"?: string}`.
+///
+/// The plane's first REACHABLE model-initiated memory write (§7.9): the old
+/// gateway arm was dead code behind `inline_tool_allowed`. Runs only on this
+/// governed loop, where the purpose-lock, permission gate, and per-step audit
+/// record already apply. session-core owns org/user/thread scoping and mints
+/// the memory id.
+async fn execute_save_memory(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    zdr: bool,
+    session_channel: Option<&Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct SaveInput {
+        content: String,
+        #[serde(default)]
+        topic: String,
+    }
+    let input: SaveInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid save_memory input: {e}")),
+    };
+    if input.content.trim().is_empty() {
+        return tool_error("save_memory: content must not be empty".to_owned());
+    }
+    let (channel, bearer) = match memory_tool_preflight(
+        SAVE_MEMORY_TOOL,
+        org_id,
+        thread_id,
+        zdr,
+        session_channel,
+        session_bearer,
+    ) {
+        Ok(ok) => ok,
+        Err(refusal) => return refusal,
+    };
+    let request = mp_contracts::model_plane::v1::IndexMemoryRequest {
+        thread_id: thread_id.to_owned(),
+        topic: if input.topic.trim().is_empty() {
+            "MEMORY".to_owned()
+        } else {
+            input.topic
+        },
+        content: input.content,
+        org_id: org_id.to_owned(),
+        // Empty means "mint a fresh id" — this call site never updates.
+        memory_id: String::new(),
+        user_id: user_id.to_owned(),
+    };
+    let request = match authenticated_session_request(request, &bearer) {
+        Ok(r) => r,
+        Err(e) => return tool_error(format!("save_memory unavailable: {e}")),
+    };
+    match mp_contracts::model_plane::v1::memory_service_client::MemoryServiceClient::new(
+        channel.clone(),
+    )
+    .index_memory(request)
+    .await
+    {
+        Ok(response) => tool_bridge::ToolExecution {
+            output: serde_json::json!({
+                "saved": true,
+                "memory_id": response.into_inner().memory_id,
+            })
+            .to_string(),
+            error: None,
+        },
+        Err(status) => tool_error(format!("save_memory failed: {}", status.message())),
+    }
+}
+
+/// `recall_memory` — input JSON `{"query": string, "limit"?: u32}`.
+///
+/// The active twin of the chat path's passive per-turn prefetch: a deployed
+/// agent asks for memory when its task needs it, instead of paying the
+/// lookup on every round.
+async fn execute_recall_memory(
+    tool_input: &str,
+    org_id: &str,
+    thread_id: &str,
+    zdr: bool,
+    session_channel: Option<&Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct RecallInput {
+        query: String,
+        #[serde(default)]
+        limit: u32,
+    }
+    let input: RecallInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid recall_memory input: {e}")),
+    };
+    if input.query.trim().is_empty() {
+        return tool_error("recall_memory: query must not be empty".to_owned());
+    }
+    let (channel, bearer) = match memory_tool_preflight(
+        RECALL_MEMORY_TOOL,
+        org_id,
+        thread_id,
+        zdr,
+        session_channel,
+        session_bearer,
+    ) {
+        Ok(ok) => ok,
+        Err(refusal) => return refusal,
+    };
+    let limit = if input.limit == 0 || input.limit > 20 {
+        5
+    } else {
+        input.limit
+    };
+    let request = mp_contracts::model_plane::v1::SearchMemoryRequest {
+        // Left empty deliberately: session-core derives the owner
+        // from the VERIFIED thread, so a caller-supplied user id
+        // would be forgeable scoping.
+        user_id: String::new(),
+        thread_id: thread_id.to_owned(),
+        query: input.query,
+        topic_filter: Vec::new(),
+        limit,
+        org_id: org_id.to_owned(),
+        updated_after: None,
+    };
+    let request = match authenticated_session_request(request, &bearer) {
+        Ok(r) => r,
+        Err(e) => return tool_error(format!("recall_memory unavailable: {e}")),
+    };
+    match mp_contracts::model_plane::v1::memory_service_client::MemoryServiceClient::new(
+        channel.clone(),
+    )
+    .search_memory(request)
+    .await
+    {
+        Ok(response) => {
+            let entries: Vec<serde_json::Value> = response
+                .into_inner()
+                .entries
+                .into_iter()
+                .filter(|entry| !entry.content.trim().is_empty())
+                .map(|entry| serde_json::json!({ "topic": entry.topic, "content": entry.content }))
+                .collect();
+            let count = entries.len();
+            tool_bridge::ToolExecution {
+                output: serde_json::json!({
+                    "status": if count == 0 { "no_memories" } else { "ok" },
+                    "count": count,
+                    "memories": entries,
+                })
+                .to_string(),
+                error: None,
+            }
+        }
+        Err(status) => tool_error(format!("recall_memory failed: {}", status.message())),
     }
 }
 
@@ -1526,6 +1990,7 @@ mod tests {
                 "user_test",
                 "run_test",
                 "step_test",
+                "",
                 None,
                 None,
                 None,
@@ -1554,6 +2019,7 @@ mod tests {
                 "user_test",
                 "run_test",
                 "step_test",
+                "",
                 None,
                 None,
                 None,
@@ -1579,6 +2045,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            "",
             None,
             None,
             None,
@@ -1608,6 +2075,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            "",
             None,
             None,
             None,
@@ -1643,6 +2111,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            "",
             None,
             None,
             None,
@@ -1668,6 +2137,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            "",
             None,
             None,
             None,
@@ -1693,6 +2163,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            "",
             None,
             None,
             None,
@@ -1719,6 +2190,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            "",
             None,
             None,
             None,
@@ -1806,6 +2278,7 @@ mod tests {
             "user_test",
             "run_test",
             "step_test",
+            "",
             None,
             None,
             None,

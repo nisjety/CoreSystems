@@ -75,3 +75,5 @@ tonic-build = { workspace = true, optional = false }
 uuid = { version = "1", features = ["v4"] }
 wiremock = "0.6"
 bytes = "1"
+# Property tests for the DOM-summary scanner (WS2 surfaces).
+proptest = "1"

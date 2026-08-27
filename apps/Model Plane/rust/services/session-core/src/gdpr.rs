@@ -129,6 +129,13 @@ pub fn parse_erasure_event(
 /// Per-table row counts from one purge run (logging/metrics/tests).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PurgeSummary {
+    /// Semantic-tier outcome for the `agent_memory` rows this purge removed.
+    ///
+    /// Deliberately NOT folded into [`PurgeSummary::total`]: that total counts
+    /// Postgres rows deleted, and adding a vector-store count to it would make
+    /// one number mean two things. An erasure proof reads this field, and
+    /// [`PurgeSummary::erasure_is_complete`] is the question it should ask.
+    pub semantic_memory: crate::memory_erasure::SemanticErasure,
     pub checkpoints: u64,
     pub subagent_edges: u64,
     pub todos: u64,
@@ -157,6 +164,16 @@ pub struct PurgeSummary {
 impl PurgeSummary {
     /// Total rows deleted across every table in one purge run.
     #[must_use]
+    /// Whether this purge can honestly claim complete erasure.
+    ///
+    /// A DSAR response should not assert erasure on `total()` alone: the
+    /// Postgres rows can all be gone while their semantic twins are
+    /// unaccounted for. False means the proof is partial and the
+    /// `semantic_memory.degradation_reason` says why.
+    pub fn erasure_is_complete(&self) -> bool {
+        self.semantic_memory.is_complete()
+    }
+
     pub fn total(&self) -> u64 {
         self.checkpoints
             + self.subagent_edges
@@ -202,7 +219,11 @@ impl PurgeSummary {
 // dependencies between the awaited statements — collapsing this into one
 // expression would obscure that ordering.
 #[allow(clippy::field_reassign_with_default)]
-pub async fn purge_organization_data(pool: &Pool, org_id: &str) -> anyhow::Result<PurgeSummary> {
+pub async fn purge_organization_data(
+    pool: &Pool,
+    org_id: &str,
+    letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
+) -> anyhow::Result<PurgeSummary> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
 
@@ -360,11 +381,21 @@ pub async fn purge_organization_data(pool: &Pool, org_id: &str) -> anyhow::Resul
         .await?
         .rows_affected();
 
-    summary.agent_memory = sqlx::query("DELETE FROM agent_memory WHERE org_id = $1")
+    // RETURNING, not just a row count: each row has a semantic twin on
+    // letta-bridge keyed by the same id, and once this statement commits there
+    // is nothing left in Postgres to find that twin by. `owner` is the user_id
+    // the semantic copy was tagged with (memory_grpc::index_memory).
+    let erased_memories: Vec<crate::memory_erasure::ErasedMemory> =
+        sqlx::query_as::<_, (String, String)>(
+            "DELETE FROM agent_memory WHERE org_id = $1 RETURNING id, owner",
+        )
         .bind(org_id)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?
-        .rows_affected();
+        .into_iter()
+        .map(|(memory_id, owner)| crate::memory_erasure::ErasedMemory { memory_id, owner })
+        .collect();
+    summary.agent_memory = erased_memories.len() as u64;
 
     summary.finetune_jobs = sqlx::query("DELETE FROM finetune_jobs WHERE org_id = $1")
         .bind(org_id)
@@ -388,6 +419,28 @@ pub async fn purge_organization_data(pool: &Pool, org_id: &str) -> anyhow::Resul
             .rows_affected();
 
     tx.commit().await?;
+
+    // After the commit, deliberately. The durable rows are the source of truth
+    // for existence; a degraded semantic tier must not roll back an erasure
+    // that Postgres has already honoured. What it must not do either is let the
+    // summary imply the vector-store copies went with them.
+    summary.semantic_memory =
+        crate::memory_erasure::erase_semantic_copies(letta, org_id, &erased_memories).await;
+    if !summary.erasure_is_complete() {
+        tracing::warn!(
+            org_id,
+            considered = summary.semantic_memory.considered(),
+            confirmed = summary.semantic_memory.confirmed,
+            unconfirmed = summary.semantic_memory.unconfirmed,
+            degradation = ?summary.semantic_memory.degradation_reason,
+            "GDPR erasure incomplete: agent_memory rows purged but semantic twins unconfirmed"
+        );
+        metrics::counter!(
+            "mp_session_semantic_erasure_unconfirmed_total",
+            "operation" => "gdpr_purge"
+        )
+        .increment(summary.semantic_memory.unconfirmed);
+    }
     Ok(summary)
 }
 
@@ -554,8 +607,26 @@ mod tests {
             finetune_jobs: 1,
             dream_runs: 1,
             session_audit_outbox: 1,
+            // Deliberately non-zero: `total()` counts Postgres rows deleted,
+            // and the semantic tier is a different store. If someone folds
+            // this into total() the assertion below breaks, which is the point
+            // — the exclusion is a decision, not an omission.
+            semantic_memory: crate::memory_erasure::SemanticErasure {
+                confirmed: 5,
+                unconfirmed: 7,
+                degradation_reason: Some("DEGRADED_TEST"),
+            },
         };
-        assert_eq!(summary.total(), 23);
+        assert_eq!(
+            summary.total(),
+            23,
+            "total() must count only Postgres rows; semantic-tier counts belong \
+             to erasure_is_complete(), not to this sum"
+        );
+        assert!(
+            !summary.erasure_is_complete(),
+            "an unconfirmed semantic count must make the erasure proof partial"
+        );
     }
 
     /// Static-analysis guard on the purge SQL itself: every `DELETE`

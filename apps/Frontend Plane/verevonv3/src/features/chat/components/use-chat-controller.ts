@@ -32,6 +32,7 @@ import {
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
+import { openProjectionChannel } from '@/shared/projection/keyed-channel'
 import {
   withBrregLookupAction,
 } from '@/features/chat/lib/brreg-action'
@@ -63,12 +64,15 @@ import {
   getChatThreadTranscript,
   getThreadMessages,
   listChatThreads,
+  approvePlan,
   listModels,
+  queueInvocationInput,
   resumeStream,
   saveChatThreadSnapshot,
   streamChat,
   submitFeedback,
   VEREVON_BALANCE_MODE_ID,
+  type AutonomyRung,
   type ChatFeedbackRating,
 } from '@/shared/api/chat-client'
 import {
@@ -132,11 +136,20 @@ import type {
   ChatTab,
   ChatTurn,
   Citation,
+  QueuedInput,
   SendOptions,
   TaskStepStatus,
 } from './chat-types'
 
 export function useChatController() {
+  /**
+   * Monotonic stream generation. Bumped by every send, so a stream can tell
+   * whether it has been superseded on its OWN thread — which a thread-id check
+   * cannot see, because sending a second message does not abort the first
+   * stream. Both are then live on one thread and both pass the id check.
+   */
+  let streamGeneration = 0
+
   const [state, setState] = createStore<ChatState>({
     turns: [],
     taskSteps: [],
@@ -148,6 +161,7 @@ export function useChatController() {
     // server-side. `cheapDefaultModelId` reaffirms this on mount.
     activeModel: VEREVON_BALANCE_MODE_ID,
     branchCount: 0,
+    queuedInputs: [],
   })
 
   const [activeTab, setActiveTab] = createSignal<ChatTab>('chat')
@@ -288,6 +302,21 @@ export function useChatController() {
     })
   }
 
+  // Threads opened via a cross-surface deep link (e.g. a Space Activity
+  // "open in chat" link) that `listChatThreads()` did NOT return -- i.e. its
+  // origin is not "chat" (see chat_history_sessions' origin filter in
+  // apps/gateway/src/domains/chat/history.rs, which that listing already
+  // enforces). `initializeChat` still loads and displays it for continuity,
+  // but it must never be written into Chat's own permanent history/sidebar --
+  // that would be exactly the leak this marker exists to prevent. In-memory
+  // only, like `temporaryThreadIds`; a reload re-derives it from the listing.
+  const foreignOriginThreadIds = new Set<string>()
+  const isForeignOriginThread = (threadId: string | null | undefined): boolean =>
+    Boolean(threadId) && foreignOriginThreadIds.has(threadId as string)
+  const markThreadForeignOrigin = (threadId: string) => {
+    foreignOriginThreadIds.add(threadId)
+  }
+
   const writeThreadSnapshot = (
     threadId: string,
     turns: ChatTurn[],
@@ -303,6 +332,10 @@ export function useChatController() {
     // for a ZDR turn, but a caller (e.g. `onTitle`) reaching here anyway must
     // still not write.
     if (isTemporaryThread(threadId)) return
+    // A thread whose origin isn't "chat" (only reachable here via a
+    // cross-surface deep link) is viewable but must not become a permanent
+    // entry in Chat's own history/transcript/server-snapshot store.
+    if (isForeignOriginThread(threadId)) return
     // …and the SERVER's posture, which this in-memory Set cannot represent.
     // `temporaryThreadIds` only knows about temporary chats started in THIS
     // tab; it says nothing about an org-wide Zero Data Retention policy, and it
@@ -562,6 +595,10 @@ export function useChatController() {
 
     let settled = false
     let replayStarted = false
+    // Snapshotted before the stream opens: `onFrameId` mutates the turn's
+    // cursor during replay, so the turn is not a reliable record of what we
+    // asked the server to skip.
+    const resumedFrom = turn.lastFrameId
     const stopStreaming = (status?: ChatTurn['status']) => {
       if (!isActiveThread()) return
       setState((s) => {
@@ -580,13 +617,23 @@ export function useChatController() {
         onMessage: ({ content: delta }) => {
           if (!isActiveThread()) return
           if (!replayStarted) {
-            // First replayed delta: the buffer replays from the start of the
-            // answer, so drop the cached partial text now (and only now).
             replayStarted = true
-            setState((s) => {
-              const t = s.turns.find((t) => t.id === assistantId)
-              if (t) t.content = ''
-            })
+            // Clear the cached partial text ONLY when we resumed without a
+            // cursor, because only then does the server replay from the start of
+            // the answer and re-send what we already have.
+            //
+            // With a `Last-Event-ID` the replay is incremental, so clearing here
+            // would delete exactly the text the cursor told the server not to
+            // re-send — turning a lossless resume into a truncated one. The
+            // cursor is read from `resumedFrom` rather than `turn.lastFrameId`
+            // because the tracking handler below overwrites the turn's value as
+            // soon as the first replayed frame arrives.
+            if (!resumedFrom) {
+              setState((s) => {
+                const t = s.turns.find((t) => t.id === assistantId)
+                if (t) t.content = ''
+              })
+            }
           }
           upsertTaskStep(createTurnStep(assistantId, turnTitle, 'answer', 'Compose response', 'Streaming answer text.', 'active'))
           setState((s) => {
@@ -622,8 +669,15 @@ export function useChatController() {
           setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(threadId, state.turns)
         },
+        onFrameId: (id) => {
+          setState((s) => {
+            const turn = s.turns.find((t) => t.id === assistantId)
+            if (turn) turn.lastFrameId = id
+          })
+        },
       },
       controller.signal,
+      turn.lastFrameId,
     )
 
     if (!settled && isActiveThread()) {
@@ -661,7 +715,8 @@ export function useChatController() {
       threadId: null,
       activeModel: state.activeModel,
       branchCount: 0,
-    }))
+        queuedInputs: [],
+      }))
     setInput('')
     setActiveTab('chat')
     setVersionState(null)
@@ -692,17 +747,24 @@ export function useChatController() {
         if (linkedThread) setActiveChatThreadId(linkedThread)
         const storedThread = linkedThread ?? readActiveChatThreadId()
         if (storedThread) {
-          if (linkedThread || isTemporaryThread(storedThread)) {
+          if (isTemporaryThread(storedThread)) {
             await loadThread(storedThread)
           } else {
-            // A stored pointer is only trusted as far as Chat's own listing: the
-            // server list excludes Space-scoped records (they live in the room's
-            // timeline), so a pointer left behind by the old routing must be
-            // released rather than resurrected into Chat's history. `null` means
-            // the listing itself was unavailable — a transient outage must not
-            // blank the chat, so the pointer loads as before.
+            // A stored or deep-linked pointer is only trusted as far as Chat's
+            // own listing: the server list is origin=chat only (Space/agent_run/
+            // support/system threads live in their own surfaces), so a pointer
+            // this page didn't create for itself must prove that before it is
+            // resurrected into Chat's own history. `null` means the listing
+            // itself was unavailable — a transient outage must not blank the
+            // chat, so the pointer loads (and persists) as before.
             const listed = await listChatThreads().catch(() => null)
             if (!listed || listed.some((thread) => thread.threadId === storedThread)) {
+              await loadThread(storedThread)
+            } else if (linkedThread) {
+              // A cross-surface "open in chat" link may DISPLAY a thread whose
+              // origin is not chat, but it never earns a permanent seat in
+              // Chat's own sidebar — that is the leak this marker prevents.
+              markThreadForeignOrigin(storedThread)
               await loadThread(storedThread)
             } else {
               clearActiveChatThreadId()
@@ -827,6 +889,68 @@ export function useChatController() {
       // Transient list failure — keep the existing pending state.
     }
   }
+  /**
+   * In-flight / failed state for a plan approval, keyed by turn.
+   *
+   * Session-only: the durable record of a grant is on the run itself, and this
+   * is only the status of the click.
+   */
+  const [planApprovalPending, setPlanApprovalPending] = createSignal<string | null>(null)
+  const [planApprovalError, setPlanApprovalError] = createSignal<Record<string, string>>({})
+
+  /**
+   * Grant a planning run the authority to execute.
+   *
+   * Two things happen on success, and the second one matters: the composer's
+   * plan-mode toggle is turned OFF. Leaving it on would make the very next
+   * message plan again, so the user would approve a plan and then watch the
+   * agent plan a second time — the grant would look like it did nothing.
+   */
+  const approveTurnPlan = async (
+    turnId: string,
+    rung: AutonomyRung,
+    justification: string,
+  ) => {
+    const runId = state.turns.find((turn) => turn.id === turnId)?.runId
+    if (!runId) {
+      setPlanApprovalError((prev) => ({
+        ...prev,
+        [turnId]: 'Denne planen har ingen kjøring å godkjenne.',
+      }))
+      return
+    }
+    setPlanApprovalPending(turnId)
+    setPlanApprovalError((prev) => {
+      const next = { ...prev }
+      delete next[turnId]
+      return next
+    })
+    try {
+      const result = await approvePlan(runId, rung, justification)
+      setState((s) => {
+        const turn = s.turns.find((turn) => turn.id === turnId)
+        if (turn) turn.grantedRung = result.grantedRung
+      })
+      setPlanMode(false)
+      if (!result.persisted) {
+        // The agent has the grant but the run does not record it, so the NEXT
+        // turn will not carry it. Saying so beats letting the user discover it
+        // when the agent refuses work it was just authorized to do.
+        setPlanApprovalError((prev) => ({
+          ...prev,
+          [turnId]: 'Fullmakten er gitt, men ikke lagret på kjøringen – neste melding kan mangle den.',
+        }))
+      }
+    } catch (error) {
+      setPlanApprovalError((prev) => ({
+        ...prev,
+        [turnId]: error instanceof Error ? error.message : 'Godkjenningen gikk ikke gjennom.',
+      }))
+    } finally {
+      setPlanApprovalPending(null)
+    }
+  }
+
   const handleApprovalDecision = async (
     turnId: string,
     approvalId: string,
@@ -849,9 +973,71 @@ export function useChatController() {
     }
   }
 
+  /**
+   * A mid-run message the run ended before receiving.
+   *
+   * Held rather than dropped: the 404 that produces this arrives BEFORE the SPA
+   * has processed the stream's terminal event, so re-sending immediately would
+   * just hit the streaming guard again. Flushed by the effect below, as one turn
+   * so two missed messages cannot race two runs against each other.
+   */
+  const [deferredSends, setDeferredSends] = createSignal<string[]>([])
+
+  const noteQueuedInput = (id: string, next: QueuedInput['state'], note?: string) => {
+    setState((s) => {
+      s.queuedInputs = s.queuedInputs.map((entry) =>
+        entry.id === id ? { ...entry, state: next, note } : entry,
+      )
+    })
+  }
+
+  const deliverMidRun = async (content: string) => {
+    const requestId = state.requestId
+    const id = createId('queued')
+    setState((s) => { s.queuedInputs = [...s.queuedInputs, { id, content, state: 'pending' }] })
+    if (!requestId) {
+      // Streaming but no request id yet — the stream is still opening, so there
+      // is nothing to deliver to. Deferring is right: the run is about to exist
+      // and will take it as an ordinary next turn.
+      setDeferredSends((pending) => [...pending, content])
+      noteQueuedInput(id, 'pending', 'Venter på at kjøringen starter.')
+      return
+    }
+    const result = await queueInvocationInput(requestId, content, {
+      threadId: state.threadId ?? undefined,
+      spaceRef: scopedThreadRefs.get(state.threadId ?? ''),
+    })
+    if (result.outcome === 'queued') {
+      noteQueuedInput(
+        id,
+        'pending',
+        result.persisted ? undefined : 'Levert, men ikke lagret i samtalehistorikken.',
+      )
+      return
+    }
+    if (result.outcome === 'run_ended') {
+      setDeferredSends((pending) => [...pending, content])
+      noteQueuedInput(id, 'pending', 'Kjøringen ble ferdig – sendes som ny melding.')
+      return
+    }
+    noteQueuedInput(id, 'refused', result.message)
+  }
+
   const sendContent = async (rawContent: string, modelOverride?: string, options: SendOptions = {}) => {
     const content = rawContent.trim()
-    if (!content || state.status === 'streaming') return
+    if (!content) return
+    // Typed while a run is still working. This used to `return` — the message
+    // was not queued, not refused, not shown as rejected: gone, and the user
+    // had to retype it after the turn ended. Now it is delivered to the running
+    // agent at its next tool-round boundary, where the agent decides whether it
+    // redirects the work or follows it (see the Model Plane's `queued_input`).
+    if (state.status === 'streaming') {
+      await deliverMidRun(content)
+      return
+    }
+    // A new turn owns the mid-run strip: whatever the previous run showed there
+    // has either landed in the transcript or been reported as refused.
+    if (state.queuedInputs.length > 0) setState((s) => { s.queuedInputs = [] })
 
     let activeThreadId = state.threadId ?? createId('thread')
     // Temporary chat locks in at the first send of a thread: once ANY
@@ -902,6 +1088,9 @@ export function useChatController() {
       content: '',
       createdAt: new Date().toISOString(),
       streaming: true,
+      // Captured at SEND time so a toggle flipped later cannot retroactively
+      // change what a finished turn was.
+      planMode: planMode(),
       status: 'waiting',
       model,
       tools,
@@ -939,6 +1128,18 @@ export function useChatController() {
     // tracks the server's real id after the onConnected swap, so it stays the
     // canonical owner check for the whole turn.
     const ownsMachine = () => state.threadId === activeThreadId
+    // One guard for every global write this send makes: thread ownership AND
+    // connection generation, with dropped writes counted rather than silent.
+    // See `shared/projection/keyed-channel` for why both halves are needed.
+    const generation = ++streamGeneration
+    const projection = openProjectionChannel({
+      ownsKey: ownsMachine,
+      generation,
+      activeGeneration: () => streamGeneration,
+      onDrop: (reason) => {
+        console.warn(`[chat] dropped a stale projection write (${reason}, gen ${generation})`)
+      },
+    })
 
     let settled = false
     const captureRequestId = (requestId?: string) => {
@@ -978,9 +1179,12 @@ export function useChatController() {
           attachments: options.attachments,
           actions: options.actions,
           planMode: planMode(),
+          effort: options.effort,
           zdr: options.zdr,
           regenerated: options.regenerated,
           editResubmit: options.editResubmit,
+          // Opt-in only: set just when the user picked a tiered catalog model.
+          minPrivacyTier: options.minPrivacyTier,
         },
         {
           onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel, runId }) => {
@@ -1144,12 +1348,76 @@ export function useChatController() {
             })
             upsertTaskStep(createTurnStep(assistantId, turnTitle, 'usage', 'Usage recorded', formatUsageSummary(usage), 'done'))
           },
+          onQueuedInput: ({ messages }) => {
+            // The agent now has it. Matched by content rather than by id: the
+            // backend echoes the text it delivered, and the id is ours alone —
+            // matching on text is what makes this correct even for a message
+            // queued by another tab on the same run.
+            const delivered = new Set(messages.map((message) => message.trim()))
+            setState((s) => {
+              s.queuedInputs = s.queuedInputs.map((entry) =>
+                delivered.has(entry.content.trim()) && entry.state === 'pending'
+                  ? { ...entry, state: 'delivered', note: undefined }
+                  : entry,
+              )
+            })
+          },
+          onMemoryRecall: ({ count, latencyMs, memories }) => {
+            // Deterministic, model-independent "memory was used" signal. Shown
+            // because a user cannot otherwise tell an answer that drew on
+            // remembered context from one that guessed — and a wrong remembered
+            // fact is only correctable if you know it was used.
+            setState((s) => {
+              const turn = s.turns.find((turn) => turn.id === assistantId)
+              if (turn) turn.memoryRecallCount = count
+            })
+            if (memories.length > 0) {
+              setState((s) => {
+                const turn = s.turns.find((turn) => turn.id === assistantId)
+                if (turn) turn.recalledMemories = memories
+              })
+            }
+            upsertTaskStep(
+              createTurnStep(
+                assistantId,
+                turnTitle,
+                'memory',
+                count === 1 ? 'Hentet 1 minne' : `Hentet ${count} minner`,
+                latencyMs != null ? `${latencyMs} ms` : '',
+                'done',
+              ),
+            )
+          },
+          onStopped: ({ reason }) => {
+            // A SERVER-side stop. Distinct from onDone on purpose: routing it
+            // there rendered a halted run as a finished answer.
+            settled = true
+            setState((s) => {
+              const turn = s.turns.find((turn) => turn.id === assistantId)
+              if (turn) turn.status = 'stopped'
+            })
+            stopStreaming(undefined)
+            markOpenSteps('done', reason?.trim() || 'Stopped.', assistantId)
+          },
+          onUnknownEvent: ({ name }) => {
+            // The gateway relays upstream SSE verbatim with no allowlist, so a
+            // new backend event arrives here whether this client knows it or
+            // not. Logged rather than dropped: silent discard is why
+            // `memory_recall` was invisible for its first day of existence.
+            console.warn(`[chat] unhandled stream event: ${name}`)
+          },
           onTitle: ({ title }) => {
             // AI-generated thread title (first exchange only, server-side).
             // Persisting with titleKind 'generated' locks it: later periodic
             // snapshots resolve against the stored item and keep this title
             // instead of reverting to the truncated first message.
             if (!title.trim()) return
+            // Guarded, unlike before. The title is generated server-side after
+            // the first exchange, so it arrives LATE — switching threads while a
+            // first message is still working was enough to write this thread's
+            // AI title onto the next one. `titleKind: 'generated'` locks it, so
+            // later snapshots would not correct it either.
+            if (!projection.accepts()) return
             writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns, {
               title,
               titleKind: 'generated',
@@ -1165,20 +1433,28 @@ export function useChatController() {
               if (turn) turn.followUps = suggestions.slice(0, 3)
             })
           },
-          onDone: ({ requestId, modelUsed, outputTokens }) => {
+          onDone: ({ requestId, modelUsed, outputTokens, stopReason }) => {
             settled = true
             captureRequestId(requestId)
-            if (modelUsed) {
-              setState((s) => {
-                const turn = s.turns.find((t) => t.id === assistantId)
-                if (turn) turn.modelUsed = modelUsed
-              })
-            }
-            if (outputTokens != null) {
-              setState((s) => {
-                const turn = s.turns.find((t) => t.id === assistantId)
-                if (turn) turn.outputTokens = outputTokens
-              })
+              if (modelUsed) {
+                setState((s) => {
+                  const turn = s.turns.find((t) => t.id === assistantId)
+                  if (turn) turn.modelUsed = modelUsed
+                })
+              }
+              if (outputTokens != null) {
+                setState((s) => {
+                  const turn = s.turns.find((t) => t.id === assistantId)
+                  if (turn) turn.outputTokens = outputTokens
+                })
+              }
+              // Only a NON-normal stop is recorded: 'end_turn' is the ordinary
+              // case and would just be noise on every turn.
+              if (stopReason && stopReason !== 'end_turn') {
+                setState((s) => {
+                  const turn = s.turns.find((t) => t.id === assistantId)
+                  if (turn) turn.stopReason = stopReason
+                })
             }
             stopStreaming(undefined)
             markOpenSteps('done', 'Completed.', assistantId)
@@ -1187,8 +1463,8 @@ export function useChatController() {
             // another thread — state.turns is now that thread's, so a snapshot
             // here would write the wrong turns and the status flip would clobber
             // the visible thread.
-            if (ownsMachine()) {
-              setState((s) => { s.status = 'idle' })
+              if (projection.accepts()) {
+                setState((s) => { s.status = 'idle' })
               writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
             }
           },
@@ -1197,7 +1473,7 @@ export function useChatController() {
             // reset the shared machine for the new thread, so finalise nothing
             // here (a global error/status write or a fallback retry would land
             // on the wrong thread).
-            if (!ownsMachine()) {
+            if (!projection.accepts()) {
               settled = true
               return
             }
@@ -1228,6 +1504,15 @@ export function useChatController() {
             markOpenSteps('error', message, assistantId)
             writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
           },
+          // Track the cursor on the LIVE stream too, not just on resume: the
+          // reconnect that needs it happens after this stream drops, so the
+          // last id has to be recorded while it is still arriving.
+          onFrameId: (id) => {
+            setState((s) => {
+              const turn = s.turns.find((turn) => turn.id === assistantId)
+              if (turn) turn.lastFrameId = id
+            })
+          },
         },
         controller.signal,
       )
@@ -1239,8 +1524,8 @@ export function useChatController() {
         // Same ownership guard as onDone: an aborted stream (e.g. a thread
         // switch) lands here with `!settled`, and must not flip the visible
         // thread's status or snapshot the wrong turns.
-        if (ownsMachine()) {
-          setState((s) => { s.status = 'idle' })
+          if (projection.accepts()) {
+            setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
         }
       }
@@ -1249,7 +1534,7 @@ export function useChatController() {
       // If the user switched threads, this send no longer owns the shared
       // machine — settle its own turn's flag above but never write global
       // status/error or a snapshot onto the now-visible thread.
-      if (!ownsMachine()) return
+      if (!projection.accepts()) return
       if (controller.signal.aborted) {
         markOpenSteps('stopped', 'Stopped by the user.', assistantId)
         setState((s) => { s.status = 'idle' })
@@ -1281,6 +1566,10 @@ export function useChatController() {
       tools: payload.tools,
       actions,
       zdr: payload.zdr,
+      effort: payload.effort,
+      // Carried only when the selected catalog model attests a tier; the wire
+      // body omits it otherwise (see buildChatWireBody).
+      minPrivacyTier: payload.minPrivacyTier,
     })
   }
 
@@ -1303,6 +1592,20 @@ export function useChatController() {
     setState((s) => { s.status = 'idle' })
     if (state.threadId) writeThreadSnapshot(state.threadId, state.turns)
   }
+
+  // One place, reactive, so no terminal path can forget it: the moment the
+  // machine is free, anything a run ended too early to receive goes out as an
+  // ordinary turn. Placed after `sendContent` so the effect's first run cannot
+  // read it before it is assigned.
+  createEffect(() => {
+    if (state.status === 'streaming') return
+    const deferred = deferredSends()
+    if (deferred.length === 0) return
+    // Cleared BEFORE sending: `sendContent` flips the status, which re-runs this
+    // effect, and a queue still holding the same text would send it twice.
+    setDeferredSends([])
+    void sendContent(deferred.join('\n\n'))
+  })
 
   const addAssistantCitation = (turnId: string, turnTitle: string, citation: Citation) => {
     setState((s) => {
@@ -1615,6 +1918,9 @@ export function useChatController() {
     imageMode,
     setImageMode,
     planMode,
+    approveTurnPlan,
+    planApprovalPending,
+    planApprovalError,
     setPlanMode,
     browseWeb,
     setBrowseWeb,

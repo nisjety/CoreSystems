@@ -39,9 +39,33 @@ const (
 
 var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 
+// The capabilities execution-core's generic health credential may attest.
+//
+// The bar is the one this list's purpose states: execution-core must OWN the
+// runtime it is claiming health for. It does for all five —
+//
+//   cap.command.sandbox / cap.command.shell  its bubblewrap sandbox and the
+//       interpreter, probed in-process.
+//   cap.memory.search / cap.memory.index     `recall_memory`/`save_memory`
+//       execute inside execution-core's tool loop; the only thing they need
+//       beyond it is session-core, which execution-core probes by connecting.
+//   cap.agent.spawn                          the delegated loop runs
+//       in-process on the parent's own inference path; its one external
+//       dependency is the same session-core StartRun.
+//
+// This list stays a list precisely because widening it is a decision. Added
+// 2026-08-26 after live proof: execution-core's reporter was attesting the
+// three new ids and being refused 403 here, so `save_memory`, `recall_memory`
+// and `subagent.task` were advertised to the model and denied at the policy
+// gate. A Rust-side contract test cannot see this file, so
+// `health_attest.rs`'s own test reads it across the language boundary the way
+// `cross_service_loop_contract.rs` does.
 var genericGlobalHealthCapabilityIDs = map[string]struct{}{
 	"cap.command.sandbox": {},
 	"cap.command.shell":   {},
+	"cap.memory.search":   {},
+	"cap.memory.index":    {},
+	"cap.agent.spawn":     {},
 }
 
 type availabilityRequest struct {

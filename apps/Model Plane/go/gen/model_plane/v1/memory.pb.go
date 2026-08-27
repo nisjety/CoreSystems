@@ -89,7 +89,20 @@ type SearchMemoryRequest struct {
 	// Tenant context.
 	OrgId string `protobuf:"bytes,5,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	// Optional lower bound for updated_at.
-	UpdatedAfter  *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_after,json=updatedAfter,proto3" json:"updated_after,omitempty"`
+	UpdatedAfter *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_after,json=updatedAfter,proto3" json:"updated_after,omitempty"`
+	// The user this search is on behalf of, for per-user scoping.
+	//
+	// When set, results are limited to memories owned by this user plus those
+	// owned by nobody (org/workspace/policy scope) -- the same rule session-core's
+	// durable query applies (`scope = 'user' AND owner = $3`).
+	//
+	// Empty means no user filter, which is org-wide. That was the ONLY behaviour
+	// before this field existed, and it was safe only because the single caller
+	// always passed a `thread_id` and a thread has one owner. This boundary did
+	// not enforce that itself: a caller omitting `thread_id` got every user's
+	// personal memories in the org. Callers acting for a user should always set
+	// this.
+	UserId        string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -164,6 +177,13 @@ func (x *SearchMemoryRequest) GetUpdatedAfter() *timestamppb.Timestamp {
 		return x.UpdatedAfter
 	}
 	return nil
+}
+
+func (x *SearchMemoryRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
 }
 
 type SearchMemoryResponse struct {
@@ -862,14 +882,15 @@ var File_model_plane_v1_memory_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\n" +
-	"\x1bmodel_plane/v1/memory.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd9\x01\n" +
+	"\x1bmodel_plane/v1/memory.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf2\x01\n" +
 	"\x13SearchMemoryRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x14\n" +
 	"\x05query\x18\x02 \x01(\tR\x05query\x12!\n" +
 	"\ftopic_filter\x18\x03 \x03(\tR\vtopicFilter\x12\x14\n" +
 	"\x05limit\x18\x04 \x01(\rR\x05limit\x12\x15\n" +
 	"\x06org_id\x18\x05 \x01(\tR\x05orgId\x12?\n" +
-	"\rupdated_after\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\fupdatedAfter\"\x98\x01\n" +
+	"\rupdated_after\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\fupdatedAfter\x12\x17\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\"\x98\x01\n" +
 	"\x14SearchMemoryResponse\x125\n" +
 	"\aentries\x18\x01 \x03(\v2\x1b.model_plane.v1.MemoryEntryR\aentries\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +

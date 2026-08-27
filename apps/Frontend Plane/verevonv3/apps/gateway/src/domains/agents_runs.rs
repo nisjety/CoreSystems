@@ -16,7 +16,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Extension, Json, Router,
 };
 use reqwest::Method;
@@ -38,6 +38,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         // have to know that to see why `system` is not swallowed as a run id.
         .route("/api/v1/agents/runs/system", get(list_system_runs))
         .route("/api/v1/agents/runs/{run_id}", get(get_run))
+        // Approving a plan IS the autonomy grant — the browser names the rung
+        // and the reason, and the Model Plane validates both.
+        .route(
+            "/api/v1/agents/runs/{run_id}/plan-approval",
+            post(approve_plan),
+        )
         // Per-org/user rate limiting, ordered like `orchestration.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
@@ -196,6 +202,41 @@ async fn get_run(
         Method::GET,
         &url,
         None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
+/// Grant a planning run the authority to execute, at a named rung and with a
+/// stated reason.
+///
+/// The body is passed through unchanged: the rung keyword and the justification
+/// are both validated by the Model Plane against the shared autonomy ladder, so
+/// re-checking them here would be a second copy of a rule that must not drift.
+/// What this layer owns is the session — `require_session` has already resolved
+/// the caller, and the Model Plane checks that they own the run.
+async fn approve_plan(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = format!(
+        "{}/v1/runs/{}/plan-approval",
+        state.model_gateway_url,
+        urlencoding::encode(&run_id)
+    );
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
         token.as_deref(),
         session_token.as_deref(),
         &user,

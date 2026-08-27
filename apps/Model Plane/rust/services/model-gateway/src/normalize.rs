@@ -25,8 +25,22 @@ pub struct NormalizedRequest {
     pub space_append_context: Option<crate::session_flow::ThreadSpaceContext>,
     pub structured_output_schema: Option<String>,
     pub zdr: bool,
+    /// Caller-selected minimum privacy tier (Venice-style). `None` is
+    /// `UNSPECIFIED` and keeps today's behavior byte-identical; `Some(tier)`
+    /// is threaded onto every downstream InferRequest and enforced by
+    /// inference-core's chain (fail-closed, never a silent downgrade).
+    pub min_privacy_tier: Option<mp_contracts::model_plane::v1::PrivacyTier>,
     pub max_cost_usd: Option<f64>,
     pub max_tokens: Option<u32>,
+}
+
+/// Wire numeric (`model_plane.v1.PrivacyTier`) of the caller-selected minimum
+/// tier, 0 (= UNSPECIFIED) when none was expressed. This is the exact value
+/// inference-core validates/enforces downstream, so every transport threads
+/// this one function's result rather than re-deriving its own encoding.
+#[must_use]
+pub fn min_privacy_tier_wire(req: &NormalizedRequest) -> i32 {
+    req.min_privacy_tier.map_or(0, |tier| tier as i32)
 }
 
 /// Load the model allowlist from `ALLOWED_MODELS` env var (comma-separated).
@@ -131,6 +145,26 @@ pub fn normalize(
         }
     }
 
+    // Fail closed at the edge on an unknown tier numeric: a NEWER client naming
+    // a tier this build does not know must be refused here rather than silently
+    // treated as no constraint downstream.
+    let min_privacy_tier = match req.min_privacy_tier {
+        None | Some(0) => None,
+        Some(value) => {
+            let tier = mp_contracts::model_plane::v1::PrivacyTier::try_from(value).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!("unknown privacy tier value: {value}"),
+                    })),
+                )
+            })?;
+            // 0 (UNSPECIFIED) imposes no constraint, mirroring inference-core:
+            // GLOBAL=1 is a real floor and IS honored.
+            (tier != mp_contracts::model_plane::v1::PrivacyTier::Unspecified).then_some(tier)
+        }
+    };
+
     Ok(NormalizedRequest {
         content,
         model,
@@ -140,6 +174,7 @@ pub fn normalize(
         space_append_context: req.space_append_context.clone(),
         structured_output_schema: req.structured_output_schema.clone(),
         zdr: req.zdr,
+        min_privacy_tier,
         max_cost_usd: req.max_cost_usd,
         max_tokens: req.max_tokens,
     })
@@ -151,6 +186,7 @@ mod tests {
 
     fn make_request(content: &str, model: Option<&str>) -> InvokeRequest {
         InvokeRequest {
+            effort: None,
             regenerated: false,
             edited_resubmit: false,
             content: content.to_owned(),
@@ -161,6 +197,7 @@ mod tests {
             space_append_context: None,
             structured_output_schema: None,
             zdr: false,
+            min_privacy_tier: None,
             browse_web: false,
             deep_research: false,
             max_cost_usd: None,
@@ -217,5 +254,47 @@ mod tests {
         let req = make_request("hello", Some("claude-sonnet-4-20250514"));
         let result = normalize(&req).expect("should succeed");
         assert_eq!(result.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn absent_and_unspecified_tiers_normalize_to_no_constraint() {
+        // Absent field and explicit UNSPECIFIED (0) both mean "no constraint";
+        // GLOBAL=1 is a real floor and must survive normalization.
+        let none = normalize(&make_request("hi", None)).expect("ok");
+        let unspecified = {
+            let mut req = make_request("hi", None);
+            req.min_privacy_tier = Some(0);
+            normalize(&req).expect("ok")
+        };
+        let global = {
+            let mut req = make_request("hi", None);
+            req.min_privacy_tier = Some(1);
+            normalize(&req).expect("ok")
+        };
+        let sovereign = {
+            let mut req = make_request("hi", None);
+            req.min_privacy_tier = Some(4);
+            normalize(&req).expect("ok")
+        };
+
+        assert!(none.min_privacy_tier.is_none());
+        assert!(unspecified.min_privacy_tier.is_none());
+        assert_eq!(min_privacy_tier_wire(&none), 0);
+        assert_eq!(min_privacy_tier_wire(&global), 1);
+        assert_eq!(min_privacy_tier_wire(&sovereign), 4);
+    }
+
+    #[test]
+    fn an_unknown_tier_numeric_fails_closed_at_the_edge() {
+        for unknown in [-1, 5, 42, i32::MAX] {
+            let mut req = make_request("hi", None);
+            req.min_privacy_tier = Some(unknown);
+            let error = normalize(&req).expect_err("unknown tier must be refused");
+            let message = error.1 .0.to_string();
+            assert!(
+                message.contains("unknown privacy tier"),
+                "got: {message}"
+            );
+        }
     }
 }

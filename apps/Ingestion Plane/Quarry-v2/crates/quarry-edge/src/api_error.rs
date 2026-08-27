@@ -26,8 +26,6 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    // scaffolding: generic constructors for broader route adoption (follow-up).
-    #[allow(dead_code)]
     pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             error: message.into(),
@@ -39,7 +37,6 @@ impl ApiError {
         }
     }
 
-    #[allow(dead_code)] // scaffolding: used by routes adopting the envelope (follow-up).
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());
         self

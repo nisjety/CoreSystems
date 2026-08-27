@@ -2912,6 +2912,45 @@ export const Puzzle = (props: LucideProps) => <Icon {...props} name="puzzle" ico
   d: 'M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z',
   key: 'w46dr5'
 }]]} />
+// GitCompare / TerminalSquare are needed by the artifact-diff and tool-call
+// surfaces that arrived with the origin/main merge. lucide-solid is no longer
+// installed (the Solid v2 migration removed it), so unlike the exports above
+// these two carry lucide's published path data for `git-compare` and
+// `square-terminal` rather than a byte copy from the package. Shape and
+// viewBox match lucide; only the list keys could differ from upstream's, and
+// those are reconciliation ids with no visual effect.
+export const GitCompare = (props: LucideProps) => <Icon {...props} name="git-compare" iconNode={[['circle', {
+  cx: '18',
+  cy: '18',
+  r: '3',
+  key: '1xkwt0'
+}], ['circle', {
+  cx: '6',
+  cy: '6',
+  r: '3',
+  key: '1lh9wr'
+}], ['path', {
+  d: 'M13 6h3a2 2 0 0 1 2 2v7',
+  key: '1yeb86'
+}], ['path', {
+  d: 'M11 18H8a2 2 0 0 1-2-2V9',
+  key: '19pyzm'
+}]]} />
+export const TerminalSquare = (props: LucideProps) => <Icon {...props} name="square-terminal" iconNode={[['path', {
+  d: 'm7 11 2-2-2-2',
+  key: '1lz0vl'
+}], ['path', {
+  d: 'M11 13h4',
+  key: '1p7l4v'
+}], ['rect', {
+  width: '18',
+  height: '18',
+  x: '3',
+  y: '3',
+  rx: '2',
+  ry: '2',
+  key: '1m3agn'
+}]]} />
 export const Hash = (props: LucideProps) => <Icon {...props} name="hash" iconNode={[['line', {
   x1: '4',
   x2: '20',

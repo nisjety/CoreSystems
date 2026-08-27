@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { CancelRunRequest, CancelRunResponse, GetRunRequest, GetScheduledStepContextRequest, ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail, ScheduledStepContext } from "./runs_pbjs";
+import { CancelRunRequest, CancelRunResponse, GetRunRequest, GetScheduledStepContextRequest, ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse, ResolveScheduledStepAuthorityRequest, ResolveScheduledStepAuthorityResponse, ResolveThreadOwnerRequest, ResolveThreadOwnerResponse, RunDetail, ScheduledStepContext } from "./runs_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -94,6 +94,23 @@ export const RunService = {
       kind: MethodKind.Unary,
     },
     /**
+     * ResolveThreadOwner — authoritative tenant/user ownership check for a
+     * thread, mirroring ResolveRunOwner exactly. Also used to authorize
+     * capability-core's memory scope='session' rows: session and thread are
+     * the same underlying resource in this codebase (see agent_memory's writer
+     * in dreaming.rs, which stores a thread_id under scope='thread'), so
+     * scope='session' calls this RPC with the same thread_id too. Returns only
+     * a boolean to avoid disclosing another tenant's thread metadata.
+     *
+     * @generated from rpc model_plane.v1.RunService.ResolveThreadOwner
+     */
+    resolveThreadOwner: {
+      name: "ResolveThreadOwner",
+      I: ResolveThreadOwnerRequest,
+      O: ResolveThreadOwnerResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * ResolveRunActionAuthority returns the non-secret, immutable run/thread
      * bindings Control needs before issuing one target-owner action decision.
      * It is restricted to Control's exact action-authorizer service identity;
@@ -105,6 +122,22 @@ export const RunService = {
       name: "ResolveRunActionAuthority",
       I: ResolveRunActionAuthorityRequest,
       O: ResolveRunActionAuthorityResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * ResolveScheduledStepAuthority returns the exact active prepared scheduled
+     * run binding for Control's per-step decision. It is narrower than ordinary
+     * run inspection: the caller supplies only immutable identifiers/digests,
+     * while Session Core derives the human subject and Space from the durable
+     * scheduled-run record. No goal, transcript, tool, credential, or decision
+     * bearer crosses this boundary.
+     *
+     * @generated from rpc model_plane.v1.RunService.ResolveScheduledStepAuthority
+     */
+    resolveScheduledStepAuthority: {
+      name: "ResolveScheduledStepAuthority",
+      I: ResolveScheduledStepAuthorityRequest,
+      O: ResolveScheduledStepAuthorityResponse,
       kind: MethodKind.Unary,
     },
   }

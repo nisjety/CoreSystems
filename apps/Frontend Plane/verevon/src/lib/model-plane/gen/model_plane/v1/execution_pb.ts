@@ -4,9 +4,9 @@
 
 import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
 import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
-import type { CancelRunRequestSchema, CancelRunResponseSchema } from "./runs_pb.js";
+import type { AutonomyRung, CancelRunRequestSchema, CancelRunResponseSchema } from "./runs_pb.js";
 import { file_model_plane_v1_runs } from "./runs_pb.js";
-import type { ToolDefinition } from "./inference_pb.js";
+import type { PrivacyTier, ToolDefinition } from "./inference_pb.js";
 import { file_model_plane_v1_inference } from "./inference_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/execution.proto.
  */
 export const file_model_plane_v1_execution: GenFile = /*@__PURE__*/
-  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9leGVjdXRpb24ucHJvdG8SDm1vZGVsX3BsYW5lLnYxIqsCChtFeGVjdXRlU2NoZWR1bGVkU3RlcFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEAoIc3BhY2VfaWQYBCABKAkSEgoKc3ViamVjdF9pZBgFIAEoCRITCgtzY2hlZHVsZV9pZBgGIAEoCRIQCghmaXJlX2tleRgHIAEoCRIXCg90ZW1wbGF0ZV9kaWdlc3QYCCABKAkSDwoHc3RlcF9pZBgJIAEoCRISCgpzdGVwX2luZGV4GAogASgNEhUKDXBvbGljeV9kaWdlc3QYCyABKAkSFwoPaWRlbXBvdGVuY3lfa2V5GAwgASgJEh4KFmNvbnRyb2xfZGVjaXNpb25fdG9rZW4YDSABKAkiiwEKHEV4ZWN1dGVTY2hlZHVsZWRTdGVwUmVzcG9uc2USDwoHc3RlcF9pZBgBIAEoCRIOCgZzdGF0dXMYAiABKAkSEgoKcmVjZWlwdF9pZBgDIAEoCRIOCgZvdXRwdXQYBCABKAkSDQoFZXJyb3IYBSABKAkSFwoPdW5rbm93bl9vdXRjb21lGAYgASgIItABCg9SdW5BZ2VudFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIMCgRnb2FsGAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEg0KBW1vZGVsGAYgASgJEgwKBG1vZGUYByABKAkSEgoKbWF4X3JvdW5kcxgIIAEoDRILCgN6ZHIYCSABKAgSLQoFdG9vbHMYCiADKAsyHi5tb2RlbF9wbGFuZS52MS5Ub29sRGVmaW5pdGlvbiJjChBSdW5BZ2VudFJlc3BvbnNlEg4KBnN0YXR1cxgBIAEoCRIUCgxmaW5hbF9vdXRwdXQYAiABKAkSFwoPcm91bmRzX2V4ZWN1dGVkGAMgASgNEhAKCGdyb3VuZGVkGAQgASgIIrkBChJFeGVjdXRlU3RlcFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg8KB3N0ZXBfaWQYAiABKAkSEQoJdG9vbF9uYW1lGAMgASgJEhIKCnRvb2xfaW5wdXQYBCABKAkSFwoPcGVybWlzc2lvbl9tb2RlGAUgASgJEhQKDGhvb2tfY29udGV4dBgGIAEoCRIOCgZvcmdfaWQYByABKAkSDwoHdXNlcl9pZBgIIAEoCRILCgN6ZHIYCSABKAgicwoTRXhlY3V0ZVN0ZXBSZXNwb25zZRIPCgdzdGVwX2lkGAEgASgJEg4KBnN0YXR1cxgCIAEoCRIOCgZvdXRwdXQYAyABKAkSDQoFZXJyb3IYBCABKAkSHAoUY29tcGFjdGlvbl90cmlnZ2VyZWQYBSABKAgiXgoQUmVzdW1lUnVuUmVxdWVzdBIOCgZydW5faWQYASABKAkSFQoNY2hlY2twb2ludF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEwoLYXBwcm92YWxfaWQYBCABKAkiOAoRUmVzdW1lUnVuUmVzcG9uc2USDwoHcmVzdW1lZBgBIAEoCBISCgpzdGVwX2luZGV4GAIgASgNIjEKD1BhdXNlUnVuUmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJIiIKEFBhdXNlUnVuUmVzcG9uc2USDgoGcGF1c2VkGAEgASgIMpwECg1FeGVjdXRpb25Db3JlElYKC0V4ZWN1dGVTdGVwEiIubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVN0ZXBSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVN0ZXBSZXNwb25zZRJQCglSZXN1bWVSdW4SIC5tb2RlbF9wbGFuZS52MS5SZXN1bWVSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuUmVzdW1lUnVuUmVzcG9uc2USUAoJQ2FuY2VsUnVuEiAubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVxdWVzdBohLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1blJlc3BvbnNlEk0KCFBhdXNlUnVuEh8ubW9kZWxfcGxhbmUudjEuUGF1c2VSdW5SZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuUGF1c2VSdW5SZXNwb25zZRJNCghSdW5BZ2VudBIfLm1vZGVsX3BsYW5lLnYxLlJ1bkFnZW50UmVxdWVzdBogLm1vZGVsX3BsYW5lLnYxLlJ1bkFnZW50UmVzcG9uc2UScQoURXhlY3V0ZVNjaGVkdWxlZFN0ZXASKy5tb2RlbF9wbGFuZS52MS5FeGVjdXRlU2NoZWR1bGVkU3RlcFJlcXVlc3QaLC5tb2RlbF9wbGFuZS52MS5FeGVjdXRlU2NoZWR1bGVkU3RlcFJlc3BvbnNlQrYBChJjb20ubW9kZWxfcGxhbmUudjFCDkV4ZWN1dGlvblByb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_model_plane_v1_runs, file_model_plane_v1_inference]);
+  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9leGVjdXRpb24ucHJvdG8SDm1vZGVsX3BsYW5lLnYxIqsCChtFeGVjdXRlU2NoZWR1bGVkU3RlcFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEAoIc3BhY2VfaWQYBCABKAkSEgoKc3ViamVjdF9pZBgFIAEoCRITCgtzY2hlZHVsZV9pZBgGIAEoCRIQCghmaXJlX2tleRgHIAEoCRIXCg90ZW1wbGF0ZV9kaWdlc3QYCCABKAkSDwoHc3RlcF9pZBgJIAEoCRISCgpzdGVwX2luZGV4GAogASgNEhUKDXBvbGljeV9kaWdlc3QYCyABKAkSFwoPaWRlbXBvdGVuY3lfa2V5GAwgASgJEh4KFmNvbnRyb2xfZGVjaXNpb25fdG9rZW4YDSABKAkiiwEKHEV4ZWN1dGVTY2hlZHVsZWRTdGVwUmVzcG9uc2USDwoHc3RlcF9pZBgBIAEoCRIOCgZzdGF0dXMYAiABKAkSEgoKcmVjZWlwdF9pZBgDIAEoCRIOCgZvdXRwdXQYBCABKAkSDQoFZXJyb3IYBSABKAkSFwoPdW5rbm93bl9vdXRjb21lGAYgASgIIs8CCg9SdW5BZ2VudFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIMCgRnb2FsGAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEg0KBW1vZGVsGAYgASgJEgwKBG1vZGUYByABKAkSEgoKbWF4X3JvdW5kcxgIIAEoDRILCgN6ZHIYCSABKAgSLQoFdG9vbHMYCiADKAsyHi5tb2RlbF9wbGFuZS52MS5Ub29sRGVmaW5pdGlvbhI1ChBtaW5fcHJpdmFjeV90aWVyGAsgASgOMhsubW9kZWxfcGxhbmUudjEuUHJpdmFjeVRpZXISEQoJcGxhbl9tb2RlGA0gASgIEjMKDWF1dG9ub215X3J1bmcYDCABKA4yHC5tb2RlbF9wbGFuZS52MS5BdXRvbm9teVJ1bmcigQEKEFJ1bkFnZW50UmVzcG9uc2USDgoGc3RhdHVzGAEgASgJEhQKDGZpbmFsX291dHB1dBgCIAEoCRIXCg9yb3VuZHNfZXhlY3V0ZWQYAyABKA0SEAoIZ3JvdW5kZWQYBCABKAgSHAoUY29tcGFjdGlvbl90cmlnZ2VyZWQYBSABKAgiuQEKEkV4ZWN1dGVTdGVwUmVxdWVzdBIOCgZydW5faWQYASABKAkSDwoHc3RlcF9pZBgCIAEoCRIRCgl0b29sX25hbWUYAyABKAkSEgoKdG9vbF9pbnB1dBgEIAEoCRIXCg9wZXJtaXNzaW9uX21vZGUYBSABKAkSFAoMaG9va19jb250ZXh0GAYgASgJEg4KBm9yZ19pZBgHIAEoCRIPCgd1c2VyX2lkGAggASgJEgsKA3pkchgJIAEoCCJzChNFeGVjdXRlU3RlcFJlc3BvbnNlEg8KB3N0ZXBfaWQYASABKAkSDgoGc3RhdHVzGAIgASgJEg4KBm91dHB1dBgDIAEoCRINCgVlcnJvchgEIAEoCRIcChRjb21wYWN0aW9uX3RyaWdnZXJlZBgFIAEoCCJeChBSZXN1bWVSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIVCg1jaGVja3BvaW50X2lkGAIgASgJEg4KBm9yZ19pZBgDIAEoCRITCgthcHByb3ZhbF9pZBgEIAEoCSI4ChFSZXN1bWVSdW5SZXNwb25zZRIPCgdyZXN1bWVkGAEgASgIEhIKCnN0ZXBfaW5kZXgYAiABKA0iMQoPUGF1c2VSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkiIgoQUGF1c2VSdW5SZXNwb25zZRIOCgZwYXVzZWQYASABKAgynAQKDUV4ZWN1dGlvbkNvcmUSVgoLRXhlY3V0ZVN0ZXASIi5tb2RlbF9wbGFuZS52MS5FeGVjdXRlU3RlcFJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5FeGVjdXRlU3RlcFJlc3BvbnNlElAKCVJlc3VtZVJ1bhIgLm1vZGVsX3BsYW5lLnYxLlJlc3VtZVJ1blJlcXVlc3QaIS5tb2RlbF9wbGFuZS52MS5SZXN1bWVSdW5SZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2USTQoIUGF1c2VSdW4SHy5tb2RlbF9wbGFuZS52MS5QYXVzZVJ1blJlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5QYXVzZVJ1blJlc3BvbnNlEk0KCFJ1bkFnZW50Eh8ubW9kZWxfcGxhbmUudjEuUnVuQWdlbnRSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuUnVuQWdlbnRSZXNwb25zZRJxChRFeGVjdXRlU2NoZWR1bGVkU3RlcBIrLm1vZGVsX3BsYW5lLnYxLkV4ZWN1dGVTY2hlZHVsZWRTdGVwUmVxdWVzdBosLm1vZGVsX3BsYW5lLnYxLkV4ZWN1dGVTY2hlZHVsZWRTdGVwUmVzcG9uc2VCtgEKEmNvbS5tb2RlbF9wbGFuZS52MUIORXhlY3V0aW9uUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_model_plane_v1_runs, file_model_plane_v1_inference]);
 
 /**
  * ExecuteScheduledStepRequest contains only non-secret, immutable bindings.
@@ -231,6 +231,56 @@ export type RunAgentRequest = Message<"model_plane.v1.RunAgentRequest"> & {
    * @generated from field: repeated model_plane.v1.ToolDefinition tools = 10;
    */
   tools: ToolDefinition[];
+
+  /**
+   * Minimum privacy tier every serving provider of EVERY inference round of
+   * this run must satisfy. The gateway threads the chat request's floor here;
+   * execution-core copies it onto each round's InferRequest so the governed
+   * agent loop enforces the same constraint as the inline path — a tier can
+   * never be lost by routing a constrained chat turn through the agent loop.
+   * UNSPECIFIED imposes no constraint.
+   *
+   * @generated from field: model_plane.v1.PrivacyTier min_privacy_tier = 11;
+   */
+  minPrivacyTier: PrivacyTier;
+
+  /**
+   * When true, this run must never take a real side-effecting action,
+   * regardless of `mode` -- the human asked to see what the agent WOULD do
+   * before letting it act. Read-only tools (knowledge_search, yr_weather,
+   * ...) still run; anything `permission::is_risky_call` classifies as
+   * risky is refused outright, the same way a delegated subagent already
+   * refuses one (see runtime_loop::agent's leaf/orchestrator role split).
+   * Sourced from the chat request's `plan_mode` flag (model-gateway).
+   * Before this field existed, the request carried NO way to express this at
+   * all -- `plan_mode` was tracked only as a durable status flag
+   * (session-core `run.mode` / `PlanModeStore.is_plan_mode`) for the UI to
+   * query, with no code path that ever consulted it before dispatching a
+   * tool. A run a human believed was "planning" could still execute a real
+   * action if its `mode` happened to be `auto`.
+   * Field number 13, not 11: `min_privacy_tier` took 11 on the integration
+   * line before this field merged. Renumbered here rather than there because
+   * this one had not shipped yet — moving a field number that is already on a
+   * deployed wire is how two builds disagree about what a byte means.
+   *
+   * @generated from field: bool plan_mode = 13;
+   */
+  planMode: boolean;
+
+  /**
+   * The rung this run is permitted to operate at, checked PER CALL by the
+   * runtime loop. Unset reads as the narrowest rung, never as a grant — an
+   * older caller that does not set it must not accidentally authorize
+   * everything.
+   *
+   * Distinct from `plan_mode` and from `mode`: plan_mode is the binary "show me
+   * what you would do" gate, while this is the graded authority a human granted
+   * when they approved the plan. A run can be out of plan mode and still be
+   * held at `WORKSPACE_WRITE`.
+   *
+   * @generated from field: model_plane.v1.AutonomyRung autonomy_rung = 12;
+   */
+  autonomyRung: AutonomyRung;
 };
 
 /**
@@ -277,6 +327,20 @@ export type RunAgentResponse = Message<"model_plane.v1.RunAgentResponse"> & {
    * @generated from field: bool grounded = 4;
    */
   grounded: boolean;
+
+  /**
+   * True when the loop cleared tool-result payloads to stay inside the context
+   * window during this run.
+   *
+   * Reported because compaction is LOSSY and otherwise invisible: an answer
+   * built on a prompt whose earlier tool results were cleared can be worse for a
+   * reason nothing in the response explains. `StepOutcome` carries the same flag
+   * for the single-step surface, where it is correctly always false — one step
+   * accumulates no history to compact.
+   *
+   * @generated from field: bool compaction_triggered = 5;
+   */
+  compactionTriggered: boolean;
 };
 
 /**

@@ -6,6 +6,8 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
+// AutonomyRung — the shared autonomy ladder a plan approval grants.
+import "model_plane/v1/runs.proto";
 import "model_plane/v1/events.proto";
 
 // SessionCore — authoritative state for thread timeline, run metadata,
@@ -151,6 +153,16 @@ service ManagedRunLifecycle {
   // Renew the server-owned recovery deadline while an accepted producer is
   // still working. This request cannot carry content or choose a deadline.
   rpc HeartbeatManagedRun(HeartbeatManagedRunRequest) returns (HeartbeatManagedRunResponse);
+
+  // Persist a completed run's final answer, so a caller that restarts can still
+  // read what the run concluded.
+  //
+  // Deliberately SEPARATE from RecordTerminalOutcome, which is metadata-only by
+  // design: that receipt must stay content-free so it is safe on every run,
+  // including a zero-retention one. This call is the explicit, separately
+  // authorized, separately auditable act of writing content — and it is refused
+  // outright for a zero-retention caller, which was promised no durable trace.
+  rpc RecordRunOutput(RecordRunOutputRequest) returns (RecordRunOutputResponse);
 }
 
 // --- CreateThread ---
@@ -208,6 +220,19 @@ message CreateThreadRequest {
   // revision above. It prevents a reference/revision from being reused for a
   // different participant set during share, replay, or fork.
   string recipient_audience_hash = 16;
+
+  // Which surface created this thread: "chat" | "space" | "agent_run" |
+  // "support" | "system". Declared by the invoking surface at creation and
+  // never changes afterward -- a thread does not become "chat" because a user
+  // later opens it from the chat page. Empty defaults to "chat" for callers
+  // that predate this field; a non-empty value is validated against the
+  // allowed set and MUST agree with space_id (origin="space" iff space_id is
+  // set) or the request is rejected. This is what lets the chat listing filter
+  // on a declared fact instead of inferring scope from space_id emptiness,
+  // which is how the Agent Run Console and Support-assist threads used to leak
+  // into the chat sidebar: both invoke with no thread/session key, so the
+  // created thread looked identical to an ordinary new chat.
+  string origin = 17;
 }
 
 message CreateThreadResponse {
@@ -455,6 +480,30 @@ message RecordTerminalOutcomeResponse {
   bool already_applied = 7;
   // True only when recovery recorded the fixed unknown-outcome failure.
   bool reconciliation_required = 8;
+}
+
+// Writes a completed run's final answer to that run's own record.
+//
+// The one content-carrying call on this service. It exists because a subagent's
+// conclusion has to survive the process that produced it: the parent run's
+// transcript is deliberately NOT where it goes (the parent learns *that* its
+// child finished; it learns *what* it concluded only through an explicitly
+// permitted read), and the terminal receipt cannot carry it.
+message RecordRunOutputRequest {
+  // Run whose answer this is. Must belong to the caller's org.
+  string run_id = 1;
+
+  // The run's final answer. Server-bounded — a run's conclusion, not its
+  // transcript.
+  string output = 2;
+}
+
+message RecordRunOutputResponse {
+  string run_id = 1;
+
+  // Characters actually stored. Lower than the request when the server bounded
+  // it, so a caller can report truncation rather than assume none.
+  uint32 stored_chars = 2;
 }
 
 // Renews a managed run's server-owned liveness deadline. No caller can set a
@@ -758,6 +807,12 @@ message ListThreadsRequest {
   // owner-bound query as org_id/user_id; callers never filter a broader
   // thread result in another plane.
   string space_id = 4;
+
+  // Optional origin filter (see CreateThreadRequest.origin). The chat page's
+  // own listing passes "chat" so a thread created by another surface -- the
+  // Agent Run Console, Support-assist -- is excluded by a declared fact
+  // rather than an inferred one. Empty means no filter.
+  string origin = 5;
 }
 
 message ThreadSummary {
@@ -781,6 +836,9 @@ message ThreadSummary {
   string latest_run_id = 9;
   string latest_run_status = 10;
   google.protobuf.Timestamp latest_run_updated_at = 11;
+
+  // See CreateThreadRequest.origin.
+  string origin = 12;
 }
 
 message ListThreadsResponse {
@@ -901,11 +959,31 @@ message SetRunModeRequest {
   // claims. The update is constrained to runs owned by this org so a caller can
   // never flip the mode of another org's run (per-org isolation invariant).
   string org_id = 3;
+
+  // The autonomy rung this transition GRANTS, and why.
+  //
+  // Persisted onto the run so the grant outlives the request that made it: the
+  // next RunAgentRequest reads it back and execution-core enforces it per call.
+  // Carried here rather than on a separate RPC because leaving plan mode IS the
+  // grant — splitting them would allow a mode change with no recorded authority,
+  // which is the state this pair exists to remove.
+  //
+  // Unset leaves whatever the run already had, so an ordinary mode change is
+  // not a silent revocation.
+  AutonomyRung granted_rung = 4;
+
+  // Required whenever `granted_rung` is set. An approval with no reason, or a
+  // reason granting nothing, is a malformed ask and is refused.
+  string justification = 5;
 }
 
 message SetRunModeResponse {
   string run_id = 1;
   string mode = 2;
+
+  // The rung the run now carries, after this call. Echoed so a caller can see
+  // the grant took effect rather than assuming it did.
+  AutonomyRung granted_rung = 3;
 }
 
 message ClaimScheduledStepRequest {

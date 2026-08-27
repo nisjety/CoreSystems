@@ -348,6 +348,17 @@ fn to_i32_or_max(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+/// This chunk's `finish_reason`, if the model set one on this choice.
+///
+/// OpenAI-family streaming carries it at `choices[0].finish_reason` — `null`
+/// on every content-bearing chunk, then a real value (`stop`, `length`,
+/// `tool_calls`, `content_filter`, `function_call`) on the chunk right
+/// before the trailing usage-only one. Verified against
+/// developers.openai.com's streaming-events reference, not assumed.
+fn openai_stream_finish_reason(json: &serde_json::Value) -> Option<&str> {
+    json["choices"][0]["finish_reason"].as_str()
+}
+
 /// Build the `OpenAI` chat completions request body.
 fn build_request_body(req: &InferRequest, stream: bool) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req
@@ -421,8 +432,7 @@ fn build_request_body(req: &InferRequest, stream: bool) -> serde_json::Value {
             .tools
             .iter()
             .map(|t| {
-                let params = serde_json::from_str::<serde_json::Value>(&t.parameters_json)
-                    .unwrap_or_else(|_| serde_json::json!({ "type": "object", "properties": {} }));
+                let params = super::tool_parameters(&t.name, &t.parameters_json);
                 serde_json::json!({
                     "type": "function",
                     "function": {
@@ -611,7 +621,9 @@ impl ProviderRouter for OpenAiProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "no body".to_owned());
-            return Err(ProviderError::Http(format!("{status}: {text}")));
+            return Err(crate::provider::overflow::classify_http_failure(
+                status, &text,
+            ));
         }
 
         let json: serde_json::Value = response
@@ -647,6 +659,9 @@ impl ProviderRouter for OpenAiProvider {
             input_tokens,
             output_tokens,
             tool_calls,
+            // Provenance is stamped by the fallback chain, not the raw adapter.
+            provider_used: String::new(),
+            residency: String::new(),
         })
     }
 
@@ -682,7 +697,9 @@ impl ProviderRouter for OpenAiProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "no body".to_owned());
-            return Err(ProviderError::Http(format!("{status}: {text}")));
+            return Err(crate::provider::overflow::classify_http_failure(
+                status, &text,
+            ));
         }
 
         let request_id = req.request_id.clone();
@@ -699,6 +716,12 @@ impl ProviderRouter for OpenAiProvider {
             let mut input_tokens = 0i32;
             let mut output_tokens = 0i32;
             let mut model_used = model.clone();
+            // Set from the choice's own `finish_reason` once a content-bearing
+            // chunk carries one (OpenAI-family streams put it on the last
+            // choice before the usage-only trailer). Stays empty if the loop
+            // exits without ever seeing one -- the tail-chunk fallback below
+            // treats that as an incomplete stream, not a natural completion.
+            let mut stop_reason = String::new();
 
             while let Some(chunk_result) = bytes_stream.next().await {
                 let bytes = match chunk_result {
@@ -719,12 +742,22 @@ impl ProviderRouter for OpenAiProvider {
                         if data == "[DONE]" {
                             let _ = tx
                                 .send(InferChunk {
+                                    reasoning_delta: String::new(),
                                     request_id: request_id.clone(),
                                     delta: String::new(),
                                     done: true,
                                     model_used: model_used.clone(),
                                     input_tokens,
                                     output_tokens,
+                                    stop_reason: if stop_reason.is_empty() {
+                                        "end_turn".to_owned()
+                                    } else {
+                                        stop_reason.clone()
+                                    },
+                                    // Provenance is stamped by the fallback
+                                    // chain, not the raw adapter.
+                                    provider_used: String::new(),
+                                    residency: String::new(),
                                 })
                                 .await;
                             return;
@@ -747,6 +780,9 @@ impl ProviderRouter for OpenAiProvider {
                             }
                             if let Some(m) = json["model"].as_str() {
                                 model_used = m.to_owned();
+                            }
+                            if let Some(reason) = openai_stream_finish_reason(&json) {
+                                stop_reason = reason.to_owned();
                             }
                             let delta = json["choices"][0]["delta"]["content"]
                                 .as_str()
@@ -774,6 +810,10 @@ impl ProviderRouter for OpenAiProvider {
                                     model_used: model_used.clone(),
                                     input_tokens: 0,
                                     output_tokens: 0,
+                                    stop_reason: String::new(),
+                                    reasoning_delta: String::new(),
+                                    provider_used: String::new(),
+                                    residency: String::new(),
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -785,15 +825,29 @@ impl ProviderRouter for OpenAiProvider {
             }
 
             // Stream ended without an explicit [DONE] — still emit a terminal
-            // done carrying whatever usage we captured.
+            // done carrying whatever usage we captured. This is the abnormal
+            // path (a transport error above `break`s into it, and so does a
+            // connection that just closes early): a finish_reason seen on a
+            // real content chunk still wins, but absent that, "end_turn"
+            // would misreport an incomplete answer as a clean one.
             let _ = tx
                 .send(InferChunk {
+                    reasoning_delta: String::new(),
                     request_id,
                     delta: String::new(),
                     done: true,
                     model_used,
                     input_tokens,
                     output_tokens,
+                    stop_reason: if stop_reason.is_empty() {
+                        "stream_incomplete".to_owned()
+                    } else {
+                        stop_reason
+                    },
+                    // Provenance is stamped by the fallback chain, not the raw
+                    // adapter.
+                    provider_used: String::new(),
+                    residency: String::new(),
                 })
                 .await;
         });
@@ -840,7 +894,9 @@ impl ProviderRouter for OpenAiProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "no body".to_owned());
-            return Err(ProviderError::Http(format!("{status}: {text}")));
+            return Err(crate::provider::overflow::classify_http_failure(
+                status, &text,
+            ));
         }
 
         let json: serde_json::Value = response
@@ -877,7 +933,17 @@ impl ProviderRouter for OpenAiProvider {
         let provider = self.provider_name().to_owned();
         // chat-parity §2: advertise the model's supported feature families so
         // the client can gate the opt-in `features[]` per model.
-        let chat_features = self.capabilities().feature_flags();
+        let caps = self.capabilities();
+        let chat_features = caps.feature_flags();
+        // Venice-style per-model privacy disclosure from this deployment's
+        // declared residency + ZDR attestation. An undeclared (Global)
+        // residency stays an empty label: "no commitment claimed".
+        let privacy_tier = super::PrivacyTier::classify(&caps);
+        let residency_label = if caps.residency == super::Residency::Global {
+            String::new()
+        } else {
+            caps.residency.as_str().to_owned()
+        };
         self.chat_models
             .iter()
             .map(|id| ModelInfo {
@@ -887,6 +953,8 @@ impl ProviderRouter for OpenAiProvider {
                 streaming: true,
                 features: chat_features.clone(),
                 cheap: is_cheap_model(id),
+                privacy_tier,
+                residency_label: residency_label.clone(),
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {
                 id: id.clone(),
@@ -906,8 +974,28 @@ impl ProviderRouter for OpenAiProvider {
 mod tests {
     use super::*;
 
+    #[test]
+    fn stream_finish_reason_reads_the_choices_zero_path() {
+        // Shape verified against developers.openai.com's streaming-events
+        // reference: null on a content-bearing chunk, a real value on the
+        // chunk right before the trailing usage-only one.
+        let content_chunk = serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "hei"}, "finish_reason": null}]
+        });
+        assert_eq!(openai_stream_finish_reason(&content_chunk), None);
+
+        let final_chunk = serde_json::json!({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+        });
+        assert_eq!(openai_stream_finish_reason(&final_chunk), Some("length"));
+
+        let missing_choices = serde_json::json!({"usage": {"prompt_tokens": 3}});
+        assert_eq!(openai_stream_finish_reason(&missing_choices), None);
+    }
+
     fn make_request(model: &str) -> InferRequest {
         InferRequest {
+            thinking_budget_tokens: 0,
             request_id: "req-1".to_owned(),
             provider_hint: String::new(),
             model: model.to_owned(),

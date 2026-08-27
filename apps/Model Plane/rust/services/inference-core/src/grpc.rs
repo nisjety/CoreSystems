@@ -63,8 +63,21 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
             modality: model.modality,
             streaming: model.streaming,
             features,
+            // Venice-style per-model privacy disclosure. The residency label
+            // stays empty for an undeclared (Global) provider so "no commitment
+            // claimed" never renders as a real guarantee.
+            privacy_tier: model.privacy_tier.as_wire_i32(),
+            residency: model.residency_label,
         }
     }
+}
+
+/// Map a wire `PrivacyTier` onto the internal enum. Unknown numerics fail
+/// closed with `invalid_argument`: a NEWER client naming a tier this build
+/// does not know must never be honored as if it had asked for nothing.
+fn tier_from_wire(value: i32) -> Result<provider::PrivacyTier, Status> {
+    provider::PrivacyTier::from_wire(value)
+        .ok_or_else(|| Status::invalid_argument(format!("unknown privacy tier value: {value}")))
 }
 
 pub(crate) struct InferenceService {
@@ -176,7 +189,7 @@ impl InferenceCore for InferenceService {
         let principal = self.authorize(&request).await?;
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req, &principal);
+        let internal_req = to_internal_request(&req, &principal)?;
 
         let result = self
             .chain
@@ -191,6 +204,8 @@ impl InferenceCore for InferenceService {
             stop_reason: result.stop_reason,
             input_tokens: result.input_tokens,
             output_tokens: result.output_tokens,
+            provider_used: result.provider_used,
+            residency: result.residency,
             tool_calls: result
                 .tool_calls
                 .into_iter()
@@ -215,7 +230,7 @@ impl InferenceCore for InferenceService {
         let principal = self.authorize(&request).await?;
         let req = request.into_inner();
 
-        let internal_req = to_internal_request(&req, &principal);
+        let internal_req = to_internal_request(&req, &principal)?;
 
         let rx = self
             .chain
@@ -255,6 +270,10 @@ impl InferenceCore for InferenceService {
             // Requested residency region. The fallback chain enforces the EU
             // residency gate (deny-by-default) before any network call.
             region: req.region,
+            // The embedding contract has no tier field yet; embeddings are
+            // served from the same EU-attested Azure deployment today, so no
+            // constraint is expressed until that contract grows one.
+            min_privacy_tier: provider::PrivacyTier::Unspecified,
         };
 
         let result = self
@@ -986,10 +1005,14 @@ impl InferenceCore for InferenceService {
 
 /// Convert the public contract to the provider contract. Tenant, user, and
 /// issuer-enforced ZDR posture come only from the verified principal.
+///
+/// # Errors
+/// Returns `invalid_argument` when the caller names a privacy tier this build
+/// cannot interpret.
 fn to_internal_request(
     req: &pb::InferRequest,
     principal: &AuthenticatedPrincipal,
-) -> provider::InferRequest {
+) -> Result<provider::InferRequest, Status> {
     let messages = req
         .messages
         .iter()
@@ -1010,7 +1033,8 @@ fn to_internal_request(
         })
         .collect();
 
-    provider::InferRequest {
+    Ok(provider::InferRequest {
+        thinking_budget_tokens: req.thinking_budget_tokens,
         request_id: req.request_id.clone(),
         provider_hint: req.provider_hint.clone(),
         model: req.model.clone(),
@@ -1023,8 +1047,10 @@ fn to_internal_request(
             Some(req.structured_output_schema.clone())
         },
         zdr: principal.effective_zdr(req.zdr),
+        min_privacy_tier: tier_from_wire(req.min_privacy_tier)?,
         tools,
         tool_choice: req.tool_choice.clone(),
+        min_residency: req.min_residency.clone(),
         org_id: principal.org_id.clone(),
         user_id: principal.budget_user_id(),
         // The verified caller's own token, forwarded so the intent layer's
@@ -1032,7 +1058,7 @@ fn to_internal_request(
         // org/user to the token's claims). Never serialized into provider
         // bodies — see the field's doc comment.
         caller_bearer: crate::provider::Bearer::new(principal.bearer()),
-    }
+    })
 }
 
 /// Bundle of every provider chain required to construct an [`InferenceService`].
@@ -1253,6 +1279,29 @@ fn validate_video_generation(req: &pb::CreateVideoGenerationJobRequest) -> Resul
     Ok(())
 }
 
+/// gRPC trailer key carrying inference-core's own classification of a provider
+/// failure, so downstream services read a type instead of matching prose.
+///
+/// Additive by design: the Status message still holds the provider's original
+/// text, so a caller that has not adopted this key behaves exactly as before.
+pub const PROVIDER_ERROR_KIND_TRAILER: &str = "x-mp-provider-error";
+
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] for a prompt over the input limit.
+pub const PROVIDER_ERROR_TOO_LONG: &str = "too_long";
+
+fn too_long_status(detail: &str) -> Status {
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    match PROVIDER_ERROR_TOO_LONG.parse() {
+        Ok(value) => {
+            metadata.insert(PROVIDER_ERROR_KIND_TRAILER, value);
+        }
+        // Unreachable for a static ASCII literal; if it ever were, the typed
+        // signal is simply absent and the message-text fallback still applies.
+        Err(_) => tracing::error!("provider error kind is not a valid trailer value"),
+    }
+    Status::with_metadata(tonic::Code::Unavailable, detail.to_owned(), metadata)
+}
+
 fn provider_error_to_status(error: provider::ProviderError) -> Status {
     match error {
         provider::ProviderError::InvalidResponse(message) => Status::invalid_argument(message),
@@ -1260,18 +1309,29 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         provider::ProviderError::Unavailable(message) | provider::ProviderError::Http(message) => {
             Status::unavailable(message)
         }
+        // Code stays `unavailable`, deliberately. An overflow error is
+        // retryable in a way an invalid argument is not: FallbackChain can move
+        // the request to a larger-context provider, and a prompt too long for
+        // an 8k model may well fit a 200k one. Re-coding this to
+        // `invalid_argument` would silently remove that recovery path. What is
+        // added is the machine-readable type, so a caller no longer has to
+        // re-derive it from provider prose.
+        provider::ProviderError::TooLong { detail } => too_long_status(&detail),
         provider::ProviderError::AllExhausted { attempts } => {
             Status::unavailable(format!("all providers exhausted after {attempts} attempts"))
         }
         provider::ProviderError::RateLimited { retry_after_ms } => {
             Status::resource_exhausted(format!("rate limited: retry after {retry_after_ms}ms"))
         }
-        // EU residency rejection is a precondition the caller can act on
-        // (request an EU region / opt in), not an internal fault.
-        provider::ProviderError::ResidencyViolation(message) => {
+        // All three posture rejections share FAILED_PRECONDITION on purpose: the
+        // caller asked for a guarantee (EU residency, verified ZDR, or a minimum
+        // privacy tier) that no configured provider can honor, so the caller can
+        // act on it (adjust the request / opt in) rather than retry blindly.
+        provider::ProviderError::ResidencyViolation(message)
+        | provider::ProviderError::ZdrUnavailable(message)
+        | provider::ProviderError::TierUnavailable(message) => {
             Status::failed_precondition(message)
         }
-        provider::ProviderError::ZdrUnavailable(message) => Status::failed_precondition(message),
     }
 }
 
@@ -1292,12 +1352,14 @@ mod tests {
     fn internal_infer_scope_comes_only_from_verified_principal() {
         let principal = AuthenticatedPrincipal::for_test("org-signed", Some("user-signed"), true);
         let request = pb::InferRequest {
+            thinking_budget_tokens: 0,
             org_id: "org-signed".to_owned(),
             zdr: false,
             ..Default::default()
         };
 
-        let internal = to_internal_request(&request, &principal);
+        let internal = to_internal_request(&request, &principal)
+            .expect("an UNSPECIFIED tier request always maps onto the internal contract");
 
         assert_eq!(internal.org_id, "org-signed");
         assert_eq!(internal.user_id, "user-signed");

@@ -24,6 +24,7 @@ pub mod policy;
 pub mod presets;
 pub mod privacy;
 pub mod resources;
+pub mod tracked_snapshot;
 pub mod zdr;
 
 pub use error::{ErrorCode, QuarryError, QuarryResult};

@@ -26,6 +26,55 @@ pub const TOOL_PREFIX: &str = "subagent.";
 /// spend and makes the causal chain of a write essentially unauditable.
 pub const MAX_DEPTH: u32 = 1;
 
+/// Maximum delegated child runs ONE top-level run may start, across all of its
+/// rounds.
+///
+/// Deliberately a **second, independent** ceiling rather than a consequence of
+/// the round budget — the same separation DeepSeek keeps between its fixed
+/// loop's round budget and its `maxTotalAgents` backstop, "so the fixed loop's
+/// round budget and the generic runaway-child backstop cannot disagree".
+///
+/// # Why the round budget does not already cover this
+///
+/// It bounds total *work*, not *fan-out*. One round dispatches every tool call
+/// the model emitted concurrently, so a single round can open twenty
+/// delegations: twenty `StartManagedRun` writes, twenty lineage rows, twenty
+/// concurrent inference calls — all inside a round budget that still adds up.
+/// The first delegation's `spawn` claims the whole remaining pool, so the rest
+/// are refused for *lack of budget*, which is a true statement about rounds and
+/// a misleading one about what just happened: the fan-out already happened at
+/// the point of refusal, and the reason the model reads should be the real one.
+///
+/// # Why eight
+///
+/// `MAX_DEPTH == 1`, so this is the total breadth of one run's delegation tree.
+/// Eight is more than any real task has needed (the largest observed use is
+/// two or three parallel lookups) and few enough that a human reading the Agent
+/// Run Console can still follow the causal chain — the same reason the depth
+/// limit is one.
+pub const MAX_TOTAL_CHILDREN: u32 = 8;
+
+/// Refuse a delegation that would exceed [`MAX_TOTAL_CHILDREN`].
+///
+/// `started` is how many this run has already opened. The message names the real
+/// cause and what to do instead, because the model's alternative to delegating
+/// is doing the work itself — and a refusal it cannot interpret becomes a retry
+/// loop against the same ceiling.
+///
+/// # Errors
+///
+/// Returns the refusal text when the ceiling is already reached.
+pub fn guard_child_ceiling(started: u32) -> Result<(), String> {
+    if started >= MAX_TOTAL_CHILDREN {
+        return Err(format!(
+            "delegation refused: this run has already started {started} subagents, which is the \
+             per-run limit of {MAX_TOTAL_CHILDREN}. Do the remaining work yourself, or narrow it \
+             into one delegated task instead of several."
+        ));
+    }
+    Ok(())
+}
+
 /// Dispatch capability for a delegated (nested) agent loop.
 ///
 /// Only a caller that already holds the agent driver's machinery — inference
@@ -166,6 +215,38 @@ mod tests {
         assert!(!is_subagent_tool("subagent"));
         assert!(!is_subagent_tool("knowledge_search"));
         assert_eq!(label("subagent.research"), "research");
+    }
+
+    /// The ceiling is about breadth, and the round budget is about work. Two
+    /// separate limits on purpose: a run can exhaust either one without the
+    /// other, and collapsing them would make one of the two refusals lie about
+    /// its cause.
+    #[test]
+    fn the_child_ceiling_is_independent_of_the_round_budget() {
+        guard_child_ceiling(0).expect("a run with no children may delegate");
+        guard_child_ceiling(MAX_TOTAL_CHILDREN - 1).expect("the last slot is usable");
+        let refusal = guard_child_ceiling(MAX_TOTAL_CHILDREN)
+            .expect_err("the ceiling must actually stop the next one");
+        assert!(
+            refusal.contains("per-run limit"),
+            "the refusal must name the real cause, not borrow the budget's: {refusal}"
+        );
+        assert!(
+            !refusal.contains("round budget"),
+            "a breadth refusal that blames the round budget sends the model to \
+             re-plan the wrong thing: {refusal}"
+        );
+        // And a run at the ceiling with plenty of budget is still refused —
+        // which is exactly the case the round budget cannot express.
+        assert!(resolve_round_budget(100, None).is_ok());
+        assert!(guard_child_ceiling(MAX_TOTAL_CHILDREN).is_err());
+    }
+
+    /// Past the ceiling as well as at it. An `==` check would let a counter that
+    /// overshot (a concurrent batch incrementing past the limit) pass forever.
+    #[test]
+    fn the_ceiling_holds_past_its_own_value() {
+        assert!(guard_child_ceiling(MAX_TOTAL_CHILDREN + 5).is_err());
     }
 
     #[test]

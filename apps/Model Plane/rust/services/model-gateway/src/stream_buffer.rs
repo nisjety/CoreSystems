@@ -58,11 +58,46 @@ pub fn scoped_stream_key(org_id: &str, user_id: &str, request_id: &str) -> Strin
     format!("{org_id}{KEY_SEPARATOR}{user_id}{KEY_SEPARATOR}{request_id}")
 }
 
-/// A single buffered delta plus its SSE sequence id.
+/// A single buffered SSE frame plus its sequence id.
+///
+/// # Rich events, and reading records written before them
+///
+/// This buffer originally held only assistant text, so a reconnect replayed the
+/// answer and silently lost every rich event — tool calls, citations, usage,
+/// the generated title (parity doc §4.1, "the one real stream gap"). It now
+/// buffers the frame: an event NAME and its `data:` payload, which makes it
+/// general over every current and future event rather than a list to keep in
+/// step.
+///
+/// `event`/`data` are `#[serde(default)]` and `delta` is retained so records
+/// written by an older build — already sitting in Redis/Dragonfly under a
+/// 10-minute TTL when the new build starts — still deserialize instead of
+/// failing the whole replay. A legacy record has an empty `event` and a
+/// populated `delta`; [`BufferedEvent::is_legacy_text`] identifies it, and the
+/// resume handler rebuilds the `chunk` frame it used to send. Without this a
+/// deploy would 500 every in-flight resume for the length of one TTL.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct BufferedDelta {
+pub struct BufferedEvent {
     pub seq: u64,
+    /// SSE event name. Empty only in legacy text-delta records.
+    #[serde(default)]
+    pub event: String,
+    /// The SSE `data:` payload, verbatim as it was sent.
+    #[serde(default)]
+    pub data: String,
+    /// Legacy text delta. Written by builds before rich buffering; never
+    /// written now, which is why it is skipped when empty rather than
+    /// serialized as `""` on every frame.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub delta: String,
+}
+
+impl BufferedEvent {
+    /// A record from before rich buffering: no event name, text in `delta`.
+    #[must_use]
+    pub fn is_legacy_text(&self) -> bool {
+        self.event.is_empty()
+    }
 }
 
 /// Terminal info captured when a stream completes, so a late resumer still
@@ -77,7 +112,7 @@ pub struct StreamDone {
 
 /// What a resume needs: deltas after the cursor and the terminal chunk.
 pub struct Replay {
-    pub deltas: Vec<BufferedDelta>,
+    pub deltas: Vec<BufferedEvent>,
     pub done: Option<StreamDone>,
     /// False when the `request_id` is unknown (evicted or never existed).
     pub found: bool,
@@ -88,7 +123,7 @@ pub struct Replay {
 // ---------------------------------------------------------------------------
 
 struct BufferedStream {
-    deltas: Vec<BufferedDelta>,
+    deltas: Vec<BufferedEvent>,
     done: Option<StreamDone>,
     updated: Instant,
 }
@@ -99,7 +134,7 @@ pub struct InMemoryStreamBuffer {
 }
 
 impl InMemoryStreamBuffer {
-    fn append(&self, request_id: &str, seq: u64, delta: &str) {
+    fn append(&self, request_id: &str, seq: u64, event: &str, data: &str) {
         let Ok(mut map) = self.inner.lock() else {
             return;
         };
@@ -111,9 +146,11 @@ impl InMemoryStreamBuffer {
                 done: None,
                 updated: Instant::now(),
             });
-        entry.deltas.push(BufferedDelta {
+        entry.deltas.push(BufferedEvent {
             seq,
-            delta: delta.to_owned(),
+            event: event.to_owned(),
+            data: data.to_owned(),
+            delta: String::new(),
         });
         if entry.deltas.len() > MAX_DELTAS_PER_STREAM {
             let overflow = entry.deltas.len() - MAX_DELTAS_PER_STREAM;
@@ -198,11 +235,13 @@ impl RedisStreamBuffer {
         format!("{REDIS_PREFIX}{request_id}:done")
     }
 
-    async fn append(&self, request_id: &str, seq: u64, delta: &str) {
+    async fn append(&self, request_id: &str, seq: u64, event: &str, data: &str) {
         let key = Self::list_key(request_id);
-        let Ok(entry) = serde_json::to_string(&BufferedDelta {
+        let Ok(entry) = serde_json::to_string(&BufferedEvent {
             seq,
-            delta: delta.to_owned(),
+            event: event.to_owned(),
+            data: data.to_owned(),
+            delta: String::new(),
         }) else {
             return;
         };
@@ -267,7 +306,7 @@ impl RedisStreamBuffer {
         let found = !entries.is_empty() || done_present;
         let deltas = entries
             .iter()
-            .filter_map(|s| serde_json::from_str::<BufferedDelta>(s).ok())
+            .filter_map(|s| serde_json::from_str::<BufferedEvent>(s).ok())
             .filter(|d| after_seq.is_none_or(|a| d.seq > a))
             .collect();
 
@@ -322,10 +361,16 @@ impl StreamBufferStore {
         }
     }
 
-    pub async fn append(&self, request_id: &str, seq: u64, delta: &str) {
+    /// Buffer one SSE frame so a reconnect can replay it.
+    ///
+    /// `event` is the SSE event name and `data` its payload verbatim. Taking the
+    /// frame rather than just text is what makes resume lossless for rich events
+    /// and keeps this store general over events that do not exist yet — the same
+    /// no-allowlist property the Verevon gateway's relay has.
+    pub async fn append(&self, request_id: &str, seq: u64, event: &str, data: &str) {
         match self {
-            Self::Memory(m) => m.append(request_id, seq, delta),
-            Self::Redis(r) => r.append(request_id, seq, delta).await,
+            Self::Memory(m) => m.append(request_id, seq, event, data),
+            Self::Redis(r) => r.append(request_id, seq, event, data).await,
         }
     }
 
@@ -358,9 +403,9 @@ mod tests {
     #[tokio::test]
     async fn append_then_replay_after_cursor() {
         let store = StreamBufferStore::new();
-        store.append("req_1", 0, "a").await;
-        store.append("req_1", 1, "b").await;
-        store.append("req_1", 2, "c").await;
+        store.append("req_1", 0, "chunk", "a").await;
+        store.append("req_1", 1, "chunk", "b").await;
+        store.append("req_1", 2, "chunk", "c").await;
 
         let all = store.replay_after("req_1", None).await;
         assert!(all.found);
@@ -374,7 +419,7 @@ mod tests {
     #[tokio::test]
     async fn finish_is_replayed() {
         let store = StreamBufferStore::new();
-        store.append("req_2", 0, "hi").await;
+        store.append("req_2", 0, "chunk", "hi").await;
         store
             .finish(
                 "req_2",
@@ -395,7 +440,9 @@ mod tests {
     #[tokio::test]
     async fn terminal_frame_is_not_replayed_after_its_cursor() {
         let store = StreamBufferStore::new();
-        store.append("req_terminal_cursor", 0, "answer").await;
+        store
+            .append("req_terminal_cursor", 0, "chunk", "answer")
+            .await;
         store
             .finish(
                 "req_terminal_cursor",
@@ -431,7 +478,7 @@ mod tests {
     async fn delta_cap_evicts_oldest() {
         let store = StreamBufferStore::new();
         for i in 0..(MAX_DELTAS_PER_STREAM as u64 + 10) {
-            store.append("req_cap", i, "x").await;
+            store.append("req_cap", i, "chunk", "x").await;
         }
         let r = store.replay_after("req_cap", None).await;
         assert_eq!(r.deltas.len(), MAX_DELTAS_PER_STREAM);
@@ -439,6 +486,55 @@ mod tests {
     }
 
     /// Regression: a buffered stream was addressable by `request_id` alone, so
+    /// A record written by a build that buffered text only must still
+    /// deserialize and still replay, or a deploy 500s every in-flight resume for
+    /// the length of one TTL (10 minutes) while those records age out.
+    #[test]
+    fn legacy_text_records_still_deserialize() {
+        let legacy = r#"{"seq":7,"delta":"half an answer"}"#;
+        let frame: BufferedEvent =
+            serde_json::from_str(legacy).expect("a legacy record must still parse");
+        assert_eq!(frame.seq, 7);
+        assert_eq!(frame.delta, "half an answer");
+        assert!(
+            frame.is_legacy_text(),
+            "no event name means the resume handler must rebuild the chunk frame"
+        );
+        assert!(frame.event.is_empty() && frame.data.is_empty());
+    }
+
+    /// Any event, including ones that do not exist yet: the buffer stores the
+    /// frame, so it never needs a list of known events to keep in step with.
+    #[tokio::test]
+    async fn any_event_name_round_trips() {
+        let store = StreamBufferStore::new();
+        let key = scoped_stream_key("org", "user", "req_rich");
+        for (seq, (event, data)) in [
+            ("chunk", r#"{"delta":"hi"}"#),
+            ("tool_call", r#"{"id":"1","name":"shell"}"#),
+            ("memory_recall", r#"{"count":3}"#),
+            ("an_event_invented_next_year", r#"{"x":1}"#),
+        ]
+        .iter()
+        .enumerate()
+        {
+            store.append(&key, seq as u64, event, data).await;
+        }
+        let replay = store.replay_after(&key, None).await;
+        let names: Vec<&str> = replay.deltas.iter().map(|f| f.event.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "chunk",
+                "tool_call",
+                "memory_recall",
+                "an_event_invented_next_year"
+            ],
+            "the buffer must not filter or rename events"
+        );
+        assert_eq!(replay.deltas[2].data, r#"{"count":3}"#);
+    }
+
     /// any authenticated caller who saw an id — and it travels in the
     /// `connected` event, every chunk, and the cancel URL — could replay
     /// another tenant's assistant output for the whole TTL window.
@@ -447,12 +543,17 @@ mod tests {
         let store = StreamBufferStore::new();
         let request_id = "req_shared_id";
         let owner = scoped_stream_key("org_a", "user_a", request_id);
-        store.append(&owner, 0, "tenant a's answer").await;
+        store.append(&owner, 0, "chunk", "tenant a's answer").await;
 
         // The owner still resumes.
         let mine = store.replay_after(&owner, None).await;
         assert!(mine.found);
-        assert_eq!(mine.deltas[0].delta, "tenant a's answer");
+        assert_eq!(mine.deltas[0].data, "tenant a's answer");
+        assert_eq!(mine.deltas[0].event, "chunk");
+        assert!(
+            !mine.deltas[0].is_legacy_text(),
+            "a freshly written frame is never a legacy record"
+        );
 
         // Another tenant knowing the exact request id derives a different key.
         let other_org = scoped_stream_key("org_b", "user_a", request_id);
@@ -486,7 +587,7 @@ mod tests {
 
         match phase.as_str() {
             "write" => {
-                store.append(&owner, 0, "persisted answer").await;
+                store.append(&owner, 0, "chunk", "persisted answer").await;
                 store
                     .finish(
                         &owner,

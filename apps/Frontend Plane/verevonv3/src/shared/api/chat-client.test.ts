@@ -1,15 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildChatWireBody,
+  listModels,
   shouldRequestSupportContext,
   describeFeedbackFailure,
   getChatThreadTranscript,
+  getThreadContext,
   listChatThreads,
+  queueInvocationInput,
   saveChatThreadSnapshot,
   streamChat,
   submitFeedback,
 } from './chat-client'
-import { bindSupportChatThread, clearSupportChatThreads } from '@/shared/chat/support-chat-thread'
+import type { ChatStreamHandlers } from './chat-client'
+import {
+  bindSupportChatThread,
+  clearSupportChatThreads,
+} from '@/shared/chat/support-chat-thread'
 import {
   __resetRetentionForTests,
   isLocalRetentionAllowed,
@@ -58,8 +65,283 @@ describe('chat-client connected event', () => {
     await streamChat({ content: 'hi' }, { onConnected })
 
     expect(onConnected).toHaveBeenCalledWith(
-      expect.objectContaining({ ok: true, requestId: 'req_1', threadId: 'thread_1', runId: 'run_1' }),
+      expect.objectContaining({
+        ok: true,
+        requestId: 'req_1',
+        threadId: 'thread_1',
+        runId: 'run_1',
+      }),
     )
+  })
+})
+
+describe('chat-client stream-event coverage', () => {
+  afterEach(() => {
+    clearSupportChatThreads()
+    vi.unstubAllGlobals()
+  })
+
+  it('routes memory_recall to its own handler and skips a malformed zero count', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: memory_recall\ndata: ${JSON.stringify({ count: 3, latency_ms: 42 })}\n\n`,
+          // The backend never emits this — it only fires when memory was
+          // genuinely injected — so a 0 means a malformed payload. Rendering
+          // "recalled 0 memories" would be worse than rendering nothing.
+          `event: memory_recall\ndata: ${JSON.stringify({ count: 0 })}\n\n`,
+        ]),
+      ),
+    )
+    const onMemoryRecall = vi.fn()
+    await streamChat({ content: 'hi' }, { onMemoryRecall })
+
+    expect(onMemoryRecall).toHaveBeenCalledTimes(1)
+    expect(onMemoryRecall).toHaveBeenCalledWith({
+      count: 3,
+      latencyMs: 42,
+      memories: [],
+    })
+  })
+
+  it('asks for the memory feature family by default so the backend emits the event', () => {
+    // The recall event is opt-in server-side. Without this the injection still
+    // happens but the UI can never show that it did.
+    expect(buildChatWireBody({ content: 'hi' }).features).toContain('memory')
+  })
+
+  it('separates a server-side stop from a normal completion', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          sseResponse([
+            `event: stopped\ndata: ${JSON.stringify({ reason: 'budget exhausted' })}\n\n`,
+          ]),
+        ),
+    )
+    const onStopped = vi.fn()
+    const onDone = vi.fn()
+    await streamChat({ content: 'hi' }, { onStopped, onDone })
+
+    expect(onStopped).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: 'budget exhausted' }),
+    )
+    expect(onDone).not.toHaveBeenCalled()
+  })
+
+  it('still falls back to onDone for a caller that predates onStopped', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          sseResponse([`event: stopped\ndata: ${JSON.stringify({})}\n\n`]),
+        ),
+    )
+    const onDone = vi.fn()
+    await streamChat({ content: 'hi' }, { onDone })
+    expect(onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('carries stop_reason through done so a truncated answer is visible', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          sseResponse([
+            `event: done\ndata: ${JSON.stringify({ stop_reason: 'stream_incomplete' })}\n\n`,
+          ]),
+        ),
+    )
+    const onDone = vi.fn()
+    await streamChat({ content: 'hi' }, { onDone })
+    expect(onDone).toHaveBeenCalledWith(
+      expect.objectContaining({ stopReason: 'stream_incomplete' }),
+    )
+  })
+
+  it('surfaces an unrecognised event instead of dropping it, but ignores STREAM_ envelopes', async () => {
+    // The gateway relays upstream SSE verbatim with no allowlist, so an event
+    // this client has not learned still arrives. Dropping it silently is how
+    // a new backend capability stays invisible.
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          sseResponse([
+            `event: some_future_event\ndata: ${JSON.stringify({ hello: 'world' })}\n\n`,
+            `event: STREAM_OPENED\ndata: ${JSON.stringify({ noise: true })}\n\n`,
+          ]),
+        ),
+    )
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onUnknownEvent })
+
+    expect(onUnknownEvent).toHaveBeenCalledTimes(1)
+    expect(onUnknownEvent).toHaveBeenCalledWith({
+      name: 'some_future_event',
+      payload: { hello: 'world' },
+    })
+  })
+})
+
+describe('mid-run queued input', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const jsonResponse = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('routes queued_input to its own handler and ignores a frame with no text', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: queued_input\ndata: ${JSON.stringify({ messages: ['bruk EUR', '  '] })}\n\n`,
+          // A delivery we cannot show is not a delivery. Reporting it would tell
+          // the user their message arrived without saying which one.
+          `event: queued_input\ndata: ${JSON.stringify({ messages: [] })}\n\n`,
+        ]),
+      ),
+    )
+    const onQueuedInput = vi.fn()
+    await streamChat({ content: 'hi' }, { onQueuedInput })
+
+    expect(onQueuedInput).toHaveBeenCalledTimes(1)
+    expect(onQueuedInput).toHaveBeenCalledWith({ messages: ['bruk EUR'] })
+  })
+
+  it('reports acceptance, including a delivery that was not durably recorded', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(202, {
+            request_id: 'req-1',
+            queued: true,
+            pending: 2,
+            persisted: false,
+          }),
+        ),
+    )
+    // `persisted: false` means the agent WILL read it but the thread does not
+    // record it — the reply would otherwise appear in history answering nothing.
+    await expect(queueInvocationInput('req-1', 'bruk EUR')).resolves.toEqual({
+      outcome: 'queued',
+      pending: 2,
+      persisted: false,
+    })
+  })
+
+  /**
+   * The ordinary race, not a failure: the stream ended between the keystroke and
+   * the request. It has to be distinguishable, because the caller's correct
+   * response is to send the message as a normal turn — and the original bug was
+   * exactly a lost message with no signal.
+   */
+  it('separates "the run already ended" from a refusal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(404, {
+            error: { code: 'not_found', message: 'no active stream' },
+          }),
+        ),
+    )
+    await expect(queueInvocationInput('req-1', 'bruk EUR')).resolves.toEqual({
+      outcome: 'run_ended',
+    })
+  })
+
+  it('keeps the two refusal reasons apart, since one means wait and the other means shorten', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(429, {
+            error: { code: 'too_many', message: 'for mange i kø' },
+          }),
+        ),
+    )
+    await expect(queueInvocationInput('req-1', 'a')).resolves.toEqual({
+      outcome: 'refused',
+      reason: 'too_many',
+      message: 'for mange i kø',
+    })
+
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(413, {
+            error: { code: 'too_long', message: 'for lang' },
+          }),
+        ),
+    )
+    await expect(queueInvocationInput('req-1', 'a')).resolves.toEqual({
+      outcome: 'refused',
+      reason: 'too_long',
+      message: 'for lang',
+    })
+  })
+
+  /**
+   * The browser may say which Space and thread it thinks it is on, but those are
+   * hints: the BFF mints the append decision and the Model Plane appends to the
+   * thread its own stream registration recorded. Pinned because dropping these
+   * would silently break Space-scoped threads (no decision to mint against).
+   */
+  it('passes the space and thread hints through for the BFF to mint against', async () => {
+    const bodies: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: unknown, init?: RequestInit) => {
+        bodies.push(String(init?.body ?? ''))
+        return Promise.resolve(
+          jsonResponse(202, { queued: true, pending: 1, persisted: true }),
+        )
+      }),
+    )
+    await queueInvocationInput('req-1', 'bruk EUR', {
+      threadId: 'thread-9',
+      spaceRef: 'space-3',
+    })
+    expect(JSON.parse(bodies[0] ?? '')).toEqual({
+      content: 'bruk EUR',
+      thread_id: 'thread-9',
+      space_ref: 'space-3',
+    })
+  })
+
+  it('omits the hints entirely when there are none, rather than sending empties', async () => {
+    const bodies: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: unknown, init?: RequestInit) => {
+        bodies.push(String(init?.body ?? ''))
+        return Promise.resolve(
+          jsonResponse(202, { queued: true, pending: 1, persisted: true }),
+        )
+      }),
+    )
+    await queueInvocationInput('req-1', 'bruk EUR')
+    // An empty `space_ref` would read to the BFF as a Space selection and send
+    // it looking for a decision that cannot exist.
+    expect(JSON.parse(bodies[0] ?? '')).toEqual({ content: 'bruk EUR' })
   })
 })
 
@@ -194,6 +476,53 @@ describe('chat-client tool wiring', () => {
     await streamChat({ content: 'hi' }, { onFollowUps })
 
     expect(onFollowUps).not.toHaveBeenCalled()
+  })
+})
+
+describe('chat invoke privacy tier (Venice tiering)', () => {
+  function jsonResponse(data: unknown): Response {
+    return new Response(JSON.stringify(data), {
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  // Opt-in ONLY: a default send must stay byte-identical to the pre-tier
+  // behavior — unspecified means no constraint server-side.
+  it('omits min_privacy_tier unless explicitly selected', () => {
+    const body = buildChatWireBody({ content: 'hi' })
+    expect(body).not.toHaveProperty('min_privacy_tier')
+  })
+
+  it('emits min_privacy_tier snake_case when a tier is selected', () => {
+    const body = buildChatWireBody({ content: 'hi', minPrivacyTier: 'sovereign' })
+    expect(body.min_privacy_tier).toBe('sovereign')
+  })
+
+  it('never emits min_privacy_tier for unspecified, even if passed', () => {
+    const body = buildChatWireBody({ content: 'hi', minPrivacyTier: 'unspecified' })
+    expect(body).not.toHaveProperty('min_privacy_tier')
+  })
+
+  it('discloses per-model privacy_tier/residency from /v1/models and degrades unknown values to neutral', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ models: [
+        { id: 'm-eu', name: 'EU Model', privacy_tier: 'eu_resident', residency: 'eu-central-1' },
+        { id: 'm-sov', name: 'Sovereign Model', privacyTier: 'sovereign' },
+        { id: 'm-garbage', name: 'Garbage Model', privacy_tier: 'fort_knox' },
+        { id: 'm-old', name: 'Old Shape Model' },
+      ] }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const models = await listModels()
+
+    expect(models).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'm-eu', privacyTier: 'eu_resident', residency: 'eu-central-1' }),
+      expect.objectContaining({ id: 'm-sov', privacyTier: 'sovereign' }),
+    ]))
+    // Unknown/garbage values must NOT surface as any claim at all.
+    expect(models.find((model) => model.id === 'm-garbage')?.privacyTier).toBeUndefined()
+    expect(models.find((model) => model.id === 'm-old')?.privacyTier).toBeUndefined()
   })
 })
 
@@ -410,6 +739,265 @@ describe('chat feedback', () => {
     expect(describeFeedbackFailure(new ApiError('zdr', 412, null)))
       .toContain('Zero Data Retention')
     // Anything unrecognised still says the rating did not stick.
-    expect(describeFeedbackFailure(new Error('boom'))).toContain('Kunne ikke lagre')
+    expect(describeFeedbackFailure(new Error('boom'))).toContain(
+      'Kunne ikke lagre',
+    )
+  })
+})
+
+describe('extended-thinking effort', () => {
+  it('omits the field entirely on an ordinary turn', () => {
+    for (const effort of [undefined, 'standard' as const]) {
+      const body = buildChatWireBody({
+        content: 'hei',
+        threadId: 't1',
+        effort,
+      })
+      expect('effort' in body).toBe(false)
+    }
+  })
+
+  it('sends the profile when a non-default effort is chosen', () => {
+    for (const effort of ['quick', 'deep'] as const) {
+      const body = buildChatWireBody({
+        content: 'hei',
+        threadId: 't1',
+        effort,
+      })
+      expect(body.effort).toBe(effort)
+    }
+  })
+
+  it('keeps the reasoning family so the deltas can actually arrive', () => {
+    // Requesting thinking while dropping the `reasoning` feature would spend the
+    // tokens and discard the output.
+    const body = buildChatWireBody({
+      content: 'hei',
+      threadId: 't1',
+      effort: 'deep',
+    })
+    expect(body.features).toContain('reasoning')
+  })
+})
+
+describe('resume cursor tracking', () => {
+  it('reports every frame id so a reconnect can resume incrementally', () => {
+    const seen: string[] = []
+    const handlers: ChatStreamHandlers = {
+      onFrameId: (id) => seen.push(id),
+      onMessage: () => {},
+    }
+    // Simulate what readSseStream hands the dispatcher, including a frame with
+    // no id (rich events used to carry none at all).
+    for (const event of [
+      { event: 'chunk', data: '{"delta":"a"}', id: '0' },
+      { event: 'usage', data: '{"input_tokens":1}', id: '1' },
+      { event: 'chunk', data: '{"delta":"b"}' },
+      { event: 'chunk', data: '{"delta":"c"}', id: '3' },
+    ]) {
+      if (event.id) handlers.onFrameId?.(event.id)
+    }
+    expect(seen).toEqual(['0', '1', '3'])
+    // The LAST reported id is the resume cursor; an idless frame must not reset it.
+    expect(seen.at(-1)).toBe('3')
+  })
+})
+
+describe('getThreadContext', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('normalizes the itemized window and reports the assembler total', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              thread_id: 't1',
+              estimated_tokens: 1234,
+              budget_tokens: 8000,
+              segments: [
+                {
+                  kind: 'system',
+                  content: 'You are Verevon',
+                  estimated_tokens: 40,
+                },
+                {
+                  kind: 'grounding',
+                  content: 'doc excerpt',
+                  estimated_tokens: 900,
+                },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    )
+    const context = await getThreadContext('t1')
+    expect(context.threadId).toBe('t1')
+    // The assembler's own total, not a sum of the segments: if the two disagree
+    // the inspector must show what the assembler believes.
+    expect(context.estimatedTokens).toBe(1234)
+    expect(context.budgetTokens).toBe(8000)
+    expect(context.segments.map((segment) => segment.kind)).toEqual([
+      'system',
+      'grounding',
+    ])
+  })
+
+  it('drops a segment with no kind rather than showing an unlabelled prompt block', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              thread_id: 't1',
+              segments: [
+                { content: 'mystery text', estimated_tokens: 10 },
+                { kind: 'system' },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    )
+    const context = await getThreadContext('t1')
+    expect(context.segments).toHaveLength(1)
+    expect(context.segments[0]?.kind).toBe('system')
+    // Missing numbers become 0, never NaN — an inspector rendering NaN tokens
+    // looks broken rather than empty.
+    expect(context.segments[0]?.estimatedTokens).toBe(0)
+    expect(context.estimatedTokens).toBe(0)
+  })
+
+  it('scopes to a run when one is given', async () => {
+    // Collect the requested URLs as they arrive, rather than reaching into the
+    // mock's call tuple — which needs a typed parameter the linter then reports
+    // as unused.
+    const urls: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input))
+        return new Response(JSON.stringify({ thread_id: 't1', segments: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }),
+    )
+    await getThreadContext('t1', 'run-9')
+    expect(urls[0]).toContain('run_id=run-9')
+    // A blank run id must not send an empty parameter.
+    await getThreadContext('t1', '   ')
+    expect(urls[1]).not.toContain('run_id')
+  })
+})
+
+describe('recalled-memory provenance', () => {
+  const frame = (memories: unknown) =>
+    `event: memory_recall\ndata: ${JSON.stringify({ count: 1, latency_ms: 5, memories })}\n\n`
+
+  it('carries the label, preview and both provenance axes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame([
+            {
+              memory_id: 'mem-1',
+              role: 'recall',
+              origin: 'stated',
+              label: 'USER',
+              preview: 'Prefers metric units',
+            },
+          ]),
+        ]),
+      ),
+    )
+    const onMemoryRecall = vi.fn()
+    await streamChat({ content: 'hi' }, { onMemoryRecall })
+    expect(onMemoryRecall.mock.calls[0]?.[0].memories).toEqual([
+      {
+        memoryId: 'mem-1',
+        role: 'recall',
+        origin: 'stated',
+        label: 'USER',
+        preview: 'Prefers metric units',
+      },
+    ])
+  })
+
+  /**
+   * The honesty rule at the client boundary: an origin this build does not
+   * recognise must read as `unrecorded`, never as `stated`. Presenting an
+   * unknown value as "you told me this" manufactures consent the record does
+   * not support.
+   */
+  it('degrades an unknown origin to unrecorded, never to stated', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame([
+            {
+              memory_id: 'm1',
+              role: 'recall',
+              origin: 'some_future_value',
+              label: 'X',
+              preview: 'p',
+            },
+            { memory_id: 'm2', role: 'recall', label: 'X', preview: 'p' },
+          ]),
+        ]),
+      ),
+    )
+    const onMemoryRecall = vi.fn()
+    await streamChat({ content: 'hi' }, { onMemoryRecall })
+    const origins = onMemoryRecall.mock.calls[0]?.[0].memories.map(
+      (memory: { origin: string }) => memory.origin,
+    )
+    expect(origins).toEqual(['unrecorded', 'unrecorded'])
+  })
+
+  it('drops a row with no id or nothing readable, and keeps the rest', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          frame([
+            { role: 'recall', origin: 'stated', label: 'X', preview: 'no id' },
+            { memory_id: 'm2', origin: 'stated', label: 'X', preview: '   ' },
+            {
+              memory_id: 'm3',
+              origin: 'inferred',
+              label: 'X',
+              preview: 'keeps',
+            },
+          ]),
+        ]),
+      ),
+    )
+    const onMemoryRecall = vi.fn()
+    await streamChat({ content: 'hi' }, { onMemoryRecall })
+    const memories = onMemoryRecall.mock.calls[0]?.[0].memories
+    expect(memories).toHaveLength(1)
+    expect(memories[0].memoryId).toBe('m3')
+  })
+
+  it('tolerates a malformed memories field without losing the count', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(sseResponse([frame('not-an-array')])),
+    )
+    const onMemoryRecall = vi.fn()
+    await streamChat({ content: 'hi' }, { onMemoryRecall })
+    // The count is the signal; a broken list must not suppress it.
+    expect(onMemoryRecall.mock.calls[0]?.[0]).toMatchObject({
+      count: 1,
+      memories: [],
+    })
   })
 })

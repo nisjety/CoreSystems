@@ -41,6 +41,30 @@ func IsSupportedRiskLevel(raw string) bool {
 	}
 }
 
+// PrivacyTier values for Capability.PrivacyTier (model-kind only). Labels
+// mirror the wire enum model_plane.v1.PrivacyTier lowercased to snake_case —
+// the exact values the frontend contract and model-gateway's /v1/models
+// disclosure already use — ordered weakest→strongest.
+const (
+	PrivacyTierUnspecified    = "unspecified"
+	PrivacyTierGlobal         = "global"
+	PrivacyTierEUResident     = "eu_resident"
+	PrivacyTierZDRContractual = "zdr_contractual"
+	PrivacyTierSovereign      = "sovereign"
+)
+
+// IsSupportedPrivacyTier reports whether raw is one of the closed set of
+// privacy tier labels. Strict for the same reason as IsSupportedRiskLevel: a
+// malformed persisted value must not silently disclose a fabricated tier.
+func IsSupportedPrivacyTier(raw string) bool {
+	switch raw {
+	case PrivacyTierUnspecified, PrivacyTierGlobal, PrivacyTierEUResident, PrivacyTierZDRContractual, PrivacyTierSovereign:
+		return true
+	default:
+		return false
+	}
+}
+
 // seededHighRiskCapabilityIDs enumerates capability ids whose risk_level is
 // set to RiskHigh by a database migration (a "seed"), never by a tenant write
 // through the HTTP/store API. It is the fail-closed backstop for the
@@ -100,4 +124,10 @@ type Capability struct {
 	ExecutionMode     string
 	CostClass         string
 	HealthCheckedAt   *time.Time
+	// PrivacyTier and Residency are model-kind only: the strongest privacy
+	// posture this model's registered providers can honor, and the declared
+	// residency label. Empty/PrivacyTierUnspecified means no declared
+	// posture; never fabricated for a non-model capability.
+	PrivacyTier string
+	Residency   string
 }

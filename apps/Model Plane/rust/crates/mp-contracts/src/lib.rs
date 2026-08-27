@@ -1,3 +1,7 @@
+pub mod autonomy;
+pub mod skill_recovery;
+pub mod tool_arguments;
+
 /// Generated protobuf and gRPC types for the Model Plane.
 ///
 /// Re-exports the `model_plane.v1` package as a Rust module tree.

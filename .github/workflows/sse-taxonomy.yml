@@ -1,0 +1,62 @@
+name: SSE taxonomy freshness
+
+# Fails when the gateway's ChatEvent surface, the SPA's stream client, and the
+# committed taxonomy doc stop agreeing.
+#
+# Two failure modes, both previously invisible:
+#   - a new backend event with no `case` in the SPA client is parsed and
+#     silently dropped — the stream succeeds and the feature just never appears;
+#   - the doc drifts behind the code, which is this repo's documented recurring
+#     problem (prose claiming a smaller SSE surface than the code emits).
+#
+# Deliberately narrow. docs/endpoint-map.md is NOT regenerated here: its `v3`
+# relevance ratings and "do not wire yet" flags are human judgment, and a
+# generator would overwrite exactly the part that carries the value.
+
+on:
+  push:
+    paths:
+      - 'apps/Model Plane/rust/services/model-gateway/src/sse_events.rs'
+      - 'apps/Model Plane/docs/sse-event-taxonomy.md'
+      - 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py'
+      - 'apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts'
+      - '.github/workflows/sse-taxonomy.yml'
+  pull_request:
+    paths:
+      - 'apps/Model Plane/rust/services/model-gateway/src/sse_events.rs'
+      - 'apps/Model Plane/docs/sse-event-taxonomy.md'
+      - 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py'
+      - 'apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts'
+      - '.github/workflows/sse-taxonomy.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # No dependencies on purpose: the check parses source text, so it must
+      # keep working when the Rust and pnpm toolchains are not installed.
+      - name: Verify the taxonomy matches source
+        run: python3 "apps/Model Plane/scripts/gen-sse-event-taxonomy.py" --check
+
+      # A checker that cannot fail is worse than none: it reads as coverage.
+      # Prove it detects drift on every run.
+      - name: Prove the check detects drift
+        run: |
+          set -uo pipefail
+          doc="apps/Model Plane/docs/sse-event-taxonomy.md"
+          cp "$doc" /tmp/taxonomy.orig
+          # Drop one documented event, exactly the stale-doc shape this guards.
+          grep -v '| `memory_recall` |' /tmp/taxonomy.orig > "$doc"
+          if python3 "apps/Model Plane/scripts/gen-sse-event-taxonomy.py" --check; then
+            echo "::error::the freshness check PASSED on a deliberately stale doc; it is not actually checking anything"
+            cp /tmp/taxonomy.orig "$doc"
+            exit 1
+          fi
+          cp /tmp/taxonomy.orig "$doc"
+          echo "drift detection confirmed"

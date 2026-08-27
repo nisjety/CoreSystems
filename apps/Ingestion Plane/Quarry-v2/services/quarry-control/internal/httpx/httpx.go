@@ -147,6 +147,16 @@ func WriteJSON[T any](w http.ResponseWriter, r *http.Request, status int, data T
 	_ = json.NewEncoder(w).Encode(env)
 }
 
+// WriteRawJSON emits `data` WITHOUT the {request_id,data} envelope. Only
+// for endpoints whose Rust caller parses the body as a bare JSON object
+// (quarry-edge's forward_one::<T> on /v1/team/* aggregates) — list
+// endpoints keep WriteJSON/forward_list semantics.
+func WriteRawJSON[T any](w http.ResponseWriter, r *http.Request, status int, data T) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(data)
+}
+
 func WriteErr(w http.ResponseWriter, r *http.Request, code quarrycontracts.ErrorCode, msg string, details map[string]any) {
 	env := quarrycontracts.Err(RequestIDOf(r.Context()), quarrycontracts.ErrorEnvelope{
 		Code: code, Message: msg, Details: details,

@@ -12,6 +12,8 @@ import {
   Download,
   ExternalLink,
   FileCode2,
+  FileText,
+  GitCompare,
   Globe2,
   Image as ImageIcon,
   Info,
@@ -20,14 +22,29 @@ import {
   Paperclip,
   Pencil,
   RefreshCw,
+  Search,
   Sparkles,
   Square,
+  TerminalSquare,
   ThumbsDown,
   ThumbsUp,
   Volume2,
   Wrench,
   X,
 } from '@/shared/icons'
+import {
+  createConversationNodeRegistry,
+  deriveConversationNodes,
+  parseUnifiedDiff,
+  toolPresentation,
+  type AnswerState,
+  type ConversationNodeContext,
+  type DiffResult,
+  type PlanApprovalStatus,
+  type ToolIntent,
+} from '@/shared/chat-nodes'
+import type { AutonomyRung, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import {
   For,
   Match,
@@ -43,7 +60,6 @@ import {
   friendlyMimeLabel,
 } from './chat-artifacts'
 import {
-  buildGeneratedImagePreviews,
   domId,
   formatBytes,
   formatDayLabel,
@@ -53,9 +69,6 @@ import {
   formatToolArgs,
   formatUsd,
   getTaskStepIcon,
-  imageGenerationDisplayContent,
-  isGeneratedImageFile,
-  isImageArtifact,
   parseInline,
   parseMarkdownBlocks,
   prettyModel,
@@ -66,12 +79,12 @@ import {
   type ChatKnowledgeGrounding,
   type ChatToolCall,
   type ChatTurn,
+  type QueuedInput,
   type ComposerAttachment,
   type ComposerToolId,
   type GeneratedFile,
   type GeneratedImagePreview,
   type IconComponent,
-  LOW_CONFIDENCE_ANSWER_THRESHOLD,
   type MarkdownBlock,
   type MarkdownListItem,
   OVERFLOW_PROMPTS,
@@ -89,6 +102,8 @@ export function MessageBlock(props: {
   onFeedback: (rating: 'positive' | 'negative') => Promise<boolean>
   onRegenerate: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  onApprovePlan: (rung: AutonomyRung, justification: string) => void
+  planApproval?: PlanApprovalStatus
   onSelectFollowUp?: (text: string) => void
   onViewSteps: () => void
   /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
@@ -102,6 +117,158 @@ export function MessageBlock(props: {
   )
 }
 
+/**
+ * The chat surface's node renderers.
+ *
+ * Defined once at module scope, not per message: the map is static, and building
+ * it inside the component would allocate on every render. Typed as an exhaustive
+ * record, so adding a `ConversationNode` kind without a renderer fails the build
+ * rather than silently rendering nothing.
+ */
+const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
+  reasoning: {
+    kind: 'reasoning',
+    render: (node) => (
+      <ReasoningTrace text={node.text} streaming={node.streaming} />
+    ),
+  },
+  answer: {
+    kind: 'answer',
+    render: (node, ctx) => (
+      <AnswerRegion answer={node.answer} onRegenerate={ctx.onRegenerate} />
+    ),
+  },
+  grounding: {
+    kind: 'grounding',
+    render: (node) => <GroundingInlineSummary grounding={node.grounding} />,
+  },
+  'low-confidence': {
+    kind: 'low-confidence',
+    render: (node) => <LowConfidenceNotice confidence={node.confidence} />,
+  },
+  'memory-recall': {
+    kind: 'memory-recall',
+    render: (node) => (
+      <MemoryRecallNotice count={node.count} memories={node.memories} />
+    ),
+  },
+  truncated: {
+    kind: 'truncated',
+    render: (node) => <TruncatedAnswerNotice stopReason={node.stopReason} />,
+  },
+  'tool-chips': {
+    kind: 'tool-chips',
+    render: (node) => <ToolChips tools={node.tools} />,
+  },
+  attachments: {
+    kind: 'attachments',
+    render: (node) => (
+      <AttachmentChips attachments={node.attachments} tone="assistant" />
+    ),
+  },
+  steps: {
+    kind: 'steps',
+    render: (node, ctx) => (
+      <StepsPill calls={node.calls} onViewSteps={ctx.onViewSteps} />
+    ),
+  },
+  approvals: {
+    kind: 'approvals',
+    render: (node, ctx) => (
+      <ApprovalRequests
+        approvals={node.approvals}
+        onDecide={ctx.onApprovalDecision}
+      />
+    ),
+  },
+  'plan-approval': {
+    kind: 'plan-approval',
+    render: (node, ctx) => (
+      <PlanApprovalControl
+        grantedRung={node.grantedRung}
+        pending={node.pending}
+        error={node.error}
+        onApprove={ctx.onApprovePlan}
+      />
+    ),
+  },
+  'image-previews': {
+    kind: 'image-previews',
+    render: (node) => <GeneratedImagePreviews previews={node.previews} />,
+  },
+  files: {
+    kind: 'files',
+    render: (node) => <GeneratedFiles files={node.files} />,
+  },
+  artifacts: {
+    kind: 'artifacts',
+    render: (node) => (
+      <div class="verevon-chat-artifact-chips">
+        <For each={node.artifacts}>
+          {(artifact) => (
+            <span>
+              <FileCode2 size={12} />
+              {artifact.title || artifact.kind}
+            </span>
+          )}
+        </For>
+      </div>
+    ),
+  },
+  'follow-ups': {
+    kind: 'follow-ups',
+    render: (node, ctx) => (
+      <FollowUpChips
+        suggestions={node.suggestions}
+        onSelect={ctx.onSelectFollowUp}
+      />
+    ),
+  },
+})
+
+/**
+ * The answer region: thinking indicator, error, or content.
+ *
+ * One component for all three because they share the streaming-class wrapper and
+ * were previously chosen by a nested `Show`/fallback pair — a structure that made
+ * rendering two of them at once impossible. Keeping that guarantee is why
+ * `AnswerState` is a discriminated union rather than three separate nodes.
+ */
+function AnswerRegion(props: {
+  answer: AnswerState
+  onRegenerate: () => void
+}) {
+  return (
+    <Switch>
+      <Match when={props.answer.state === 'pending'}>
+        <ThinkingDots />
+      </Match>
+      <Match when={props.answer.state === 'failed' ? props.answer : null}>
+        {(failed) => (
+          <ErrorNotice
+            message={failed().message}
+            onRetry={props.onRegenerate}
+          />
+        )}
+      </Match>
+      <Match when={props.answer.state === 'content' ? props.answer : null}>
+        {(content) => (
+          <div class={{ 'verevon-chat-streaming': content().streaming }}>
+            <Show when={content().content}>
+              {(text) => <ChatMarkdown content={text()} />}
+            </Show>
+            <Show when={content().stopped}>
+              <span class="verevon-chat-status-chip">
+                <Square size={12} /> Stoppet
+              </span>
+            </Show>
+          </div>
+        )}
+      </Match>
+    </Switch>
+  )
+}
+
 export function AssistantMessage(props: {
   copied: boolean
   message: ChatTurn
@@ -110,6 +277,8 @@ export function AssistantMessage(props: {
   onFeedback: (rating: 'positive' | 'negative') => Promise<boolean>
   onRegenerate: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  onApprovePlan: (rung: AutonomyRung, justification: string) => void
+  planApproval?: PlanApprovalStatus
   onSelectFollowUp?: (text: string) => void
   onViewSteps: () => void
   version?: VersionBadge | null
@@ -129,17 +298,20 @@ export function AssistantMessage(props: {
 
   const waiting = () => props.message.status === 'waiting'
   const errored = () => props.message.status === 'error'
-  const stopped = () => props.message.status === 'stopped'
-  const emptyWaiting = () => waiting() && !props.message.content && !props.message.reasoning
-  const files = () => props.message.files ?? []
-  const artifacts = () => props.message.artifacts ?? []
-  const imagePreviews = createMemo(() => buildGeneratedImagePreviews(files(), artifacts(), props.message.content))
-  const displayContent = createMemo(() => (
-    imagePreviews().length > 0 ? imageGenerationDisplayContent(props.message.content) : props.message.content
-  ))
-  const visibleFiles = createMemo(() => files().filter((file) => !isGeneratedImageFile(file)))
-  const visibleArtifacts = createMemo(() => artifacts().filter((artifact) => !isImageArtifact(artifact)))
-  const artifactCount = () => visibleArtifacts().length
+
+  // What this turn renders, as data. The conditions and order that used to live
+  // inline as fourteen nested `<Show>` blocks are now one reviewable function
+  // (`deriveConversationNodes`) with its own tests — including the three-path
+  // equivalence gate, which caught `stopReason`/`memoryRecallCount` being
+  // dropped on reload.
+  const nodes = createMemo(() => deriveConversationNodes(props.message, props.planApproval))
+  const nodeContext = (): ConversationNodeContext => ({
+    onViewSteps: props.onViewSteps,
+    onApprovalDecision: props.onApprovalDecision,
+    onApprovePlan: props.onApprovePlan,
+    onSelectFollowUp: props.onSelectFollowUp,
+    onRegenerate: props.onRegenerate,
+  })
 
   return (
     <article class="verevon-chat-message verevon-chat-message--assistant">
@@ -151,65 +323,16 @@ export function AssistantMessage(props: {
           <span>Verevon</span>
           <time>{formatRelative(props.message.createdAt)}</time>
         </div>
-        <Show when={props.message.reasoning}>
-          {(reasoning) => <ReasoningTrace text={reasoning()} streaming={waiting()} />}
-        </Show>
-        <Show
-          when={!emptyWaiting()}
-          fallback={<ThinkingDots />}
-        >
-          <Show
-            when={!errored()}
-            fallback={<ErrorNotice message={props.message.content || 'Stream error'} onRetry={props.onRegenerate} />}
-          >
-            <div class={{ 'verevon-chat-streaming': waiting() }}>
-              <Show when={displayContent()}>
-                {(content) => <ChatMarkdown content={content()} />}
-              </Show>
-              <Show when={stopped()}>
-                <span class="verevon-chat-status-chip"><Square size={12} /> Stoppet</span>
-              </Show>
-            </div>
-          </Show>
-        </Show>
-        <Show when={props.message.grounding}>
-          {(grounding) => <GroundingInlineSummary grounding={grounding()} />}
-        </Show>
-        <Show when={!waiting() && !errored() && props.message.confidence != null && (props.message.confidence ?? 1) < LOW_CONFIDENCE_ANSWER_THRESHOLD}>
-          <LowConfidenceNotice confidence={props.message.confidence ?? 0} />
-        </Show>
-        <ToolChips tools={props.message.tools} />
-        <AttachmentChips attachments={props.message.attachments} tone="assistant" />
-        <Show when={(props.message.toolCalls?.length ?? 0) > 0}>
-          <StepsPill calls={props.message.toolCalls ?? []} onViewSteps={props.onViewSteps} />
-        </Show>
-        <Show when={(props.message.pendingApprovals?.length ?? 0) > 0}>
-          <ApprovalRequests
-            approvals={props.message.pendingApprovals ?? []}
-            onDecide={props.onApprovalDecision}
-          />
-        </Show>
-        <Show when={imagePreviews().length > 0}>
-          <GeneratedImagePreviews previews={imagePreviews()} />
-        </Show>
-        <Show when={visibleFiles().length > 0}>
-          <GeneratedFiles files={visibleFiles()} />
-        </Show>
-        <Show when={artifactCount() > 0}>
-          <div class="verevon-chat-artifact-chips">
-            <For each={visibleArtifacts()}>
-              {(artifact) => (
-                <span>
-                  <FileCode2 size={12} />
-                  {artifact.title || artifact.kind}
-                </span>
-              )}
-            </For>
-          </div>
-        </Show>
-        <Show when={!waiting() && !errored() && (props.message.followUps?.length ?? 0) > 0}>
-          <FollowUpChips suggestions={props.message.followUps ?? []} onSelect={props.onSelectFollowUp} />
-        </Show>
+        {/*
+          Rendered from the derived node list through the keyed registry. Adding
+          a node kind means adding a renderer to CHAT_NODE_REGISTRY and a case to
+          `deriveConversationNodes` — not editing this component. `keyed` is off
+          deliberately: nodes are recreated each derivation, and keying on
+          identity would remount every node on every token during streaming.
+        */}
+        <For each={nodes()}>
+          {(node) => CHAT_NODE_REGISTRY.render(node, nodeContext())}
+        </For>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
@@ -796,30 +919,306 @@ export function ApprovalRequests(props: {
   )
 }
 
+/**
+ * A unified diff, rendered as hunks.
+ *
+ * Shared by both patch producers — a tool that returned a patch, and an artifact
+ * revision diffed client-side — because a diff is a diff and two renderers would
+ * drift. Line numbers are deliberately omitted: the hunk header carries the
+ * position, and per-line numbers in a 320px card cost more width than they earn.
+ */
+export function DiffView(props: { result: DiffResult }) {
+  return (
+    <div class="verevon-chat-diff">
+      <div class="verevon-chat-diff__stat">
+        <span class="verevon-chat-diff__added">+{props.result.stat.added}</span>
+        <span class="verevon-chat-diff__removed">
+          −{props.result.stat.removed}
+        </span>
+        <Show when={props.result.truncated}>
+          {/* An empty hunk list would otherwise read as "no changes". */}
+          {/* Norwegian inline, matching this file's convention (no i18n hook
+              here — see the sibling notices). */}
+          <span class="verevon-chat-diff__truncated">
+            for stor til å vises linje for linje
+          </span>
+        </Show>
+      </div>
+      <Show when={props.result.hunks.length > 0}>
+        <For each={props.result.hunks}>
+          {(hunk) => (
+            <div class="verevon-chat-diff__hunk">
+              <div class="verevon-chat-diff__hunk-head">
+                @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},
+                {hunk.newLines} @@
+              </div>
+              <For each={hunk.lines}>
+                {(line) => (
+                  <div
+                    class={`verevon-chat-diff__line verevon-chat-diff__line--${line.kind}`}
+                  >
+                    <span class="verevon-chat-diff__sigil" aria-hidden="true">
+                      {line.kind === 'added'
+                        ? '+'
+                        : line.kind === 'removed'
+                          ? '-'
+                          : ' '}
+                    </span>
+                    <span class="verevon-chat-diff__text">
+                      {line.text || "\u00a0"}
+                    </span>
+                  </div>
+                )}
+              </For>
+            </div>
+          )}
+        </For>
+      </Show>
+    </div>
+  )
+}
+
+/** Per-intent icon. The glyph is the fastest signal of what a step did. */
+function ToolIntentIcon(props: { intent: ToolIntent }) {
+  return (
+    <Switch fallback={<Wrench size={14} />}>
+      <Match when={props.intent === 'terminal'}>
+        <TerminalSquare size={14} />
+      </Match>
+      <Match when={props.intent === 'search'}>
+        <Search size={14} />
+      </Match>
+      <Match when={props.intent === 'read'}>
+        <FileText size={14} />
+      </Match>
+      <Match when={props.intent === 'diff'}>
+        <GitCompare size={14} />
+      </Match>
+    </Switch>
+  )
+}
+
+/**
+ * A tool call, presented according to its recomputed intent
+ * (`shared/chat-nodes/tool-presentation`).
+ *
+ * Every call used to render identically: a wrench, the name, and raw `<pre>`
+ * blocks. The header now carries what the intent makes meaningful — a result
+ * count for a search, a truncation warning for a read — so the collapsed row is
+ * informative without expanding it. The body is still the raw payload, because
+ * the payload is the evidence and reshaping it would hide what the model saw.
+ */
 export function ToolCallCard(props: { call: ChatToolCall }) {
   const [open, setOpen] = createSignal(false)
-  const failed = () => Boolean(props.call.error) || props.call.status === 'error'
+  const failed = () =>
+    Boolean(props.call.error) || props.call.status === 'error'
   const running = () => !props.call.status || props.call.status === 'running'
-  const statusLabel = () => failed() ? 'feilet' : running() ? 'kjører ...' : 'fullført'
+  const statusLabel = () =>
+    failed() ? 'feilet' : running() ? 'kjører ...' : 'fullført'
   const args = () => formatToolArgs(props.call.args)
+  const presentation = createMemo(() => toolPresentation(props.call))
 
   return (
-    <div class="verevon-chat-tool-call">
-      <button type="button" aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
-        <Wrench size={14} />
+    <div class="verevon-chat-tool-call" data-intent={presentation().intent}>
+      <button
+        type="button"
+        aria-expanded={open() ? 'true' : 'false'}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <ToolIntentIcon intent={presentation().intent} />
         <span>{props.call.name}</span>
-        <em class={{ 'is-error': failed(), 'is-running': running() }}>{statusLabel()}</em>
+        {/* A search that returned nothing is a real outcome, so 0 must render —
+            hence an explicit null check rather than a truthiness test. */}
+        <Show when={presentation().count != null && !running()}>
+          <em class="verevon-chat-tool-call__count">
+            {presentation().count}{' '}
+            {presentation().count === 1 ? 'treff' : 'treff'}
+          </em>
+        </Show>
+        <Show when={presentation().intent === 'diff'}>
+          <em class="verevon-chat-tool-call__count">
+            +{presentation().added ?? 0} −{presentation().removed ?? 0}
+          </em>
+        </Show>
+        <Show when={presentation().truncated}>
+          {/* Not the same as "no results": there IS more and the model did not
+              see it, which matters for any answer built on this. */}
+          <em
+            class="verevon-chat-tool-call__truncated"
+            title="Resultatet ble avkortet"
+          >
+            avkortet
+          </em>
+        </Show>
+        <em class={{ 'is-error': failed(), 'is-running': running() }}>
+          {statusLabel()}
+        </em>
         <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
       <Show when={open() && (args() || props.call.output || props.call.error)}>
         <div>
-          <Show when={args()}><pre>{args()}</pre></Show>
-          <Show when={props.call.output}><pre>{props.call.output}</pre></Show>
-          <Show when={props.call.error}><p>{props.call.error}</p></Show>
+          <Show when={args()}>
+            <pre>{args()}</pre>
+          </Show>
+          <Show
+            when={presentation().intent === 'diff' && props.call.output}
+            fallback={
+              <Show when={props.call.output}>
+                <pre>{props.call.output}</pre>
+              </Show>
+            }
+          >
+            {/* A patch rendered as a patch. The raw text is still what the model
+                saw — this only changes how a reader reads it. */}
+            {(output) => <DiffView result={parseUnifiedDiff(output())} />}
+          </Show>
+          <Show when={props.call.error}>
+            <p>{props.call.error}</p>
+          </Show>
         </div>
       </Show>
     </div>
   )
+}
+
+/**
+ * Messages the user sent WHILE the agent was working.
+ *
+ * Rendered under the in-progress answer, where the newest thing the user did
+ * belongs, and every state is visible: waiting, handed to the agent, or refused
+ * with the reason. Silence here is the bug this replaces — the send path used to
+ * discard mid-run input with no trace at all.
+ */
+export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
+  const label = (entry: QueuedInput) => {
+    if (entry.state === 'delivered') return 'levert til agenten'
+    if (entry.state === 'refused') return 'ikke levert'
+    return 'venter'
+  }
+  return (
+    <Show when={props.entries.length > 0}>
+      <ul class="verevon-chat-queued" aria-label="Meldinger sendt underveis">
+        <For each={props.entries}>
+          {(entry) => (
+            <li class="verevon-chat-queued-item" data-state={entry.state}>
+              <p class="verevon-chat-queued-text">{entry.content}</p>
+              <p class="verevon-chat-queued-state">
+                <span>{label(entry)}</span>
+                <Show when={entry.note}>
+                  {(note) => (
+                    <span class="verevon-chat-queued-note">{note()}</span>
+                  )}
+                </Show>
+              </p>
+            </li>
+          )}
+        </For>
+      </ul>
+    </Show>
+  )
+}
+
+/**
+ * The plan-approval control: the only thing that grants a planning run the
+ * authority to execute.
+ *
+ * A plan-mode run described what it would do. Letting it act is a decision a
+ * person makes, and the Model Plane requires that decision to name TWO things —
+ * how much authority is granted, and why. So this asks for both, and refuses to
+ * submit until the reason is a reason: an approval with no stated ground is a
+ * rubber stamp with extra steps, and the whole point of the ladder is that the
+ * grant is reviewable afterwards.
+ *
+ * Before this existed, plan mode could be entered from the composer and never
+ * left — the control that decides how much a run may do had no way to be used.
+ */
+export function PlanApprovalControl(props: {
+  grantedRung?: AutonomyRung
+  pending: boolean
+  error?: string
+  onApprove: (rung: AutonomyRung, justification: string) => void
+}) {
+  const [rung, setRung] = createSignal<AutonomyRung>('workspace_write')
+  const [reason, setReason] = createSignal('')
+  const tooShort = () => reason().trim().length < MIN_PLAN_JUSTIFICATION_CHARS
+
+  return (
+    <Show
+      when={!props.grantedRung}
+      fallback={
+        <p class="verevon-chat-plan-granted">
+          Godkjent: agenten kan nå {RUNG_LABEL[props.grantedRung ?? 'read_only']}.
+        </p>
+      }
+    >
+      <section class="verevon-chat-plan" aria-label="Godkjenn planen">
+        <p class="verevon-chat-plan__lead">
+          Dette var en plan – ingenting er utført. Velg hvor mye agenten får gjøre, og skriv
+          hvorfor.
+        </p>
+        <div class="verevon-chat-plan__rungs" role="radiogroup" aria-label="Fullmakt">
+          <For each={GRANTABLE_RUNGS}>
+            {(option) => (
+              <button
+                type="button"
+                role="radio"
+                aria-checked={rung() === option ? 'true' : 'false'}
+                class="verevon-chat-plan__rung"
+                data-selected={rung() === option}
+                onClick={() => setRung(option)}
+              >
+                {RUNG_LABEL[option]}
+              </button>
+            )}
+          </For>
+        </div>
+        <textarea
+          class="verevon-chat-plan__reason"
+          rows={2}
+          placeholder="Hvorfor trenger agenten denne fullmakten?"
+          value={reason()}
+          onInput={(event) => setReason(event.currentTarget.value)}
+        />
+        <div class="verevon-chat-plan__actions">
+          {/* The minimum is stated, not enforced silently: a disabled button
+              with no reason given is indistinguishable from a broken one. */}
+          <Show when={tooShort()}>
+            <span class="verevon-chat-plan__hint">
+              Minst {MIN_PLAN_JUSTIFICATION_CHARS} tegn – en begrunnelse noen kan vurdere.
+            </span>
+          </Show>
+          <Show when={props.error}>
+            {(message) => (
+              <span class="verevon-chat-plan__error" role="alert">
+                {message()}
+              </span>
+            )}
+          </Show>
+          <button
+            type="button"
+            class="verevon-chat-plan__approve"
+            disabled={tooShort() || props.pending}
+            onClick={() => props.onApprove(rung(), reason().trim())}
+          >
+            {props.pending ? 'Godkjenner…' : 'Godkjenn'}
+          </button>
+        </div>
+      </section>
+    </Show>
+  )
+}
+
+/**
+ * `read_only` is deliberately absent: it is what a plan-mode run already has, so
+ * offering it as a grant would be an approval that changes nothing while still
+ * taking the run out of plan mode.
+ */
+const GRANTABLE_RUNGS: AutonomyRung[] = ['workspace_write', 'danger_full_access']
+
+const RUNG_LABEL: Record<AutonomyRung, string> = {
+  read_only: 'bare undersøke',
+  workspace_write: 'skrive i arbeidsområdet',
+  danger_full_access: 'utføre alt, også utgående handlinger',
 }
 
 export function ToolChips(props: { tools: ComposerToolId[] }) {
@@ -992,7 +1391,136 @@ export function LowConfidenceNotice(props: { confidence: number }) {
   )
 }
 
-export function GroundingInlineSummary(props: { grounding: ChatKnowledgeGrounding }) {
+/**
+ * Deterministic "memory was used" indicator (Model Plane's `memory_recall`
+ * event). Shown because a user cannot otherwise distinguish an answer that
+ * drew on remembered context from one that guessed — and a wrong remembered
+ * fact is only correctable if you know it was in play. The backend emits the
+ * event only when memory genuinely contributed, so there is no zero state.
+ */
+/**
+ * Norwegian label per origin.
+ *
+ * `unrecorded` is deliberately NOT phrased as something the user said. The
+ * backend contract is explicit that rows predating provenance must never render
+ * as `stated`, and "du sa dette" about a row that does not record it would
+ * manufacture consent. It reads as an unknown source instead.
+ */
+const MEMORY_ORIGIN_LABEL: Record<MemoryOrigin, string> = {
+  stated: 'du ba meg huske',
+  inferred: 'utledet',
+  unrecorded: 'ukjent kilde',
+}
+
+/**
+ * "Memory was used", and — when the backend said which — what was used.
+ *
+ * Collapsed to a single line by default: the count is the signal, the contents
+ * are the follow-up. Expanding is the point of the whole feature, though. A
+ * remembered fact that is wrong is only correctable if you can find it, and
+ * seeing the list is also how you tell whether the agent's memory needs
+ * updating at all.
+ */
+export function MemoryRecallNotice(props: {
+  count: number
+  memories: RecalledMemory[]
+}) {
+  const [open, setOpen] = createSignal(false)
+  const listed = () => props.memories.length > 0
+  const summary = () =>
+    `Brukte ${props.count} ${props.count === 1 ? 'minne' : 'minner'} fra tidligere samtaler.`
+
+  return (
+    <div class="verevon-chat-memory-recall">
+      <Show
+        when={listed()}
+        fallback={
+          // No list to show — an older backend, or entries that carried nothing
+          // readable. The count still stands on its own.
+          <p class="verevon-chat-memory-recall-notice" role="note">
+            <Sparkles size={12} />
+            {summary()}
+          </p>
+        }
+      >
+        <button
+          type="button"
+          class="verevon-chat-memory-recall-notice verevon-chat-memory-recall__toggle"
+          aria-expanded={open() ? 'true' : 'false'}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <Sparkles size={12} />
+          <span>{summary()}</span>
+          <span class="verevon-chat-memory-recall__hint">
+            {open() ? 'Skjul' : 'Vis hva jeg husker'}
+          </span>
+          <ChevronRight
+            size={12}
+            class={{ 'verevon-chat-rotate': open() }}
+          />
+        </button>
+        <Show when={open()}>
+          <ul class="verevon-chat-memory-recall__list">
+            <For each={props.memories}>
+              {(memory) => (
+                <li class="verevon-chat-memory-recall__item">
+                  <div class="verevon-chat-memory-recall__head">
+                    <span class="verevon-chat-memory-recall__label">
+                      {memory.label}
+                    </span>
+                    {/* Both axes are shown: WHERE it came from and HOW it came
+                        to exist. They answer different questions, and the
+                        second is the one that says whether to trust it. */}
+                    <span
+                      class="verevon-chat-memory-recall__badge"
+                      data-origin={memory.origin}
+                    >
+                      {MEMORY_ORIGIN_LABEL[memory.origin]}
+                    </span>
+                    <Show when={memory.role === 'inject'}>
+                      <span class="verevon-chat-memory-recall__scope">
+                        organisasjon
+                      </span>
+                    </Show>
+                  </div>
+                  <p class="verevon-chat-memory-recall__preview">
+                    {memory.preview}
+                  </p>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </Show>
+    </div>
+  )
+}
+
+/**
+ * The answer may be incomplete. `stream_incomplete` means the provider
+ * connection broke before any proper termination signal; the token-ceiling
+ * reasons mean the model ran out of room mid-thought. Either way the reply
+ * looked finished and was not — the exact case honesty requires naming.
+ */
+export function TruncatedAnswerNotice(props: { stopReason: string }) {
+  const cutOff = () =>
+    props.stopReason === 'max_tokens' || props.stopReason === 'length'
+  const incomplete = () => props.stopReason === 'stream_incomplete'
+  return (
+    <Show when={cutOff() || incomplete()}>
+      <p class="verevon-chat-truncated-notice" role="note">
+        <AlertCircle size={12} />
+        {cutOff()
+          ? 'Svaret nådde lengdegrensen og kan være avkuttet — be om fortsettelsen.'
+          : 'Forbindelsen brøt før svaret var fullført — svaret kan være avkuttet.'}
+      </p>
+    </Show>
+  )
+}
+
+export function GroundingInlineSummary(props: {
+  grounding: ChatKnowledgeGrounding
+}) {
   return (
     <div class="verevon-chat-grounding-inline">
       <span><Sparkles size={12} /> {props.grounding.sourceCount} internal source{props.grounding.sourceCount === 1 ? '' : 's'}</span>

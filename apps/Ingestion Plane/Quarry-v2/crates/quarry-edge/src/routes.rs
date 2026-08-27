@@ -5,6 +5,7 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
     middleware,
+    response::IntoResponse,
     routing::{delete, get, patch, post},
     Extension, Json, Router,
 };
@@ -229,6 +230,17 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/change/check", post(crate::change_routes::check))
         .route("/v1/change/latest", get(crate::change_routes::latest))
         .route("/v1/change/history", get(crate::change_routes::history))
+        // Parity finishers — PromoteTrackedResultToSnapshot +
+        // ScheduleRefreshRun over the PostgresBaselineStore / durable
+        // frontier. Both 501 with a hint when postgres-queue is off.
+        .route(
+            "/v1/change/snapshot",
+            post(crate::change_routes::promote_snapshot),
+        )
+        .route(
+            "/v1/change/refresh",
+            post(crate::change_routes::schedule_refresh),
+        )
         // Cycle 31 / cluster #11 — GraphQL query endpoint (auth-gated).
         .route("/graphql", post(crate::graphql::graphql_handler))
         // Cycle 23 / cluster #5 — schedules list + lifecycle.
@@ -376,7 +388,7 @@ async fn scrape(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<ScrapeRequest>,
-) -> Result<Json<Envelope<NormalizedOutput>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<Json<Envelope<NormalizedOutput>>, (StatusCode, axum::response::Response)> {
     let request_id = RequestKind::new().to_string();
     if req.ingest.unwrap_or(false) && claims.is_service() && !claims.has_scope("scrape:write") {
         let error = QuarryError::new(
@@ -385,7 +397,7 @@ async fn scrape(
         );
         return Err((
             StatusCode::FORBIDDEN,
-            Json(Envelope::err(&request_id, error)),
+            Json(Envelope::<()>::err(&request_id, error)).into_response(),
         ));
     }
     let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
@@ -400,7 +412,7 @@ async fn scrape(
         let err = QuarryError::new(ErrorCode::BadRequest, format!("invalid url: {e}"));
         (
             StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::BAD_REQUEST),
-            Json(Envelope::<()>::err(&request_id, err)),
+            Json(Envelope::<()>::err(&request_id, err)).into_response(),
         )
     })?;
 
@@ -483,11 +495,23 @@ async fn scrape(
                 .await;
             Ok(Json(Envelope::ok(request_id, out)))
         }
-        Err(err) => Err((
-            StatusCode::from_u16(err.code.http_status())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            Json(Envelope::<()>::err(&request_id, err)),
-        )),
+        Err(err) => {
+            // OSS-parity 3D — structured rate-limit envelope (Tavily-style)
+            // on 429, matching /v1/search. Every other failure keeps the
+            // canonical `{ data, meta, error }` envelope.
+            if matches!(err.code, ErrorCode::RateLimited) {
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(crate::api_error::ApiError::rate_limited(err.message, 60))
+                        .into_response(),
+                ));
+            }
+            Err((
+                StatusCode::from_u16(err.code.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                Json(Envelope::<()>::err(&request_id, err)).into_response(),
+            ))
+        }
     }
 }
 
@@ -1079,6 +1103,8 @@ fn effective_privacy(privacy: Option<PrivacyPolicy>, zdr: ZdrMode) -> PrivacyPol
 mod tests {
     use super::*;
 
+    use axum::response::IntoResponse;
+
     use async_trait::async_trait;
     use quarry_core::error::{ErrorCode, QuarryError};
     use quarry_core::output::DriverKind;
@@ -1334,5 +1360,101 @@ mod tests {
         assert_eq!(resp.body, b"planned");
         assert_eq!(h3_calls.load(Ordering::Relaxed), 1);
         assert_eq!(static_calls.load(Ordering::Relaxed), 1);
+    }
+
+    async fn call_scrape(
+        state: AppState,
+        url: &str,
+    ) -> axum::response::Response {
+        match scrape(State(state), Extension(claims_for_org("org_alpha")), Json(request_for(url)))
+            .await
+        {
+            Ok(json) => json.into_response(),
+            Err((status, json)) => (status, json).into_response(),
+        }
+    }
+
+    fn request_for(url: &str) -> ScrapeRequest {
+        ScrapeRequest {
+            url: url.to_string(),
+            prev_fingerprint: None,
+            cache: None,
+            zdr: None,
+            privacy: None,
+            signals: None,
+            ingest: None,
+            org_id: None,
+            render: None,
+            prefer_http3: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limited_scrape_yields_api_error_envelope() {
+        // The runtime pipeline surfaces a driver RateLimited as-is (no retry
+        // loop for single-page runs), so this exercises the handler's 429 path.
+        // The driver must be REGISTERED — /v1/scrape builds through the
+        // registry, not the bare static driver.
+        let err_driver = Arc::new(TestDriver::err(
+            DriverKind::Static,
+            Arc::new(AtomicU32::new(0)),
+            ErrorCode::RateLimited,
+        ));
+        let mut drivers = DriverRegistry::new(DriverKind::Static);
+        drivers.register(err_driver.clone());
+        let state = test_state_with_artifacts(
+            err_driver,
+            drivers,
+            None,
+            Arc::new(InMemoryStore::new()),
+        );
+        let response = call_scrape(state, "https://example.com/page").await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["code"], "RATE_LIMITED");
+        assert_eq!(body["retry_after_seconds"], 60);
+        // Full ApiError envelope — no request_id/meta wrapper on error paths.
+        assert_eq!(
+            crate::test_support::json_keys(&body),
+            vec![
+                "code",
+                "error",
+                "hint",
+                "next_actions",
+                "retry_after_seconds",
+                "window"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_url_scrape_keeps_envelope_error_shape() {
+        // Non-429 failures keep the canonical { data, meta, error } envelope:
+        // the ApiError adoption is scoped to rate-limit paths only.
+        let calls = Arc::new(AtomicU32::new(0));
+        let static_driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, b"unused"));
+        let state = test_state(
+            static_driver,
+            DriverRegistry::new(DriverKind::Static),
+            None,
+        );
+        let response = call_scrape(state, "not a url").await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(
+            crate::test_support::json_keys(&body),
+            vec!["data", "error", "meta"]
+        );
+        assert_eq!(body["data"], serde_json::Value::Null);
+        assert!(body["meta"]["request_id"]
+            .as_str()
+            .expect("request id")
+            .starts_with("req_"));
+        assert!(body["error"]["message"]
+            .as_str()
+            .expect("envelope error message")
+            .starts_with("invalid url:"));
     }
 }

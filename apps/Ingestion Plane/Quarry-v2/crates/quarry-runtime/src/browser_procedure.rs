@@ -210,9 +210,11 @@ pub fn analyze_impact(
         procedure_id: procedure.procedure_id.clone(),
         impacted_steps,
         quarantine_required,
-        reasons: quarantine_required
-            .then(|| vec!["procedure navigation source changed; replay requires review".to_owned()])
-            .unwrap_or_default(),
+        reasons: if quarantine_required {
+            vec!["procedure navigation source changed; replay requires review".to_owned()]
+        } else {
+            Vec::new()
+        },
     }
 }
 

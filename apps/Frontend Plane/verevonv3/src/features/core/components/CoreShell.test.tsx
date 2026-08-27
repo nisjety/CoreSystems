@@ -586,6 +586,81 @@ describe('v2 dashboard shell port', () => {
     expect(within(chatHistory).getByText('local only thread')).toBeTruthy()
   })
 
+  // Regression coverage: pin used to be two disconnected systems -- this
+  // sidebar's `togglePinnedChatThread` only ever touched local storage, while
+  // DashboardComposer's own history panel wrote the SAME thread's pin through
+  // `saveChatThreadSnapshot` (the server-owned `ChatThreadSession.pinned`).
+  // Toggling here without a write-through meant the very next
+  // `refreshServerSessions` (any remount) silently reverted it back to
+  // whatever the server still had. The fix makes this panel write through too.
+  it('persists a pin toggle to the server, not only to local storage', async () => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    Object.defineProperty(window, 'sessionStorage', {
+      configurable: true,
+      value: createStorageMock(),
+    })
+    setActiveChatThreadId('thread-history-1')
+    upsertChatThreadHistory({
+      threadId: 'thread-history-1',
+      title: 'history visible check',
+      preview: 'Assistant reply preview',
+      updatedAt: new Date().toISOString(),
+    })
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/chat/threads' && init?.method !== 'DELETE') {
+        return new Response(JSON.stringify({ data: { sessions: [] } }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        })
+      }
+      if (url === '/api/v1/chat/threads/thread-history-1' && init?.method === 'PUT') {
+        return new Response(JSON.stringify({
+          data: {
+            session: {
+              threadId: 'thread-history-1',
+              title: 'history visible check',
+              preview: 'Assistant reply preview',
+              updatedAt: new Date().toISOString(),
+              pinned: true,
+            },
+          },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        })
+      }
+      return new Response(JSON.stringify({ data: {} }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithRouter(() => (
+      <AgentsProvider>
+        <CoreSidebar
+          activeRoute="/chat"
+          expanded
+          onExpandedChange={vi.fn()}
+          onOpenSearch={vi.fn()}
+        />
+      </AgentsProvider>
+    ), '/chat')
+
+    fireEvent.click(await screen.findByRole('button', { name: /Fest til topp/i }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/threads/thread-history-1',
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ pinned: true }) }),
+    ))
+    expect(await screen.findByRole('button', { name: /Løsne fra topp/i })).toBeTruthy()
+  })
+
   it('clears the active chat thread when starting a new sidebar conversation', () => {
     Object.defineProperty(window, 'localStorage', {
       configurable: true,

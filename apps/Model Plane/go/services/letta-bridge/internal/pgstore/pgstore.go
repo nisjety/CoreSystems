@@ -107,7 +107,7 @@ DO UPDATE SET topic = EXCLUDED.topic,
 //
 // Scoring mirrors the in-memory store: a prefix match scores 1.0, any other
 // substring match scores 0.5, and an empty query scores 1.0.
-func (s *Store) Search(ctx context.Context, orgID, threadID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error) {
+func (s *Store) Search(ctx context.Context, orgID, threadID, userID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error) {
 	var (
 		clauses = []string{"org_id = $1"}
 		args    = []any{orgID}
@@ -115,6 +115,13 @@ func (s *Store) Search(ctx context.Context, orgID, threadID, query string, topic
 	add := func(clause string, arg any) {
 		args = append(args, arg)
 		clauses = append(clauses, fmt.Sprintf(clause, len(args)))
+	}
+	if userID != "" {
+		// Own user-scoped memories plus everything owned by nobody
+		// (org/workspace/policy). Mirrors session-core's durable rule
+		// `scope = 'user' AND owner = $3` so the two tiers agree on visibility
+		// instead of the semantic one being wider.
+		add("(user_id = $%d OR user_id = '')", userID)
 	}
 	if threadID != "" {
 		add("thread_id = $%d", threadID)

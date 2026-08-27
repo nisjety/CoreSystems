@@ -42,7 +42,7 @@ func (s semanticTestStore) Put(_ context.Context, orgID, threadID, topic, memory
 	return &memstore.Record{OrgID: orgID, ThreadID: threadID, Topic: topic, MemoryID: memoryID, Content: content}, nil
 }
 
-func (s semanticTestStore) Search(_ context.Context, _, _, _ string, _ []string, _ time.Time, _ int32) ([]memstore.Hit, error) {
+func (s semanticTestStore) Search(_ context.Context, _, _, _, _ string, _ []string, _ time.Time, _ int32) ([]memstore.Hit, error) {
 	return s.searchHits, s.searchErr
 }
 

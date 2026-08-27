@@ -2,8 +2,8 @@
 // @generated from file model_plane/v1/runs.proto (package model_plane.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_struct, file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
 import type { JsonObject, Message } from "@bufbuild/protobuf";
@@ -12,7 +12,7 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/runs.proto.
  */
 export const file_model_plane_v1_runs: GenFile = /*@__PURE__*/
-  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJTCh5HZXRTY2hlZHVsZWRTdGVwQ29udGV4dFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkiZwoUU2NoZWR1bGVkU3RlcENvbnRleHQSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSDAoEZ29hbBgEIAEoCRIOCgZzdGF0dXMYBSABKAkiYAoPTGlzdFJ1bnNSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSJNChBMaXN0UnVuc1Jlc3BvbnNlEicKBHJ1bnMYASADKAsyGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSEAoIaGFzX21vcmUYAiABKAgiYwoVTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIIkkKFlJlc29sdmVSdW5Pd25lclJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCRIPCgd1c2VyX2lkGAMgASgJIi0KF1Jlc29sdmVSdW5Pd25lclJlc3BvbnNlEhIKCmF1dGhvcml6ZWQYASABKAgiQgogUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eVJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCSLrAgohUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eVJlc3BvbnNlEhAKCHJlc29sdmVkGAEgASgIEg4KBnJ1bl9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEgoKc3ViamVjdF9pZBgEIAEoCRIRCgl0aHJlYWRfaWQYBSABKAkSEAoIc3BhY2VfaWQYBiABKAkSHgoWcmVjaXBpZW50X2F1ZGllbmNlX3JlZhgHIAEoCRIjChtyZWNpcGllbnRfYXVkaWVuY2VfcmV2aXNpb24YCCABKAQSHwoXcmVjaXBpZW50X2F1ZGllbmNlX2hhc2gYCSABKAkSGgoScHJpdmFjeV9wb2xpY3lfcmVmGAogASgJEikKIXRocmVhZF9yZXNvdXJjZV9hdXRob3JpemF0aW9uX3JlZhgLIAEoCRIaChJhdXRob3JpdHlfcmV2aXNpb24YDCABKAQSEgoKcnVuX3N0YXR1cxgNIAEoCSKTAwoJUnVuRGV0YWlsEg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSFQoNcGFyZW50X3J1bl9pZBgDIAEoCRIQCghhZ2VudF9pZBgEIAEoCRIOCgZzdGF0dXMYBSABKAkSDAoEbW9kZRgGIAEoCRIMCgRnb2FsGAcgASgJEhQKDGZpbmFsX291dHB1dBgIIAEoCRINCgVlcnJvchgJIAEoCRIYChBjaGVja3BvaW50X2luZGV4GAogASgNEhcKD3N0ZXBzX2NvbXBsZXRlZBgLIAEoDRIUCgxpbnB1dF90b2tlbnMYDCABKA0SFQoNb3V0cHV0X3Rva2VucxgNIAEoDRIuCgpjcmVhdGVkX2F0GA4gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GA8gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIpCghtZXRhZGF0YRgQIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QypAUKClJ1blNlcnZpY2USQgoGR2V0UnVuEh0ubW9kZWxfcGxhbmUudjEuR2V0UnVuUmVxdWVzdBoZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBJvChdHZXRTY2hlZHVsZWRTdGVwQ29udGV4dBIuLm1vZGVsX3BsYW5lLnYxLkdldFNjaGVkdWxlZFN0ZXBDb250ZXh0UmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLlNjaGVkdWxlZFN0ZXBDb250ZXh0Ek0KCExpc3RSdW5zEh8ubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2USWQoOTGlzdFN5c3RlbVJ1bnMSJS5tb2RlbF9wbGFuZS52MS5MaXN0U3lzdGVtUnVuc1JlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5MaXN0UnVuc1Jlc3BvbnNlEmIKD1Jlc29sdmVSdW5Pd25lchImLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5Pd25lclJlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXNwb25zZRKAAQoZUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eRIwLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXF1ZXN0GjEubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eVJlc3BvbnNlQrEBChJjb20ubW9kZWxfcGxhbmUudjFCCVJ1bnNQcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
+  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJTCh5HZXRTY2hlZHVsZWRTdGVwQ29udGV4dFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkiZwoUU2NoZWR1bGVkU3RlcENvbnRleHQSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSDAoEZ29hbBgEIAEoCRIOCgZzdGF0dXMYBSABKAkiYAoPTGlzdFJ1bnNSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSJNChBMaXN0UnVuc1Jlc3BvbnNlEicKBHJ1bnMYASADKAsyGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSEAoIaGFzX21vcmUYAiABKAgiYwoVTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIIkkKFlJlc29sdmVSdW5Pd25lclJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCRIPCgd1c2VyX2lkGAMgASgJIi0KF1Jlc29sdmVSdW5Pd25lclJlc3BvbnNlEhIKCmF1dGhvcml6ZWQYASABKAgiTwoZUmVzb2x2ZVRocmVhZE93bmVyUmVxdWVzdBIRCgl0aHJlYWRfaWQYASABKAkSDgoGb3JnX2lkGAIgASgJEg8KB3VzZXJfaWQYAyABKAkiMAoaUmVzb2x2ZVRocmVhZE93bmVyUmVzcG9uc2USEgoKYXV0aG9yaXplZBgBIAEoCCJCCiBSZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJIusCCiFSZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVzcG9uc2USEAoIcmVzb2x2ZWQYASABKAgSDgoGcnVuX2lkGAIgASgJEg4KBm9yZ19pZBgDIAEoCRISCgpzdWJqZWN0X2lkGAQgASgJEhEKCXRocmVhZF9pZBgFIAEoCRIQCghzcGFjZV9pZBgGIAEoCRIeChZyZWNpcGllbnRfYXVkaWVuY2VfcmVmGAcgASgJEiMKG3JlY2lwaWVudF9hdWRpZW5jZV9yZXZpc2lvbhgIIAEoBBIfChdyZWNpcGllbnRfYXVkaWVuY2VfaGFzaBgJIAEoCRIaChJwcml2YWN5X3BvbGljeV9yZWYYCiABKAkSKQohdGhyZWFkX3Jlc291cmNlX2F1dGhvcml6YXRpb25fcmVmGAsgASgJEhoKEmF1dGhvcml0eV9yZXZpc2lvbhgMIAEoBBISCgpydW5fc3RhdHVzGA0gASgJIu4BCiRSZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEwoLc2NoZWR1bGVfaWQYBCABKAkSEAoIZmlyZV9rZXkYBSABKAkSFwoPdGVtcGxhdGVfZGlnZXN0GAYgASgJEhUKDXBvbGljeV9kaWdlc3QYByABKAkSDwoHc3RlcF9pZBgIIAEoCRISCgpzdGVwX2luZGV4GAkgASgNEhcKD2lkZW1wb3RlbmN5X2tleRgKIAEoCSK7AgolUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHlSZXNwb25zZRIQCghyZXNvbHZlZBgBIAEoCBIOCgZydW5faWQYAiABKAkSEQoJdGhyZWFkX2lkGAMgASgJEg4KBm9yZ19pZBgEIAEoCRISCgpzdWJqZWN0X2lkGAUgASgJEhAKCHNwYWNlX2lkGAYgASgJEhMKC3NjaGVkdWxlX2lkGAcgASgJEhAKCGZpcmVfa2V5GAggASgJEhcKD3RlbXBsYXRlX2RpZ2VzdBgJIAEoCRIVCg1wb2xpY3lfZGlnZXN0GAogASgJEg8KB3N0ZXBfaWQYCyABKAkSEgoKc3RlcF9pbmRleBgMIAEoDRIXCg9pZGVtcG90ZW5jeV9rZXkYDSABKAkSEgoKcnVuX3N0YXR1cxgOIAEoCSKTAwoJUnVuRGV0YWlsEg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSFQoNcGFyZW50X3J1bl9pZBgDIAEoCRIQCghhZ2VudF9pZBgEIAEoCRIOCgZzdGF0dXMYBSABKAkSDAoEbW9kZRgGIAEoCRIMCgRnb2FsGAcgASgJEhQKDGZpbmFsX291dHB1dBgIIAEoCRINCgVlcnJvchgJIAEoCRIYChBjaGVja3BvaW50X2luZGV4GAogASgNEhcKD3N0ZXBzX2NvbXBsZXRlZBgLIAEoDRIUCgxpbnB1dF90b2tlbnMYDCABKA0SFQoNb3V0cHV0X3Rva2VucxgNIAEoDRIuCgpjcmVhdGVkX2F0GA4gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GA8gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIpCghtZXRhZGF0YRgQIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QqkwEKDEF1dG9ub215UnVuZxIdChlBVVRPTk9NWV9SVU5HX1VOU1BFQ0lGSUVEEAASGwoXQVVUT05PTVlfUlVOR19SRUFEX09OTFkQARIhCh1BVVRPTk9NWV9SVU5HX1dPUktTUEFDRV9XUklURRACEiQKIEFVVE9OT01ZX1JVTkdfREFOR0VSX0ZVTExfQUNDRVNTEAMyoAcKClJ1blNlcnZpY2USQgoGR2V0UnVuEh0ubW9kZWxfcGxhbmUudjEuR2V0UnVuUmVxdWVzdBoZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBJvChdHZXRTY2hlZHVsZWRTdGVwQ29udGV4dBIuLm1vZGVsX3BsYW5lLnYxLkdldFNjaGVkdWxlZFN0ZXBDb250ZXh0UmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLlNjaGVkdWxlZFN0ZXBDb250ZXh0Ek0KCExpc3RSdW5zEh8ubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2USWQoOTGlzdFN5c3RlbVJ1bnMSJS5tb2RlbF9wbGFuZS52MS5MaXN0U3lzdGVtUnVuc1JlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5MaXN0UnVuc1Jlc3BvbnNlEmIKD1Jlc29sdmVSdW5Pd25lchImLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5Pd25lclJlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXNwb25zZRJrChJSZXNvbHZlVGhyZWFkT3duZXISKS5tb2RlbF9wbGFuZS52MS5SZXNvbHZlVGhyZWFkT3duZXJSZXF1ZXN0GioubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVRocmVhZE93bmVyUmVzcG9uc2USgAEKGVJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHkSMC5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuQWN0aW9uQXV0aG9yaXR5UmVxdWVzdBoxLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXNwb25zZRKMAQodUmVzb2x2ZVNjaGVkdWxlZFN0ZXBBdXRob3JpdHkSNC5tb2RlbF9wbGFuZS52MS5SZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlcXVlc3QaNS5tb2RlbF9wbGFuZS52MS5SZXNvbHZlU2NoZWR1bGVkU3RlcEF1dGhvcml0eVJlc3BvbnNlQrEBChJjb20ubW9kZWxfcGxhbmUudjFCCVJ1bnNQcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
 
 /**
  * @generated from message model_plane.v1.GetRunRequest
@@ -294,6 +294,50 @@ export const ResolveRunOwnerResponseSchema: GenMessage<ResolveRunOwnerResponse> 
   messageDesc(file_model_plane_v1_runs, 9);
 
 /**
+ * @generated from message model_plane.v1.ResolveThreadOwnerRequest
+ */
+export type ResolveThreadOwnerRequest = Message<"model_plane.v1.ResolveThreadOwnerRequest"> & {
+  /**
+   * @generated from field: string thread_id = 1;
+   */
+  threadId: string;
+
+  /**
+   * @generated from field: string org_id = 2;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string user_id = 3;
+   */
+  userId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveThreadOwnerRequest.
+ * Use `create(ResolveThreadOwnerRequestSchema)` to create a new message.
+ */
+export const ResolveThreadOwnerRequestSchema: GenMessage<ResolveThreadOwnerRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 10);
+
+/**
+ * @generated from message model_plane.v1.ResolveThreadOwnerResponse
+ */
+export type ResolveThreadOwnerResponse = Message<"model_plane.v1.ResolveThreadOwnerResponse"> & {
+  /**
+   * @generated from field: bool authorized = 1;
+   */
+  authorized: boolean;
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveThreadOwnerResponse.
+ * Use `create(ResolveThreadOwnerResponseSchema)` to create a new message.
+ */
+export const ResolveThreadOwnerResponseSchema: GenMessage<ResolveThreadOwnerResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 11);
+
+/**
  * ResolveRunActionAuthorityRequest is intentionally limited to the run and
  * tenant. Subject, Space, audience, resource, and privacy values are derived
  * only from the durable run/thread rows; callers cannot restate them.
@@ -317,7 +361,7 @@ export type ResolveRunActionAuthorityRequest = Message<"model_plane.v1.ResolveRu
  * Use `create(ResolveRunActionAuthorityRequestSchema)` to create a new message.
  */
 export const ResolveRunActionAuthorityRequestSchema: GenMessage<ResolveRunActionAuthorityRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 10);
+  messageDesc(file_model_plane_v1_runs, 12);
 
 /**
  * ResolveRunActionAuthorityResponse carries no transcript, goal, model output,
@@ -404,7 +448,151 @@ export type ResolveRunActionAuthorityResponse = Message<"model_plane.v1.ResolveR
  * Use `create(ResolveRunActionAuthorityResponseSchema)` to create a new message.
  */
 export const ResolveRunActionAuthorityResponseSchema: GenMessage<ResolveRunActionAuthorityResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 11);
+  messageDesc(file_model_plane_v1_runs, 13);
+
+/**
+ * @generated from message model_plane.v1.ResolveScheduledStepAuthorityRequest
+ */
+export type ResolveScheduledStepAuthorityRequest = Message<"model_plane.v1.ResolveScheduledStepAuthorityRequest"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string thread_id = 2;
+   */
+  threadId: string;
+
+  /**
+   * @generated from field: string org_id = 3;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string schedule_id = 4;
+   */
+  scheduleId: string;
+
+  /**
+   * @generated from field: string fire_key = 5;
+   */
+  fireKey: string;
+
+  /**
+   * @generated from field: string template_digest = 6;
+   */
+  templateDigest: string;
+
+  /**
+   * @generated from field: string policy_digest = 7;
+   */
+  policyDigest: string;
+
+  /**
+   * @generated from field: string step_id = 8;
+   */
+  stepId: string;
+
+  /**
+   * @generated from field: uint32 step_index = 9;
+   */
+  stepIndex: number;
+
+  /**
+   * @generated from field: string idempotency_key = 10;
+   */
+  idempotencyKey: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveScheduledStepAuthorityRequest.
+ * Use `create(ResolveScheduledStepAuthorityRequestSchema)` to create a new message.
+ */
+export const ResolveScheduledStepAuthorityRequestSchema: GenMessage<ResolveScheduledStepAuthorityRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 14);
+
+/**
+ * @generated from message model_plane.v1.ResolveScheduledStepAuthorityResponse
+ */
+export type ResolveScheduledStepAuthorityResponse = Message<"model_plane.v1.ResolveScheduledStepAuthorityResponse"> & {
+  /**
+   * @generated from field: bool resolved = 1;
+   */
+  resolved: boolean;
+
+  /**
+   * @generated from field: string run_id = 2;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string thread_id = 3;
+   */
+  threadId: string;
+
+  /**
+   * @generated from field: string org_id = 4;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string subject_id = 5;
+   */
+  subjectId: string;
+
+  /**
+   * @generated from field: string space_id = 6;
+   */
+  spaceId: string;
+
+  /**
+   * @generated from field: string schedule_id = 7;
+   */
+  scheduleId: string;
+
+  /**
+   * @generated from field: string fire_key = 8;
+   */
+  fireKey: string;
+
+  /**
+   * @generated from field: string template_digest = 9;
+   */
+  templateDigest: string;
+
+  /**
+   * @generated from field: string policy_digest = 10;
+   */
+  policyDigest: string;
+
+  /**
+   * @generated from field: string step_id = 11;
+   */
+  stepId: string;
+
+  /**
+   * @generated from field: uint32 step_index = 12;
+   */
+  stepIndex: number;
+
+  /**
+   * @generated from field: string idempotency_key = 13;
+   */
+  idempotencyKey: string;
+
+  /**
+   * @generated from field: string run_status = 14;
+   */
+  runStatus: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveScheduledStepAuthorityResponse.
+ * Use `create(ResolveScheduledStepAuthorityResponseSchema)` to create a new message.
+ */
+export const ResolveScheduledStepAuthorityResponseSchema: GenMessage<ResolveScheduledStepAuthorityResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 15);
 
 /**
  * RunDetail — full run metadata.
@@ -526,7 +714,62 @@ export type RunDetail = Message<"model_plane.v1.RunDetail"> & {
  * Use `create(RunDetailSchema)` to create a new message.
  */
 export const RunDetailSchema: GenMessage<RunDetail> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 12);
+  messageDesc(file_model_plane_v1_runs, 16);
+
+/**
+ * AutonomyRung — how much a run is permitted to do, as a strictly ordered
+ * ladder. Higher is wider; each rung includes everything below it.
+ *
+ * Shared vocabulary on purpose: model-gateway decides and records a grant, and
+ * execution-core enforces it PER CALL at execution. Baking a rung into a tool
+ * schema instead would be wrong — a schema is registry-global while the
+ * effective rung is per-call truth, so the same tool can be permitted on one
+ * call and refused on the next within one run.
+ *
+ * The names mirror execution-core's own `MpSandboxPolicy` rather than inventing
+ * a second scale, so a granted rung and the isolation it implies cannot drift
+ * apart.
+ *
+ * @generated from enum model_plane.v1.AutonomyRung
+ */
+export enum AutonomyRung {
+  /**
+   * No rung stated. Treated as the NARROWEST, never as a default grant: an
+   * unset field on an old client must not read as permission.
+   *
+   * @generated from enum value: AUTONOMY_RUNG_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Investigate only. Reads run; anything with a real effect is refused.
+   *
+   * @generated from enum value: AUTONOMY_RUNG_READ_ONLY = 1;
+   */
+  READ_ONLY = 1,
+
+  /**
+   * May write within the run's own workspace. Still refuses actions that reach
+   * outside it (sending, publishing, booking, paying).
+   *
+   * @generated from enum value: AUTONOMY_RUNG_WORKSPACE_WRITE = 2;
+   */
+  WORKSPACE_WRITE = 2,
+
+  /**
+   * Full effect. Reserved for an explicit, justified, human-granted escalation
+   * — never a default and never inferred.
+   *
+   * @generated from enum value: AUTONOMY_RUNG_DANGER_FULL_ACCESS = 3;
+   */
+  DANGER_FULL_ACCESS = 3,
+}
+
+/**
+ * Describes the enum model_plane.v1.AutonomyRung.
+ */
+export const AutonomyRungSchema: GenEnum<AutonomyRung> = /*@__PURE__*/
+  enumDesc(file_model_plane_v1_runs, 0);
 
 /**
  * RunService — query and manage run lifecycle.
@@ -608,6 +851,22 @@ export const RunService: GenService<{
     output: typeof ResolveRunOwnerResponseSchema;
   },
   /**
+   * ResolveThreadOwner — authoritative tenant/user ownership check for a
+   * thread, mirroring ResolveRunOwner exactly. Also used to authorize
+   * capability-core's memory scope='session' rows: session and thread are
+   * the same underlying resource in this codebase (see agent_memory's writer
+   * in dreaming.rs, which stores a thread_id under scope='thread'), so
+   * scope='session' calls this RPC with the same thread_id too. Returns only
+   * a boolean to avoid disclosing another tenant's thread metadata.
+   *
+   * @generated from rpc model_plane.v1.RunService.ResolveThreadOwner
+   */
+  resolveThreadOwner: {
+    methodKind: "unary";
+    input: typeof ResolveThreadOwnerRequestSchema;
+    output: typeof ResolveThreadOwnerResponseSchema;
+  },
+  /**
    * ResolveRunActionAuthority returns the non-secret, immutable run/thread
    * bindings Control needs before issuing one target-owner action decision.
    * It is restricted to Control's exact action-authorizer service identity;
@@ -619,6 +878,21 @@ export const RunService: GenService<{
     methodKind: "unary";
     input: typeof ResolveRunActionAuthorityRequestSchema;
     output: typeof ResolveRunActionAuthorityResponseSchema;
+  },
+  /**
+   * ResolveScheduledStepAuthority returns the exact active prepared scheduled
+   * run binding for Control's per-step decision. It is narrower than ordinary
+   * run inspection: the caller supplies only immutable identifiers/digests,
+   * while Session Core derives the human subject and Space from the durable
+   * scheduled-run record. No goal, transcript, tool, credential, or decision
+   * bearer crosses this boundary.
+   *
+   * @generated from rpc model_plane.v1.RunService.ResolveScheduledStepAuthority
+   */
+  resolveScheduledStepAuthority: {
+    methodKind: "unary";
+    input: typeof ResolveScheduledStepAuthorityRequestSchema;
+    output: typeof ResolveScheduledStepAuthorityResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_model_plane_v1_runs, 0);

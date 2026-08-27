@@ -17,6 +17,7 @@ import {
   Copy,
   Download,
   Eye,
+  GitCompare,
   FileCode2,
   FileSpreadsheet,
   FileText,
@@ -35,7 +36,9 @@ import {
 } from 'solid-js'
 import {
   ChatMarkdown,
+  DiffView,
 } from './ChatMessages'
+import { diffText } from '@/shared/chat-nodes'
 import {
   EmptyPanel,
 } from './ChatPanels'
@@ -152,6 +155,12 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
   const [versionCursor, setVersionCursor] = createSignal<number | null>(null)
   const [copyState, setCopyState] = createSignal<'copied' | 'failed' | 'idle'>('idle')
   const [showSource, setShowSource] = createSignal(false)
+  /**
+   * "What changed in this revision" — the one patch this app can genuinely
+   * produce, because `ChatArtifact.history` retains every version's full content
+   * client-side. No backend work and no new contract; the data was already here.
+   */
+  const [showDiff, setShowDiff] = createSignal(false)
   const [imageFailed, setImageFailed] = createSignal(false)
 
   const artifact = () => props.item.artifact
@@ -173,6 +182,16 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
     title: revision().title,
     version: revision().version,
   }))
+  /** The revision immediately before the one on screen, if there is one. */
+  const previousRevision = createMemo(() => {
+    const index = revisionIndex()
+    return index > 0 ? versions()[index - 1] : undefined
+  })
+  const revisionDiff = createMemo(() => {
+    const previous = previousRevision()
+    if (!previous) return null
+    return diffText(previous.content, revision().content)
+  })
   const renderKind = createMemo(() => artifactRenderKind(displayed()))
   const missing = createMemo(() => artifactContentMissing(displayed().content))
   const fileMeta = createMemo(() => artifactFileMeta(displayed(), renderKind(), props.item.file))
@@ -188,6 +207,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
     () => {
       setVersionCursor(null)
       setShowSource(false)
+      setShowDiff(false)
       setImageFailed(false)
       setCopyState('idle')
     },
@@ -265,6 +285,22 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               </button>
             </div>
           </Show>
+          {/* The value the accessor receives must be the diff itself, so the
+              `missing` guard is a ternary rather than an && (which narrows to `true`). */}
+          <Show when={missing() ? null : revisionDiff()}>
+            {(diff) => (
+              <button
+                type="button"
+                class="verevon-chat-artifact-action"
+                onClick={() => setShowDiff((value) => !value)}
+              >
+                <GitCompare size={14} />
+                {showDiff()
+                  ? 'Vis versjonen'
+                  : `Vis endringer (+${diff().stat.added} −${diff().stat.removed})`}
+              </button>
+            )}
+          </Show>
           <Show when={renderKind() === 'html' && !missing()}>
             <button
               type="button"
@@ -311,6 +347,10 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
 
       <div class="verevon-chat-artifact-view__body">
         <Show when={!missing()} fallback={<ArtifactLoadFailure kind={artifact().kind} />}>
+          <Show
+            when={!(showDiff() && revisionDiff())}
+            fallback={<DiffView result={revisionDiff()!} />}
+          >
           <Switch fallback={<ArtifactPlainText content={displayed().content} />}>
             <Match when={renderKind() === 'code'}>
               <ArtifactCodeView content={displayed().content} language={artifactLanguage(displayed())} />
@@ -343,6 +383,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               </Show>
             </Match>
           </Switch>
+          </Show>
         </Show>
       </div>
     </section>

@@ -21,6 +21,74 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// PrivacyTier — programmatic privacy posture of a provider/deployment,
+// ordered weakest→strongest so callers express a MINIMUM and enforcement is a
+// plain `>=`. Mirrors Venice's per-model privacy controls: the catalogue
+// discloses each model's tier, and a request requiring a tier the active
+// providers cannot meet fails closed with a typed error — never a silent
+// downgrade. Retention (zdr/supports_zdr) and geography (residency) are
+// independent axes; the tier combines them.
+type PrivacyTier int32
+
+const (
+	// No constraint expressed. Byte-identical behavior to pre-tier requests.
+	PrivacyTier_PRIVACY_TIER_UNSPECIFIED PrivacyTier = 0
+	// No residency/ZDR commitment accepted beyond provider default.
+	PrivacyTier_PRIVACY_TIER_GLOBAL PrivacyTier = 1
+	// ML processing committed to the EU/EEA (Azure DataZone/regional EU).
+	PrivacyTier_PRIVACY_TIER_EU_RESIDENT PrivacyTier = 2
+	// EU residency plus an independently verified Zero-Data-Retention contract.
+	PrivacyTier_PRIVACY_TIER_ZDR_CONTRACTUAL PrivacyTier = 3
+	// Processed and stored in Norway on Norwegian-operated infrastructure,
+	// with a verified ZDR contract.
+	PrivacyTier_PRIVACY_TIER_SOVEREIGN PrivacyTier = 4
+)
+
+// Enum value maps for PrivacyTier.
+var (
+	PrivacyTier_name = map[int32]string{
+		0: "PRIVACY_TIER_UNSPECIFIED",
+		1: "PRIVACY_TIER_GLOBAL",
+		2: "PRIVACY_TIER_EU_RESIDENT",
+		3: "PRIVACY_TIER_ZDR_CONTRACTUAL",
+		4: "PRIVACY_TIER_SOVEREIGN",
+	}
+	PrivacyTier_value = map[string]int32{
+		"PRIVACY_TIER_UNSPECIFIED":     0,
+		"PRIVACY_TIER_GLOBAL":          1,
+		"PRIVACY_TIER_EU_RESIDENT":     2,
+		"PRIVACY_TIER_ZDR_CONTRACTUAL": 3,
+		"PRIVACY_TIER_SOVEREIGN":       4,
+	}
+)
+
+func (x PrivacyTier) Enum() *PrivacyTier {
+	p := new(PrivacyTier)
+	*p = x
+	return p
+}
+
+func (x PrivacyTier) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PrivacyTier) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_inference_proto_enumTypes[0].Descriptor()
+}
+
+func (PrivacyTier) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_inference_proto_enumTypes[0]
+}
+
+func (x PrivacyTier) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PrivacyTier.Descriptor instead.
+func (PrivacyTier) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_inference_proto_rawDescGZIP(), []int{0}
+}
+
 // InferRequest — a single inference request to be routed to a provider.
 type InferRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -47,9 +115,35 @@ type InferRequest struct {
 	Tools []*ToolDefinition `protobuf:"bytes,10,rep,name=tools,proto3" json:"tools,omitempty"`
 	// Tool selection policy: "auto" (default), "none", "required", or a specific
 	// tool name. Empty is treated as "auto" when `tools` is non-empty.
-	ToolChoice    string `protobuf:"bytes,11,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ToolChoice string `protobuf:"bytes,11,opt,name=tool_choice,json=toolChoice,proto3" json:"tool_choice,omitempty"`
+	// Minimum privacy tier every serving provider must satisfy. Providers below
+	// the tier are skipped in every chain path; when none remains, the request
+	// fails with a typed precondition naming this tier — never a silent
+	// downgrade. UNSPECIFIED imposes no constraint.
+	// NOTE: field numbers 12–13 are reserved by a parallel in-flight contract
+	// (`min_residency`, `thinking_budget_tokens`); this lands at 14 so the two
+	// streams merge without renumbering.
+	MinPrivacyTier PrivacyTier `protobuf:"varint,14,opt,name=min_privacy_tier,json=minPrivacyTier,proto3,enum=model_plane.v1.PrivacyTier" json:"min_privacy_tier,omitempty"`
+	// Requested minimum residency floor for this call (e.g. "eu", "norway").
+	// inference-core enforces this deny-by-default at the provider-selection
+	// gate: a provider whose declared residency is weaker than this floor is
+	// skipped, the same way a non-ZDR provider is skipped when `zdr` is true
+	// (see provider/fallback.rs's infer_one_model/stream_one_model). Empty
+	// means no floor -- any configured provider may serve the request.
+	// Accepted tokens match `Residency::parse` ("global", "eu"/"eea", "norway"/
+	// "no"/"sovereign"); an unrecognized token is rejected before any provider
+	// is tried, rather than silently treated as "no requirement".
+	MinResidency string `protobuf:"bytes,12,opt,name=min_residency,json=minResidency,proto3" json:"min_residency,omitempty"`
+	// Extended-thinking budget in tokens for this request. 0 (default) requests
+	// no thinking and is byte-identical to the pre-existing behaviour.
+	//
+	// Advisory, not a guarantee: inference-core forwards it only to models that
+	// actually accept a thinking parameter, because sending one to a model that
+	// does not is a hard provider error, not a silent no-op. A budget set for a
+	// model that cannot think is dropped and the request proceeds normally.
+	ThinkingBudgetTokens int32 `protobuf:"varint,13,opt,name=thinking_budget_tokens,json=thinkingBudgetTokens,proto3" json:"thinking_budget_tokens,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *InferRequest) Reset() {
@@ -157,6 +251,27 @@ func (x *InferRequest) GetToolChoice() string {
 		return x.ToolChoice
 	}
 	return ""
+}
+
+func (x *InferRequest) GetMinPrivacyTier() PrivacyTier {
+	if x != nil {
+		return x.MinPrivacyTier
+	}
+	return PrivacyTier_PRIVACY_TIER_UNSPECIFIED
+}
+
+func (x *InferRequest) GetMinResidency() string {
+	if x != nil {
+		return x.MinResidency
+	}
+	return ""
+}
+
+func (x *InferRequest) GetThinkingBudgetTokens() int32 {
+	if x != nil {
+		return x.ThinkingBudgetTokens
+	}
+	return 0
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).
@@ -367,7 +482,15 @@ type InferResponse struct {
 	// Number of generated tokens.
 	OutputTokens int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
 	// chat-parity §2: tool calls the model requested (empty for a plain answer).
-	ToolCalls     []*ToolCall `protobuf:"bytes,7,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
+	ToolCalls []*ToolCall `protobuf:"bytes,7,rep,name=tool_calls,json=toolCalls,proto3" json:"tool_calls,omitempty"`
+	// Registry id of the provider that served the request (e.g. "azure-openai").
+	// Empty means unknown/not applicable. Provenance-receipt input (Phase 4):
+	// lets callers stamp which deployment actually processed content.
+	ProviderUsed string `protobuf:"bytes,8,opt,name=provider_used,json=providerUsed,proto3" json:"provider_used,omitempty"`
+	// Residency label of the serving deployment: "global", "eu", or "norway".
+	// Empty means undeclared. Disclosure only — the tier that was REQUIRED is
+	// carried by the request; this reports what was actually met.
+	Residency     string `protobuf:"bytes,9,opt,name=residency,proto3" json:"residency,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -451,6 +574,20 @@ func (x *InferResponse) GetToolCalls() []*ToolCall {
 	return nil
 }
 
+func (x *InferResponse) GetProviderUsed() string {
+	if x != nil {
+		return x.ProviderUsed
+	}
+	return ""
+}
+
+func (x *InferResponse) GetResidency() string {
+	if x != nil {
+		return x.Residency
+	}
+	return ""
+}
+
 // InferChunk — a single chunk in a streaming inference response.
 type InferChunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -465,9 +602,28 @@ type InferChunk struct {
 	// Token counts (populated on final chunk).
 	InputTokens int32 `protobuf:"varint,5,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
 	// Number of generated tokens on the final chunk.
-	OutputTokens  int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OutputTokens int32 `protobuf:"varint,6,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// Serving-provider provenance (populated on final chunk). Same semantics as
+	// InferResponse.provider_used / InferResponse.residency — Phase-4 receipt
+	// inputs for streamed turns. Field numbers 7–8 are reserved by a parallel
+	// in-flight contract (`stop_reason`, `reasoning_delta`).
+	ProviderUsed string `protobuf:"bytes,9,opt,name=provider_used,json=providerUsed,proto3" json:"provider_used,omitempty"`
+	Residency    string `protobuf:"bytes,10,opt,name=residency,proto3" json:"residency,omitempty"`
+	// Why generation stopped (populated on the final chunk): "end_turn",
+	// "max_tokens"/"length" (provider-dependent spelling for hitting the token
+	// ceiling), "stop_sequence", or "stream_incomplete" -- inference-core's own
+	// value, set ONLY when the provider connection broke or closed before any
+	// proper termination signal (message_stop / finish_reason / [DONE]) arrived,
+	// so a silently truncated streamed answer is never indistinguishable from a
+	// normal completion. Empty on every non-final chunk.
+	StopReason string `protobuf:"bytes,7,opt,name=stop_reason,json=stopReason,proto3" json:"stop_reason,omitempty"`
+	// Incremental extended-thinking text, when the model produced any. Carried
+	// separately from `delta` so a client can render, hide, or drop the model's
+	// reasoning independently of its answer -- and so reasoning can never be
+	// concatenated into the answer by a client that does not know about it.
+	ReasoningDelta string `protobuf:"bytes,8,opt,name=reasoning_delta,json=reasoningDelta,proto3" json:"reasoning_delta,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *InferChunk) Reset() {
@@ -540,6 +696,34 @@ func (x *InferChunk) GetOutputTokens() int32 {
 		return x.OutputTokens
 	}
 	return 0
+}
+
+func (x *InferChunk) GetProviderUsed() string {
+	if x != nil {
+		return x.ProviderUsed
+	}
+	return ""
+}
+
+func (x *InferChunk) GetResidency() string {
+	if x != nil {
+		return x.Residency
+	}
+	return ""
+}
+
+func (x *InferChunk) GetStopReason() string {
+	if x != nil {
+		return x.StopReason
+	}
+	return ""
+}
+
+func (x *InferChunk) GetReasoningDelta() string {
+	if x != nil {
+		return x.ReasoningDelta
+	}
+	return ""
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
@@ -793,7 +977,14 @@ type ModelInfo struct {
 	// families this model supports, derived from the provider's
 	// ProviderCapabilities (e.g. "reasoning", "tools", "vision", "image").
 	// Lets the client gate the opt-in `features[]` per selected model.
-	Features      []string `protobuf:"bytes,5,rep,name=features,proto3" json:"features,omitempty"`
+	Features []string `protobuf:"bytes,5,rep,name=features,proto3" json:"features,omitempty"`
+	// Strongest privacy tier this provider can honor (Venice model_spec.privacy
+	// equivalent). Derived from the provider's declared residency plus its ZDR
+	// attestation; UNSPECIFIED means the provider declares no posture.
+	PrivacyTier PrivacyTier `protobuf:"varint,6,opt,name=privacy_tier,json=privacyTier,proto3,enum=model_plane.v1.PrivacyTier" json:"privacy_tier,omitempty"`
+	// Declared residency label: "global", "eu", or "norway". Empty means the
+	// provider declares no residency commitment.
+	Residency     string `protobuf:"bytes,7,opt,name=residency,proto3" json:"residency,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -861,6 +1052,20 @@ func (x *ModelInfo) GetFeatures() []string {
 		return x.Features
 	}
 	return nil
+}
+
+func (x *ModelInfo) GetPrivacyTier() PrivacyTier {
+	if x != nil {
+		return x.PrivacyTier
+	}
+	return PrivacyTier_PRIVACY_TIER_UNSPECIFIED
+}
+
+func (x *ModelInfo) GetResidency() string {
+	if x != nil {
+		return x.Residency
+	}
+	return ""
 }
 
 // ListModelsResponse — available models in the active provider chain.
@@ -4438,7 +4643,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\x9c\x03\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xbe\x04\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -4454,7 +4659,10 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x05tools\x18\n" +
 	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\x12\x1f\n" +
 	"\vtool_choice\x18\v \x01(\tR\n" +
-	"toolChoice\"o\n" +
+	"toolChoice\x12E\n" +
+	"\x10min_privacy_tier\x18\x0e \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\x0eminPrivacyTier\x12#\n" +
+	"\rmin_residency\x18\f \x01(\tR\fminResidency\x124\n" +
+	"\x16thinking_budget_tokens\x18\r \x01(\x05R\x14thinkingBudgetTokens\"o\n" +
 	"\x0eToolDefinition\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
@@ -4466,7 +4674,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\vChatMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name\"\x89\x02\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\"\xcc\x02\n" +
 	"\rInferResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x18\n" +
@@ -4478,7 +4686,9 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\finput_tokens\x18\x05 \x01(\x05R\vinputTokens\x12#\n" +
 	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\x127\n" +
 	"\n" +
-	"tool_calls\x18\a \x03(\v2\x18.model_plane.v1.ToolCallR\ttoolCalls\"\xbc\x01\n" +
+	"tool_calls\x18\a \x03(\v2\x18.model_plane.v1.ToolCallR\ttoolCalls\x12#\n" +
+	"\rprovider_used\x18\b \x01(\tR\fproviderUsed\x12\x1c\n" +
+	"\tresidency\x18\t \x01(\tR\tresidency\"\xc9\x02\n" +
 	"\n" +
 	"InferChunk\x12\x1d\n" +
 	"\n" +
@@ -4488,7 +4698,13 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
 	"model_used\x18\x04 \x01(\tR\tmodelUsed\x12!\n" +
 	"\finput_tokens\x18\x05 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\"\xc7\x01\n" +
+	"\routput_tokens\x18\x06 \x01(\x05R\foutputTokens\x12#\n" +
+	"\rprovider_used\x18\t \x01(\tR\fproviderUsed\x12\x1c\n" +
+	"\tresidency\x18\n" +
+	" \x01(\tR\tresidency\x12\x1f\n" +
+	"\vstop_reason\x18\a \x01(\tR\n" +
+	"stopReason\x12'\n" +
+	"\x0freasoning_delta\x18\b \x01(\tR\x0ereasoningDelta\"\xc7\x01\n" +
 	"\x16CreateEmbeddingRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -4507,13 +4723,15 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_used\x18\x04 \x01(\tR\fproviderUsed\"K\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bmodality\x18\x01 \x01(\tR\bmodality\x12\x1a\n" +
-	"\bprovider\x18\x02 \x01(\tR\bprovider\"\x8d\x01\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"\xeb\x01\n" +
 	"\tModelInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1a\n" +
 	"\bmodality\x18\x03 \x01(\tR\bmodality\x12\x1c\n" +
 	"\tstreaming\x18\x04 \x01(\bR\tstreaming\x12\x1a\n" +
-	"\bfeatures\x18\x05 \x03(\tR\bfeatures\"G\n" +
+	"\bfeatures\x18\x05 \x03(\tR\bfeatures\x12>\n" +
+	"\fprivacy_tier\x18\x06 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\vprivacyTier\x12\x1c\n" +
+	"\tresidency\x18\a \x01(\tR\tresidency\"G\n" +
 	"\x12ListModelsResponse\x121\n" +
 	"\x06models\x18\x01 \x03(\v2\x19.model_plane.v1.ModelInfoR\x06models\"\xe8\x01\n" +
 	"\x17SynthesizeSpeechRequest\x12\x1d\n" +
@@ -4856,7 +5074,13 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x04done\x18\x04 \x01(\bR\x04done\x12!\n" +
 	"\fcontent_type\x18\x05 \x01(\tR\vcontentType\x12%\n" +
 	"\x0econtent_length\x18\x06 \x01(\x04R\rcontentLength\x12#\n" +
-	"\rprovider_used\x18\a \x01(\tR\fproviderUsed2\xa6\x10\n" +
+	"\rprovider_used\x18\a \x01(\tR\fproviderUsed*\xa0\x01\n" +
+	"\vPrivacyTier\x12\x1c\n" +
+	"\x18PRIVACY_TIER_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13PRIVACY_TIER_GLOBAL\x10\x01\x12\x1c\n" +
+	"\x18PRIVACY_TIER_EU_RESIDENT\x10\x02\x12 \n" +
+	"\x1cPRIVACY_TIER_ZDR_CONTRACTUAL\x10\x03\x12\x1a\n" +
+	"\x16PRIVACY_TIER_SOVEREIGN\x10\x042\xa6\x10\n" +
 	"\rInferenceCore\x12D\n" +
 	"\x05Infer\x12\x1c.model_plane.v1.InferRequest\x1a\x1d.model_plane.v1.InferResponse\x12I\n" +
 	"\vInferStream\x12\x1c.model_plane.v1.InferRequest\x1a\x1a.model_plane.v1.InferChunk0\x01\x12b\n" +
@@ -4893,116 +5117,120 @@ func file_model_plane_v1_inference_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_inference_proto_rawDescData
 }
 
+var file_model_plane_v1_inference_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_model_plane_v1_inference_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
 var file_model_plane_v1_inference_proto_goTypes = []any{
-	(*InferRequest)(nil),                         // 0: model_plane.v1.InferRequest
-	(*ToolDefinition)(nil),                       // 1: model_plane.v1.ToolDefinition
-	(*ToolCall)(nil),                             // 2: model_plane.v1.ToolCall
-	(*ChatMessage)(nil),                          // 3: model_plane.v1.ChatMessage
-	(*InferResponse)(nil),                        // 4: model_plane.v1.InferResponse
-	(*InferChunk)(nil),                           // 5: model_plane.v1.InferChunk
-	(*CreateEmbeddingRequest)(nil),               // 6: model_plane.v1.CreateEmbeddingRequest
-	(*CreateEmbeddingResponse)(nil),              // 7: model_plane.v1.CreateEmbeddingResponse
-	(*ListModelsRequest)(nil),                    // 8: model_plane.v1.ListModelsRequest
-	(*ModelInfo)(nil),                            // 9: model_plane.v1.ModelInfo
-	(*ListModelsResponse)(nil),                   // 10: model_plane.v1.ListModelsResponse
-	(*SynthesizeSpeechRequest)(nil),              // 11: model_plane.v1.SynthesizeSpeechRequest
-	(*SynthesizeSpeechResponse)(nil),             // 12: model_plane.v1.SynthesizeSpeechResponse
-	(*TranscribeSpeechRequest)(nil),              // 13: model_plane.v1.TranscribeSpeechRequest
-	(*TranscribeSpeechResponse)(nil),             // 14: model_plane.v1.TranscribeSpeechResponse
-	(*ListSpeechVoicesRequest)(nil),              // 15: model_plane.v1.ListSpeechVoicesRequest
-	(*SpeechVoiceInfo)(nil),                      // 16: model_plane.v1.SpeechVoiceInfo
-	(*ListSpeechVoicesResponse)(nil),             // 17: model_plane.v1.ListSpeechVoicesResponse
-	(*TranslateTextRequest)(nil),                 // 18: model_plane.v1.TranslateTextRequest
-	(*TranslateTextResponse)(nil),                // 19: model_plane.v1.TranslateTextResponse
-	(*TranslationInput)(nil),                     // 20: model_plane.v1.TranslationInput
-	(*BatchTranslateTextRequest)(nil),            // 21: model_plane.v1.BatchTranslateTextRequest
-	(*TranslationResult)(nil),                    // 22: model_plane.v1.TranslationResult
-	(*BatchTranslateTextResponse)(nil),           // 23: model_plane.v1.BatchTranslateTextResponse
-	(*DetectTextLanguageRequest)(nil),            // 24: model_plane.v1.DetectTextLanguageRequest
-	(*TranslationDetection)(nil),                 // 25: model_plane.v1.TranslationDetection
-	(*DetectTextLanguageResponse)(nil),           // 26: model_plane.v1.DetectTextLanguageResponse
-	(*ListTranslationLanguagesRequest)(nil),      // 27: model_plane.v1.ListTranslationLanguagesRequest
-	(*TranslationLanguageInfo)(nil),              // 28: model_plane.v1.TranslationLanguageInfo
-	(*ListTranslationLanguagesResponse)(nil),     // 29: model_plane.v1.ListTranslationLanguagesResponse
-	(*GenerateImageRequest)(nil),                 // 30: model_plane.v1.GenerateImageRequest
-	(*GeneratedImage)(nil),                       // 31: model_plane.v1.GeneratedImage
-	(*GenerateImageResponse)(nil),                // 32: model_plane.v1.GenerateImageResponse
-	(*AnalyzeImageRequest)(nil),                  // 33: model_plane.v1.AnalyzeImageRequest
-	(*AnalyzeImageResponse)(nil),                 // 34: model_plane.v1.AnalyzeImageResponse
-	(*ExtractImageTextRequest)(nil),              // 35: model_plane.v1.ExtractImageTextRequest
-	(*ExtractImageTextResponse)(nil),             // 36: model_plane.v1.ExtractImageTextResponse
-	(*AnalyzeDocumentRequest)(nil),               // 37: model_plane.v1.AnalyzeDocumentRequest
-	(*AnalyzeDocumentResponse)(nil),              // 38: model_plane.v1.AnalyzeDocumentResponse
-	(*AnalyzeLanguageRequest)(nil),               // 39: model_plane.v1.AnalyzeLanguageRequest
-	(*LanguageAnalysisResult)(nil),               // 40: model_plane.v1.LanguageAnalysisResult
-	(*AnalyzeLanguageResponse)(nil),              // 41: model_plane.v1.AnalyzeLanguageResponse
-	(*CreateRealtimeSessionRequest)(nil),         // 42: model_plane.v1.CreateRealtimeSessionRequest
-	(*CreateRealtimeSessionResponse)(nil),        // 43: model_plane.v1.CreateRealtimeSessionResponse
-	(*CreateVideoGenerationJobRequest)(nil),      // 44: model_plane.v1.CreateVideoGenerationJobRequest
-	(*CreateVideoGenerationJobResponse)(nil),     // 45: model_plane.v1.CreateVideoGenerationJobResponse
-	(*GetVideoGenerationJobRequest)(nil),         // 46: model_plane.v1.GetVideoGenerationJobRequest
-	(*GetVideoGenerationJobResponse)(nil),        // 47: model_plane.v1.GetVideoGenerationJobResponse
-	(*StreamVideoGenerationContentRequest)(nil),  // 48: model_plane.v1.StreamVideoGenerationContentRequest
-	(*StreamVideoGenerationContentResponse)(nil), // 49: model_plane.v1.StreamVideoGenerationContentResponse
+	(PrivacyTier)(0),                             // 0: model_plane.v1.PrivacyTier
+	(*InferRequest)(nil),                         // 1: model_plane.v1.InferRequest
+	(*ToolDefinition)(nil),                       // 2: model_plane.v1.ToolDefinition
+	(*ToolCall)(nil),                             // 3: model_plane.v1.ToolCall
+	(*ChatMessage)(nil),                          // 4: model_plane.v1.ChatMessage
+	(*InferResponse)(nil),                        // 5: model_plane.v1.InferResponse
+	(*InferChunk)(nil),                           // 6: model_plane.v1.InferChunk
+	(*CreateEmbeddingRequest)(nil),               // 7: model_plane.v1.CreateEmbeddingRequest
+	(*CreateEmbeddingResponse)(nil),              // 8: model_plane.v1.CreateEmbeddingResponse
+	(*ListModelsRequest)(nil),                    // 9: model_plane.v1.ListModelsRequest
+	(*ModelInfo)(nil),                            // 10: model_plane.v1.ModelInfo
+	(*ListModelsResponse)(nil),                   // 11: model_plane.v1.ListModelsResponse
+	(*SynthesizeSpeechRequest)(nil),              // 12: model_plane.v1.SynthesizeSpeechRequest
+	(*SynthesizeSpeechResponse)(nil),             // 13: model_plane.v1.SynthesizeSpeechResponse
+	(*TranscribeSpeechRequest)(nil),              // 14: model_plane.v1.TranscribeSpeechRequest
+	(*TranscribeSpeechResponse)(nil),             // 15: model_plane.v1.TranscribeSpeechResponse
+	(*ListSpeechVoicesRequest)(nil),              // 16: model_plane.v1.ListSpeechVoicesRequest
+	(*SpeechVoiceInfo)(nil),                      // 17: model_plane.v1.SpeechVoiceInfo
+	(*ListSpeechVoicesResponse)(nil),             // 18: model_plane.v1.ListSpeechVoicesResponse
+	(*TranslateTextRequest)(nil),                 // 19: model_plane.v1.TranslateTextRequest
+	(*TranslateTextResponse)(nil),                // 20: model_plane.v1.TranslateTextResponse
+	(*TranslationInput)(nil),                     // 21: model_plane.v1.TranslationInput
+	(*BatchTranslateTextRequest)(nil),            // 22: model_plane.v1.BatchTranslateTextRequest
+	(*TranslationResult)(nil),                    // 23: model_plane.v1.TranslationResult
+	(*BatchTranslateTextResponse)(nil),           // 24: model_plane.v1.BatchTranslateTextResponse
+	(*DetectTextLanguageRequest)(nil),            // 25: model_plane.v1.DetectTextLanguageRequest
+	(*TranslationDetection)(nil),                 // 26: model_plane.v1.TranslationDetection
+	(*DetectTextLanguageResponse)(nil),           // 27: model_plane.v1.DetectTextLanguageResponse
+	(*ListTranslationLanguagesRequest)(nil),      // 28: model_plane.v1.ListTranslationLanguagesRequest
+	(*TranslationLanguageInfo)(nil),              // 29: model_plane.v1.TranslationLanguageInfo
+	(*ListTranslationLanguagesResponse)(nil),     // 30: model_plane.v1.ListTranslationLanguagesResponse
+	(*GenerateImageRequest)(nil),                 // 31: model_plane.v1.GenerateImageRequest
+	(*GeneratedImage)(nil),                       // 32: model_plane.v1.GeneratedImage
+	(*GenerateImageResponse)(nil),                // 33: model_plane.v1.GenerateImageResponse
+	(*AnalyzeImageRequest)(nil),                  // 34: model_plane.v1.AnalyzeImageRequest
+	(*AnalyzeImageResponse)(nil),                 // 35: model_plane.v1.AnalyzeImageResponse
+	(*ExtractImageTextRequest)(nil),              // 36: model_plane.v1.ExtractImageTextRequest
+	(*ExtractImageTextResponse)(nil),             // 37: model_plane.v1.ExtractImageTextResponse
+	(*AnalyzeDocumentRequest)(nil),               // 38: model_plane.v1.AnalyzeDocumentRequest
+	(*AnalyzeDocumentResponse)(nil),              // 39: model_plane.v1.AnalyzeDocumentResponse
+	(*AnalyzeLanguageRequest)(nil),               // 40: model_plane.v1.AnalyzeLanguageRequest
+	(*LanguageAnalysisResult)(nil),               // 41: model_plane.v1.LanguageAnalysisResult
+	(*AnalyzeLanguageResponse)(nil),              // 42: model_plane.v1.AnalyzeLanguageResponse
+	(*CreateRealtimeSessionRequest)(nil),         // 43: model_plane.v1.CreateRealtimeSessionRequest
+	(*CreateRealtimeSessionResponse)(nil),        // 44: model_plane.v1.CreateRealtimeSessionResponse
+	(*CreateVideoGenerationJobRequest)(nil),      // 45: model_plane.v1.CreateVideoGenerationJobRequest
+	(*CreateVideoGenerationJobResponse)(nil),     // 46: model_plane.v1.CreateVideoGenerationJobResponse
+	(*GetVideoGenerationJobRequest)(nil),         // 47: model_plane.v1.GetVideoGenerationJobRequest
+	(*GetVideoGenerationJobResponse)(nil),        // 48: model_plane.v1.GetVideoGenerationJobResponse
+	(*StreamVideoGenerationContentRequest)(nil),  // 49: model_plane.v1.StreamVideoGenerationContentRequest
+	(*StreamVideoGenerationContentResponse)(nil), // 50: model_plane.v1.StreamVideoGenerationContentResponse
 }
 var file_model_plane_v1_inference_proto_depIdxs = []int32{
-	3,  // 0: model_plane.v1.InferRequest.messages:type_name -> model_plane.v1.ChatMessage
-	1,  // 1: model_plane.v1.InferRequest.tools:type_name -> model_plane.v1.ToolDefinition
-	2,  // 2: model_plane.v1.InferResponse.tool_calls:type_name -> model_plane.v1.ToolCall
-	9,  // 3: model_plane.v1.ListModelsResponse.models:type_name -> model_plane.v1.ModelInfo
-	16, // 4: model_plane.v1.ListSpeechVoicesResponse.voices:type_name -> model_plane.v1.SpeechVoiceInfo
-	20, // 5: model_plane.v1.BatchTranslateTextRequest.items:type_name -> model_plane.v1.TranslationInput
-	22, // 6: model_plane.v1.BatchTranslateTextResponse.translations:type_name -> model_plane.v1.TranslationResult
-	25, // 7: model_plane.v1.DetectTextLanguageResponse.detections:type_name -> model_plane.v1.TranslationDetection
-	28, // 8: model_plane.v1.ListTranslationLanguagesResponse.languages:type_name -> model_plane.v1.TranslationLanguageInfo
-	31, // 9: model_plane.v1.GenerateImageResponse.images:type_name -> model_plane.v1.GeneratedImage
-	40, // 10: model_plane.v1.AnalyzeLanguageResponse.results:type_name -> model_plane.v1.LanguageAnalysisResult
-	0,  // 11: model_plane.v1.InferenceCore.Infer:input_type -> model_plane.v1.InferRequest
-	0,  // 12: model_plane.v1.InferenceCore.InferStream:input_type -> model_plane.v1.InferRequest
-	6,  // 13: model_plane.v1.InferenceCore.CreateEmbedding:input_type -> model_plane.v1.CreateEmbeddingRequest
-	8,  // 14: model_plane.v1.InferenceCore.ListModels:input_type -> model_plane.v1.ListModelsRequest
-	11, // 15: model_plane.v1.InferenceCore.SynthesizeSpeech:input_type -> model_plane.v1.SynthesizeSpeechRequest
-	13, // 16: model_plane.v1.InferenceCore.TranscribeSpeech:input_type -> model_plane.v1.TranscribeSpeechRequest
-	15, // 17: model_plane.v1.InferenceCore.ListSpeechVoices:input_type -> model_plane.v1.ListSpeechVoicesRequest
-	18, // 18: model_plane.v1.InferenceCore.TranslateText:input_type -> model_plane.v1.TranslateTextRequest
-	21, // 19: model_plane.v1.InferenceCore.BatchTranslateText:input_type -> model_plane.v1.BatchTranslateTextRequest
-	24, // 20: model_plane.v1.InferenceCore.DetectTextLanguage:input_type -> model_plane.v1.DetectTextLanguageRequest
-	27, // 21: model_plane.v1.InferenceCore.ListTranslationLanguages:input_type -> model_plane.v1.ListTranslationLanguagesRequest
-	30, // 22: model_plane.v1.InferenceCore.GenerateImage:input_type -> model_plane.v1.GenerateImageRequest
-	33, // 23: model_plane.v1.InferenceCore.AnalyzeImage:input_type -> model_plane.v1.AnalyzeImageRequest
-	35, // 24: model_plane.v1.InferenceCore.ExtractImageText:input_type -> model_plane.v1.ExtractImageTextRequest
-	37, // 25: model_plane.v1.InferenceCore.AnalyzeDocument:input_type -> model_plane.v1.AnalyzeDocumentRequest
-	39, // 26: model_plane.v1.InferenceCore.AnalyzeLanguage:input_type -> model_plane.v1.AnalyzeLanguageRequest
-	42, // 27: model_plane.v1.InferenceCore.CreateRealtimeSession:input_type -> model_plane.v1.CreateRealtimeSessionRequest
-	44, // 28: model_plane.v1.InferenceCore.CreateVideoGenerationJob:input_type -> model_plane.v1.CreateVideoGenerationJobRequest
-	46, // 29: model_plane.v1.InferenceCore.GetVideoGenerationJob:input_type -> model_plane.v1.GetVideoGenerationJobRequest
-	48, // 30: model_plane.v1.InferenceCore.StreamVideoGenerationContent:input_type -> model_plane.v1.StreamVideoGenerationContentRequest
-	4,  // 31: model_plane.v1.InferenceCore.Infer:output_type -> model_plane.v1.InferResponse
-	5,  // 32: model_plane.v1.InferenceCore.InferStream:output_type -> model_plane.v1.InferChunk
-	7,  // 33: model_plane.v1.InferenceCore.CreateEmbedding:output_type -> model_plane.v1.CreateEmbeddingResponse
-	10, // 34: model_plane.v1.InferenceCore.ListModels:output_type -> model_plane.v1.ListModelsResponse
-	12, // 35: model_plane.v1.InferenceCore.SynthesizeSpeech:output_type -> model_plane.v1.SynthesizeSpeechResponse
-	14, // 36: model_plane.v1.InferenceCore.TranscribeSpeech:output_type -> model_plane.v1.TranscribeSpeechResponse
-	17, // 37: model_plane.v1.InferenceCore.ListSpeechVoices:output_type -> model_plane.v1.ListSpeechVoicesResponse
-	19, // 38: model_plane.v1.InferenceCore.TranslateText:output_type -> model_plane.v1.TranslateTextResponse
-	23, // 39: model_plane.v1.InferenceCore.BatchTranslateText:output_type -> model_plane.v1.BatchTranslateTextResponse
-	26, // 40: model_plane.v1.InferenceCore.DetectTextLanguage:output_type -> model_plane.v1.DetectTextLanguageResponse
-	29, // 41: model_plane.v1.InferenceCore.ListTranslationLanguages:output_type -> model_plane.v1.ListTranslationLanguagesResponse
-	32, // 42: model_plane.v1.InferenceCore.GenerateImage:output_type -> model_plane.v1.GenerateImageResponse
-	34, // 43: model_plane.v1.InferenceCore.AnalyzeImage:output_type -> model_plane.v1.AnalyzeImageResponse
-	36, // 44: model_plane.v1.InferenceCore.ExtractImageText:output_type -> model_plane.v1.ExtractImageTextResponse
-	38, // 45: model_plane.v1.InferenceCore.AnalyzeDocument:output_type -> model_plane.v1.AnalyzeDocumentResponse
-	41, // 46: model_plane.v1.InferenceCore.AnalyzeLanguage:output_type -> model_plane.v1.AnalyzeLanguageResponse
-	43, // 47: model_plane.v1.InferenceCore.CreateRealtimeSession:output_type -> model_plane.v1.CreateRealtimeSessionResponse
-	45, // 48: model_plane.v1.InferenceCore.CreateVideoGenerationJob:output_type -> model_plane.v1.CreateVideoGenerationJobResponse
-	47, // 49: model_plane.v1.InferenceCore.GetVideoGenerationJob:output_type -> model_plane.v1.GetVideoGenerationJobResponse
-	49, // 50: model_plane.v1.InferenceCore.StreamVideoGenerationContent:output_type -> model_plane.v1.StreamVideoGenerationContentResponse
-	31, // [31:51] is the sub-list for method output_type
-	11, // [11:31] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	4,  // 0: model_plane.v1.InferRequest.messages:type_name -> model_plane.v1.ChatMessage
+	2,  // 1: model_plane.v1.InferRequest.tools:type_name -> model_plane.v1.ToolDefinition
+	0,  // 2: model_plane.v1.InferRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	3,  // 3: model_plane.v1.InferResponse.tool_calls:type_name -> model_plane.v1.ToolCall
+	0,  // 4: model_plane.v1.ModelInfo.privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	10, // 5: model_plane.v1.ListModelsResponse.models:type_name -> model_plane.v1.ModelInfo
+	17, // 6: model_plane.v1.ListSpeechVoicesResponse.voices:type_name -> model_plane.v1.SpeechVoiceInfo
+	21, // 7: model_plane.v1.BatchTranslateTextRequest.items:type_name -> model_plane.v1.TranslationInput
+	23, // 8: model_plane.v1.BatchTranslateTextResponse.translations:type_name -> model_plane.v1.TranslationResult
+	26, // 9: model_plane.v1.DetectTextLanguageResponse.detections:type_name -> model_plane.v1.TranslationDetection
+	29, // 10: model_plane.v1.ListTranslationLanguagesResponse.languages:type_name -> model_plane.v1.TranslationLanguageInfo
+	32, // 11: model_plane.v1.GenerateImageResponse.images:type_name -> model_plane.v1.GeneratedImage
+	41, // 12: model_plane.v1.AnalyzeLanguageResponse.results:type_name -> model_plane.v1.LanguageAnalysisResult
+	1,  // 13: model_plane.v1.InferenceCore.Infer:input_type -> model_plane.v1.InferRequest
+	1,  // 14: model_plane.v1.InferenceCore.InferStream:input_type -> model_plane.v1.InferRequest
+	7,  // 15: model_plane.v1.InferenceCore.CreateEmbedding:input_type -> model_plane.v1.CreateEmbeddingRequest
+	9,  // 16: model_plane.v1.InferenceCore.ListModels:input_type -> model_plane.v1.ListModelsRequest
+	12, // 17: model_plane.v1.InferenceCore.SynthesizeSpeech:input_type -> model_plane.v1.SynthesizeSpeechRequest
+	14, // 18: model_plane.v1.InferenceCore.TranscribeSpeech:input_type -> model_plane.v1.TranscribeSpeechRequest
+	16, // 19: model_plane.v1.InferenceCore.ListSpeechVoices:input_type -> model_plane.v1.ListSpeechVoicesRequest
+	19, // 20: model_plane.v1.InferenceCore.TranslateText:input_type -> model_plane.v1.TranslateTextRequest
+	22, // 21: model_plane.v1.InferenceCore.BatchTranslateText:input_type -> model_plane.v1.BatchTranslateTextRequest
+	25, // 22: model_plane.v1.InferenceCore.DetectTextLanguage:input_type -> model_plane.v1.DetectTextLanguageRequest
+	28, // 23: model_plane.v1.InferenceCore.ListTranslationLanguages:input_type -> model_plane.v1.ListTranslationLanguagesRequest
+	31, // 24: model_plane.v1.InferenceCore.GenerateImage:input_type -> model_plane.v1.GenerateImageRequest
+	34, // 25: model_plane.v1.InferenceCore.AnalyzeImage:input_type -> model_plane.v1.AnalyzeImageRequest
+	36, // 26: model_plane.v1.InferenceCore.ExtractImageText:input_type -> model_plane.v1.ExtractImageTextRequest
+	38, // 27: model_plane.v1.InferenceCore.AnalyzeDocument:input_type -> model_plane.v1.AnalyzeDocumentRequest
+	40, // 28: model_plane.v1.InferenceCore.AnalyzeLanguage:input_type -> model_plane.v1.AnalyzeLanguageRequest
+	43, // 29: model_plane.v1.InferenceCore.CreateRealtimeSession:input_type -> model_plane.v1.CreateRealtimeSessionRequest
+	45, // 30: model_plane.v1.InferenceCore.CreateVideoGenerationJob:input_type -> model_plane.v1.CreateVideoGenerationJobRequest
+	47, // 31: model_plane.v1.InferenceCore.GetVideoGenerationJob:input_type -> model_plane.v1.GetVideoGenerationJobRequest
+	49, // 32: model_plane.v1.InferenceCore.StreamVideoGenerationContent:input_type -> model_plane.v1.StreamVideoGenerationContentRequest
+	5,  // 33: model_plane.v1.InferenceCore.Infer:output_type -> model_plane.v1.InferResponse
+	6,  // 34: model_plane.v1.InferenceCore.InferStream:output_type -> model_plane.v1.InferChunk
+	8,  // 35: model_plane.v1.InferenceCore.CreateEmbedding:output_type -> model_plane.v1.CreateEmbeddingResponse
+	11, // 36: model_plane.v1.InferenceCore.ListModels:output_type -> model_plane.v1.ListModelsResponse
+	13, // 37: model_plane.v1.InferenceCore.SynthesizeSpeech:output_type -> model_plane.v1.SynthesizeSpeechResponse
+	15, // 38: model_plane.v1.InferenceCore.TranscribeSpeech:output_type -> model_plane.v1.TranscribeSpeechResponse
+	18, // 39: model_plane.v1.InferenceCore.ListSpeechVoices:output_type -> model_plane.v1.ListSpeechVoicesResponse
+	20, // 40: model_plane.v1.InferenceCore.TranslateText:output_type -> model_plane.v1.TranslateTextResponse
+	24, // 41: model_plane.v1.InferenceCore.BatchTranslateText:output_type -> model_plane.v1.BatchTranslateTextResponse
+	27, // 42: model_plane.v1.InferenceCore.DetectTextLanguage:output_type -> model_plane.v1.DetectTextLanguageResponse
+	30, // 43: model_plane.v1.InferenceCore.ListTranslationLanguages:output_type -> model_plane.v1.ListTranslationLanguagesResponse
+	33, // 44: model_plane.v1.InferenceCore.GenerateImage:output_type -> model_plane.v1.GenerateImageResponse
+	35, // 45: model_plane.v1.InferenceCore.AnalyzeImage:output_type -> model_plane.v1.AnalyzeImageResponse
+	37, // 46: model_plane.v1.InferenceCore.ExtractImageText:output_type -> model_plane.v1.ExtractImageTextResponse
+	39, // 47: model_plane.v1.InferenceCore.AnalyzeDocument:output_type -> model_plane.v1.AnalyzeDocumentResponse
+	42, // 48: model_plane.v1.InferenceCore.AnalyzeLanguage:output_type -> model_plane.v1.AnalyzeLanguageResponse
+	44, // 49: model_plane.v1.InferenceCore.CreateRealtimeSession:output_type -> model_plane.v1.CreateRealtimeSessionResponse
+	46, // 50: model_plane.v1.InferenceCore.CreateVideoGenerationJob:output_type -> model_plane.v1.CreateVideoGenerationJobResponse
+	48, // 51: model_plane.v1.InferenceCore.GetVideoGenerationJob:output_type -> model_plane.v1.GetVideoGenerationJobResponse
+	50, // 52: model_plane.v1.InferenceCore.StreamVideoGenerationContent:output_type -> model_plane.v1.StreamVideoGenerationContentResponse
+	33, // [33:53] is the sub-list for method output_type
+	13, // [13:33] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_inference_proto_init() }
@@ -5015,13 +5243,14 @@ func file_model_plane_v1_inference_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_inference_proto_rawDesc), len(file_model_plane_v1_inference_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   50,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_model_plane_v1_inference_proto_goTypes,
 		DependencyIndexes: file_model_plane_v1_inference_proto_depIdxs,
+		EnumInfos:         file_model_plane_v1_inference_proto_enumTypes,
 		MessageInfos:      file_model_plane_v1_inference_proto_msgTypes,
 	}.Build()
 	File_model_plane_v1_inference_proto = out.File

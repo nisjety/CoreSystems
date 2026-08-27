@@ -2,6 +2,7 @@ import {
   ChevronRight,
   FileCode2,
   Link2,
+  Layers,
   ListChecks,
   MessageSquare,
   MessageSquarePlus,
@@ -9,9 +10,13 @@ import {
   Sparkles,
   Square,
 } from '@/shared/icons'
+import type { ThreadContext } from '@/shared/api/chat-client'
+import { ToolCallCard } from './ChatMessages'
 import {
   For,
+  Match,
   Show,
+  Switch,
   createMemo,
   createSignal,
 } from 'solid-js'
@@ -30,6 +35,7 @@ import {
 import {
   type AgentTaskStep,
   type ChatArtifact,
+  type ChatToolCall,
   type ChatGroundingGraph,
   type ChatGroundingSource,
   type ChatKnowledgeGrounding,
@@ -226,7 +232,108 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
   )
 }
 
-export function StepsPanel(props: { steps: AgentTaskStep[]; screen?: ChatArtifact | null; onStopTask: () => void }) {
+/**
+ * Context inspector: what is actually in the model's window for this thread,
+ * itemized by segment with per-segment token estimates.
+ *
+ * The data (`GetContextAssembly`) has existed all along and the gateway already
+ * called it to BUILD prompts — it was simply never exposed, so the one surface
+ * that could answer "why did it answer from *that*?" was unreachable. Collapsed
+ * by default: it is diagnostic, not part of reading an answer.
+ *
+ * Segment content is shown, not just sizes. "1,200 tokens of grounding" does not
+ * answer the question the inspector exists for.
+ */
+export function ContextWindowPanel(props: {
+  context: ThreadContext | undefined
+  loading: boolean
+  failed: boolean
+}) {
+  const [open, setOpen] = createSignal(false)
+  const used = () => props.context?.estimatedTokens ?? 0
+  const budget = () => props.context?.budgetTokens ?? 0
+  // Guard the divide: a zero budget would render NaN%, which reads as broken
+  // rather than as unknown.
+  const fill = () => (budget() > 0 ? Math.round((used() / budget()) * 100) : null)
+
+  return (
+    <section class="verevon-chat-context-window">
+      <button
+        type="button"
+        class="verevon-chat-context-window__toggle"
+        aria-expanded={open() ? 'true' : 'false'}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Layers size={14} />
+        <span>Kontekstvindu</span>
+        <Show when={props.context}>
+          <em>
+            {used().toLocaleString('nb-NO')}
+            <Show when={budget() > 0}>{` / ${budget().toLocaleString('nb-NO')}`}</Show>
+            {' tokens'}
+            <Show when={fill() != null}>{` (${fill()}%)`}</Show>
+          </em>
+        </Show>
+        <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
+      </button>
+      <Show when={open()}>
+        <Switch>
+          <Match when={props.loading}>
+            <p class="verevon-chat-context-window__note">Laster …</p>
+          </Match>
+          <Match when={props.failed}>
+            {/* Named, not blank: a failed read and an empty window look the
+                same otherwise, and only one of them is a problem. */}
+            <p class="verevon-chat-context-window__note">
+              Kunne ikke hente kontekstvinduet.
+            </p>
+          </Match>
+          <Match when={(props.context?.segments.length ?? 0) === 0}>
+            <p class="verevon-chat-context-window__note">Ingen segmenter rapportert.</p>
+          </Match>
+          <Match when={props.context}>
+            {(context) => (
+              <ul class="verevon-chat-context-window__list">
+                <For each={context().segments}>
+                  {(segment) => (
+                    <li class="verevon-chat-context-window__item">
+                      <div class="verevon-chat-context-window__head">
+                        <span class="verevon-chat-context-window__kind">{segment.kind}</span>
+                        <span class="verevon-chat-context-window__tokens">
+                          {segment.estimatedTokens.toLocaleString('nb-NO')} tokens
+                        </span>
+                      </div>
+                      <Show when={segment.content.trim()}>
+                        {(content) => (
+                          <pre class="verevon-chat-context-window__content">{content()}</pre>
+                        )}
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            )}
+          </Match>
+        </Switch>
+      </Show>
+    </section>
+  )
+}
+
+export function StepsPanel(props: {
+  steps: AgentTaskStep[]
+  /**
+   * The turn's tool calls, with their real arguments and output.
+   *
+   * These were collected on every turn and rendered NOWHERE: `ToolCallCard`
+   * had no caller, and the "view steps" pill pointed here, which showed task
+   * steps (title/detail/status) instead. So the evidence a step was built on —
+   * what was searched, what came back, what failed — was unreachable in the UI.
+   */
+  toolCalls?: ChatToolCall[]
+  screen?: ChatArtifact | null
+  onStopTask: () => void
+}) {
   const activeTask = () => props.steps.some((step) => step.status === 'active' || step.status === 'waiting')
   const sections = createMemo(() => groupTaskSteps(props.steps))
   const [collapsedSections, setCollapsedSections] = createSignal<Set<string>>(new Set())
@@ -300,6 +407,14 @@ export function StepsPanel(props: { steps: AgentTaskStep[]; screen?: ChatArtifac
                 </section>
               )}
             </For>
+            <Show when={(props.toolCalls?.length ?? 0) > 0}>
+              <section class="verevon-chat-steps-tools">
+                <h3>{'Verktøykall'}</h3>
+                <For each={props.toolCalls ?? []}>
+                  {(call) => <ToolCallCard call={call} />}
+                </For>
+              </section>
+            </Show>
           </div>
         </div>
       </div>

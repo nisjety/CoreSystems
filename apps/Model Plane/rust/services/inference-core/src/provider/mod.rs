@@ -1,5 +1,7 @@
 //! Provider routing traits and implementations.
 
+use tracing::warn;
+
 pub mod anthropic;
 pub mod artifact_ref;
 pub mod doc_intel;
@@ -7,6 +9,7 @@ pub mod fallback;
 pub mod intent;
 pub mod language;
 pub mod openai;
+pub mod overflow;
 pub mod policy_client;
 pub mod realtime;
 pub mod routing_policy;
@@ -118,10 +121,30 @@ pub struct InferRequest {
     pub max_tokens: i32,
     pub structured_output_schema: Option<String>,
     pub zdr: bool,
+    /// Minimum privacy tier every serving provider must satisfy. Providers
+    /// whose derived tier is weaker are skipped in every chain path; when none
+    /// remains the request fails closed with
+    /// [`ProviderError::TierUnavailable`] naming the required tier — never a
+    /// silent downgrade. `Unspecified` imposes no constraint and is
+    /// byte-identical to pre-tier behavior.
+    pub min_privacy_tier: PrivacyTier,
     /// chat-parity §2 function-calling: tools the model may call (empty = none).
     pub tools: Vec<ToolDefinition>,
     /// Tool selection policy: "auto" | "none" | "required" | a tool name.
     pub tool_choice: String,
+    /// Requested minimum residency floor (e.g. "eu", "norway"). Enforced
+    /// deny-by-default in `provider::fallback`: a provider whose declared
+    /// [`Residency`] is weaker than this floor is skipped, mirroring how a
+    /// non-ZDR provider is skipped when `zdr` is true. Empty means no floor.
+    pub min_residency: String,
+    /// Extended-thinking budget in tokens. 0 requests no thinking, which is the
+    /// pre-existing behaviour byte-for-byte.
+    ///
+    /// Advisory: a provider forwards it only when the resolved model actually
+    /// accepts a thinking parameter, because sending one to a model that does
+    /// not is a hard 400 rather than a silent no-op. See
+    /// `anthropic::supports_extended_thinking`.
+    pub thinking_budget_tokens: i32,
     /// Tenant scope for the Verevon intent layer's budget check (from gRPC
     /// metadata `x-org-id`; empty when the caller doesn't forward it).
     pub org_id: String,
@@ -177,6 +200,13 @@ pub struct InferResponse {
     pub output_tokens: i32,
     /// chat-parity §2: tool calls the model requested (empty for a plain answer).
     pub tool_calls: Vec<ToolCall>,
+    /// Registry id of the provider that actually served this response (e.g.
+    /// "azure-openai"). Phase-4 provenance-receipt input; empty when unknown.
+    pub provider_used: String,
+    /// Residency label of the serving deployment ([`Residency::as_str`]).
+    /// Disclosure only — reports the posture that was actually met. Empty when
+    /// undeclared.
+    pub residency: String,
 }
 
 /// A single streaming chunk.
@@ -188,6 +218,22 @@ pub struct InferChunk {
     pub model_used: String,
     pub input_tokens: i32,
     pub output_tokens: i32,
+    /// Why generation stopped. Populated on the final chunk only; see the
+    /// proto field's doc for the full vocabulary, including
+    /// `"stream_incomplete"` for a connection that broke before any proper
+    /// termination signal arrived.
+    pub stop_reason: String,
+    /// Incremental extended-thinking text, when the model produced any.
+    ///
+    /// Kept separate from `delta` rather than merged: reasoning is not part of
+    /// the answer, and a consumer that appended it would put the model's
+    /// scratchpad into the user's reply. A chunk carries one or the other.
+    pub reasoning_delta: String,
+    /// Serving-provider provenance (populated on final chunks; same semantics
+    /// as [`InferResponse::provider_used`]). Empty when unknown.
+    pub provider_used: String,
+    /// Residency label of the serving deployment (see [`InferResponse::residency`]).
+    pub residency: String,
 }
 
 /// A unified embedding request used internally across providers.
@@ -208,6 +254,12 @@ pub struct EmbedRequest {
     /// unless `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING` is set. Empty means the
     /// caller expresses no preference and the configured EU deployment is used.
     pub region: String,
+    /// Minimum privacy tier the serving embedding provider must satisfy
+    /// (same semantics as [`InferRequest::min_privacy_tier`]). There is no wire
+    /// field on the embedding contract yet, so callers currently leave this at
+    /// the default (`Unspecified`) — the gate exists so the enforcement path is
+    /// shared, not so embeddings advertise tiers today.
+    pub min_privacy_tier: PrivacyTier,
 }
 
 /// Unified embedding response.
@@ -233,6 +285,12 @@ pub struct ModelInfo {
     /// the UI group "cheap" models and pick a cheap default. Carried as a
     /// `"cheap"` entry in the proto `ModelInfo.features` list at the gRPC edge.
     pub cheap: bool,
+    /// Strongest privacy tier the owning provider can honor (Venice
+    /// `model_spec.privacy` equivalent). `Unspecified` means the provider
+    /// declares no posture.
+    pub privacy_tier: PrivacyTier,
+    /// Declared residency label ([`Residency::as_str`]); empty when undeclared.
+    pub residency_label: String,
 }
 
 /// Introspectable feature flags for a provider.
@@ -431,6 +489,95 @@ impl Residency {
     }
 }
 
+/// Programmatic privacy tier of a provider/deployment (Venice-style).
+///
+/// Ordered weakest→strongest so a request expresses a MINIMUM and eligibility
+/// is a plain `>=`. Combines the two independent axes — geography
+/// ([`Residency`]) and retention (`supports_zdr`) — into one sellable posture:
+/// `EuResident` demands `Residency::Eu`+, `ZdrContractual` additionally
+/// demands a verified ZDR contract, and `Sovereign` demands Norwegian-operated
+/// infrastructure WITH that ZDR contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyTier {
+    /// No constraint expressed / no declared posture.
+    #[default]
+    Unspecified,
+    /// No commitment beyond provider default.
+    Global,
+    /// ML processing committed to the EU/EEA.
+    EuResident,
+    /// EU-or-better residency plus an independently verified Zero-Data-
+    /// Retention contract.
+    ZdrContractual,
+    /// Processed and stored in Norway on Norwegian-operated infrastructure,
+    /// with a verified ZDR contract.
+    Sovereign,
+}
+
+impl PrivacyTier {
+    /// Numeric value matching the `model_plane.v1.PrivacyTier` proto enum.
+    #[must_use]
+    pub const fn as_wire_i32(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Global => 1,
+            Self::EuResident => 2,
+            Self::ZdrContractual => 3,
+            Self::Sovereign => 4,
+        }
+    }
+
+    /// Inverse of [`Self::as_wire_i32`]. Unknown numerics (a NEWER client
+    /// speaking a tier this build does not know) return `None` so callers can
+    /// reject rather than silently treat an unrecognized requirement as none.
+    #[must_use]
+    pub fn from_wire(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Unspecified),
+            1 => Some(Self::Global),
+            2 => Some(Self::EuResident),
+            3 => Some(Self::ZdrContractual),
+            4 => Some(Self::Sovereign),
+            _ => None,
+        }
+    }
+
+    /// Human-readable label for logs, typed errors, and the provenance receipt.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Global => "global",
+            Self::EuResident => "eu_resident",
+            Self::ZdrContractual => "zdr_contractual",
+            Self::Sovereign => "sovereign",
+        }
+    }
+
+    /// Derive the strongest tier a provider can honor from its declared
+    /// capabilities. Geography comes from `residency`; the retention axis from
+    /// `supports_zdr`. A Norwegian-operated resource WITHOUT a ZDR attestation
+    /// classifies `EuResident` on purpose: claiming sovereignty without the
+    /// retention contract would sell a guarantee the deployment does not make.
+    #[must_use]
+    pub fn classify(caps: &ProviderCapabilities) -> Self {
+        if !caps.supports_zdr {
+            return match caps.residency {
+                Residency::Global => Self::Global,
+                Residency::Eu | Residency::Norway => Self::EuResident,
+            };
+        }
+        match caps.residency {
+            // Sovereignty is Norway-specific per the pinned contract: EU
+            // residency with a verified ZDR contract stays `ZdrContractual`,
+            // because geography alone is not sovereignty.
+            Residency::Norway => Self::Sovereign,
+            Residency::Eu | Residency::Global => Self::ZdrContractual,
+        }
+    }
+}
+
 impl ProviderCapabilities {
     /// True if this provider advertises the named modality group.
     #[allow(dead_code)] // intended surface; consumed by router/policy (Phase 2/5)
@@ -577,6 +724,100 @@ mod capability_tests {
     }
 }
 
+#[cfg(test)]
+mod privacy_tier_tests {
+    use super::{PrivacyTier, ProviderCapabilities, Residency};
+
+    /// The tier ladder is the sellable contract: a request expresses a MINIMUM
+    /// and eligibility is `>=`. Reordering these values would silently reprice
+    /// every customer's posture.
+    #[test]
+    fn tiers_are_ordered_weakest_to_strongest() {
+        assert!(PrivacyTier::Global > PrivacyTier::Unspecified);
+        assert!(PrivacyTier::EuResident > PrivacyTier::Global);
+        assert!(PrivacyTier::ZdrContractual > PrivacyTier::EuResident);
+        assert!(PrivacyTier::Sovereign > PrivacyTier::ZdrContractual);
+        assert_eq!(PrivacyTier::default(), PrivacyTier::Unspecified);
+    }
+
+    /// The wire enum is pinned by the proto contract; the frontend and
+    /// capability-core both encode these numerics independently.
+    #[test]
+    fn wire_values_match_the_pinned_proto_contract() {
+        for (value, tier) in [
+            (0, PrivacyTier::Unspecified),
+            (1, PrivacyTier::Global),
+            (2, PrivacyTier::EuResident),
+            (3, PrivacyTier::ZdrContractual),
+            (4, PrivacyTier::Sovereign),
+        ] {
+            assert_eq!(tier.as_wire_i32(), value);
+            assert_eq!(PrivacyTier::from_wire(value), Some(tier));
+        }
+    }
+
+    /// An unknown numeric must NOT collapse to "no constraint" — that would let
+    /// a newer client's stronger requirement be honored by an older build as if
+    /// it had asked for nothing. Fail loud instead.
+    #[test]
+    fn unknown_wire_values_fail_closed() {
+        for value in [-1, 5, 42, i32::MAX] {
+            assert_eq!(
+                PrivacyTier::from_wire(value),
+                None,
+                "wire value {value} must be rejected, not downgraded"
+            );
+        }
+    }
+
+    #[test]
+    fn labels_use_snake_case_for_logs_and_receipts() {
+        assert_eq!(PrivacyTier::Unspecified.label(), "unspecified");
+        assert_eq!(PrivacyTier::Global.label(), "global");
+        assert_eq!(PrivacyTier::EuResident.label(), "eu_resident");
+        assert_eq!(PrivacyTier::ZdrContractual.label(), "zdr_contractual");
+        assert_eq!(PrivacyTier::Sovereign.label(), "sovereign");
+    }
+
+    fn caps(residency: Residency, supports_zdr: bool) -> ProviderCapabilities {
+        ProviderCapabilities {
+            residency,
+            supports_zdr,
+            ..ProviderCapabilities::default()
+        }
+    }
+
+    /// The full mapping table. Two rows are deliberate traps:
+    /// Norway WITHOUT ZDR classifies `EuResident` (geography alone is not
+    /// sovereignty), and Global WITH ZDR classifies `ZdrContractual` (a retention
+    /// contract does not relocate processing).
+    #[test]
+    fn classification_combines_geography_and_retention() {
+        // No ZDR attestation: geography alone caps at EU residency.
+        assert_eq!(PrivacyTier::classify(&caps(Residency::Global, false)), PrivacyTier::Global);
+        assert_eq!(PrivacyTier::classify(&caps(Residency::Eu, false)), PrivacyTier::EuResident);
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Norway, false)),
+            PrivacyTier::EuResident,
+            "a Norwegian region without a verified ZDR contract is EU-resident, \
+             never Sovereign"
+        );
+        // ZDR verified: retention satisfied, geography decides the rest.
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Global, true)),
+            PrivacyTier::ZdrContractual,
+            "a ZDR contract without EU residency stays at ZdrContractual"
+        );
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Eu, true)),
+            PrivacyTier::ZdrContractual,
+            "EU residency plus a ZDR contract is ZdrContractual — SOVEREIGN is \
+             Norway-only per the pinned contract"
+        );
+        assert_eq!(PrivacyTier::classify(&caps(Residency::Norway, true)), PrivacyTier::Sovereign);
+    }
+}
+
 /// Errors from provider operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
@@ -591,6 +832,16 @@ pub enum ProviderError {
 
     #[error("provider unavailable: {0}")]
     Unavailable(String),
+
+    /// The prompt exceeded the provider's input limit. Distinguished from
+    /// [`ProviderError::Http`] so callers can shed history and retry instead of
+    /// re-deriving the intent from provider prose — see
+    /// [`crate::provider::overflow`] for why that classification lives here and
+    /// not downstream.
+    ///
+    /// `detail` is the provider's original `"<status>: <body>"` text, unchanged.
+    #[error("prompt too long for the provider: {detail}")]
+    TooLong { detail: String },
 
     #[error("all providers exhausted after {attempts} total attempts")]
     AllExhausted { attempts: u32 },
@@ -609,6 +860,13 @@ pub enum ProviderError {
     /// independently verified ZDR contract. Rejected before any provider call.
     #[error("zero data retention unavailable: {0}")]
     ZdrUnavailable(String),
+
+    /// A request required a minimum privacy tier no matching provider can
+    /// honor (deny-by-default, before any provider call). The message names
+    /// the REQUIRED tier so callers see exactly what could not be met — a
+    /// downgrade is never silent.
+    #[error("required privacy tier unavailable: {0}")]
+    TierUnavailable(String),
 }
 
 /// Canonical EU Azure regions permitted to serve embeddings under the EU
@@ -690,6 +948,61 @@ pub(crate) fn endpoint_region_is_non_eu(endpoint: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    // --- tool_parameters: a malformed schema must be LOUD, never silent -------
+
+    /// The bug this replaces: a bare `unwrap_or_else` turned an unparseable
+    /// schema into `{"type":"object","properties":{}}`, which tells the provider
+    /// "this function accepts anything". The model then invents argument names,
+    /// the executor rejects them, and the visible symptom is a tool that
+    /// mysteriously never works — with nothing anywhere naming the real cause.
+    #[test]
+    fn an_unparseable_schema_still_degrades_but_is_reported() {
+        let open = serde_json::json!({ "type": "object", "properties": {} });
+        // Invalid JSON.
+        assert_eq!(tool_parameters("broken_tool", "{not json"), open);
+        // Valid JSON that is not an object — a schema has to be an object.
+        assert_eq!(tool_parameters("array_tool", "[1,2,3]"), open);
+        assert_eq!(tool_parameters("string_tool", "\"nope\""), open);
+        assert_eq!(tool_parameters("null_tool", "null"), open);
+    }
+
+    /// An ABSENT schema is a legitimate "this tool takes no arguments" — the
+    /// same output, but not a fault, and it must not be reported as one or the
+    /// warning becomes noise every caller learns to ignore.
+    #[test]
+    fn an_absent_schema_is_not_treated_as_a_malformation() {
+        let open = serde_json::json!({ "type": "object", "properties": {} });
+        for empty in ["", "   ", "\n"] {
+            assert_eq!(tool_parameters("no_args_tool", empty), open);
+        }
+    }
+
+    /// A good schema passes through byte-for-byte. Degrading a valid schema
+    /// would be strictly worse than the bug being fixed.
+    #[test]
+    fn a_valid_schema_is_passed_through_untouched() {
+        let raw =
+            r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#;
+        let parsed = tool_parameters("knowledge_search", raw);
+        assert_eq!(
+            parsed,
+            serde_json::from_str::<serde_json::Value>(raw).unwrap()
+        );
+        assert_eq!(parsed["required"][0], "query");
+    }
+
+    /// The log line has to say WHICH tool, or an operator with twenty tools
+    /// learns only that one of them is broken.
+    #[test]
+    fn the_kind_of_the_wrong_value_is_named() {
+        assert_eq!(json_kind(&serde_json::json!([])), "array");
+        assert_eq!(json_kind(&serde_json::json!("x")), "string");
+        assert_eq!(json_kind(&serde_json::json!(null)), "null");
+        assert_eq!(json_kind(&serde_json::json!(1)), "number");
+        assert_eq!(json_kind(&serde_json::json!(true)), "bool");
+        assert_eq!(json_kind(&serde_json::json!({})), "object");
+    }
     use super::*;
 
     #[test]
@@ -791,5 +1104,72 @@ mod tests {
         assert!(!endpoint_region_is_non_eu(
             "https://my-swedencentral-res.openai.azure.com"
         ));
+    }
+}
+
+/// Parse a tool's declared JSON-Schema parameters, or fall back to an open
+/// object — **loudly**.
+///
+/// # Why the fallback is kept, and why it must not be silent
+///
+/// This used to be a bare `.unwrap_or_else(...)` producing
+/// `{"type":"object","properties":{}}` with no signal at all. That is the worst
+/// possible failure to hide: an open schema tells the provider "this function
+/// takes anything", so the model invents argument names, the call reaches an
+/// executor that rejects it, and the only visible symptom is a tool that
+/// mysteriously never works. The schema was malformed the whole time and nothing
+/// said so.
+///
+/// The fallback itself stays, deliberately. Rejecting the request would fail the
+/// entire turn because *one* of possibly twenty tools has a bad schema — a
+/// caller's authoring mistake would become an outage. Degrading one tool and
+/// naming it is the proportionate response.
+///
+/// Callers that own the schema (`builtin_tool_defs`, `offered_tool_defs`) should
+/// never trip this; a client-declared or MCP-registered tool can.
+///
+/// Lives here rather than in one provider because BOTH the `OpenAI` and Anthropic
+/// paths had the same silent `unwrap_or_else` — the identical bug twice is what
+/// a shared concern looks like before it is shared.
+pub(crate) fn tool_parameters(tool_name: &str, parameters_json: &str) -> serde_json::Value {
+    let trimmed = parameters_json.trim();
+    // An absent schema is a legitimate "no arguments", not a malformation. Only
+    // a *present but unparseable* one is a fault worth reporting.
+    if trimmed.is_empty() {
+        return serde_json::json!({ "type": "object", "properties": {} });
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value) if value.is_object() => value,
+        Ok(other) => {
+            warn!(
+                tool = tool_name,
+                kind = json_kind(&other),
+                "tool parameter schema is not a JSON object; the provider will be told this \
+                 tool accepts any arguments, so its calls will likely be rejected downstream"
+            );
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        Err(error) => {
+            warn!(
+                tool = tool_name,
+                %error,
+                "tool parameter schema is not valid JSON; the provider will be told this tool \
+                 accepts any arguments, so its calls will likely be rejected downstream"
+            );
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+    }
+}
+
+/// Name of a JSON value's type, for a log line that says what arrived instead of
+/// an object.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }

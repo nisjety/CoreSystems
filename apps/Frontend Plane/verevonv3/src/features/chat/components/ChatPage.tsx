@@ -4,6 +4,7 @@ import {
   Show,
   Switch,
 } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   ArrowDown,
   EyeOff,
@@ -12,10 +13,12 @@ import {
 import {
   DashboardComposer,
 } from '@/features/dashboard/home/DashboardComposer'
+import { getThreadContext } from '@/shared/api/chat-client'
 import {
   DateDivider,
   EmptyChatState,
   MessageBlock,
+  QueuedInputStrip,
 } from './ChatMessages'
 import {
   ArtifactsPanel,
@@ -24,6 +27,7 @@ import {
   ChatHeader,
   ChatTabs,
   SourcesPanel,
+  ContextWindowPanel,
   StepsPanel,
 } from './ChatPanels'
 import {
@@ -73,6 +77,9 @@ export default function ChatPage() {
     setImageMode,
     planMode,
     setPlanMode,
+    approveTurnPlan,
+    planApprovalPending,
+    planApprovalError,
     browseWeb,
     setBrowseWeb,
     temporaryChat,
@@ -101,9 +108,30 @@ export default function ChatPage() {
       planMode={planMode()}
       showTurnReceipt={false}
       submitting={isStreaming()}
+      allowMidRunSubmit
+      // ^ chat opts in: a submit during the stream is a MID-RUN message, which
+      // sendContent persists to the thread and queues into the live run
+      // (deliverMidRun). Without it the composer swallowed Enter for the whole
+      // stream and the queued-input arc had no reachable client.
       temporaryChat={temporaryChat()}
       temporaryChatLocked={temporaryChatLocked()}
     />
+  )
+
+  // Context inspector data. Keyed on (thread, tab) so it is fetched only while
+  // the Steps tab is open and refetched when the thread changes — assembling a
+  // context window is real backend work, and doing it on every turn in case
+  // someone might look is exactly the kind of cost that never shows up as a bug.
+  const [threadContext] = createResource(
+    () => {
+      if (activeTab() !== 'steps') return null
+      const threadId = state.threadId
+      // A temporary chat has no durable context to inspect, and asking would
+      // be a server round-trip for a thread that is not meant to persist.
+      if (!threadId || isActiveThreadTemporary()) return null
+      return { threadId }
+    },
+    async (key) => getThreadContext(key.threadId),
   )
 
   return (
@@ -168,6 +196,13 @@ export default function ChatPage() {
                         onApprovalDecision={(approvalId, decision) =>
                           void handleApprovalDecision(turn.id, approvalId, decision)
                         }
+                        onApprovePlan={(rung, justification) =>
+                          void approveTurnPlan(turn.id, rung, justification)
+                        }
+                        planApproval={{
+                          pending: planApprovalPending() === turn.id,
+                          error: planApprovalError()[turn.id],
+                        }}
                         onSelectFollowUp={setInput}
                         onViewSteps={() => setActiveTab('steps')}
                         // The version switcher only ever applies to the trailing
@@ -179,6 +214,14 @@ export default function ChatPage() {
                     </>
                   )}
                 </For>
+                {/*
+                  Below the in-progress answer, because that is where the newest
+                  thing the user did belongs. The durable record of these lives
+                  on the thread itself (written when the message was accepted),
+                  so a reload shows them as ordinary messages — this strip is
+                  only the live status of a delivery in flight.
+                */}
+                <QueuedInputStrip entries={state.queuedInputs} />
                 <Show when={state.error && state.status === 'error'}>
                   <div class="verevon-chat-error" role="alert">{state.error}</div>
                 </Show>
@@ -210,7 +253,27 @@ export default function ChatPage() {
             <ArtifactsPanel items={artifactItems()} />
           </Match>
           <Match when={activeTab() === 'steps'}>
-            <StepsPanel steps={state.taskSteps} screen={latestScreen()} onStopTask={handleStop} />
+            {/*
+              The tool calls come from the LAST assistant turn: the pill that
+              routes here belongs to that turn, so its evidence is what the panel
+              should show.
+            */}
+            <StepsPanel
+              steps={state.taskSteps}
+              toolCalls={state.turns.at(-1)?.toolCalls}
+              screen={latestScreen()}
+              onStopTask={handleStop}
+            />
+            {/*
+              Fetched only while this tab is open — the inspector is diagnostic,
+              and assembling a context window is real work on the backend that
+              should not run on every chat turn just in case someone looks.
+            */}
+            <ContextWindowPanel
+              context={threadContext()}
+              loading={threadContext.loading}
+              failed={threadContext.error != null}
+            />
           </Match>
         </Switch>
 

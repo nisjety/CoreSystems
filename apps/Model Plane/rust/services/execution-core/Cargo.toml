@@ -16,6 +16,10 @@ tonic = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 tracing = { workspace = true }
+# Concurrent (non-'static, borrowed) tool-call dispatch within one round --
+# `futures::future::join_all` on futures that borrow `LoopContext`, same
+# pattern already used in model-gateway (deep_research.rs, dataplane.rs).
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -38,7 +42,6 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-futures = { workspace = true }
 mp-slo = { path = "../../crates/mp-slo" }
 wiremock = "0.6"
 rsa = { version = "0.9", features = ["pem"] }

@@ -31,6 +31,11 @@ mod auth;
 mod cache;
 mod canary;
 mod change_routes;
+// Only consumed by the postgres-queue-gated fan-out in change_routes; the
+// bin target has no external consumers, so an ungated declaration would be
+// dead code in default-feature builds.
+#[cfg(feature = "postgres-queue")]
+mod change_webhook;
 mod config;
 mod experiments;
 mod extract_routes;
@@ -46,6 +51,8 @@ mod schedule_routes;
 mod search_routes;
 mod source_registrar;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod telemetry;
 
 #[tokio::main]

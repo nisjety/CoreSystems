@@ -23,7 +23,7 @@ import (
 // cancellation and timeouts.
 type Store interface {
 	Put(ctx context.Context, orgID, threadID, topic, memoryID, userID, content string) (*memstore.Record, error)
-	Search(ctx context.Context, orgID, threadID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error)
+	Search(ctx context.Context, orgID, threadID, userID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error)
 	// List enumerates memories owned by userID, across every thread, scoped
 	// to orgID. Backs ListMemory -- see MemoryService in memory.proto. A
 	// backend with no per-user ownership tracking may legitimately return an
@@ -44,8 +44,8 @@ func (m *inMemoryStore) Put(_ context.Context, orgID, threadID, topic, memoryID,
 	return m.s.Put(orgID, threadID, topic, memoryID, userID, content)
 }
 
-func (m *inMemoryStore) Search(_ context.Context, orgID, threadID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error) {
-	return m.s.Search(orgID, threadID, query, topicFilter, updatedAfter, topK), nil
+func (m *inMemoryStore) Search(_ context.Context, orgID, threadID, userID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error) {
+	return m.s.Search(orgID, threadID, userID, query, topicFilter, updatedAfter, topK), nil
 }
 
 // List always returns an empty result. memstore has no per-user ownership
@@ -165,7 +165,7 @@ func (s *Server) SearchMemory(ctx context.Context, req *mpv1.SearchMemoryRequest
 	if req.UpdatedAfter != nil {
 		updatedAfter = req.UpdatedAfter.AsTime()
 	}
-	raw, err := s.store.Search(ctx, req.OrgId, req.ThreadId, req.Query, req.TopicFilter, updatedAfter, int32(req.Limit))
+	raw, err := s.store.Search(ctx, req.OrgId, req.ThreadId, req.UserId, req.Query, req.TopicFilter, updatedAfter, int32(req.Limit))
 	s.observeSemantic(err, len(raw))
 	if err != nil {
 		telemetry.MemorySearchesTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "error")))

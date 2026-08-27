@@ -58,7 +58,9 @@ impl TrustClass {
             return Self::ThirdPartyMcp;
         }
         match tool_name {
-            "web_search" | "web_fetch" => Self::ExternalWeb,
+            "web_search" | "web_fetch" | "fetch_url" | "web.search" | "web.read" => {
+                Self::ExternalWeb
+            }
             "browser_agent" => Self::BrowserScraped,
             _ => Self::OrgInternal,
         }

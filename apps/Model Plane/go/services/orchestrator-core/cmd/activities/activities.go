@@ -448,6 +448,10 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 		created, terr := client.CreateThread(ctx, &mpv1.CreateThreadRequest{
 			SessionKey: "system-run/" + runID,
 			OrgId:      orgID,
+			// This is exactly the case origin exists for: a workload-owned thread
+			// that no human surface created, and that must never be classified
+			// "chat" by the field's own default -- see sessions.proto's Origin doc.
+			Origin: "system",
 		})
 		switch {
 		case terr != nil && status.Code(terr) == codes.Unavailable:

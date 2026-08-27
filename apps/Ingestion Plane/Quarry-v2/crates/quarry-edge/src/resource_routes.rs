@@ -147,14 +147,23 @@ pub async fn get_artifact(
         Ok(value) => value,
         Err(err) => return err_response(&request_id, err).into_response(),
     };
-    let bytes = match state.artifacts.get(&claims.org_id, &artifact_id).await {
+    // The KEY, not just the bytes: it records what the producer stored, which is
+    // the only authoritative source for a content type. Without it this route
+    // served everything as an opaque download, so a screenshot the runtime had
+    // captured could not be rendered anywhere — `screenshot_ref` reached the UI
+    // with nothing able to display it.
+    let (bytes, key) = match state
+        .artifacts
+        .get_with_key(&claims.org_id, &artifact_id)
+        .await
+    {
         Ok(value) => value,
         Err(err) => return err_response(&request_id, err).into_response(),
     };
 
     Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, artifact_content_type(&id))
+        .header(header::CONTENT_TYPE, artifact_content_type(&key))
         .header(header::CACHE_CONTROL, "private, max-age=30")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .body(Body::from(bytes))
@@ -167,8 +176,16 @@ pub async fn get_artifact(
         })
 }
 
-fn artifact_content_type(_id: &str) -> HeaderValue {
-    HeaderValue::from_static("application/octet-stream")
+/// Content type for an artifact, from the object key the producer stored it
+/// under.
+///
+/// Kept alongside `nosniff` deliberately: the pairing is what makes an accurate
+/// type safe. The kind is a server-side fact chosen at `put` time and encoded
+/// into the key, so declaring it tells the browser exactly what was stored while
+/// `nosniff` forbids it from guessing anything else. An empty or unrecognised key
+/// falls back to the opaque default this function used to return unconditionally.
+fn artifact_content_type(key: &str) -> HeaderValue {
+    HeaderValue::from_static(quarry_core::artifact::content_type_for_key(key))
 }
 
 /// Phase-2 visual RAG — serve a page-image PNG from the CAS for the
@@ -1207,5 +1224,29 @@ mod tests {
         assert!(VALID_SOURCE_KINDS.contains(&"scrape"));
         assert!(VALID_SOURCE_KINDS.contains(&"search"));
         assert!(!VALID_SOURCE_KINDS.contains(&"agent"));
+    }
+}
+
+#[cfg(test)]
+mod artifact_content_type_tests {
+    use super::artifact_content_type;
+    use quarry_core::artifact::{object_key, ArtifactKind};
+
+    /// The regression this fixes: a screenshot served as an opaque download.
+    #[test]
+    fn a_stored_screenshot_is_served_as_an_image() {
+        let key = object_key("acme", "run_1", "page_1", ArtifactKind::Screenshot);
+        assert_eq!(artifact_content_type(&key), "image/png");
+    }
+
+    /// A backend that cannot report its key must degrade to the old behaviour,
+    /// never to a guessed type.
+    #[test]
+    fn an_unknown_key_stays_opaque() {
+        assert_eq!(artifact_content_type(""), "application/octet-stream");
+        assert_eq!(
+            artifact_content_type("org=a/run=r/page=p/raw.bin"),
+            "application/octet-stream"
+        );
     }
 }

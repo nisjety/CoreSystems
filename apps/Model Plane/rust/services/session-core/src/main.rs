@@ -22,6 +22,7 @@ mod grpc;
 mod http_health;
 mod learning_events;
 mod letta_adapter;
+mod memory_erasure;
 mod memory_grpc;
 mod nats;
 mod nats_connection;
@@ -97,6 +98,7 @@ async fn main() -> Result<()> {
             async move { orchestration_nats::run(nats_url, events_tx).await }
         },
     ));
+    let gdpr_letta_memory = letta_memory.clone();
     let gdpr_erasure_handle = tokio::spawn(async move {
         if gdpr_nats_url.is_empty() {
             warn!("NATS_SHARED_URL not set; session-core GDPR erasure consumer disabled");
@@ -107,7 +109,8 @@ async fn main() -> Result<()> {
         supervise_background("session-core GDPR erasure consumer", move || {
             let pool = gdpr_pool.clone();
             let nats_url = gdpr_nats_url.clone();
-            async move { gdpr_nats::run(pool, nats_url).await }
+            let letta = gdpr_letta_memory.clone();
+            async move { gdpr_nats::run(pool, nats_url, letta).await }
         })
         .await
     });

@@ -835,6 +835,9 @@ impl ExecutionCore for ExecutionService {
             // record; the shared session channel reaches the approval store.
             &req.run_id,
             &req.step_id,
+            // The direct single-step RPC carries no thread context — memory
+            // tools fail closed here, same authority class as subagents.
+            "",
             Some(self.session_channel.clone()),
             Some(&browser_sink),
             Some(&self.state),

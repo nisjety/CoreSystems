@@ -343,12 +343,20 @@ pub struct ResolvedTargetProof {
     pub locator: Option<SemanticLocator>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DomSummary {
     pub node_count: u32,
     pub interactive_elements: Vec<InteractiveElement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_snippet: Option<String>,
+    /// Stable action-planning index over the surviving interactive elements.
+    /// Rows are dense and 1-based: row N names `@eN`, the same ref-id form
+    /// agent snapshots mint, so a planner can go straight from this compact
+    /// map to a snapshot-backed action without renumbering. Authoritative
+    /// element detail lives at `interactive_elements[index - 1]`. Absent when
+    /// the page offers nothing interactive; legacy payloads may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_map: Option<Vec<ElementClickTarget>>,
 }
 
 /// Bounded agent-facing page snapshot. This is deliberately a stable wire
@@ -443,9 +451,14 @@ pub struct SnapshotTarget {
     pub frame_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<ElementFingerprint>,
+    /// For scanner-produced targets: the stable 1-based DOM-summary click
+    /// index this ref was minted from, aligned with the summary's click map.
+    /// Native AX targets carry their own authority and leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_index: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InteractiveElement {
     pub tag: String,
     pub selector: String,
@@ -469,6 +482,28 @@ pub struct InteractiveElement {
     /// evidence. Effectful actions still require an exact/approved target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<ElementFingerprint>,
+    /// Stable 1-based position in the parent summary's click map, aligned
+    /// with the `@eN` snapshot ref convention. Absent for legacy summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_index: Option<u32>,
+}
+
+/// One compact row of a [`DomSummary`] click map. Deliberately narrower than
+/// [`InteractiveElement`]: a planner scans this list cheaply and only fans
+/// out to the full element (via `index`) when it needs placeholder, test-id,
+/// or fingerprint detail.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ElementClickTarget {
+    /// Agent-facing handle, identical to the snapshot ref for this index.
+    pub ref_id: String,
+    /// Dense, 1-based; equals this row's position in the click map plus one.
+    pub index: u32,
+    pub tag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// Best-effort accessible name (aria-label, label association, or text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// A semantic locator is resolved against the latest Quarry observation, then

@@ -48,6 +48,22 @@ pub struct SseChunk {
     pub output_tokens: u32,
 }
 
+/// End every out-of-band registration a live stream holds.
+///
+/// Two registries key off the same `request_id` — cancellation and mid-run input
+/// — and the stream task has ten exit paths. Finishing them one call at a time
+/// meant the eleventh exit path would leak whichever one its author forgot, and
+/// a leaked queue entry accepts a message no loop will ever drain: the user is
+/// told their message was delivered and it never arrives.
+fn finish_stream_registrations(
+    cancels: &crate::cancel_registry::CancelRegistry,
+    queued_inputs: &crate::queued_input::QueuedInputRegistry,
+    request_id: &str,
+) {
+    cancels.finish(request_id);
+    queued_inputs.finish(request_id);
+}
+
 #[allow(clippy::result_large_err)]
 fn authenticated_session_request<T>(
     value: T,
@@ -248,6 +264,49 @@ fn replay_cached_stream(
 /// Data Plane or Execution Core bearer. That invariant is covered by the
 /// pre-dispatch credential checks immediately above session creation.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Emit one rich/control event AND buffer it for resume, under a shared
+/// monotonic `seq` used as the SSE `id:`.
+///
+/// # Why buffering belongs here and not at 15 call sites
+///
+/// Before this, only assistant text was buffered, so a reconnect replayed the
+/// answer and silently lost every rich event — tool calls, citations, usage, the
+/// generated title (parity doc §4.1). The events were also sent without an
+/// `id:`, so a `Last-Event-ID` cursor could not even be positioned relative to
+/// them. Both are fixed by routing every emission through one place that
+/// assigns the id, buffers the frame, and sends it.
+///
+/// Feature gating is applied here so the call sites lose their `if
+/// X.should_emit(&features)` wrapper: control events (family `None`) always
+/// emit, exactly as before. A suppressed event is NOT buffered — replaying an
+/// event to a client that never opted into its family would be a different
+/// stream on resume than it saw live.
+async fn emit_and_buffer(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    buffers: &crate::stream_buffer::StreamBufferStore,
+    buffer_key: &str,
+    seq: &mut u64,
+    features: &[String],
+    req_id: &str,
+    event: crate::sse_events::ChatEvent,
+) {
+    if !event.should_emit(features) {
+        return;
+    }
+    let name = event.name();
+    let data = event.payload(req_id).to_string();
+    // Buffer before sending, so a reconnect can never observe a frame the
+    // buffer does not have.
+    buffers.append(buffer_key, *seq, name, &data).await;
+    let _ = tx
+        .send(Ok(Event::default()
+            .id(seq.to_string())
+            .event(name)
+            .data(data)))
+        .await;
+    *seq += 1;
+}
+
 pub async fn invoke_stream_sse(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -278,6 +337,22 @@ pub async fn invoke_stream_sse(
     let cost_bearer = cost_bearer.map(|Extension(bearer)| bearer);
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let features = req.features.clone();
+    // Normalize and validate BEFORE branching: an unknown tier numeric must
+    // fail closed on both the durable and the persistence-free path, and the
+    // ZDR branch threads the same floor onto its inference call.
+    let normalized = match crate::normalize::normalize(&req) {
+        Ok(normalized) => normalized,
+        Err((_, Json(error))) => {
+            let message = error
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("invalid invoke request");
+            return error_stream(&request_id, "invalid_request", message, false);
+        }
+    };
+    // Caller's privacy floor as the wire numeric (0 = UNSPECIFIED). Captured
+    // once here so every derived call site threads it without re-deriving.
+    let min_privacy_tier_wire = crate::normalize::min_privacy_tier_wire(&normalized);
     let effective_zdr = claims.effective_zdr(req.zdr);
     let pii_redaction_required = crate::moderation::pii_redaction_required(
         &features,
@@ -370,6 +445,9 @@ pub async fn invoke_stream_sse(
             }
             None => user_content.clone(),
         };
+        // The persistence-free path still honors the caller's privacy floor:
+        // retention and geography are independent axes. The tier was validated
+        // by normalize() before this branch, so no constraint is silently lost.
         return zdr_direct_stream(
             state,
             request_id,
@@ -378,21 +456,12 @@ pub async fn invoke_stream_sse(
             provider_content,
             features,
             grounding,
+            min_privacy_tier_wire,
             inference_bearer,
         )
         .await;
     }
 
-    let normalized = match crate::normalize::normalize(&req) {
-        Ok(normalized) => normalized,
-        Err((_, Json(error))) => {
-            let message = error
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or("invalid invoke request");
-            return error_stream(&request_id, "invalid_request", message, false);
-        }
-    };
     // Control Plane owns the org's spend/token ceilings; read them so an
     // operator's cap actually applies to a turn that did not name its own.
     // Fails open on an org-core outage — see `org_quota::fetch_org_limits`.
@@ -711,7 +780,9 @@ pub async fn invoke_stream_sse(
             features,
             agentic_tools,
             effective_zdr,
+            min_privacy_tier_wire,
             posture.to_owned(),
+            req.plan_mode,
             execution_bearer,
             data_plane_bearer,
             model_bearer,
@@ -743,10 +814,9 @@ pub async fn invoke_stream_sse(
         .await;
     }
 
-    // Safety policy is resolved from capability-core per request; client
-    // features can add PII redaction but cannot disable the org's policy.
-    // Retrieval below uses the raw query (Data Plane is internal); only the
-    // provider-bound prompt is redacted.
+    // Persistence prep for the durable path: PII redaction applies here too
+    // (redaction is orthogonal to retention posture), and the privacy floor
+    // rides on every inference call below via `min_privacy_tier_wire`.
     let user_content = if pii_redaction_required {
         crate::moderation::redact_pii(&req.content).0
     } else {
@@ -773,6 +843,7 @@ pub async fn invoke_stream_sse(
             request_id: &request_id,
             model: &model,
             zdr: effective_zdr,
+            min_privacy_tier: min_privacy_tier_wire,
             inference_bearer: &inference_bearer,
         },
     )
@@ -807,6 +878,43 @@ pub async fn invoke_stream_sse(
             (combined, grounded)
         }
         None => (recent_thread_messages, false),
+    };
+
+    // Long-term memory prefetch (harness-adoption §7.9): the SSE chat path —
+    // the actual browser product — streamed every turn with NO memory until
+    // now; only the gRPC Invoke path had it. Skipped for trivial prompts
+    // ("ja", "thanks!") where recalled context can only derail the reply, and
+    // timeout-bounded so a slow backend costs the recall, never the turn.
+    let memory_recall_status = if crate::memory_prefetch::is_trivial_prompt(&req.content) {
+        None
+    } else {
+        let (memory_entries, recall_status) = fetch_chat_memory_context(
+            &state,
+            &org_id,
+            &session_run.thread_id,
+            &user_content,
+            &model_bearer,
+        )
+        .await;
+        if !memory_entries.is_empty() {
+            // Same block format as grpc.rs's `build_messages`, so both paths
+            // present memory identically to the model. Inserted after the
+            // leading system context (assembly/grounding stay first) and
+            // before conversation history.
+            let insert_at = messages
+                .iter()
+                .position(|message| message.role != "system")
+                .unwrap_or(messages.len());
+            messages.insert(
+                insert_at,
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: format!("Relevant memory:\n{}", memory_entries.join("\n---\n")),
+                    name: String::new(),
+                },
+            );
+        }
+        recall_status
     };
 
     // HONESTY_CONTRACT (see retrieval::NO_GROUNDING_SYSTEM_NOTICE): resolve
@@ -1063,10 +1171,27 @@ pub async fn invoke_stream_sse(
             tool_defs.push(web_search);
         }
     }
+    // Tool-argument elicitation guidance, gated on the FINAL offered set (after
+    // the client/builtin merge and the web_search append above) so the prompt
+    // never warns about a tool this turn cannot call. Inserted before the first
+    // non-system turn like the memory block: guidance is context, not history.
+    if let Some(notice) = crate::tool_loop::user_supplied_args_notice(&tool_defs) {
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != "system")
+            .unwrap_or(messages.len());
+        messages.insert(insert_at, notice);
+    }
+
     // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
     // stop it cooperatively. `cancels` is moved into the task to finish() on end.
     let cancels = state.cancels.clone();
     let cancel_flag = cancels.register(&request_id, &org_id, &user_id);
+    // Accept mid-run input for this stream. The thread id is recorded HERE, from
+    // the prepared run, so the enqueue endpoint never has to trust a
+    // client-supplied thread — see `queued_input::enqueue_for`.
+    let queued_inputs = state.queued_inputs.clone();
+    queued_inputs.register(&request_id, &org_id, &user_id, &session_run.thread_id);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let session_state = state.clone();
@@ -1093,6 +1218,11 @@ pub async fn invoke_stream_sse(
     // back: with a 12-round tool budget a multi-step ERP question showed a dead
     // spinner for the entire phase and then dumped everything at once.
     tokio::spawn(async move {
+        // One monotonic SSE `id:` counter for EVERY frame this stream emits —
+        // text and rich events alike. Declared at the top of the task because a
+        // resume cursor is only meaningful if all frames share one sequence;
+        // rich events previously carried no `id:` at all.
+        let mut seq: u64 = 0;
         // chat-parity §1: hold the idempotency claim for the stream's lifetime.
         // Dropped when the task ends (normal completion, cancel, error, or
         // client disconnect) — which releases the key for a later regenerate.
@@ -1121,15 +1251,43 @@ pub async fn invoke_stream_sse(
             {
                 tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to cancel disconnected direct inference stream");
             }
-            cancels.finish(&req_id);
+            finish_stream_registrations(&cancels, &queued_inputs, &req_id);
             return;
         }
 
         if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
             let event = crate::sse_events::ChatEvent::Grounding { grounding: payload };
-            if event.should_emit(&features) {
-                let _ = tx.send(Ok(event.to_sse(&req_id))).await;
-            }
+            emit_and_buffer(
+                &tx,
+                &stream_buffers,
+                &buffer_key,
+                &mut seq,
+                &features,
+                &req_id,
+                event,
+            )
+            .await;
+        }
+
+        // The deterministic "memory was used" indicator (§7.9). Emitted only
+        // when memory was genuinely injected this turn; gated on the `memory`
+        // feature family so a client that has not opted in sees nothing.
+        if let Some(recall) = &memory_recall_status {
+            let event = crate::sse_events::ChatEvent::MemoryRecall {
+                count: recall.count,
+                latency_ms: recall.latency_ms,
+                memories: recall.described.clone(),
+            };
+            emit_and_buffer(
+                &tx,
+                &stream_buffers,
+                &buffer_key,
+                &mut seq,
+                &features,
+                &req_id,
+                event,
+            )
+            .await;
         }
 
         // chat-parity §8: emit retrieved sources up front (gated on the
@@ -1146,9 +1304,16 @@ pub async fn invoke_stream_sse(
                 url: c.url,
                 snippet: c.snippet,
             };
-            if cite.should_emit(&features) {
-                let _ = tx.send(Ok(cite.to_sse(&req_id))).await;
-            }
+            emit_and_buffer(
+                &tx,
+                &stream_buffers,
+                &buffer_key,
+                &mut seq,
+                &features,
+                &req_id,
+                cite,
+            )
+            .await;
         }
 
         // chat-parity §2 — function-calling tool loop. Every tool_call and
@@ -1188,6 +1353,7 @@ pub async fn invoke_stream_sse(
                 inference_bearer.as_str(),
                 session_bearer.as_str(),
                 effective_zdr,
+                min_privacy_tier_wire,
                 &model_clone,
                 messages,
                 &tool_phase_query,
@@ -1207,7 +1373,7 @@ pub async fn invoke_stream_sse(
                     true,
                 )
                 .await;
-                cancels.finish(&req_id);
+                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             };
             // A research run observes Stop mid-pipeline; honor it here rather
@@ -1217,7 +1383,16 @@ pub async fn invoke_stream_sse(
                 let stopped = crate::sse_events::ChatEvent::Stopped {
                     reason: "client cancelled".to_owned(),
                 };
-                let _ = tx.send(Ok(stopped.to_sse(&req_id))).await;
+                emit_and_buffer(
+                    &tx,
+                    &stream_buffers,
+                    &buffer_key,
+                    &mut seq,
+                    &features,
+                    &req_id,
+                    stopped,
+                )
+                .await;
                 if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
                     &session_state,
                     &session_run_for_terminal,
@@ -1227,7 +1402,7 @@ pub async fn invoke_stream_sse(
                 {
                     tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to cancel deep-research run after client stop");
                 }
-                cancels.finish(&req_id);
+                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             }
             deep_research_ran = true;
@@ -1285,7 +1460,7 @@ pub async fn invoke_stream_sse(
                     true,
                 )
                 .await;
-                cancels.finish(&req_id);
+                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             };
             turn_evidence.tool_successes += forced.tool_successes;
@@ -1318,6 +1493,7 @@ pub async fn invoke_stream_sse(
                     .as_ref()
                     .map(VerifiedCapabilityBearer::as_str),
                 effective_zdr,
+                min_privacy_tier_wire,
                 &model_clone,
                 messages,
                 tool_defs,
@@ -1338,7 +1514,7 @@ pub async fn invoke_stream_sse(
                     true,
                 )
                 .await;
-                cancels.finish(&req_id);
+                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             };
             turn_evidence.tool_successes += rounds.tool_successes;
@@ -1355,6 +1531,13 @@ pub async fn invoke_stream_sse(
             }
         }
 
+        // Extended-thinking budget, derived server-side from the client's
+        // effort profile (never a client-supplied raw budget). `standard`/unset
+        // yields 0, which is byte-identical to the pre-existing request.
+        let thinking_budget_tokens = crate::thinking::budget_tokens(
+            req.effort.as_deref().unwrap_or_default(),
+            answer_token_budget(),
+        );
         let mut grpc_req = InferRequest {
             request_id: req_id.clone(),
             org_id: org_clone.clone(),
@@ -1365,6 +1548,12 @@ pub async fn invoke_stream_sse(
             max_tokens: answer_token_budget(),
             structured_output_schema,
             zdr: effective_zdr,
+            // The caller's privacy floor rides on the ANSWER call and every
+            // retry/fallback derived from `grpc_req` below; auxiliary
+            // micro-calls (title, follow-ups, compaction summary) keep their
+            // own posture because they carry only already-persisted text.
+            min_privacy_tier: min_privacy_tier_wire,
+            thinking_budget_tokens,
             ..Default::default()
         };
 
@@ -1443,7 +1632,7 @@ pub async fn invoke_stream_sse(
                     start,
                 )
                 .await;
-                cancels.finish(&req_id);
+                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             }
         }
@@ -1466,7 +1655,7 @@ pub async fn invoke_stream_sse(
                 Ok(response) => break Some(response.into_inner()),
                 Err(error) => error,
             };
-            if !crate::compaction::is_context_length_error(error.message()) {
+            if !crate::compaction::is_context_length_status(&error) {
                 // Streaming RPC unavailable. Do NOT emit a bare `done` — that
                 // reads as a successful *empty* completion and forces every
                 // client to work around it. Fall back to the non-streaming Infer
@@ -1507,7 +1696,7 @@ pub async fn invoke_stream_sse(
                     false,
                 )
                 .await;
-                cancels.finish(&req_id);
+                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             }
             length_retries += 1;
@@ -1539,7 +1728,7 @@ pub async fn invoke_stream_sse(
                 &session_bearer,
             )
             .await;
-            cancels.finish(&req_id);
+            finish_stream_registrations(&cancels, &queued_inputs, &req_id);
             return;
         };
 
@@ -1547,7 +1736,6 @@ pub async fn invoke_stream_sse(
         // reconnecting client can send `Last-Event-Id` and resume from the
         // next delta (replay endpoint lands in Phase 2 — see
         // docs/HARNESS_PHASE1.md §3b).
-        let mut seq: u64 = 0;
         let mut assistant_output = String::new();
         let mut terminal_assigned = false;
         let mut cancelled = false;
@@ -1583,7 +1771,8 @@ pub async fn invoke_stream_sse(
                                 message: "The chat run is no longer active. Please retry.".to_owned(),
                                 retryable: true,
                             };
-                            let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                            emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id, event)
+                                .await;
                             break 'stream;
                         }
                         Err(error) => {
@@ -1594,7 +1783,8 @@ pub async fn invoke_stream_sse(
                                 message: "Unable to confirm the chat run is active. Please retry.".to_owned(),
                                 retryable: true,
                             };
-                            let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                            emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id, event)
+                                .await;
                             break 'stream;
                         }
                     }
@@ -1610,11 +1800,44 @@ pub async fn invoke_stream_sse(
                 let stopped = crate::sse_events::ChatEvent::Stopped {
                     reason: "client cancelled".to_owned(),
                 };
-                let _ = tx.send(Ok(stopped.to_sse(&req_id))).await;
+                emit_and_buffer(
+                    &tx,
+                    &stream_buffers,
+                    &buffer_key,
+                    &mut seq,
+                    &features,
+                    &req_id,
+                    stopped,
+                )
+                .await;
                 break;
             }
             match result {
                 Ok(chunk) if !chunk.done => {
+                    // Extended thinking, on its own event and NEVER appended to
+                    // `assistant_output`: reasoning is the model's scratchpad,
+                    // not part of the answer, and it must not reach the
+                    // persisted turn or the `chunk` stream a client renders as
+                    // the reply.
+                    //
+                    // `reasoning` is an opt-in family, so a client that did not
+                    // ask for it receives nothing — `should_emit` handles that,
+                    // which is why this is emitted unconditionally here.
+                    if !chunk.reasoning_delta.is_empty() {
+                        let event = crate::sse_events::ChatEvent::ReasoningDelta {
+                            delta: chunk.reasoning_delta.clone(),
+                        };
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            event,
+                        )
+                        .await;
+                    }
                     assistant_output.push_str(&chunk.delta);
                     let sse_chunk = SseChunk {
                         request_id: chunk.request_id.clone(),
@@ -1627,7 +1850,9 @@ pub async fn invoke_stream_sse(
                     let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
                     // Buffer the delta for resumability before sending so a
                     // reconnect never races ahead of what we retained.
-                    stream_buffers.append(&buffer_key, seq, &chunk.delta).await;
+                    stream_buffers
+                        .append(&buffer_key, seq, "chunk", &data)
+                        .await;
                     if client_connected
                         && tx
                             .send(Ok(Event::default()
@@ -1648,6 +1873,18 @@ pub async fn invoke_stream_sse(
                     seq += 1;
                 }
                 Ok(chunk) => {
+                    // The provider contract is that reasoning arrives only on
+                    // non-final chunks (a thinking block closes before
+                    // `message_stop`). Not silently tolerated if that changes:
+                    // dropping reasoning here would look exactly like a model
+                    // that did not think.
+                    if !chunk.reasoning_delta.is_empty() {
+                        tracing::warn!(
+                            request_id = %req_id,
+                            "reasoning arrived on a FINAL chunk and was dropped; a \
+                             provider changed the contract this loop assumes"
+                        );
+                    }
                     if !chunk.delta.is_empty() {
                         assistant_output.push_str(&chunk.delta);
                         let sse_chunk = SseChunk {
@@ -1659,7 +1896,9 @@ pub async fn invoke_stream_sse(
                             output_tokens: 0,
                         };
                         let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
-                        stream_buffers.append(&buffer_key, seq, &chunk.delta).await;
+                        stream_buffers
+                            .append(&buffer_key, seq, "chunk", &data)
+                            .await;
                         if client_connected {
                             // Ignore a send failure: this is the last delta
                             // before the terminal work (persist, terminalize
@@ -1677,12 +1916,33 @@ pub async fn invoke_stream_sse(
 
                     let input_tokens = u32::try_from(chunk.input_tokens).unwrap_or(0);
                     let output_tokens = u32::try_from(chunk.output_tokens).unwrap_or(0);
+                    // Provenance comes off the final chunk: which deployment
+                    // answered and under what residency, stamped on the usage
+                    // envelope below.
+                    let provider_used = chunk.provider_used.clone();
+                    let residency = chunk.residency.clone();
                     let model_used = if chunk.model_used.is_empty() {
                         model_clone.clone()
                     } else {
                         chunk.model_used.clone()
                     };
                     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    // inference-core sets this ONLY when the provider connection
+                    // broke before any proper termination signal arrived — a
+                    // streamed answer that would otherwise look identical to a
+                    // clean completion (see inference.proto's InferChunk.stop_reason
+                    // doc, and provider/openai.rs's/anthropic.rs's "stream_incomplete"
+                    // fallback chunk). Logged so an incomplete answer is at least
+                    // discoverable, even though the client-facing SseChunk payload
+                    // does not carry this yet (a much wider shared struct, ~18
+                    // unrelated construction sites — a separate, larger change).
+                    if chunk.stop_reason == "stream_incomplete" {
+                        tracing::warn!(
+                            request_id = %req_id,
+                            "inference stream ended without a proper termination signal; \
+                             the answer may be truncated"
+                        );
+                    }
 
                     if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
                         &session_state,
@@ -1705,7 +1965,16 @@ pub async fn invoke_stream_sse(
                             message: "Unable to persist the assistant response.".to_owned(),
                             retryable: true,
                         };
-                        let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            event,
+                        )
+                        .await;
                         break;
                     }
 
@@ -1724,8 +1993,17 @@ pub async fn invoke_stream_sse(
                             message: "Unable to finalize the chat run.".to_owned(),
                             retryable: true,
                         };
-                        let _ = tx.send(Ok(event.to_sse(&req_id))).await;
-                        cancels.finish(&req_id);
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            event,
+                        )
+                        .await;
+                        finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                         return;
                     }
                     terminal_assigned = true;
@@ -1756,6 +2034,9 @@ pub async fn invoke_stream_sse(
                         input_tokens,
                         output_tokens,
                         latency_ms,
+                        min_privacy_tier_wire,
+                        provider_used,
+                        residency,
                     );
                     if let Err(e) = publisher
                         .publish(&subjects::usage_subject(&org_clone), &usage_envelope)
@@ -1825,9 +2106,16 @@ pub async fn invoke_stream_sse(
                         latency_ms,
                         confidence,
                     };
-                    if usage_event.should_emit(&features) {
-                        let _ = tx.send(Ok(usage_event.to_sse(&req_id))).await;
-                    }
+                    emit_and_buffer(
+                        &tx,
+                        &stream_buffers,
+                        &buffer_key,
+                        &mut seq,
+                        &features,
+                        &req_id,
+                        usage_event,
+                    )
+                    .await;
 
                     // Store the finished answer under the same key the lookup
                     // used. `cache_prompt` is `Some` only when the turn passed
@@ -1876,7 +2164,16 @@ pub async fn invoke_stream_sse(
                         .await
                         {
                             let event = crate::sse_events::ChatEvent::Title { title };
-                            let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                            emit_and_buffer(
+                                &tx,
+                                &stream_buffers,
+                                &buffer_key,
+                                &mut seq,
+                                &features,
+                                &req_id,
+                                event,
+                            )
+                            .await;
                         }
                     }
 
@@ -1906,7 +2203,16 @@ pub async fn invoke_stream_sse(
                         .await;
                         if !suggestions.is_empty() {
                             let event = crate::sse_events::ChatEvent::FollowUps { suggestions };
-                            let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                            emit_and_buffer(
+                                &tx,
+                                &stream_buffers,
+                                &buffer_key,
+                                &mut seq,
+                                &features,
+                                &req_id,
+                                event,
+                            )
+                            .await;
                         }
                     }
 
@@ -1935,7 +2241,16 @@ pub async fn invoke_stream_sse(
                         message: "The inference stream ended unexpectedly.".to_owned(),
                         retryable: true,
                     };
-                    let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                    emit_and_buffer(
+                        &tx,
+                        &stream_buffers,
+                        &buffer_key,
+                        &mut seq,
+                        &features,
+                        &req_id,
+                        event,
+                    )
+                    .await;
                     break;
                 }
             }
@@ -1967,11 +2282,20 @@ pub async fn invoke_stream_sse(
                         .to_owned(),
                     retryable: true,
                 };
-                let _ = tx.send(Ok(event.to_sse(&req_id))).await;
+                emit_and_buffer(
+                    &tx,
+                    &stream_buffers,
+                    &buffer_key,
+                    &mut seq,
+                    &features,
+                    &req_id,
+                    event,
+                )
+                .await;
             }
         }
         // chat-parity §4: stop tracking this stream for cancellation.
-        cancels.finish(&req_id);
+        finish_stream_registrations(&cancels, &queued_inputs, &req_id);
     });
 
     Sse::new(ReceiverStream::new(rx))
@@ -2049,7 +2373,7 @@ fn answer_token_budget() -> i32 {
         .clamp(MIN_ANSWER_TOKENS, MAX_ANSWER_TOKENS)
 }
 
-fn context_assembly_budget() -> u32 {
+pub(crate) fn context_assembly_budget() -> u32 {
     std::env::var("MODEL_GATEWAY_CONTEXT_ASSEMBLY_TOKENS")
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
@@ -2315,7 +2639,236 @@ struct SummarizerContext<'a> {
     request_id: &'a str,
     model: &'a str,
     zdr: bool,
+    /// Caller-selected minimum privacy tier, already normalized to the wire
+    /// numeric (0 = no constraint) so every derived InferRequest carries the
+    /// caller's floor without re-deriving it.
+    min_privacy_tier: i32,
     inference_bearer: &'a VerifiedInferenceBearer,
+}
+
+/// How much of the about-to-be-discarded head is used as the memory query.
+///
+/// The head can be tens of KB; memory backends want a query, not a corpus.
+/// A bounded prefix keeps the lookup cheap and predictable, and the head's
+/// opening turns are where a user most often states the standing constraints
+/// this hook exists to protect.
+const COMPACTION_MEMORY_QUERY_CHARS: usize = 1_000;
+
+/// Total characters of memory contribution admitted into the summary prompt.
+/// Compaction exists to SHRINK the prompt; an unbounded directive could make
+/// the summarization call itself larger than what it is compacting away.
+const COMPACTION_MEMORY_DIRECTIVE_CHARS: usize = 1_500;
+
+/// The `on_pre_compress` hook (harness-adoption: `hermes-agent`'s
+/// `MemoryProvider.on_pre_compress`, MIT).
+///
+/// Compaction is the one place the system deliberately destroys detail, and it
+/// decides what to keep knowing only this thread. Memory knows what has
+/// mattered to this user across threads. This gives it a say before the head
+/// is summarized away — see `compaction::summary_prompt_with_memory` for how
+/// the contribution is framed (as a salience hint, never as facts to merge).
+///
+/// Best-effort by contract, exactly like the existing `fetch_memory_context`
+/// on the inference path: any failure returns an empty directive, which makes
+/// `summary_prompt_with_memory` produce byte-identical output to the plain
+/// `summary_prompt`. A memory outage must never degrade compaction — losing
+/// the hint is survivable, failing the turn is not.
+async fn fetch_compaction_memory_directive(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    head_transcript: &str,
+    bearer: &VerifiedModelBearer,
+) -> String {
+    use mp_contracts::model_plane::v1::SearchMemoryRequest;
+
+    let query: String = head_transcript
+        .chars()
+        .take(COMPACTION_MEMORY_QUERY_CHARS)
+        .collect();
+    if query.trim().is_empty() {
+        return String::new();
+    }
+
+    let Ok(request) = authenticated_session_request(
+        SearchMemoryRequest {
+            // Left empty deliberately: session-core derives the owner
+            // from the VERIFIED thread, so a caller-supplied user id
+            // would be forgeable scoping.
+            user_id: String::new(),
+            thread_id: thread_id.to_owned(),
+            query,
+            topic_filter: Vec::new(),
+            limit: 5,
+            org_id: org_id.to_owned(),
+            updated_after: None,
+        },
+        bearer,
+    ) else {
+        return String::new();
+    };
+
+    let entries = match state.memory_client.clone().search_memory(request).await {
+        Ok(response) => response.into_inner().entries,
+        Err(error) => {
+            tracing::warn!(%error, "compaction memory lookup failed; summarizing without it");
+            return String::new();
+        }
+    };
+
+    let mut directive = String::new();
+    for entry in entries {
+        let content = entry.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        if directive.len() + content.len() + 3 > COMPACTION_MEMORY_DIRECTIVE_CHARS {
+            break;
+        }
+        directive.push_str("- ");
+        directive.push_str(content);
+        directive.push('\n');
+    }
+    directive
+}
+
+/// Hard ceiling on the per-turn memory prefetch (harness-adoption §7.9,
+/// hermes-agent's timeout-bounded external prefetch, MIT). This runs BEFORE
+/// the stream opens, on the same latency-critical stretch the compaction
+/// summarizer is bounded on and for the same reason: memory is advisory
+/// context, and a slow memory backend must cost the turn nothing but the
+/// recall, never a visible hang.
+const MEMORY_PREFETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// What one turn's memory prefetch actually injected, for the
+/// `memory_recall` SSE indicator. `None` = nothing recalled, no event.
+struct MemoryRecallStatus {
+    count: u32,
+    latency_ms: u64,
+    /// What was recalled, projected for display.
+    ///
+    /// The prefetch used to `.map(|entry| entry.content)` and drop everything
+    /// else — including `provenance` and `topic` — so the turn could report a
+    /// count and nothing else. A reader cannot check or correct what they cannot
+    /// see, which is the whole point of surfacing recall.
+    described: Vec<crate::memory_provenance::RecalledMemoryView>,
+}
+
+/// Best-effort, timeout-bounded long-term memory prefetch for the direct
+/// chat path — the SSE twin of `grpc.rs`'s `fetch_memory_context`, which
+/// until now only the gRPC Invoke path had (the browser product streamed
+/// every turn with no memory at all; see claude-hermes-deepseek.md §7.9).
+///
+/// Returns the recalled entries plus a recall status for the indicator
+/// event. Every failure mode — missing credential, timeout, backend error —
+/// degrades to "no memory this turn", exactly like the gRPC twin.
+async fn fetch_chat_memory_context(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    query: &str,
+    bearer: &VerifiedModelBearer,
+) -> (Vec<String>, Option<MemoryRecallStatus>) {
+    use mp_contracts::model_plane::v1::SearchMemoryRequest;
+
+    let Ok(request) = authenticated_session_request(
+        SearchMemoryRequest {
+            // Left empty deliberately: session-core derives the owner
+            // from the VERIFIED thread, so a caller-supplied user id
+            // would be forgeable scoping.
+            user_id: String::new(),
+            thread_id: thread_id.to_owned(),
+            query: query.to_owned(),
+            topic_filter: Vec::new(),
+            limit: 5,
+            org_id: org_id.to_owned(),
+            updated_after: None,
+        },
+        bearer,
+    ) else {
+        // Previously the only fully SILENT degradation path here: no log, no
+        // metric. A turn answered without memory because the credential could
+        // not be attached looked identical to a turn with nothing to recall.
+        tracing::warn!("chat memory prefetch skipped: request not forwardable");
+        record_memory_prefetch_outcome("no_credential");
+        return (Vec::new(), None);
+    };
+
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        MEMORY_PREFETCH_TIMEOUT,
+        state.memory_client.clone().search_memory(request),
+    )
+    .await;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    let recalled = match response {
+        Ok(Ok(resp)) => resp.into_inner().entries,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "chat memory prefetch failed; continuing without memory");
+            record_memory_prefetch_outcome("error");
+            return (Vec::new(), None);
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                timeout_ms = MEMORY_PREFETCH_TIMEOUT.as_millis() as u64,
+                "chat memory prefetch timed out; continuing without memory"
+            );
+            record_memory_prefetch_outcome("timeout");
+            return (Vec::new(), None);
+        }
+    };
+    // Project BEFORE reducing to prompt text, so the display record and the
+    // injected content come from the same entries and cannot disagree.
+    let described = crate::memory_provenance::describe_recalled_memories(&recalled);
+    let entries: Vec<String> = recalled
+        .into_iter()
+        .map(|entry| entry.content)
+        .filter(|content| !content.trim().is_empty())
+        .collect();
+    if entries.is_empty() {
+        record_memory_prefetch_outcome("empty");
+        return (Vec::new(), None);
+    }
+    record_memory_prefetch_outcome("hit");
+    let count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    (
+        entries,
+        Some(MemoryRecallStatus {
+            count,
+            latency_ms,
+            described,
+        }),
+    )
+}
+
+/// Outcome labels for [`MEMORY_PREFETCH_OUTCOME_METRIC`]. Kept as one closed
+/// list so a dashboard can assert the labels sum to the turn count.
+pub(crate) const MEMORY_PREFETCH_OUTCOMES: &[&str] =
+    &["hit", "empty", "timeout", "error", "no_credential"];
+
+/// Why this is a metric and not a user-facing notice.
+///
+/// A prefetch that times out means the answer was produced without context that
+/// was supposed to be there — real degradation, and the kind this plan keeps
+/// finding hidden. But it is also ordinary operational jitter on a 400ms
+/// best-effort budget, and an inline "memory unavailable" banner on a slow turn
+/// is alarming and unactionable for the person reading the answer.
+///
+/// So the honesty is directed where it can be acted on: the operator sees the
+/// rate, the reader sees the notice only when memory *was* used
+/// (`MemoryRecallNotice`). `empty` and `timeout` are separate labels precisely
+/// because "nothing to recall" and "could not look" are the two the UI cannot
+/// distinguish, and confusing them is how a broken prefetch reads as a quiet
+/// product.
+const MEMORY_PREFETCH_OUTCOME_METRIC: &str = "mp_gateway_chat_memory_prefetch_total";
+
+fn record_memory_prefetch_outcome(outcome: &'static str) {
+    debug_assert!(
+        MEMORY_PREFETCH_OUTCOMES.contains(&outcome),
+        "unlisted memory-prefetch outcome label"
+    );
+    metrics::counter!(MEMORY_PREFETCH_OUTCOME_METRIC, "outcome" => outcome).increment(1);
 }
 
 async fn load_recent_thread_messages(
@@ -2394,6 +2947,11 @@ async fn load_recent_thread_messages(
         COMPACTED_TAIL_MESSAGES,
     ) {
         let transcript = crate::compaction::render_head_transcript(&messages, head);
+        // `on_pre_compress`: let memory flag what the summarizer must not drop
+        // before the head is destroyed. Best-effort — an empty directive
+        // yields exactly the pre-hook prompt.
+        let memory_directive =
+            fetch_compaction_memory_directive(state, org_id, thread_id, &transcript, bearer).await;
         // Bounded because this runs BEFORE the stream opens: an unbounded
         // summarization call would reintroduce the dead spinner that moving the
         // tool phase into the stream task just removed. On timeout we take the
@@ -2405,8 +2963,9 @@ async fn load_recent_thread_messages(
                 &format!("{}-compaction", summarizer.request_id),
                 org_id,
                 summarizer.model,
-                &crate::compaction::summary_prompt(&transcript),
+                &crate::compaction::summary_prompt_with_memory(&transcript, &memory_directive),
                 summarizer.zdr,
+                summarizer.min_privacy_tier,
                 summarizer.inference_bearer,
             ),
         )
@@ -2504,13 +3063,26 @@ async fn fetch_skill_context(
     ) else {
         return Vec::new();
     };
-    matched
-        .matches
-        .into_iter()
-        .filter_map(|m| m.skill)
-        .filter(|s| !s.body.trim().is_empty())
-        .map(|s| crate::skills::format_skill_block(&s))
-        .collect()
+    // Bounded by SIZE as well as count — see `skills::fit_skill_blocks`.
+    let fitted = crate::skills::fit_skill_blocks(
+        matched
+            .matches
+            .into_iter()
+            .filter_map(|m| m.skill)
+            .filter(|s| !s.body.trim().is_empty())
+            .map(|s| crate::skills::format_skill_block(&s))
+            .collect(),
+    );
+    if fitted.truncated > 0 || fitted.dropped > 0 {
+        tracing::warn!(
+            %org_id,
+            truncated = fitted.truncated,
+            dropped = fitted.dropped,
+            budget_chars = crate::skills::SKILL_CONTEXT_BUDGET_CHARS,
+            "skill guidance exceeded its context budget; degraded to fit"
+        );
+    }
+    fitted.blocks
 }
 
 /// SSE stream for a multimodal (vision) turn: route the image + the user's
@@ -3045,6 +3617,8 @@ async fn mark_run_plan_mode(state: &AppState, org_id: &str, run_id: &str, sessio
         run_id: run_id.to_owned(),
         mode: "plan".to_owned(),
         org_id: org_id.to_owned(),
+        granted_rung: 0,
+        justification: String::new(),
     };
     let mut durable_request = tonic::Request::new(durable);
     let Ok(authorization) = format!("Bearer {session_bearer}").parse() else {
@@ -3386,6 +3960,9 @@ async fn run_infer_fallback(
     let buffers = state.stream_buffers.clone();
     let buffer_key = crate::stream_buffer::scoped_stream_key(org_id, user_id, request_id);
     let thread_id = run.thread_id.clone();
+    // `grpc_req` is consumed by the call below; keep its floor for the usage
+    // envelope so the fallback stamps the same provenance as the live stream.
+    let min_privacy_tier = grpc_req.min_privacy_tier;
     let result = state
         .inference_client
         .clone()
@@ -3406,7 +3983,6 @@ async fn run_infer_fallback(
 
             let mut seq: u64 = 0;
             for piece in chunk_for_stream(&resp.content, 48) {
-                buffers.append(&buffer_key, seq, &piece).await;
                 let sse_chunk = SseChunk {
                     request_id: request_id.to_owned(),
                     delta: piece,
@@ -3416,6 +3992,9 @@ async fn run_infer_fallback(
                     output_tokens: 0,
                 };
                 let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
+                // Buffer before sending so a reconnect never races ahead of
+                // what was retained.
+                buffers.append(&buffer_key, seq, "chunk", &data).await;
                 if tx
                     .send(Ok(Event::default()
                         .id(seq.to_string())
@@ -3513,6 +4092,9 @@ async fn run_infer_fallback(
                 input_tokens,
                 output_tokens,
                 latency_ms,
+                min_privacy_tier,
+                resp.provider_used.clone(),
+                resp.residency.clone(),
             );
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
@@ -3767,19 +4349,34 @@ pub async fn invoke_resume_sse(
     let tail_key = buffer_key.clone();
     let buffers = state.stream_buffers.clone();
     tokio::spawn(async move {
-        let send_delta = |delta: crate::stream_buffer::BufferedDelta| {
-            let chunk = SseChunk {
-                request_id: req_id.clone(),
-                delta: delta.delta,
-                done: false,
-                model_used: String::new(),
-                input_tokens: 0,
-                output_tokens: 0,
+        // Replay each buffered frame under its OWN event name. Previously every
+        // frame was re-sent as a `chunk`, which is why a reconnect produced the
+        // text of the answer and none of its tool calls, citations, usage or
+        // title: the events had never been buffered, and anything that had been
+        // would have come back mislabelled anyway.
+        let send_frame = |frame: crate::stream_buffer::BufferedEvent| {
+            let (name, data) = if frame.is_legacy_text() {
+                // A record written by a build that buffered text only. Rebuild
+                // the exact `chunk` frame it used to send, so a deploy does not
+                // break resumes for streams already in the buffer.
+                let chunk = SseChunk {
+                    request_id: req_id.clone(),
+                    delta: frame.delta,
+                    done: false,
+                    model_used: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                };
+                (
+                    "chunk".to_owned(),
+                    serde_json::to_string(&chunk).unwrap_or_default(),
+                )
+            } else {
+                (frame.event, frame.data)
             };
-            let data = serde_json::to_string(&chunk).unwrap_or_default();
             tx.send(Ok(Event::default()
-                .id(delta.seq.to_string())
-                .event("chunk")
+                .id(frame.seq.to_string())
+                .event(name)
                 .data(data)))
         };
         let send_done = |done: crate::stream_buffer::StreamDone| {
@@ -3800,9 +4397,9 @@ pub async fn invoke_resume_sse(
 
         // Highest seq forwarded so far — the cursor for the tail below.
         let mut cursor = after_seq;
-        for delta in replay.deltas {
-            cursor = Some(cursor.map_or(delta.seq, |c| c.max(delta.seq)));
-            if send_delta(delta).await.is_err() {
+        for frame in replay.deltas {
+            cursor = Some(cursor.map_or(frame.seq, |c| c.max(frame.seq)));
+            if send_frame(frame).await.is_err() {
                 return;
             }
         }
@@ -3828,10 +4425,10 @@ pub async fn invoke_resume_sse(
                 return; // client went away again; the next resume replays from its cursor
             }
             let tail = buffers.replay_after(&tail_key, cursor).await;
-            for delta in tail.deltas {
-                cursor = Some(cursor.map_or(delta.seq, |c| c.max(delta.seq)));
+            for frame in tail.deltas {
+                cursor = Some(cursor.map_or(frame.seq, |c| c.max(frame.seq)));
                 last_progress = std::time::Instant::now();
-                if send_delta(delta).await.is_err() {
+                if send_frame(frame).await.is_err() {
                     return;
                 }
             }
@@ -3998,6 +4595,7 @@ async fn direct_infer(
     model: &str,
     content: &str,
     zdr: bool,
+    min_privacy_tier: i32,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<String, tonic::Status> {
     let mut client = state.inference_client.clone();
@@ -4020,6 +4618,9 @@ async fn direct_infer(
                 // GDPR ZDR: honor the run's Zero-Data-Retention flag on the agentic
                 // fallback inference (was hardcoded false, ignoring the run's ZDR).
                 zdr,
+                // Same caller privacy floor as the primary paths — a fallback
+                // must never reach a provider the main chain would refuse.
+                min_privacy_tier,
                 ..Default::default()
             },
             inference_bearer,
@@ -4419,6 +5020,9 @@ async fn zdr_direct_stream(
     content: String,
     features: Vec<String>,
     grounding: Option<crate::retrieval::Grounding>,
+    // Caller's minimum privacy tier (wire numeric; 0 = no constraint). The
+    // persistence-free path still enforces the residency axis.
+    min_privacy_tier: i32,
     inference_bearer: VerifiedInferenceBearer,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let answer = match direct_infer(
@@ -4428,6 +5032,7 @@ async fn zdr_direct_stream(
         &model,
         &content,
         true,
+        min_privacy_tier,
         &inference_bearer,
     )
     .await
@@ -4623,7 +5228,9 @@ fn spawn_run_dispatch(
     content: &str,
     tools: &[ToolDefinition],
     zdr: bool,
+    min_privacy_tier_wire: i32,
     permission_mode: &str,
+    plan_mode: bool,
     execution_bearer: &VerifiedExecutionBearer,
     data_plane_bearer: &VerifiedBearer,
     session_bearer: &VerifiedModelBearer,
@@ -4649,9 +5256,40 @@ fn spawn_run_dispatch(
         // threaded into execution-core so every inference round + tool audit
         // detail honors it.
         zdr,
+        // Privacy floor: the caller's min_privacy_tier as the wire numeric,
+        // threaded so the governed agent loop enforces the same tier as the
+        // inline invoke path. Never silently downgraded by taking this path.
+        min_privacy_tier: min_privacy_tier_wire,
+        // Forwarded so execution-core can refuse a risky tool outright
+        // regardless of `mode` — see RunAgentRequest.plan_mode's doc for why
+        // this field exists at all (it didn't, until now).
+        plan_mode,
         // chat-parity: the client's declared tools, merged server-side with the
         // built-in + MCP set under the same governed execute_step path.
         tools: tools.to_vec(),
+        // The graded authority execution-core enforces PER CALL.
+        //
+        // A plan-mode run is held to READ_ONLY, which states in the ladder's own
+        // vocabulary what `plan_mode` states as a boolean — the two agree by
+        // construction rather than by hoping they stay in step.
+        //
+        // Anything else sends the rung an approved plan granted this THREAD,
+        // read from the coordinator's grant store — the only writer is
+        // `handle_exit_plan_mode`, so a rung wider than READ_ONLY always traces
+        // to a validated human escalation. Absent a grant it stays UNSPECIFIED,
+        // which is deliberately NOT a grant: execution-core reads it as "no
+        // graded constraint stated" and falls back to the posture gates that
+        // governed this path before the ladder existed. Inventing a wider rung
+        // here would manufacture an authority no human granted.
+        autonomy_rung: if plan_mode {
+            mp_contracts::model_plane::v1::AutonomyRung::ReadOnly as i32
+        } else {
+            state
+                .plan_mode
+                .granted_rung(org_id, &run.thread_id)
+                .unwrap_or(mp_contracts::model_plane::v1::AutonomyRung::Unspecified)
+                as i32
+        },
     };
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
@@ -4757,7 +5395,9 @@ fn agentic_run_stream(
     features: Vec<String>,
     tools: Vec<ToolDefinition>,
     zdr: bool,
+    min_privacy_tier_wire: i32,
     permission_mode: String,
+    plan_mode: bool,
     execution_bearer: VerifiedExecutionBearer,
     data_plane_bearer: VerifiedBearer,
     model_bearer: VerifiedModelBearer,
@@ -4797,7 +5437,9 @@ fn agentic_run_stream(
             &content,
             &tools,
             zdr,
+            min_privacy_tier_wire,
             &permission_mode,
+            plan_mode,
             &execution_bearer,
             &data_plane_bearer,
             &model_bearer,
@@ -5056,6 +5698,27 @@ fn agentic_run_stream(
             Ok(Ok(Ok(response))) => response,
         };
 
+        // Compaction is LOSSY and otherwise invisible: an answer built on a
+        // prompt whose earlier tool results were cleared can be worse for a
+        // reason nothing else in the stream explains. execution-core reports it;
+        // this is the reader, so the field is a signal rather than a value
+        // nobody consumes.
+        //
+        // A log line and nothing user-facing, deliberately. The clearing notice
+        // already tells the MODEL what happened and how to re-fetch, and a
+        // second banner telling the USER their agent ran low on room would be
+        // noise they cannot act on. What operators need is the correlation
+        // between "this run compacted" and "this answer was thin", which is a
+        // log/metrics question.
+        if response.compaction_triggered {
+            tracing::info!(
+                %request_id,
+                run_id = %run.run_id,
+                status = %response.status,
+                "agentic run compacted its prompt to stay within the context window"
+            );
+        }
+
         match classify_agentic_run_outcome(&response.status) {
             AgenticRunOutcome::AwaitingApproval => {
                 let paused = build_stream_envelope(
@@ -5245,6 +5908,7 @@ fn build_stream_envelope(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // provenance receipt fields ride beside the usage counters
 fn build_usage_envelope(
     request_id: &str,
     org_id: &str,
@@ -5253,6 +5917,9 @@ fn build_usage_envelope(
     input_tokens: u32,
     output_tokens: u32,
     latency_ms: u64,
+    min_privacy_tier: i32,
+    provider_used: String,
+    residency: String,
 ) -> Envelope {
     Envelope {
         event_id: new_ulid(),
@@ -5274,6 +5941,12 @@ fn build_usage_envelope(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "latency_ms": latency_ms,
+            // Provenance receipt inputs, stamped beside the token counts on
+            // every transport: which deployment processed the content and
+            // under what residency / requested privacy floor.
+            "provider_used": provider_used,
+            "residency": residency,
+            "min_privacy_tier": min_privacy_tier,
         }),
         zdr: false,
     }
@@ -6126,10 +6799,43 @@ mod tests {
 
     #[test]
     fn usage_envelope_correlation_id_equals_request_id() {
-        let env = build_usage_envelope("req-ABC", "org-1", "user-1", "gpt-4o", 10, 20, 33);
+        let env = build_usage_envelope(
+            "req-ABC",
+            "org-1",
+            "user-1",
+            "gpt-4o",
+            10,
+            20,
+            33,
+            0,
+            String::new(),
+            String::new(),
+        );
         assert_eq!(env.correlation_id, "req-ABC");
         assert_eq!(env.producer, "model-gateway");
         assert!(env.idempotency_key.contains("req-ABC"));
+    }
+
+    /// The usage envelope carries the provenance receipt inputs (which
+    /// deployment answered, under what residency, against which requested
+    /// floor) so attribution consumers never have to re-derive them.
+    #[test]
+    fn usage_envelope_stamps_provenance_fields() {
+        let env = build_usage_envelope(
+            "req-PROV",
+            "org-1",
+            "user-1",
+            "gpt-4o",
+            10,
+            20,
+            33,
+            4,
+            "azure-norway-eu".to_owned(),
+            "norway".to_owned(),
+        );
+        assert_eq!(env.payload["provider_used"], "azure-norway-eu");
+        assert_eq!(env.payload["residency"], "norway");
+        assert_eq!(env.payload["min_privacy_tier"], 4);
     }
 
     #[test]
@@ -6137,7 +6843,18 @@ mod tests {
         // Parity across the two envelopes a single streamed request emits.
         let request_id = "req-PARITY-1";
         let opened = build_stream_envelope(request_id, "STREAM_OPENED", "o", "u", "m");
-        let usage = build_usage_envelope(request_id, "o", "u", "m", 1, 1, 1);
+        let usage = build_usage_envelope(
+            request_id,
+            "o",
+            "u",
+            "m",
+            1,
+            1,
+            1,
+            0,
+            String::new(),
+            String::new(),
+        );
         assert_eq!(opened.correlation_id, usage.correlation_id);
         assert_eq!(opened.correlation_id, request_id);
     }

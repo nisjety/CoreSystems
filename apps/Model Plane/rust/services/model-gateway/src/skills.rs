@@ -632,3 +632,169 @@ mod tests {
         assert!(handle_get_skill(&store, get_req, &ownership, "bob").is_err());
     }
 }
+
+/// Character budget for injected skill guidance — the chat loop's half of
+/// plan item 3.5.
+///
+/// Skill injection was capped by COUNT (`sse::MAX_INJECTED_SKILLS`) and not by
+/// size. Skill bodies are operator-authored free text with no length limit, so a
+/// few long skills could occupy more of the prompt than the conversation they
+/// exist to steer — and nothing fails, the model just has less room and answers
+/// worse.
+///
+/// # Why this is duplicated rather than shared
+///
+/// execution-core's governed loop has the same budget in
+/// `runtime_loop::skill_budget`. The two loops are separate crates with separate
+/// deployment cadence and neither depends on the other — the same reasoning as
+/// the tool-retry vocabularies (`CLAUDE.md`;
+/// `docs/postmortem/0001-harn-1-2-tool-dispatch-unification.md`). A contract
+/// test (`tests/skill_budget_contract.rs`) pins the two budgets together, so a
+/// change on one side that is not made on the other fails the build rather than
+/// letting chat and deployed agents disagree about how much prompt skills may
+/// take.
+pub const SKILL_CONTEXT_BUDGET_CHARS: usize = 8_000;
+
+/// Least content a truncated skill block may keep and still be worth injecting.
+pub const MIN_SKILL_CHARS: usize = 240;
+
+/// Appended to a truncated block so the model knows the rule it is reading is
+/// incomplete instead of acting on half of it as if it were whole.
+/// Render a skill recovery as the tool output the model reads.
+///
+/// Shared by both loops through `mp_contracts::skill_recovery`; only the
+/// rendering lives here, for the same reason the block layout does — what must
+/// agree between the loops is the selection rule, not the wording.
+///
+/// Every arm is a distinct fact and says which it is: a disabled rule presented
+/// as a live one is a rule the operator switched off still steering answers, and
+/// a miss that suggests nothing is a dead end where a correction was available.
+#[must_use]
+pub fn render_recovered_skill(recovered: &mp_contracts::skill_recovery::RecoveredSkill) -> String {
+    use mp_contracts::skill_recovery::RecoveredSkill;
+
+    match recovered {
+        RecoveredSkill::Found {
+            name,
+            description,
+            content,
+            truncated,
+        } => serde_json::json!({
+            "status": "ok",
+            "name": name,
+            "description": description,
+            "instruction": content,
+            // Stated even here: this module exists because a silently cut
+            // instruction reads as a complete one.
+            "truncated": truncated,
+        })
+        .to_string(),
+        RecoveredSkill::Disabled { name } => serde_json::json!({
+            "status": "disabled",
+            "name": name,
+            "detail": "this skill is switched off for the organization; do not follow it, and do \
+                       not describe it as a current rule",
+        })
+        .to_string(),
+        RecoveredSkill::NotFound { available } => serde_json::json!({
+            "status": "not_found",
+            "available": available,
+            "detail": "no skill by that name. Use one of the names listed, exactly as written, or \
+                       proceed without it — do not guess at the missing instruction",
+        })
+        .to_string(),
+    }
+}
+
+pub const TRUNCATION_MARKER: &str =
+    "\n[… skill truncated to fit the context budget. Call reattach_skill with this \
+     skill's name to read the rest before acting on it.]";
+
+/// Outcome of fitting skill blocks into the budget.
+pub struct FittedSkills {
+    pub blocks: Vec<String>,
+    pub truncated: usize,
+    pub dropped: usize,
+}
+
+/// Fit already-formatted skill blocks into [`SKILL_CONTEXT_BUDGET_CHARS`],
+/// truncating before dropping. Mirrors execution-core's
+/// `runtime_loop::skill_budget::fit_skill_blocks`.
+///
+/// Callers pass blocks already ordered by relevance: the budget is spent front
+/// to back, so ordering decides what survives.
+#[must_use]
+pub fn fit_skill_blocks(blocks: Vec<String>) -> FittedSkills {
+    let mut kept = Vec::new();
+    let mut truncated = 0usize;
+    let mut dropped = 0usize;
+    let mut remaining = SKILL_CONTEXT_BUDGET_CHARS;
+    let marker_len = TRUNCATION_MARKER.chars().count();
+
+    for block in blocks {
+        let len = block.chars().count();
+        if len <= remaining {
+            remaining -= len;
+            kept.push(block);
+            continue;
+        }
+        if remaining <= marker_len + MIN_SKILL_CHARS {
+            dropped += 1;
+            continue;
+        }
+        let keep = remaining - marker_len;
+        let head: String = block.chars().take(keep).collect();
+        remaining = 0;
+        truncated += 1;
+        kept.push(format!("{head}{TRUNCATION_MARKER}"));
+    }
+
+    FittedSkills {
+        blocks: kept,
+        truncated,
+        dropped,
+    }
+}
+
+#[cfg(test)]
+mod skill_budget_tests {
+    use super::{fit_skill_blocks, MIN_SKILL_CHARS, SKILL_CONTEXT_BUDGET_CHARS, TRUNCATION_MARKER};
+
+    fn block(name: &str, len: usize) -> String {
+        format!("## Skill: {name}\n{}", "x".repeat(len))
+    }
+
+    #[test]
+    fn the_budget_is_never_exceeded() {
+        for sizes in [vec![10_000], vec![5_000; 3], vec![100; 200]] {
+            let blocks = sizes
+                .iter()
+                .enumerate()
+                .map(|(i, len)| block(&format!("S{i}"), *len))
+                .collect();
+            let fitted = fit_skill_blocks(blocks);
+            let total: usize = fitted.blocks.iter().map(|b| b.chars().count()).sum();
+            assert!(
+                total <= SKILL_CONTEXT_BUDGET_CHARS,
+                "injected {total} chars"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_block_is_truncated_and_says_so() {
+        let fitted = fit_skill_blocks(vec![block("Big", SKILL_CONTEXT_BUDGET_CHARS * 2)]);
+        assert_eq!(fitted.truncated, 1);
+        assert_eq!(fitted.dropped, 0);
+        assert!(fitted.blocks[0].ends_with(TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn blocks_with_no_useful_room_are_dropped_and_counted() {
+        let fitted = fit_skill_blocks(vec![
+            block("Fills", SKILL_CONTEXT_BUDGET_CHARS),
+            block("NoRoom", MIN_SKILL_CHARS * 4),
+        ]);
+        assert_eq!(fitted.dropped, 1, "omissions must be counted, never silent");
+    }
+}

@@ -71,6 +71,27 @@ service InferenceCore {
   rpc StreamVideoGenerationContent(StreamVideoGenerationContentRequest) returns (stream StreamVideoGenerationContentResponse);
 }
 
+// PrivacyTier — programmatic privacy posture of a provider/deployment,
+// ordered weakest→strongest so callers express a MINIMUM and enforcement is a
+// plain `>=`. Mirrors Venice's per-model privacy controls: the catalogue
+// discloses each model's tier, and a request requiring a tier the active
+// providers cannot meet fails closed with a typed error — never a silent
+// downgrade. Retention (zdr/supports_zdr) and geography (residency) are
+// independent axes; the tier combines them.
+enum PrivacyTier {
+  // No constraint expressed. Byte-identical behavior to pre-tier requests.
+  PRIVACY_TIER_UNSPECIFIED = 0;
+  // No residency/ZDR commitment accepted beyond provider default.
+  PRIVACY_TIER_GLOBAL = 1;
+  // ML processing committed to the EU/EEA (Azure DataZone/regional EU).
+  PRIVACY_TIER_EU_RESIDENT = 2;
+  // EU residency plus an independently verified Zero-Data-Retention contract.
+  PRIVACY_TIER_ZDR_CONTRACTUAL = 3;
+  // Processed and stored in Norway on Norwegian-operated infrastructure,
+  // with a verified ZDR contract.
+  PRIVACY_TIER_SOVEREIGN = 4;
+}
+
 // InferRequest — a single inference request to be routed to a provider.
 message InferRequest {
   // Client-supplied request identifier for tracing.
@@ -107,6 +128,34 @@ message InferRequest {
   // Tool selection policy: "auto" (default), "none", "required", or a specific
   // tool name. Empty is treated as "auto" when `tools` is non-empty.
   string tool_choice = 11;
+
+  // Minimum privacy tier every serving provider must satisfy. Providers below
+  // the tier are skipped in every chain path; when none remains, the request
+  // fails with a typed precondition naming this tier — never a silent
+  // downgrade. UNSPECIFIED imposes no constraint.
+  // NOTE: field numbers 12–13 are reserved by a parallel in-flight contract
+  // (`min_residency`, `thinking_budget_tokens`); this lands at 14 so the two
+  // streams merge without renumbering.
+  PrivacyTier min_privacy_tier = 14;
+  // Requested minimum residency floor for this call (e.g. "eu", "norway").
+  // inference-core enforces this deny-by-default at the provider-selection
+  // gate: a provider whose declared residency is weaker than this floor is
+  // skipped, the same way a non-ZDR provider is skipped when `zdr` is true
+  // (see provider/fallback.rs's infer_one_model/stream_one_model). Empty
+  // means no floor -- any configured provider may serve the request.
+  // Accepted tokens match `Residency::parse` ("global", "eu"/"eea", "norway"/
+  // "no"/"sovereign"); an unrecognized token is rejected before any provider
+  // is tried, rather than silently treated as "no requirement".
+  string min_residency = 12;
+
+  // Extended-thinking budget in tokens for this request. 0 (default) requests
+  // no thinking and is byte-identical to the pre-existing behaviour.
+  //
+  // Advisory, not a guarantee: inference-core forwards it only to models that
+  // actually accept a thinking parameter, because sending one to a model that
+  // does not is a hard provider error, not a silent no-op. A budget set for a
+  // model that cannot think is dropped and the request proceeds normally.
+  int32 thinking_budget_tokens = 13;
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).
@@ -162,6 +211,16 @@ message InferResponse {
 
   // chat-parity §2: tool calls the model requested (empty for a plain answer).
   repeated ToolCall tool_calls = 7;
+
+  // Registry id of the provider that served the request (e.g. "azure-openai").
+  // Empty means unknown/not applicable. Provenance-receipt input (Phase 4):
+  // lets callers stamp which deployment actually processed content.
+  string provider_used = 8;
+
+  // Residency label of the serving deployment: "global", "eu", or "norway".
+  // Empty means undeclared. Disclosure only — the tier that was REQUIRED is
+  // carried by the request; this reports what was actually met.
+  string residency = 9;
 }
 
 // InferChunk — a single chunk in a streaming inference response.
@@ -182,6 +241,27 @@ message InferChunk {
   int32 input_tokens = 5;
   // Number of generated tokens on the final chunk.
   int32 output_tokens = 6;
+
+  // Serving-provider provenance (populated on final chunk). Same semantics as
+  // InferResponse.provider_used / InferResponse.residency — Phase-4 receipt
+  // inputs for streamed turns. Field numbers 7–8 are reserved by a parallel
+  // in-flight contract (`stop_reason`, `reasoning_delta`).
+  string provider_used = 9;
+  string residency = 10;
+  // Why generation stopped (populated on the final chunk): "end_turn",
+  // "max_tokens"/"length" (provider-dependent spelling for hitting the token
+  // ceiling), "stop_sequence", or "stream_incomplete" -- inference-core's own
+  // value, set ONLY when the provider connection broke or closed before any
+  // proper termination signal (message_stop / finish_reason / [DONE]) arrived,
+  // so a silently truncated streamed answer is never indistinguishable from a
+  // normal completion. Empty on every non-final chunk.
+  string stop_reason = 7;
+
+  // Incremental extended-thinking text, when the model produced any. Carried
+  // separately from `delta` so a client can render, hide, or drop the model's
+  // reasoning independently of its answer -- and so reasoning can never be
+  // concatenated into the answer by a client that does not know about it.
+  string reasoning_delta = 8;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
@@ -259,6 +339,15 @@ message ModelInfo {
   // ProviderCapabilities (e.g. "reasoning", "tools", "vision", "image").
   // Lets the client gate the opt-in `features[]` per selected model.
   repeated string features = 5;
+
+  // Strongest privacy tier this provider can honor (Venice model_spec.privacy
+  // equivalent). Derived from the provider's declared residency plus its ZDR
+  // attestation; UNSPECIFIED means the provider declares no posture.
+  PrivacyTier privacy_tier = 6;
+
+  // Declared residency label: "global", "eu", or "norway". Empty means the
+  // provider declares no residency commitment.
+  string residency = 7;
 }
 
 // ListModelsResponse — available models in the active provider chain.
