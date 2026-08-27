@@ -12,11 +12,19 @@ on:
     branches: [main]
     paths:
       - 'apps/Frontend Plane/verevonv3/**'
+      # The SPA's @quarry/client is generated from this spec, so a spec change
+      # alters the very client the SPA compiles against.
+      - 'apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml'
+      - 'apps/Ingestion Plane/Quarry-v2/sdks/generate.sh'
       - '.github/workflows/verevonv3-ci.yml'
   push:
     branches: [main]
     paths:
       - 'apps/Frontend Plane/verevonv3/**'
+      # The SPA's @quarry/client is generated from this spec, so a spec change
+      # alters the very client the SPA compiles against.
+      - 'apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml'
+      - 'apps/Ingestion Plane/Quarry-v2/sdks/generate.sh'
       - '.github/workflows/verevonv3-ci.yml'
 
 permissions:
@@ -129,6 +137,21 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
           cache-dependency-path: 'apps/Frontend Plane/verevonv3/pnpm-lock.yaml'
+
+      # @quarry/client is a GENERATED SDK: sdks/generate.sh writes it from
+      # Quarry's openapi.yaml, and Quarry's .gitignore keeps everything but the
+      # markdown docs out of the repo. package.json depends on it by `file:`
+      # path, so `pnpm install --frozen-lockfile` cannot resolve it until it
+      # exists -- and its `types` field points at dist/, so it must also be
+      # compiled before tsc can see a single one of its types. Without this
+      # step a clean checkout fails at INSTALL, not at a legible type error.
+      - name: Generate and build the Quarry TypeScript SDK
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
+        run: |
+          ./generate.sh
+          cd typescript
+          pnpm install --ignore-scripts
+          pnpm run build
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

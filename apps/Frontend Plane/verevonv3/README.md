@@ -18,9 +18,9 @@ Standalone SolidJS + Vite + TypeScript frontend for Verevon, created beside `ver
 
 ## Stack
 
-- SolidJS 1.9 for fine-grained client rendering.
+- SolidJS 2.0 (release candidate) for fine-grained client rendering.
 - Vite 8 for dev/build speed and static client deployment.
-- TypeScript 6 strict mode with path aliases.
+- TypeScript 7 strict mode with path aliases.
 - `vite-plugin-mcp` enabled in `vite.config.ts`; Vite exposes the local MCP endpoint at `/__mcp/sse` during development.
 - `zod` action schemas used by human UI controls and selectively projected into Model Plane calls.
 
@@ -32,6 +32,32 @@ Standalone SolidJS + Vite + TypeScript frontend for Verevon, created beside `ver
 - `src/shared/context-packs` builds compact model context from route, visible records, draft input, and available actions.
 - `src/shared/api` holds the API-first transport clients (56 files) for the Rust same-origin gateway and cross-plane services. (Verified 2026-07-11: the previously advertised `src/shared/rpc` and `src/shared/graphrest` directories do not exist; RPC and graph shapes are served through the gateway via these `api` clients.)
 - `src/shared/cost` owns model routing policy for cost-aware Model Plane calls.
+
+## Setup
+
+One prerequisite is not satisfied by `pnpm install`, and it fails in a way
+that does not name itself. `package.json` depends on `@quarry/client` by
+`file:` path, but that SDK is **generated** from Quarry's OpenAPI spec and
+Quarry's `.gitignore` keeps everything except its markdown docs out of the
+repo. On a fresh checkout the directory therefore has no `package.json`, so
+`pnpm install` cannot resolve the dependency at all -- and even once it can,
+the package's `types` field points at `dist/`, so the SDK must also be
+compiled before `tsc` can see a single one of its types.
+
+Generate and build it once, before the first install:
+
+```bash
+# one command per line: `&&` is not a statement separator in Windows PowerShell
+cd "../../Ingestion Plane/Quarry-v2/sdks"
+bash ./generate.sh            # requires a running Docker daemon
+cd typescript
+pnpm install --ignore-scripts
+pnpm run build
+```
+
+Re-run it whenever `Quarry-v2/docs/openapi.yaml` changes; CI does this on
+every run (see `.github/workflows/verevonv3-ci.yml`), which is why the
+workflow is also path-triggered on that spec.
 
 ## Scripts
 
