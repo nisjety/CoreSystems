@@ -88,6 +88,12 @@ run is comparable.
    concern, unchanged; the audit's highest-confidence priority.
 5. **CI gate**: `make eval-retrieval` exists; nothing blocks a regression yet.
 
+> **Superseded — read round 8 for items 2, 4 and 5.** Item 4 was not a Model
+> Plane concern: the gRPC retrieval RPC was failing on every dense query. Item 5
+> is now wired for unit tests (the retrieval-quality gate remains operator-run,
+> for reasons round 8 records). Item 2's lexical half is mined and gated as of
+> round 8; Norwegian morphology is still open.
+
 ## Config in force (2026-08-26)
 
 | knob | value | where | evidence |
@@ -729,7 +735,7 @@ committed baseline (`scripts/eval-baseline.json`), and putting it on the PR path
 would need a self-hosted runner holding the corpus and the secrets. That is a
 deployment decision, not a code change.
 
-## 3. Keyword-style queries: already in, but not in the gate
+## 3. Keyword-style queries: were already mined, now actually gated
 
 This one was mis-filed as open — the work landed in round 6.
 `scripts/eval-mine-lexical-queries.py` (committed) mines identifier-shaped
@@ -739,10 +745,71 @@ dropped as ambiguous. 25 queries, and they produced the round-6 headline —
 `w_bm25` worth **+0.37 nDCG / +0.20 recall** on that class, against costing nDCG
 on natural-language questions.
 
-The residual gap is narrower than "missing queries": the miner writes
-`golden-lexical*.json` to a scratch dir and does not seed the durable
-`eval_golden_judgments` table, and `eval-baseline.json` is derived only from the
-natural-language set. So the class is measured and reproducible, but **not
-gated** — a regression specific to lexical retrieval would not trip the gate.
-Closing that means a baselined lexical cell, which needs the same operator-run
-eval as item 2.
+The residual gap was narrower than "missing queries": the class was measured and
+reproducible but **not gated** — `eval-baseline.json` derived only from the
+natural-language set, so a regression specific to lexical retrieval would not
+trip anything.
+
+### Now gated as its own cell
+
+Closed. `scripts/eval-lexical-cell.sh` runs the mined class and writes it as
+`st-rr-on-lexical-{baseline,contextual}.json`; `make eval-retrieval-lexical`
+wraps it, and `eval-check` now runs both classes before gating.
+
+**Separate cells, not more queries in the existing one.** Averaged together the
+two classes cancel: `w_bm25` is worth +0.37 nDCG on the lexical class and costs
+nDCG on natural-language questions, so a regression that destroys exact-identifier
+lookup while leaving prose retrieval intact would move a blended metric by less
+than its noise floor. One number cannot gate both.
+
+**The default path, unlike the attribution study.** That study pins explicit
+weights because its job is attribution, but pinning `mode_mix` suppresses smart
+hybrid's query-adaptive routing — those cells measure a configuration no caller
+uses. A gate should protect what callers actually get, so this cell runs
+`EVAL_NO_MIX=1`.
+
+Baselined 2026-08-27, 23 mined queries per org:
+
+| cell | recall@10 | nDCG@10 | MRR | zero-result |
+| --- | --- | --- | --- | --- |
+| lexical-baseline | 1.0000 | 0.9622 | 0.9493 | 0 |
+| lexical-contextual | 1.0000 | 0.9622 | 0.9493 | 0 |
+
+The two are identical because the rank histograms are identical — 21 of 23 at
+rank 1, one at rank 2, one at rank 3 — on genuinely different data (the two
+golden sets share queries but carry different per-org document ids). Contextual
+embedding makes no measurable difference to exact-identifier lookup, which is the
+expected result: it disambiguates prose, not exact tokens. Recall at 1.0000
+against a 0.030 tolerance means the gate fails if even one query of 23 loses its
+document — a sharper gate than the natural-language cells can offer.
+
+Verified both directions: exit 0 on the unmodified results, exit 1 with all six
+metrics flagged when two of 23 queries are made to lose their document.
+
+### Two gate bugs found while wiring it
+
+Both would have silently weakened the gate, and neither is specific to the
+lexical cell:
+
+* **`--update` replaced the baseline file wholesale.** Re-baselining one cell
+  deleted every other cell's baseline — and a missing baseline does not fail the
+  gate, it downgrades to `no baseline entry (new org?) — not gated`. Losing
+  coverage was indistinguishable from passing. `--update` now merges and prints
+  which cells it left untouched; `--replace` keeps the old behaviour for
+  genuinely retiring a cell.
+* **`MIN_QUERIES = 80` was global.** It exists to catch "the eval did not really
+  run", but a legitimately smaller cell (23 mined queries) would have been failed
+  as an incomplete run. Now derived per cell from that cell's own baselined count
+  (90%, with an absolute backstop of 20 so a cell cannot be baselined down to
+  nothing), which also keeps catching a truncated run in the 87-query cells.
+
+### Not done: seeding `eval_golden_judgments`
+
+Deliberately. The table is `(org_id, query_norm) → relevant_ids` with **no
+`query_set` column**, so seeding the 23 lexical queries would blend them into one
+110-query pool and the in-service scorecard would report a single averaged
+number — destroying exactly the class separation that makes this gate useful.
+Confirmed current state: 87 judgments, all `org-corpus-baseline`, and zero
+identifier-shaped queries among them. Segmenting the in-service eval by query
+class needs a schema migration plus scorecard changes in `data-quality-go`; the
+committed miner plus the gated cell covers the class without it.

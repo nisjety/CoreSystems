@@ -1,4 +1,4 @@
-.PHONY: eval-retrieval eval-gate eval-check up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell verevon-net go-tidy
+.PHONY: eval-retrieval eval-retrieval-lexical eval-gate eval-check up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell verevon-net go-tidy
 
 SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unverified)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -198,6 +198,21 @@ eval-retrieval:
 	./scripts/eval-attribution-study.sh "$${EVAL_SCRATCH:-./scripts}"
 	python3 ./scripts/eval-score-attribution.py "$${EVAL_SCRATCH:-./scripts}"
 
+# The MINED LEXICAL class — exact identifiers, config keys, file paths — as its
+# own gated cell. Separate from the target above on purpose: the 87-query set is
+# all natural-language questions, the class where the dense arm dominates, and
+# averaging the two classes together hides a lexical-only regression inside the
+# blended metric's noise floor. `w_bm25` is worth +0.37 nDCG on this class and
+# costs nDCG on the other; one number cannot gate both.
+#
+# Judgments are correct by construction (tokens occurring in exactly one corpus
+# document), so this needs no hand-judging — but the ids are specific to this
+# deployment's ingest, which is why the mined sets are regenerated rather than
+# committed. Run the miner first:
+#   python3 scripts/eval-mine-lexical-queries.py "$${EVAL_SCRATCH:-./scripts}"
+eval-retrieval-lexical:
+	./scripts/eval-lexical-cell.sh "$${EVAL_SCRATCH:-./scripts}"
+
 # CI gate: fails (exit 1) when a metric regresses past the measured noise floor,
 # or when the eval itself did not really run (too few queries scored, or queries
 # returning nothing — the shape every silent-stage failure in this service has
@@ -211,9 +226,12 @@ eval-retrieval:
 eval-gate:
 	python3 ./scripts/eval-gate.py "$${EVAL_SCRATCH:-./scripts}"
 
-# Full loop: measure, attribute, then gate. This is the one to run in CI and
-# before/after any change to fusion weights, rerank config, chunking or models.
-eval-check: eval-retrieval eval-gate
+# Full loop: measure both query classes, attribute, then gate. This is the one to
+# run before/after any change to fusion weights, rerank config, chunking or
+# models. Both classes are included because they disagree — a change that helps
+# prose retrieval can gut identifier lookup, and only running one class would
+# call that a win.
+eval-check: eval-retrieval eval-retrieval-lexical eval-gate
 
 test-security-scripts:
 	./tests/scripts/auth-regression-matrix-test.sh

@@ -12,5 +12,19 @@
   "queries": 87,
   "recall_at_10": 0.8735632183908046,
   "zero_result": 0
+ },
+ "lexical-baseline": {
+  "mrr": 0.9492753623188406,
+  "ndcg_at_10": 0.9622143371118025,
+  "queries": 23,
+  "recall_at_10": 1.0,
+  "zero_result": 0
+ },
+ "lexical-contextual": {
+  "mrr": 0.9492753623188406,
+  "ndcg_at_10": 0.9622143371118025,
+  "queries": 23,
+  "recall_at_10": 1.0,
+  "zero_result": 0
  }
 }

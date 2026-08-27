@@ -5,13 +5,22 @@ Run it in CI, or by hand before/after any change to fusion weights, rerank
 config, chunking, or embedding models:
 
     python3 scripts/eval-gate.py <results-dir>            # check vs baseline
-    python3 scripts/eval-gate.py <results-dir> --update    # re-baseline
+    python3 scripts/eval-gate.py <results-dir> --update    # re-baseline (merge)
+    python3 scripts/eval-gate.py <results-dir> --replace   # re-baseline (drop absent cells)
 
-`<results-dir>` holds the `st-rr-on-<org>.json` files written by
-`eval-attribution-study.sh` (or any run of `eval-run-retrieval.py` with
-OUT_FILE named that way). The baseline lives in
+`<results-dir>` holds the `st-rr-on-<cell>.json` files written by
+`eval-attribution-study.sh` / `eval-lexical-cell.sh` (or any run of
+`eval-run-retrieval.py` with OUT_FILE named that way). The baseline lives in
 `scripts/eval-baseline.json`, committed, so a regression is a diff a reviewer
 can see.
+
+`--update` MERGES: cells present in the results dir are rewritten, cells absent
+from it are left alone. It used to replace the file wholesale, which meant
+re-baselining one cell silently deleted every other cell's baseline — and a
+deleted baseline does not fail the gate, it downgrades to
+"no baseline entry (new org?) — not gated". Losing coverage looked identical to
+passing. `--replace` still does the wholesale rewrite, for when a cell is
+genuinely retired.
 
 ## Why the tolerances are what they are
 
@@ -37,8 +46,22 @@ BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval-baseli
 
 # Per-metric slack, from the measured noise above. recall gets ~2 queries.
 TOLERANCE = {"recall_at_10": 0.030, "ndcg_at_10": 0.045, "mrr": 0.045}
-# Floors that do not depend on the baseline: these catch a dark stage outright.
-MIN_QUERIES = 80
+
+# "Did the eval actually run?" floor. Cells legitimately differ in size — 87
+# hand-authored natural-language questions vs 23 mined lexical queries — so a
+# single global count is wrong in both directions at once: it false-fails the
+# small cell as an incomplete run, and (had the floor been lowered to suit it)
+# would stop catching a truncated run in the large one. Gate each cell against
+# its OWN baselined count instead, with a small absolute backstop so a cell
+# cannot be baselined down to nothing.
+MIN_QUERY_FRACTION = 0.9
+MIN_QUERIES_ABSOLUTE = 20
+
+# A query that retrieved NOTHING is the signature of an arm or the confidence
+# gate eating results. Kept tight on purpose, and it is the sharpest signal the
+# lexical cell has: those queries are mined to occur in exactly one corpus
+# document, so a zero result there means lexical retrieval is broken, not that
+# the question was hard.
 MAX_ZERO_RESULT_FRACTION = 0.02
 
 
@@ -93,7 +116,8 @@ def collect(results_dir):
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    update = "--update" in sys.argv
+    replace = "--replace" in sys.argv
+    update = "--update" in sys.argv or replace
     results_dir = args[0] if args else os.path.dirname(os.path.abspath(__file__))
 
     current = collect(results_dir)
@@ -102,11 +126,26 @@ def main():
             f"no st-rr-on-*.json in {results_dir} — run eval-attribution-study.sh first")
 
     if update:
-        json.dump(current, open(BASELINE, "w", encoding="utf-8"), indent=1, sort_keys=True)
+        existing = {}
+        if os.path.exists(BASELINE):
+            existing = json.load(open(BASELINE, encoding="utf-8"))
+        kept = sorted(set(existing) - set(current))
+        merged = current if replace else {**existing, **current}
+        json.dump(merged, open(BASELINE, "w", encoding="utf-8"), indent=1, sort_keys=True)
         print(f"baseline updated from {results_dir}:")
         for org, m in sorted(current.items()):
-            print(f"  {org:<12} recall={m['recall_at_10']:.4f} "
+            was = existing.get(org)
+            mark = "new " if was is None else "     "
+            print(f"  {mark}{org:<22} recall={m['recall_at_10']:.4f} "
                   f"nDCG={m['ndcg_at_10']:.4f} MRR={m['mrr']:.4f} n={m['queries']}")
+        if kept:
+            # Say this out loud. Silence here is what made the old wholesale
+            # rewrite dangerous: a cell vanishing from the baseline is invisible
+            # at gate time, because an unbaselined cell only warns.
+            verb = "DROPPED (--replace)" if replace else "left untouched"
+            print(f"\ncells not in {results_dir}, {verb}:")
+            for org in kept:
+                print(f"    {org}")
         print(f"\nwrote {BASELINE} — commit it, so a later regression is a visible diff.")
         return 0
 
@@ -117,18 +156,19 @@ def main():
     baseline = json.load(open(BASELINE, encoding="utf-8"))
 
     failures, warnings = [], []
-    print(f"{'org':<12}{'metric':<14}{'baseline':>10}{'current':>10}{'delta':>9}{'slack':>8}  verdict")
-    print("-" * 74)
+    print(f"{'cell':<22}{'metric':<14}{'baseline':>10}{'current':>10}{'delta':>9}{'slack':>8}  verdict")
+    print("-" * 84)
     for org, cur in sorted(current.items()):
         base = baseline.get(org)
         if base is None:
             warnings.append(f"{org}: no baseline entry (new org?) — not gated")
             continue
 
-        if cur["queries"] < MIN_QUERIES:
+        floor = max(MIN_QUERIES_ABSOLUTE, int(base["queries"] * MIN_QUERY_FRACTION))
+        if cur["queries"] < floor:
             failures.append(
-                f"{org}: only {cur['queries']} queries scored (min {MIN_QUERIES}) — "
-                f"the eval itself did not complete")
+                f"{org}: only {cur['queries']} queries scored, against {base['queries']} "
+                f"at baseline (floor {floor}) — the eval itself did not complete")
         zero_frac = cur["zero_result"] / max(cur["queries"], 1)
         if zero_frac > MAX_ZERO_RESULT_FRACTION:
             failures.append(
@@ -140,7 +180,7 @@ def main():
             b, c = base[metric], cur[metric]
             delta = c - b
             ok = delta >= -slack
-            print(f"{org:<12}{metric:<14}{b:>10.4f}{c:>10.4f}{delta:>+9.4f}"
+            print(f"{org:<22}{metric:<14}{b:>10.4f}{c:>10.4f}{delta:>+9.4f}"
                   f"{slack:>8.3f}  {'ok' if ok else 'REGRESSED'}")
             if not ok:
                 failures.append(
