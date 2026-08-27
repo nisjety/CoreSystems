@@ -813,3 +813,123 @@ Confirmed current state: 87 judgments, all `org-corpus-baseline`, and zero
 identifier-shaped queries among them. Segmenting the in-service eval by query
 class needs a schema migration plus scorecard changes in `data-quality-go`; the
 committed miner plus the gated cell covers the class without it.
+
+---
+
+# Addendum — round 9: what the gate was not measuring
+
+Round 8 gated the mined lexical class at recall 1.0000 / nDCG 0.9622 and called
+the class healthy. Pushed to stop measuring the easy case and make real keyword
+search work, that number turned out to be a poor proxy. Three defects, two fixed
+here.
+
+## The mined set tests only the category that worked
+
+All 23 mined queries are `snake_case` / `SCREAMING_CASE` identifiers. **Zero
+contain a `/` or a `.`** — so the miner's own path and dotted-version patterns
+produced nothing that survived the uniqueness filter, and the gate never
+exercised them. A 1.0000 recall on that set says exact single-token lookup works.
+It says nothing about paths, and nothing about how a person actually types.
+
+## 1. `/` was stripped from every query, and both lexical arms went dark on paths
+
+`sanitize_terms` removed `/` as "path syntax". But Postgres' `simple` parser
+indexes a file path as ONE lexeme *containing* the slashes —
+`to_tsvector('simple','internal/jobs/executor.go')` is
+`'internal/jobs/executor.go'` — so stripping the separators produced a term that
+could not match anything indexed. Measured on the live 1,164-chunk corpus:
+
+| query as sent | Postgres FTS | Quickwit |
+|---|---|---|
+| `src/api/mod.rs` (raw) | 10 rows | 153 hits |
+| `srcapimod.rs` (what DP2 actually sent) | **0** | **0** |
+| `zzz/qqq/nope.rs` (control) | — | 0 hits |
+
+The control is the point: 153 was real signal, so the stripped form discarded
+genuine hits rather than avoiding false ones. Both arms, not just the Postgres
+fallback.
+
+Fixed by preserving `/`. Safe for both consumers, verified rather than assumed:
+`websearch_to_tsquery` is total on user input and a path survives OR-joining
+intact (`'src/api/mod.rs' | 'retrieval'`), and `build_quickwit_query` wraps every
+term in `quote_term` unconditionally so a slash sits inside a quoted phrase.
+`:` stays stripped — it is a Quickwit field selector and, unlike `/`, no measured
+recall sits behind keeping it. Two tests changed direction deliberately
+(`textquery::file_paths_survive_intact`,
+`sparse::file_paths_reach_quickwit_quoted`); both previously asserted the
+mangling.
+
+Verified live after deploy: `src/api/mod.rs` went from 0 sparse candidates to 10.
+
+## 2. The retrieval trace endpoint returned HTTP 500 for every trace ever written
+
+`GET /v1/retrieval/{trace_id}`:
+
+```
+decoding column "dense_score": Rust type `Option<f32>` (as SQL type FLOAT4)
+is not compatible with SQL type FLOAT8
+```
+
+`TraceCandidateRow` declared four score columns as `f32`; they are `double
+precision`. sqlx type-checks decodes strictly, so **5,886 runs and 58,759
+candidate rows had been written and none could be read back.**
+
+The real cost was not the endpoint. This is the **only** surface exposing
+per-arm attribution — `candidate_count_dense`, `candidate_count_sparse`, the
+per-stage timings. With it down, arm liveness could only be inferred from the
+retrieve response, which carries score fields for dense and sparse alone and
+nothing for graph, wiki, visual, keyword, audio or video. That is why arm
+liveness has been misread repeatedly in this document, including twice in this
+round: `sparse_score == 0` was taken as "the sparse arm is dark" when it only
+meant "this candidate came from an arm with no field to report". **Fix the
+instrument before trusting a reading from it.**
+
+Fixed to `f64`, with narrowing to `f32` at the gRPC boundary where the proto
+declares `float`. With the endpoint working, the actual arm behaviour:
+
+| query | dense | sparse |
+|---|---|---|
+| `idx_ku_content_tsv_gin` | 10 | 1 |
+| `where is idx_ku_content_tsv_gin defined and how is it used` | 10 | 10 |
+| `src/api/mod.rs` | 10 | 10 |
+
+## 3. Realistic query shapes cost 0.115 nDCG — open
+
+Same 23 identifiers, same judgments, each wrapped in the words a person would
+type around it (`where is X defined and how is it used`):
+
+| query shape | recall@10 | nDCG@10 | MRR | found |
+|---|---|---|---|---|
+| bare identifier | 1.0000 | 0.9622 | 0.9493 | 23/23 |
+| wrapped in prose | 0.9130 | 0.8473 | 0.8261 | 21/23 |
+
+−0.115 nDCG, more than twice the gate's 0.045 tolerance, and two identifiers
+become unfindable outright. The judgments are identical, so the loss is
+attributable to the prose alone.
+
+Cause: the AND→OR fix that made multi-word questions work at all has swung to
+the opposite failure. A rare, high-value term OR'd with common words gets
+swamped:
+
+| Quickwit query | hits | top-5 contain the path? |
+|---|---|---|
+| `"internal/jobs/executor.go"` alone | 14 | — |
+| `"where" OR "is" OR "internal/jobs/executor.go" OR "called"` | **1,517** | **none** |
+
+1,517 of ~2,328 chunks — the disjunction matches most of the corpus and ranking
+is dominated by the common terms. The standard remedies are stopword handling,
+minimum-should-match, or boosting rare/identifier-shaped terms; picking among
+them needs measurement, not a guess, so this is recorded and left open rather
+than patched.
+
+## Also observed, not yet chased
+
+* For a bare identifier the sparse arm contributes **1** candidate while Quickwit
+  reports 18 hits for the same term. Either an under-fetch or a dedup collapse;
+  worth a look before tuning `w_bm25` again.
+* The corpus holds **2 chunks** with Norwegian characters, so Norwegian
+  morphology cannot be measured here at all. The `simple` text-search config
+  does no stemming in any language (`søknaden` and `søknad` are distinct
+  lexemes, as are `retries` and `retry`), which is right for identifiers and
+  wrong for prose. A second, language-stemmed tsvector OR'd with the `simple`
+  one is the usual answer; it needs a corpus that can show the difference.

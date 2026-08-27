@@ -262,10 +262,27 @@ pub struct TraceCandidateRow {
     pub rank: i32,
     pub knowledge_id: Option<String>,
     pub document_id: Option<String>,
-    pub dense_score: Option<f32>,
-    pub sparse_score: Option<f32>,
-    pub rerank_score: Option<f32>,
-    pub final_score: Option<f32>,
+    // `f64`, not `f32`: these four columns are `double precision` in
+    // `retrieval_candidates`, and sqlx type-checks decodes strictly. As `f32`
+    // every read of this table failed with
+    //   decoding column "dense_score": Rust type `Option<f32>` (as SQL type
+    //   FLOAT4) is not compatible with SQL type FLOAT8
+    // which returned HTTP 500 from `GET /v1/retrieval/{trace_id}` for every
+    // trace that has ever existed — 5,886 runs and 58,759 candidate rows were
+    // being written and none could be read back.
+    //
+    // The cost was not just a broken endpoint: this is the ONLY surface that
+    // exposes per-arm attribution (`candidate_count_dense` / `_sparse`, the
+    // per-stage timings). With it down, arm liveness could only be guessed from
+    // the retrieve response, which carries score fields for dense and sparse
+    // only — nothing for graph, wiki, visual, keyword, audio or video. Several
+    // arm-liveness measurements in docs/retrieval-fusion-evidence-2026-08-26.md
+    // had to be retracted for exactly that reason. Fix the instrument before
+    // trusting a reading from it.
+    pub dense_score: Option<f64>,
+    pub sparse_score: Option<f64>,
+    pub rerank_score: Option<f64>,
+    pub final_score: Option<f64>,
 }
 
 #[derive(Debug, serde::Serialize)]

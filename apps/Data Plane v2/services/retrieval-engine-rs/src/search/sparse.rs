@@ -494,8 +494,35 @@ mod tests {
         assert!(query.contains("org_id:\"org-1\""));
         assert!(query.contains("entity_type:\"knowledge_unit\""));
         assert!(query.contains("\"alpha\" OR \"beta\""));
+        // The caller's field selector must not survive as a selector.
         assert!(!query.contains("site:ignored"));
-        assert!(!query.contains("../bad"));
+        // `/` USED to be stripped here, and this test asserted that. It was
+        // wrong: a path-shaped term matched nothing once its separators were
+        // removed (measured 153 Quickwit hits -> 0 for `src/api/mod.rs`), so the
+        // slash now survives. What makes that safe is quoting, not stripping —
+        // assert the quoting instead of the mangling.
+        assert!(
+            query.contains("\"../bad\""),
+            "a path-shaped term must survive, quoted: {query}"
+        );
+    }
+
+    /// The path fix, at this boundary: slashes reach Quickwit inside a quoted
+    /// phrase, so they are matched as text and can never act as query syntax.
+    #[test]
+    fn file_paths_reach_quickwit_quoted() {
+        let query = build_quickwit_query("org-1", "where is src/api/mod.rs used");
+
+        assert!(
+            query.contains("\"src/api/mod.rs\""),
+            "the path must be present and quoted: {query}"
+        );
+        // Quoted means the `/` is inside the phrase, never adjacent to the
+        // `field:value` syntax Quickwit would otherwise try to parse.
+        assert!(
+            !query.contains("/api/mod.rs\" OR \"src"),
+            "the path must not be split across terms: {query}"
+        );
     }
 
     // Regression: Quickwit's default operator is AND, so joining terms with a

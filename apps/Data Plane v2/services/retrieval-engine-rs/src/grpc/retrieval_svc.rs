@@ -406,9 +406,16 @@ impl RetrievalService for RetrievalSvc {
                             rank: c.rank,
                             knowledge_id: c.knowledge_id.unwrap_or_default(),
                             document_id: c.document_id.unwrap_or_default(),
-                            dense_score: c.dense_score.unwrap_or(0.0),
-                            sparse_score: c.sparse_score.unwrap_or(0.0),
-                            rerank_score: c.rerank_score.unwrap_or(0.0),
+                            // Narrowed here, at the wire boundary, because the
+                            // proto declares these `float`. The DB columns are
+                            // `double precision` and `TraceCandidateRow` now
+                            // decodes them as `f64` to match — reading them as
+                            // `f32` made every trace fetch fail. Scores are
+                            // ranking signals in [0,1]-ish ranges, so f32 on the
+                            // wire loses nothing that a caller can act on.
+                            dense_score: c.dense_score.unwrap_or(0.0) as f32,
+                            sparse_score: c.sparse_score.unwrap_or(0.0) as f32,
+                            rerank_score: c.rerank_score.unwrap_or(0.0) as f32,
                             source_chunk_ref: String::new(),
                         })
                         .collect(),

@@ -36,8 +36,40 @@ pub fn fts_disjunction(query: &str) -> String {
 }
 
 /// Reduce a user query to bare terms: strip anything that could carry query
-/// syntax (`:` field selectors, `/` paths, wildcards, parentheses) and cap the
-/// count so one enormous query cannot build an unbounded disjunction.
+/// syntax (`:` field selectors, wildcards, parentheses) and cap the count so one
+/// enormous query cannot build an unbounded disjunction.
+///
+/// # `/` is preserved, and stripping it silently broke every path query
+///
+/// `/` was stripped here as "path syntax". But Postgres' `simple` parser emits a
+/// file path as ONE lexeme *containing the slashes* — `to_tsvector('simple',
+/// 'internal/jobs/executor.go')` is `'internal/jobs/executor.go'` — so removing
+/// the separators produced a term that cannot match anything that was indexed.
+/// Both lexical arms returned zero for any path-shaped query, measured on the
+/// live 1,164-chunk corpus:
+///
+/// | query as sent | Postgres FTS | Quickwit |
+/// |---|---|---|
+/// | `src/api/mod.rs` (raw) | 10 rows | 153 hits |
+/// | `srcapimod.rs` (slashes stripped) | **0** | **0** |
+/// | `zzz/qqq/nope.rs` (control) | — | 0 hits |
+///
+/// The control matters: 153 is real signal, not a loose match, so the stripped
+/// form was discarding genuine hits rather than avoiding false ones. Same silent
+/// -zero signature as the AND-vs-OR defect above, and it survived the mined
+/// lexical golden set because that set contains only `snake_case`/`SCREAMING`
+/// identifiers and no path-shaped queries at all — the gate measured the case
+/// that worked.
+///
+/// Safe for every consumer, verified rather than assumed:
+/// * Postgres — `websearch_to_tsquery` is total on user input, and a path
+///   survives OR-joining intact: `'src/api/mod.rs' | 'retrieval'`.
+/// * Quickwit — `build_quickwit_query` wraps every term in `quote_term`
+///   unconditionally, so a `/` is inside a quoted phrase and cannot act as
+///   syntax.
+///
+/// `:` stays stripped: it is a Quickwit field selector, and unlike `/` there is
+/// no measured recall behind keeping it.
 #[must_use]
 pub fn sanitize_terms(query: &str) -> Vec<String> {
     query
@@ -45,7 +77,7 @@ pub fn sanitize_terms(query: &str) -> Vec<String> {
         .filter_map(|term| {
             let cleaned: String = term
                 .chars()
-                .filter(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+                .filter(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/'))
                 .collect();
             (!cleaned.is_empty()).then_some(cleaned)
         })
@@ -69,17 +101,36 @@ mod tests {
     #[test]
     fn query_syntax_is_stripped_from_terms() {
         let got = fts_disjunction("alpha site:ignored ../bad beta");
-        // `.` is deliberately KEPT (version strings, file extensions, hostnames
-        // are real query terms), so `../bad` reduces to `..bad` rather than
-        // `bad`. Harmless as a tsquery term; the path separator is what mattered.
-        assert_eq!(got, "alpha or siteignored or ..bad or beta");
+        // `.` and `/` are deliberately KEPT — version strings, file extensions,
+        // hostnames and paths are all real query terms — so `../bad` survives
+        // whole. Only `:` is removed, because it is a Quickwit field selector.
+        assert_eq!(got, "alpha or siteignored or ../bad or beta");
         assert!(
             !got.contains(':'),
             "field selectors must not survive: {got}"
         );
-        assert!(
-            !got.contains('/'),
-            "path separators must not survive: {got}"
+    }
+
+    /// A file path must reach the query builders INTACT.
+    ///
+    /// This previously asserted the opposite. Stripping `/` was believed to be
+    /// defensive, but Postgres' `simple` parser indexes a path as one lexeme
+    /// containing its slashes, so the stripped term matched nothing: measured
+    /// 10 rows -> 0 on Postgres FTS and 153 hits -> 0 on Quickwit for
+    /// `src/api/mod.rs`, with a nonsense path confirming the 153 was real
+    /// signal. Every path-shaped query silently returned zero on both lexical
+    /// arms. Keep this test pointing the way it does now.
+    #[test]
+    fn file_paths_survive_intact() {
+        assert_eq!(
+            fts_disjunction("src/api/mod.rs"),
+            "src/api/mod.rs",
+            "a lone path must not be mangled"
+        );
+        assert_eq!(
+            fts_disjunction("where is internal/jobs/executor.go called"),
+            "where or is or internal/jobs/executor.go or called",
+            "a path mixed into prose must survive the disjunction"
         );
     }
 
