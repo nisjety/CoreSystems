@@ -2119,6 +2119,83 @@ mod tests {
         );
     }
 
+    // --- forged-call denial for tickets.create -------------------------------
+    //
+    // tickets.create is the first action in MODEL_EXECUTABLE_ACTION_IDS, so a
+    // model can now be offered it as a tool. The owner (conversation-core)
+    // verifies the signed Control decision and is covered by its own suite; the
+    // invariant THIS side must hold is narrower and just as load-bearing: the
+    // gateway may never manufacture a receipt the owner did not issue. Every
+    // identifier it returns has to come out of the owner's response, so a
+    // caller can never be told an effect happened durably when it did not.
+
+    fn receipt_status(resp: Value) -> StatusCode {
+        ticket_operation_receipt_response(resp).status()
+    }
+
+    #[test]
+    fn ticket_receipt_is_refused_when_the_owner_returned_no_operation() {
+        // A ticket body with no operation block at all: the write may or may not
+        // have happened, and the honest answer is a gateway error, never a 200.
+        let resp = json!({ "data": { "ticket": { "id": "ticket_123" } } });
+        assert_eq!(receipt_status(resp), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn ticket_receipt_is_refused_when_the_operation_is_not_completed() {
+        // `reserved` means Control holds a reservation that was never committed.
+        // Reporting that as success is exactly the false-success this contract
+        // exists to prevent.
+        let resp = json!({ "data": { "operation": {
+            "operation_id": "ticketop_1",
+            "audit_event_id": "audit_1",
+            "status": "reserved"
+        }}});
+        assert_eq!(receipt_status(resp), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn ticket_receipt_is_refused_without_a_durable_audit_event() {
+        // An operation id with no audit event is an unwitnessed effect. Clause 4
+        // of the action contract is that everything the model does is visible,
+        // so an unauditable receipt is not a receipt.
+        let resp = json!({ "data": { "operation": {
+            "operation_id": "ticketop_1",
+            "status": "completed"
+        }}});
+        assert_eq!(receipt_status(resp), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn ticket_receipt_is_refused_when_owner_identifiers_are_blank() {
+        // Present-but-empty is the shape a fabricated response takes when a
+        // caller pads the contract to look complete.
+        let resp = json!({ "data": { "operation": {
+            "operation_id": "   ",
+            "audit_event_id": "",
+            "status": "completed"
+        }}});
+        assert_eq!(receipt_status(resp), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn ticket_receipt_echoes_only_owner_issued_identifiers() {
+        // The success path: every id in the envelope is the OWNER's. The gateway
+        // mints no run id and no audit id of its own -- that substitution is what
+        // made the pre-migration synthetic ids unverifiable.
+        let resp = json!({ "data": {
+            "operation": {
+                "operation_id": "ticketop_aeabd1dd",
+                "audit_event_id": "audit_9d2c1644",
+                "status": "completed",
+                "replayed": true
+            },
+            "ticket": { "id": "ticket_8dffc325" }
+        }});
+        let response = ticket_operation_receipt_response(resp);
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[test]
     fn ticket_action_response_uses_nested_ticket_for_classifications() {
         let response = json!({

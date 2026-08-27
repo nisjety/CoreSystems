@@ -21,10 +21,11 @@ describe('action registry', () => {
     })
 
     expect(pack.currentView).toBe('knowledge')
-    // Model eligibility is fail-closed (see model-eligibility.ts) until
-    // Capability Core binds a governed operation to the agent runtime, so no
-    // registry action -- knowledge.recrawl_source included -- is exposed yet.
-    expect(pack.availableActions).toEqual([])
+    // Model eligibility is earned per action (see model-eligibility.ts):
+    // tickets.create is exposed because its owner issues a durable operation
+    // receipt and denies a forged decision. Asserted as an exact set, so a
+    // second action cannot be admitted without this test being revisited.
+    expect(pack.availableActions).toEqual(['tickets.create'])
     // Kept explicit so loosening the allowlist cannot silently expose either a
     // side-effecting crawl or an irreversible, approval-gated publish.
     expect(pack.availableActions).not.toContain('knowledge.recrawl_source')

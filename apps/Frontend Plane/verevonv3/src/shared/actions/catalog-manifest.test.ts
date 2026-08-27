@@ -20,10 +20,22 @@ describe('provisional Action Catalog manifest', () => {
     expect(canonicalActionCatalogJson(actionRegistry)).toBe(canonicalActionCatalogJson([...actionRegistry].reverse()))
   })
 
-  it('records browser-only actions as human-only until their owner adapter is live', () => {
+  it('marks an action model-eligible only where the owner adapter is live', () => {
     const manifest = buildActionCatalogManifest()
     expect(manifest.actions).not.toHaveLength(0)
-    expect(manifest.actions.every((action) => action.allowedActorTypes.join(',') === 'human')).toBe(true)
+
+    // tickets.create is the one action whose owner issues a durable operation
+    // receipt, so it is the one action a model may be offered. Everything else
+    // stays human-only until its own owner path is proven the same way.
+    const modelEligible = manifest.actions
+      .filter((action) => action.allowedActorTypes.includes('model'))
+      .map((action) => action.id)
+    expect(modelEligible).toEqual(['tickets.create'])
+
+    // Every action stays available to a human: eligibility widens the actor
+    // set, it never narrows it -- the 'anything AI can do, a human can do'
+    // half of the contract.
+    expect(manifest.actions.every((action) => action.allowedActorTypes.includes('human'))).toBe(true)
   })
 
   it('does not confuse legacy dispatch with an owner-issued operation receipt', () => {
