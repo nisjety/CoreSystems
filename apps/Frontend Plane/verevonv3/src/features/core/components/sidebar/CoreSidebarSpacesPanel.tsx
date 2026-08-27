@@ -1,5 +1,5 @@
 import { useLocation } from '@solidjs/router'
-import { MessageCircle, Users } from '@/shared/icons'
+import { Hash, MessageCircle, Users } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
@@ -50,7 +50,12 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   })
   const normalizedQuery = createMemo(() => query().trim().toLocaleLowerCase())
   const personalSpaces = createMemo(() => (spaces() ?? []).filter((space) => space.kind === 'personal'))
-  const otherSpaces = createMemo(() => (spaces() ?? []).filter((space) => space.kind !== 'personal'))
+  // Channels, Slack-shaped: the organization's own room pins to the top, the
+  // rest keep the server's order. Sorted copy — never mutate the resource value.
+  const otherSpaces = createMemo(() => (spaces() ?? [])
+    .filter((space) => space.kind !== 'personal')
+    .slice()
+    .sort((a, b) => Number(b.is_organization_room === true) - Number(a.is_organization_room === true)))
   const visiblePersonalSpaces = createMemo(() => personalSpaces().filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
   const visibleOtherSpaces = createMemo(() => otherSpaces().filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
   const visibleThreads = createMemo(() => (threads()?.threads ?? []).filter((thread) => matchesThread(thread, normalizedQuery())))
@@ -78,17 +83,17 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
           </p>
         </Show>
 
-        <Show when={!spaces.loading && !spacesLoadFailed() && visiblePersonalSpaces().length > 0}>
-          <SidebarGroup title={i18n.tr('Personlig rom', 'Personal Space')}>
-            <For each={visiblePersonalSpaces()}>
+        <Show when={!spaces.loading && !spacesLoadFailed() && visibleOtherSpaces().length > 0}>
+          <SidebarGroup title={i18n.tr('Kanaler', 'Channels')}>
+            <For each={visibleOtherSpaces()}>
               {(space) => <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} />}
             </For>
           </SidebarGroup>
         </Show>
 
-        <Show when={!spaces.loading && !spacesLoadFailed() && visibleOtherSpaces().length > 0}>
-          <SidebarGroup title={i18n.tr('Andre rom', 'Other spaces')}>
-            <For each={visibleOtherSpaces()}>
+        <Show when={!spaces.loading && !spacesLoadFailed() && visiblePersonalSpaces().length > 0}>
+          <SidebarGroup title={i18n.tr('Personlig rom', 'Personal Space')}>
+            <For each={visiblePersonalSpaces()}>
               {(space) => <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} />}
             </For>
           </SidebarGroup>
@@ -150,7 +155,12 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
       aria-current={props.active ? 'page' : undefined}
       class={cn('core-sidebar-panel-link', props.active && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')}
     >
-      <Users class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
+      <Show
+        when={props.space.kind === 'personal'}
+        fallback={<Hash class="core-sidebar-panel-link__icon" strokeWidth={1.7} />}
+      >
+        <Users class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
+      </Show>
       <span class="core-sidebar-panel-link__label verevon-sidebar-row-strong">
         {spaceDisplayName(props.space, i18n.tr)}
       </span>
@@ -182,7 +192,11 @@ function spaceRefFromPath(pathname: string): string | undefined {
 
 function defaultSpace(spaces: readonly SpaceSummary[] | undefined): SpaceSummary | undefined {
   if (!spaces) return undefined
-  return spaces.find((space) => space.kind === 'personal' && space.lifecycle === 'active')
+  // Mirrors pickDefaultSpace on /spaces: the organization's channel first, so
+  // the panel highlights the room the resolver would land in.
+  return spaces.find((space) => space.kind === 'room' && space.is_organization_room === true && space.lifecycle === 'active')
+    ?? spaces.find((space) => space.kind === 'room' && space.lifecycle === 'active')
+    ?? spaces.find((space) => space.kind === 'personal' && space.lifecycle === 'active')
     ?? spaces.find((space) => space.kind === 'personal')
     ?? spaces.find((space) => space.lifecycle === 'active')
     ?? spaces[0]

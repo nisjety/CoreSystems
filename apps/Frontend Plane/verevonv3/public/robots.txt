@@ -1,0 +1,15 @@
+# Verevon v3 is an authenticated, single-tenant-per-org workspace. Every route
+# behind / requires a session, so there is nothing here a crawler may index.
+#
+# This file states that explicitly. nginx already sends `X-Robots-Tag: noindex`
+# on every response (nginx.conf), but a crawler asks for /robots.txt FIRST and,
+# without this file, the SPA history fallback answered that request with
+# index.html and a 200 -- which reads as "crawl everything" rather than a
+# directive. Keep both: the header covers responses, this covers the request.
+#
+# If a public marketing or documentation surface is ever served from this
+# origin, add an explicit Allow for that path prefix instead of relaxing the
+# blanket Disallow below.
+
+User-agent: *
+Disallow: /

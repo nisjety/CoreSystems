@@ -69,7 +69,7 @@ describe('SpacesExpandedSidebarPanel', () => {
     expect(await screen.findByRole('link', { name: 'Personlig rom' }).then((link) => link.getAttribute('href'))).toBe(
       '/spaces/space%20personal',
     )
-    expect(screen.getByText(/other spaces|andre rom/i)).toBeTruthy()
+    expect(screen.getByText(/channels|kanaler/i)).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Launch room' }).getAttribute('href')).toBe('/spaces/space_shared')
     expect(screen.getByText(/all conversations|alle samtaler/i)).toBeTruthy()
     // A Space conversation opens in its ROOM, never in /chat — the room's

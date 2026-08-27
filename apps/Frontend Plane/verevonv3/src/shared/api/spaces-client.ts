@@ -20,6 +20,10 @@ export type SpaceSummary = {
   name: string
   kind: string
   lifecycle: string
+  /** True for the organization's own shared room (its org-wide channel).
+   * Absent on older gateway responses and on the Control-outage fallback
+   * listing, so absence means "unknown", not "no". */
+  is_organization_room?: boolean
 }
 
 /** A server-composed lifecycle + current-membership read. It contains no
@@ -342,6 +346,28 @@ export async function getAgentInstallations(): Promise<readonly AgentDefinitionI
  */
 export async function createPersonalSpace(name?: string): Promise<SpaceSummary> {
   const response = await requestJson<{ space: SpaceSummary }>('/api/v1/spaces', {
+    method: 'POST',
+    body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
+  })
+  return response.space
+}
+
+/**
+ * Provision the organization's shared room — the org-wide channel every member
+ * lands in.
+ *
+ * Idempotent server-side: an organization has at most one org room, so a
+ * repeat call returns the existing one. Normally the onboarding
+ * create-organization action already did this; the Spaces surface calls it
+ * when the listing shows no channel, which self-heals organizations created
+ * before the hook existed and retries a Convex outage during onboarding.
+ *
+ * Same two-step lifecycle as the personal room: the response means "the room
+ * now exists", and Control must register it before it appears in the listing
+ * or accepts any action.
+ */
+export async function ensureOrganizationRoom(name?: string): Promise<SpaceSummary> {
+  const response = await requestJson<{ space: SpaceSummary }>('/api/v1/spaces/organization-room', {
     method: 'POST',
     body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
   })

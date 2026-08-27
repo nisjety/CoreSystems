@@ -12,12 +12,47 @@ const space = (over: Partial<SpaceSummary> = {}): SpaceSummary => ({
 })
 
 describe('pickDefaultSpace', () => {
-  it('prefers an active personal space over an active shared one', () => {
-    const shared = space({ space_ref: 'space_shared', kind: 'shared' })
+  it('lands in the organization channel first, Slack-shaped', () => {
     const personal = space({ space_ref: 'space_personal', kind: 'personal' })
-    // Order deliberately puts the shared one first: the rule must be the kind,
-    // not list position.
-    expect(pickDefaultSpace([shared, personal])?.space_ref).toBe('space_personal')
+    const orgRoom = space({
+      space_ref: 'space_org',
+      kind: 'room',
+      is_organization_room: true,
+    })
+    // Order deliberately puts the personal one first: the rule must be the
+    // room's identity, not list position.
+    expect(pickDefaultSpace([personal, orgRoom])?.space_ref).toBe('space_org')
+  })
+
+  it('prefers the organization channel over another active channel', () => {
+    const otherRoom = space({ space_ref: 'space_room', kind: 'room' })
+    const orgRoom = space({
+      space_ref: 'space_org',
+      kind: 'room',
+      is_organization_room: true,
+    })
+    expect(pickDefaultSpace([otherRoom, orgRoom])?.space_ref).toBe('space_org')
+  })
+
+  it('never lands in a channel that Control has not activated yet', () => {
+    // A pending_registration channel would greet the user with a refusal —
+    // their own active room is the better landing while Control catches up.
+    const pendingOrgRoom = space({
+      space_ref: 'space_org',
+      kind: 'room',
+      is_organization_room: true,
+      lifecycle: 'pending_registration',
+    })
+    const personal = space({ space_ref: 'space_personal', kind: 'personal' })
+    expect(pickDefaultSpace([pendingOrgRoom, personal])?.space_ref).toBe('space_personal')
+  })
+
+  it('falls back to an active channel of unknown provenance before the personal room', () => {
+    // The Control-outage fallback listing omits is_organization_room entirely;
+    // an active channel still beats the personal room in that state.
+    const room = space({ space_ref: 'space_room', kind: 'room' })
+    const personal = space({ space_ref: 'space_personal', kind: 'personal' })
+    expect(pickDefaultSpace([personal, room])?.space_ref).toBe('space_room')
   })
 
   it('still opens a non-active personal space rather than skipping to a shared one', () => {
@@ -45,8 +80,8 @@ describe('pickDefaultSpace', () => {
   })
 
   it('resolves nothing for an empty list rather than inventing a target', () => {
-    // Distinct from a failed read: the page renders "no rooms yet" and names
-    // provisioning as the missing step, instead of navigating somewhere.
+    // Distinct from a failed read: the page provisions the organization room
+    // and reports that state, instead of navigating somewhere.
     expect(pickDefaultSpace([])).toBeUndefined()
   })
 })

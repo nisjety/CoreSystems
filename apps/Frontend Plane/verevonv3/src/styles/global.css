@@ -42013,3 +42013,32 @@ textarea:focus-visible {
   .verevon-space-view__heading { gap: 12px; }
   .verevon-space-fresh-conversation { min-height: 260px; padding: 24px 16px; }
 }
+
+/* /spaces resolver: the org-room provisioning card shown while the channel is
+   being ensured and Control registration is awaited. The spinner animation is
+   .onboarding-phase-spinner, shared with the onboarding crawl phases. */
+.spaces-index-provisioning {
+  max-width: 560px;
+  padding: 48px 32px;
+  display: grid;
+  gap: 12px;
+}
+
+.spaces-index-provisioning h1 {
+  font-size: 1.35rem;
+  margin: 0 0 4px;
+}
+
+.spaces-index-provisioning__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--verevon-text-muted, inherit);
+}
+
+.spaces-index-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}

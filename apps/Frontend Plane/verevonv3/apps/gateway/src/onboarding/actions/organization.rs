@@ -170,6 +170,10 @@ pub(crate) async fn create_organization(
             .into_response();
     }
 
+    // Captured before `mirror_body` takes ownership of `name`: step 5 names the
+    // organization's room after the organization itself.
+    let org_room_name = name.clone();
+
     // 3. Provision the org-core projection + first owner before the session is
     // allowed to activate the organization. The endpoint is idempotent, so this
     // also repairs a previous partial attempt on retry.
@@ -226,6 +230,34 @@ pub(crate) async fn create_organization(
                 .into_response();
         }
     };
+
+    // 5. Auto-provision the organization's shared room — the org-wide channel
+    // every member lands in — so a fresh workspace never opens on an empty
+    // Spaces surface. Best-effort BY DESIGN, for two reasons: the room ensure
+    // is idempotent and the Spaces surface retries it on load, so nothing is
+    // lost by deferring; and the Convex membership projection that gates the
+    // ensure converges asynchronously from Control, so refusing to complete
+    // onboarding over a projection that has not caught up yet would fail the
+    // whole sign-up for a room that will provision itself moments later.
+    let ensure_args = json!({
+        "externalAuthId": actor.user_id.as_str(),
+        "externalOrgId": org_id.as_str(),
+        "name": org_room_name,
+    });
+    if crate::domains::spaces::convex_gateway_call(
+        &state,
+        "mutation",
+        "spaces:ensureOrganizationRoomForGateway",
+        ensure_args,
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            org_id = %org_id,
+            "organization room auto-provisioning deferred; the Spaces surface will ensure it idempotently"
+        );
+    }
 
     respond_json(ba_status, normalize_org(&ba_org), active_cookies)
 }

@@ -641,6 +641,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/spaces",
             get(list_personal_spaces).post(create_personal_space),
         )
+        // Static segment registered before the `{space_ref}` matchers so a
+        // room literally named "organization-room" can never shadow it.
+        .route(
+            "/api/v1/spaces/organization-room",
+            post(ensure_organization_room),
+        )
         .route(
             "/api/v1/spaces/{space_ref}/membership",
             get(current_membership),
@@ -1212,6 +1218,13 @@ async fn list_personal_spaces(
                         .and_then(Value::as_str)
                         .unwrap_or("active"),
                     "role": entry.get("role").and_then(Value::as_str).unwrap_or_default(),
+                    // Display fact from the Application labels (the same source
+                    // as `name`): lets the surface render the org-wide channel
+                    // distinctly. Absent label -> false, never a guess.
+                    "is_organization_room": label
+                        .and_then(|value| value.get("isOrganizationRoom"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 }))
             })
             .collect();
@@ -1303,6 +1316,72 @@ async fn create_personal_space(
             Json(error(
                 "space_provisioning_unavailable",
                 "The Space could not be created. Nothing was provisioned.",
+            )),
+        );
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"data": {"space": public_space(&created)}})),
+    )
+}
+
+/// Provision the organization's shared room — the org-wide channel every
+/// member lands in, Slack's "#general" shape.
+///
+/// Idempotent the same way the personal ensure is: an organization has at most
+/// one org room (`spaces:ensureOrganizationRoomForGateway` enforces the
+/// invariant), so a repeat call returns the existing record. The normal caller
+/// is the onboarding create-organization action; this route exists so an
+/// organization created BEFORE that hook shipped can self-heal from the Spaces
+/// surface, and so a Convex outage during onboarding stays retryable.
+///
+/// Same 202 semantics as the personal create: the room exists but is
+/// `pending_registration` until Control registers it, and the org roster is
+/// converged onto it afterwards by the membership sync — a fresh room listing
+/// only its registrar is a real intermediate state, not a failure.
+async fn ensure_organization_room(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    body: Option<Json<Value>>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_required",
+                "An active organization is required before its room can be created.",
+            )),
+        );
+    }
+    let name = body
+        .as_ref()
+        .and_then(|Json(value)| value.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+
+    let mut args = json!({
+        "externalAuthId": user.user_id,
+        "externalOrgId": org_id,
+    });
+    if let Some(name) = name {
+        args["name"] = json!(name);
+    }
+    let Ok(created) = convex_gateway_call(
+        &state,
+        "mutation",
+        "spaces:ensureOrganizationRoomForGateway",
+        args,
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "space_provisioning_unavailable",
+                "The organization room could not be created. Nothing was provisioned.",
             )),
         );
     };
