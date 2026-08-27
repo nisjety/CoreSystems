@@ -956,6 +956,23 @@ services:
       MODEL_PLANE_EXTRACTION_MODEL: ${MODEL_PLANE_EXTRACTION_MODEL:-gpt-4o-mini}
       MODEL_PLANE_EXTRACTION_PROVIDER: ${MODEL_PLANE_EXTRACTION_PROVIDER:-azure_openai}
       MODEL_PLANE_EXTRACTION_TIMEOUT_MS: ${MODEL_PLANE_EXTRACTION_TIMEOUT_MS:-60000}
+      # Database-truth reconciler for extraction the event path could not
+      # deliver. Graph extraction is one inference call PER CHUNK (~30s/document),
+      # so a backlog outlives the 120s signed-envelope TTL and every document
+      # behind the head of the queue is dropped and acked — measured 12 announced,
+      # 2 extracted, 10 discarded. This loop re-extracts them by reading Postgres,
+      # so nothing can expire. ON by default: a config-gated fix ships inert on a
+      # deployment whose .env was never updated, and the blast radius is bounded
+      # by the batch size below (extraction is idempotent on content-derived ids).
+      #
+      # Interval is deliberately slower than index-engine's 60s and the batch much
+      # smaller: one tick can run for minutes, so polling faster only stacks ticks.
+      # Documents that extract cleanly to zero entities are suppressed for the
+      # process lifetime — without that the loop re-pays for them every tick
+      # (measured 63 inference calls/tick on the eval corpus, ~18k/day).
+      GRAPH_RECONCILE_ENABLED: ${GRAPH_RECONCILE_ENABLED:-1}
+      GRAPH_RECONCILE_INTERVAL_SECS: ${GRAPH_RECONCILE_INTERVAL_SECS:-300}
+      GRAPH_RECONCILE_BATCH: ${GRAPH_RECONCILE_BATCH:-5}
       # Auth Core audited service-principal hop to inference-core. The
       # credential is deployment-owned; never fall back to a shared x-api-key.
       MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}

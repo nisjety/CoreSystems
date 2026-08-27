@@ -117,11 +117,25 @@ impl GraphTraverseClient {
         let result = self
             .traverse_inner(bearer, org_id, seed_ids, max_hops, max_entities)
             .await;
-        match &result {
-            Ok(_) => self.breaker.record_success(),
-            Err(_) => self.breaker.record_failure(self.breaker.now_ms()),
+        // The breaker exists to stop us re-timing-out against a graph-index that
+        // is DOWN or SLOW. It must therefore count reachability, not request
+        // outcome — see `breaker_verdict`. Counting every `Err` alike (which is
+        // what this did) meant one under-scoped caller's 403 tripped the breaker
+        // and disabled the deep tier for EVERY caller, including end users whose
+        // tokens are authorized for it, for the whole 10s cooldown. Observed
+        // live: 18 x 403 from one service principal, then 39 x "breaker open"
+        // affecting unrelated queries.
+        match breaker_verdict(&result) {
+            BreakerVerdict::Healthy => self.breaker.record_success(),
+            BreakerVerdict::Unhealthy => self.breaker.record_failure(self.breaker.now_ms()),
         }
-        result
+        result.map_err(|e| match e {
+            TraverseError::Status(status) => {
+                // Never echo the body — mirrors the rerank client's no-leak rule.
+                anyhow::anyhow!("graph traverse returned {status}")
+            }
+            TraverseError::Unreachable(e) => e,
+        })
     }
 
     async fn traverse_inner(
@@ -131,7 +145,7 @@ impl GraphTraverseClient {
         seed_ids: &[String],
         max_hops: u8,
         max_entities: u32,
-    ) -> anyhow::Result<Vec<(String, u8)>> {
+    ) -> Result<Vec<(String, u8)>, TraverseError> {
         let url = format!("{}/v1/graph/traverse", self.base_url);
         let resp = self
             .http
@@ -145,14 +159,67 @@ impl GraphTraverseClient {
             }))
             .send()
             .await
-            .context("graph traverse request failed")?;
+            .context("graph traverse request failed")
+            .map_err(TraverseError::Unreachable)?;
         let status = resp.status();
         if !status.is_success() {
-            // Never echo the body — mirrors the rerank client's no-body-leak rule.
-            anyhow::bail!("graph traverse returned {status}");
+            return Err(TraverseError::Status(status));
         }
-        let body: serde_json::Value = resp.json().await.context("graph traverse decode")?;
+        // A body we cannot decode means graph-index answered but is speaking a
+        // shape we do not understand — a real service fault, so `Unreachable`
+        // (which counts against the breaker), not `Status`.
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .context("graph traverse decode")
+            .map_err(TraverseError::Unreachable)?;
         Ok(parse_traverse_entities(&body))
+    }
+}
+
+/// Why a traverse attempt failed, split by what it says about graph-index's
+/// HEALTH rather than about this request's outcome.
+enum TraverseError {
+    /// graph-index answered with a non-success status. It is up and serving.
+    Status(reqwest::StatusCode),
+    /// No usable answer: transport error, timeout, or an undecodable body.
+    Unreachable(anyhow::Error),
+}
+
+/// What one attempt should tell the circuit breaker.
+#[derive(Debug, PartialEq, Eq)]
+enum BreakerVerdict {
+    /// graph-index is serving; do not penalise it.
+    Healthy,
+    /// graph-index is down, overloaded, or broken; count toward opening.
+    Unhealthy,
+}
+
+/// Map an attempt to a breaker verdict.
+///
+/// The rule: an answered request proves reachability, so it must not count
+/// toward a breaker whose entire purpose is to stop calling an unreachable
+/// service. Two deliberate carve-outs stay `Unhealthy`, because they describe
+/// graph-index's own capacity rather than the caller's request:
+///
+/// * **5xx** — the server is failing.
+/// * **429** — the server is shedding load; backing off is the cooperative
+///   response, and hammering a rate-limited dependency is what breakers are for.
+///
+/// Everything else in 4xx (403 insufficient scope, 400 bad seeds, 404) is a
+/// per-request fault. That caller degrades to the in-process 1-hop tier, which
+/// is correct for it, and no other caller is affected.
+fn breaker_verdict<T>(result: &Result<T, TraverseError>) -> BreakerVerdict {
+    match result {
+        Ok(_) => BreakerVerdict::Healthy,
+        Err(TraverseError::Unreachable(_)) => BreakerVerdict::Unhealthy,
+        Err(TraverseError::Status(status)) => {
+            if status.is_server_error() || *status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                BreakerVerdict::Unhealthy
+            } else {
+                BreakerVerdict::Healthy
+            }
+        }
     }
 }
 
@@ -216,6 +283,68 @@ mod tests {
     fn parse_traverse_entities_empty_on_malformed_body() {
         assert!(parse_traverse_entities(&serde_json::json!({})).is_empty());
         assert!(parse_traverse_entities(&serde_json::json!({"entities": "nope"})).is_empty());
+    }
+
+    /// The regression this split exists for.
+    ///
+    /// A 403 from one under-scoped service principal used to count as a breaker
+    /// failure, so three of them disabled the deep graph tier for EVERY caller —
+    /// including end users whose tokens are authorized for it (graph-index only
+    /// enforces `graph:read` on service principals). Observed live: 18 x 403
+    /// from one principal, then 39 x "breaker open" on unrelated queries.
+    #[test]
+    fn an_answered_request_never_penalises_the_breaker() {
+        for code in [401u16, 403, 400, 404, 409, 422] {
+            let status = reqwest::StatusCode::from_u16(code).expect("valid status");
+            let result: Result<(), TraverseError> = Err(TraverseError::Status(status));
+            assert_eq!(
+                breaker_verdict(&result),
+                BreakerVerdict::Healthy,
+                "{code} is a per-request fault; graph-index answered it"
+            );
+        }
+    }
+
+    /// Capacity and health signals still open the breaker — that is its job.
+    #[test]
+    fn server_faults_and_rate_limits_still_open_the_breaker() {
+        for code in [500u16, 502, 503, 504, 429] {
+            let status = reqwest::StatusCode::from_u16(code).expect("valid status");
+            let result: Result<(), TraverseError> = Err(TraverseError::Status(status));
+            assert_eq!(
+                breaker_verdict(&result),
+                BreakerVerdict::Unhealthy,
+                "{code} describes graph-index's own health/capacity"
+            );
+        }
+    }
+
+    #[test]
+    fn unreachable_and_undecodable_open_the_breaker() {
+        let result: Result<(), TraverseError> =
+            Err(TraverseError::Unreachable(anyhow::anyhow!("timed out")));
+        assert_eq!(breaker_verdict(&result), BreakerVerdict::Unhealthy);
+        let ok: Result<(), TraverseError> = Ok(());
+        assert_eq!(breaker_verdict(&ok), BreakerVerdict::Healthy);
+    }
+
+    /// End-to-end on the breaker itself: a burst of 403s leaves it closed, so a
+    /// later authorized caller still reaches the remote tier.
+    #[test]
+    fn a_burst_of_403s_leaves_the_tier_available_to_other_callers() {
+        let b = Breaker::new();
+        for _ in 0..10 {
+            let denied: Result<(), TraverseError> =
+                Err(TraverseError::Status(reqwest::StatusCode::FORBIDDEN));
+            match breaker_verdict(&denied) {
+                BreakerVerdict::Healthy => b.record_success(),
+                BreakerVerdict::Unhealthy => b.record_failure(0),
+            }
+        }
+        assert!(
+            !b.is_open(0),
+            "an authz gap on one principal must not disable the tier globally"
+        );
     }
 
     #[test]

@@ -28,6 +28,20 @@ VALUES
   ('org-corpus-contextual', 'Corpus Contextual (dev eval fixture)', now())
 ON CONFLICT (id) DO NOTHING;
 
+-- WARNING (added 2026-08-27): role 'member' below is NOT sufficient.
+--
+-- auth-core's owner-invariant preflight (migration 018) refuses to START while
+-- any organization is ownerless, and an org whose only member is a 'member' is
+-- ownerless. This fixture therefore installs a latent startup blocker: nothing
+-- fails until auth-service next restarts, and then it crash-loops with
+-- OWNER_INVARIANT_PREFLIGHT_FAILED. That is exactly what happened when
+-- auth-service was restarted to reload PLANE_SERVICE_PRINCIPALS_JSON.
+--
+-- Repairing it is an operator-reviewed workflow, not an UPDATE: see
+-- scripts/eval-fixture-owner-repair.sql. If you are creating these orgs fresh,
+-- run that repair immediately after this file, or delete the fixture instead of
+-- leaving it ownerless.
+
 INSERT INTO member (id, organization_id, user_id, role, created_at)
 VALUES
   ('member-corpus-seeder-baseline',   'org-corpus-baseline',   'service:corpus-seeder', 'member', now()),

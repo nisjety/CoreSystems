@@ -411,3 +411,158 @@ unreliable (43, then 4, tail failures). `eval-run-retrieval.py` now takes
 `EVAL_OFFSET`/`EVAL_LIMIT`, and `scripts/eval-default-path.sh` runs the set in
 25-query chunks with one freshly minted token each — deterministic instead of
 racing.
+
+---
+
+# Addendum — round 7: the two open decisions, resolved
+
+## 1. `graph:read` was a smaller problem than reported, hiding a real one
+
+Round 6 said callers without `graph:read` lose the deep multi-hop tier. That
+overstated it: `graph-index-rs/src/auth.rs` enforces the scope **only for service
+principals** — user tokens pass with no scope check, because graph reads are
+tenant-scoped. End users through the gateway always had the deep tier. The 403s
+were exclusively the eval principal's.
+
+The actual defect was in the **circuit breaker**. `graph_remote.rs` counted every
+`Err` alike, so a 403 was indistinguishable from a timeout. One under-scoped
+service caller could therefore open the breaker and disable the deep tier **for
+every caller, users included**, for the whole cooldown. Observed live: 18 × 403
+from one principal, then 39 × "breaker open" on unrelated queries.
+
+Fixed by splitting reachability from request outcome (`TraverseError::Status`
+vs `Unreachable`, decided in `breaker_verdict`):
+
+* any answered request proves graph-index is serving → does **not** penalise
+* 5xx and 429 still open it (server health / capacity — the breaker's real job)
+* transport errors, timeouts and undecodable bodies still open it
+
+`graph:read` was also granted to `corpus-seeder` in the principal registry so the
+eval can exercise the deep tier at all — a read-only scope on fixture orgs.
+
+## 2. Envelope expiry: a reconciler, but native and DB-truth
+
+Of the three candidate fixes, two do not survive contact with the code:
+
+* **Trust `jti` instead of `exp`** — unsound as written. The replay cache is
+  in-memory, capacity-bounded, and pruned *exactly at* `exp`
+  (`consume_replay_id`). The replay window **is** `exp`; they are not independent
+  controls. Honouring one without the other needs every `jti` remembered for the
+  stream's 7-day `max_age`, durably across restarts.
+* **Fresh envelope per chunk** — the TTL clock starts at *publish*, and expiry
+  happens while messages wait in the stream behind slow work. Splitting one
+  document event into N multiplies queue depth and extends no deadline.
+* (Also rejected: trusting the broker's delivery timestamp. Envelopes exist so a
+  compromised broker cannot forge events.)
+
+What resolves it: `GraphExtractor::extract` takes `(text, org_id, zdr)` — **all
+three live in Postgres, none come from the event.** So `graph-index-rs/src/reconcile.rs`
+is a native loop that finds org-visible documents with no `graph_text_units` rows
+and extracts directly from the database. Envelopes keep authenticating the event
+path at a short TTL; recovery never needs one.
+
+The shell script (`scripts/graph-reconcile.sh`) stays as the manual/bulk tool.
+
+**A cost leak found reviewing my own reconciler before deploying it:** "no
+`graph_text_units` rows" cannot distinguish *never tried* from *tried, nothing
+there*. Nine documents in the eval corpus legitimately hold no entities — 63
+chunks — so the loop would have re-extracted them **every tick, ~18,000
+inference calls a day, indefinitely**. A process-lifetime `Suppressed` set now
+bounds it, and only a *clean* empty result suppresses: if any chunk errored the
+document stays eligible, so a rate-limited model cannot permanently silence a
+document that does have entities. A restart grants one more attempt, which is how
+a document suppressed during a model outage recovers unattended.
+
+Guardrail added to the module docs: **any future consumer whose per-message work
+is inference-bound must ship with a DB-truth reconciler.** Millisecond consumers
+(quickwit-adapter, meilisearch-adapter) do not need one — for them a >120s
+backlog is a broker outage, not a design flaw.
+
+## Merge fallout fixed
+
+The merged inference contract added three `InferRequest` fields
+(`min_privacy_tier`, `min_residency`, `thinking_budget_tokens`), breaking both
+construction sites in the plane (`graph-index-rs/src/extractor.rs` and
+`embedding-engine-rs/src/provider/contextualize.rs`). Set to their documented
+zero values, which the proto states are byte-identical to prior behaviour.
+Deliberately **not** tightened: a privacy tier or residency floor *skips*
+providers that cannot meet it and fails the call rather than downgrading, so
+raising them is a deployment-posture decision, not a build fix.
+
+## Live blocker: auth-service is down, and the eval fixture caused it
+
+Restarting auth-service to reload the principal registry surfaced a latent
+landmine in `scripts/eval-fixture-membership.sql`: it creates the two eval orgs
+with a `member` row of role `'member'` and **no owner**. auth-core's
+owner-invariant preflight (migration 018, pre-existing since 2026-07-16) refuses
+to start while any organization is ownerless, so auth-service now crash-loops
+with `OWNER_INVARIANT_PREFLIGHT_FAILED: 2 ownerless organization(s)`.
+
+The fixture has been a startup blocker since 2026-08-26; nothing detected it
+because auth-service had not restarted since. Repair is a deliberate
+operator-reviewed workflow (insert a reviewed mapping, then call
+`apply_reviewed_owner_repairs()`), and `reviewed_by` is an operator attestation —
+so `scripts/eval-fixture-owner-repair.sql` is written and waiting for an operator
+to sign and run, rather than applied automatically. A warning is now inline in
+`eval-fixture-membership.sql` so the fixture cannot be recreated ownerless.
+
+**Therefore round 7 has no eval numbers.** The breaker fix and the reconciler are
+unit-tested (223 / 84 / 99 passing) and deployed, but the deep-tier eval rerun
+that would measure the `graph:read` grant is blocked until auth-service is back.
+
+## Round 7 numbers: the deep multi-hop tier
+
+Isolated by the caller's SCOPE rather than a weight — graph-index requires
+`graph:read` on service principals for `/v1/graph/traverse`, so a token without
+it gets the in-process 1-hop tier and a token with it gets remote traversal, with
+weights/corpus/queries identical. Default path (no `mode_mix`), n=87,
+`org-corpus-baseline` (30 of 39 judged documents extracted, 5,877 entities).
+
+| tier | recall@10 | nDCG@10 | MRR |
+|---|---|---|---|
+| 1-hop only (no `graph:read`) | 0.8851 | 0.7196 | 0.6661 |
+| **deep multi-hop (`graph:read`)** | 0.8506 | **0.7755** | **0.7504** |
+| delta | −0.0345 | **+0.0559** | **+0.0842** |
+
+48 of 87 result sets differ; MRR improved on 17 queries and regressed on 8.
+
+Reading: the deep tier **reorders substantially for the better** (+0.056 nDCG,
++0.084 MRR — both well outside the ±0.04 lottery) while costing ~3 queries of
+recall (−0.0345, about 3× the 1.15-point single-query floor, so probably real
+rather than noise). Multi-hop neighbours displace a few first-page dense hits
+but rank the surviving judged documents markedly higher. On a corpus where only
+30 documents have graph rows at all, that is a stronger effect than expected and
+argues for extending extraction before tuning `w_graph`.
+
+**The first attempt at this A/B was invalid and the reason is worth recording:**
+the retrieval cache key is (query, top_k, top_n, zdr, sovereign, admin, mix,
+filters) and contains **nothing about the caller's scopes or bearer**. The second
+arm therefore read the first arm's entries verbatim — 87 cache hits, 24ms p50
+against the other arm's 3.5s. `scripts/eval-deep-graph-tier.sh` now flushes
+`dpv2:ret:*` between arms.
+
+That cache-key gap is a real property, not just an eval artifact: **two callers
+with different graph authority share cache entries**, so a caller without
+`graph:read` can be served a result computed with deep traversal. It is not a
+content leak — candidates are org-scoped and pass the visibility gate on the way
+in — but it is a capability inconsistency, and it makes any future scope-gated
+retrieval difference invisible to measurement. Worth adding the caller's
+capability set to the key.
+
+## Correction: the reconciler shipped inert once
+
+The first graph-index deploy of the suppression fix contained the reconciler but
+**not** the suppression: a scripted edit applied the `Suppressed` type, the
+signature threading and the `errored` tracking, but silently failed to rewrite
+the outcome branch, so `suppressed.insert` was never called. The unit tests
+passed because they exercised the type and the SQL constants, never the decision.
+Caught by reading the live logs — the deployed binary still emitted the old
+"will be retried next tick" message — and confirmed by grepping the binary for
+the new strings.
+
+Fixed by extracting the decision into a pure `classify_outcome(produced, errored)`
+returning `Healed | Failed | EmptyClean`, which is directly testable, plus two
+tests that would have caught the no-op (`only_a_clean_empty_result_suppresses`,
+`a_total_provider_outage_suppresses_nothing` — the latter pinning that an outage
+must not suppress the corpus). Deploy verification is now **grep the binary for a
+string only the new code emits**, not the build's exit code.

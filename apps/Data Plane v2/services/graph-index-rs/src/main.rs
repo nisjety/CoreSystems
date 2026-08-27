@@ -10,6 +10,7 @@ mod grpc;
 mod inference_auth;
 mod model;
 mod neo4j;
+mod reconcile;
 mod store;
 mod stream;
 
@@ -216,6 +217,19 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    // Database-truth reconciler for extraction the event path could not deliver.
+    // Graph extraction is one inference call per chunk, so a backlog outlives the
+    // 120s envelope TTL and documents behind the head of the queue are dropped.
+    // This heals them by reading Postgres — no envelope, no re-announce, nothing
+    // that can expire. See `reconcile` for why the alternatives were rejected.
+    let reconcile_task = reconcile::run(
+        pool.clone(),
+        store.clone(),
+        extractor.clone(),
+        neo4j.clone(),
+        reconcile::ReconcileConfig::from_env(),
+    );
+
     let consumer_neo4j = neo4j.clone();
     let community_min_size = cfg.community_min_size;
     let consumer_task = async move {
@@ -239,6 +253,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::select! {
+        res = reconcile_task => {
+            if let Err(e) = res { tracing::error!(err = %e, "graph reconciler exited"); }
+        }
         res = axum::serve(listener, app) => {
             if let Err(e) = res { tracing::error!(err = %e, "API server error"); }
         }

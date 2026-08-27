@@ -401,6 +401,24 @@ impl Contextualizer {
             zdr: false,
             tools: Vec::new(),
             tool_choice: String::new(),
+            // The three fields the merged inference contract added. All set to
+            // their zero values, which the proto documents as byte-identical to
+            // the pre-existing behaviour: UNSPECIFIED imposes no privacy-tier
+            // constraint, an empty `min_residency` imposes no residency floor,
+            // and a 0 thinking budget requests no extended thinking (right for a
+            // cheap, deterministic, temperature-0 task like this one).
+            //
+            // Deliberately NOT tightened here. Both are real provider-selection
+            // controls — a tier or residency floor SKIPS providers that cannot
+            // meet it and fails the call rather than downgrading silently — so
+            // raising them is a deployment posture decision, not a build fix.
+            // This path's retention posture is already asserted at mint time via
+            // MODEL_PLANE_INFERENCE_RETENTION_POSTURE, and `zdr` above still
+            // gates retaining providers. Revisit when the sovereignty posture is
+            // set per-tenant rather than per-service.
+            min_privacy_tier: model_plane::v1::PrivacyTier::Unspecified as i32,
+            min_residency: String::new(),
+            thinking_budget_tokens: 0,
         };
 
         let mut req = tonic::Request::new(request);
