@@ -10,7 +10,7 @@
 //! performs the actual Qdrant purge — it never touches NATS itself.
 //!
 //! Scope: this crate independently upserts org-scoped vector points, each
-//! carrying an `org_id` payload field, into three Qdrant collections:
+//! carrying an `org_id` payload field, into five Qdrant collections:
 //!
 //! - the main text-chunk collection (`Config::qdrant_collection`, default
 //!   `dataplane_knowledge` — `qdrant_writer::upsert_vectors` /
@@ -18,6 +18,14 @@
 //! - `wiki_consumer::WIKI_COLLECTION` (`wiki_block_embeddings`)
 //! - the visual/page-image collection (`Config::qdrant_visual_collection`,
 //!   default `dataplane_page_images` — `image_consumer::handle_created`)
+//! - the audio and video segment collections
+//!   (`Config::qdrant_audio_collection` / `qdrant_video_collection`, defaults
+//!   `dataplane_audio_segments` / `dataplane_video_segments` —
+//!   `media_consumer::handle_created`)
+//!
+//! That list is enumerated once, in [`PurgeCollections::all`], whose exhaustive
+//! destructuring turns "someone added a collection and forgot the purge" from a
+//! silent compliance gap into a compile error.
 //!
 //! `entity_summary_embeddings` is provisioned (created) by this crate at
 //! boot (see `main.rs`) so the nightly entity-summary job has it ready, but
@@ -149,6 +157,53 @@ pub struct PurgeCollections {
     pub knowledge: String,
     pub wiki: String,
     pub visual: String,
+    /// Audio/video segment collections. Added with the media arms — a new
+    /// org-scoped collection that is NOT listed here survives org erasure
+    /// silently, because the purge only touches names it is told about.
+    pub audio: String,
+    pub video: String,
+}
+
+impl PurgeCollections {
+    /// Every collection this crate must purge, as a slice.
+    ///
+    /// **This is the anti-regression mechanism, not a convenience.** The body
+    /// destructures `Self` exhaustively, so adding a field to
+    /// `PurgeCollections` without listing it here is a COMPILE ERROR rather
+    /// than a silently un-erased collection. That failure mode is exactly how
+    /// `dataplane_audio_segments` / `dataplane_video_segments` were initially
+    /// missed: `main.rs` provisioned them, the writer upserted into them, and
+    /// the purge simply never knew their names.
+    ///
+    /// Note this covers collections this crate *writes*, which is deliberately
+    /// narrower than the ones it *provisions*: `entity_summary_embeddings` is
+    /// created at boot but never written here, and per the ownership rule in
+    /// this module's docs it is purged by whoever owns its writes.
+    #[must_use]
+    pub fn all(&self) -> [&str; 5] {
+        let Self {
+            knowledge,
+            wiki,
+            visual,
+            audio,
+            video,
+        } = self;
+        [knowledge, wiki, visual, audio, video]
+    }
+
+    /// Build from `Config` so there is one construction site for production.
+    /// `wiki` is not a `Config` field (it is a crate constant), so it is passed
+    /// in rather than guessed.
+    #[must_use]
+    pub fn from_config(cfg: &crate::config::Config, wiki: &str) -> Self {
+        Self {
+            knowledge: cfg.qdrant_collection.clone(),
+            wiki: wiki.to_owned(),
+            visual: cfg.qdrant_visual_collection.clone(),
+            audio: cfg.qdrant_audio_collection.clone(),
+            video: cfg.qdrant_video_collection.clone(),
+        }
+    }
 }
 
 /// Per-collection point counts from one purge run (logging/tests).
@@ -157,6 +212,8 @@ pub struct PurgeSummary {
     pub knowledge_points: u64,
     pub wiki_points: u64,
     pub visual_points: u64,
+    pub audio_points: u64,
+    pub video_points: u64,
     /// MinIO CAS objects (raw + rendered page PNGs) deleted for this org.
     /// Zero both when the org genuinely had none AND when CAS erasure is
     /// unconfigured (`cas: None` was passed to `purge_organization_data`) —
@@ -168,7 +225,12 @@ impl PurgeSummary {
     /// Total points/objects deleted across every store in one purge run.
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.knowledge_points + self.wiki_points + self.visual_points + self.cas_objects
+        self.knowledge_points
+            + self.wiki_points
+            + self.visual_points
+            + self.audio_points
+            + self.video_points
+            + self.cas_objects
     }
 }
 
@@ -219,6 +281,8 @@ pub async fn purge_organization_data(
         knowledge_points: purge_collection(qdrant, &collections.knowledge, org_id).await?,
         wiki_points: purge_collection(qdrant, &collections.wiki, org_id).await?,
         visual_points: purge_collection(qdrant, &collections.visual, org_id).await?,
+        audio_points: purge_collection(qdrant, &collections.audio, org_id).await?,
+        video_points: purge_collection(qdrant, &collections.video, org_id).await?,
         cas_objects,
     })
 }
@@ -412,15 +476,53 @@ mod tests {
         ));
     }
 
+    /// Guards the collection-parity invariant from the cheap side: `all()` must
+    /// expose one name per purged collection. The expensive side (a new field
+    /// failing to compile) is enforced by the exhaustive destructuring in
+    /// `all()` itself; this catches the inverse mistake of adding a field to
+    /// `all()` without wiring it into `purge_organization_data`.
+    #[test]
+    fn every_purged_collection_is_exposed_by_all() {
+        let c = PurgeCollections {
+            knowledge: "k".into(),
+            wiki: "w".into(),
+            visual: "vi".into(),
+            audio: "a".into(),
+            video: "vd".into(),
+        };
+        assert_eq!(c.all(), ["k", "w", "vi", "a", "vd"]);
+        // One count field per collection in `all()`, plus CAS objects. If these
+        // drift apart, a purge is either running blind or reporting blind.
+        let summary = PurgeSummary {
+            knowledge_points: 1,
+            wiki_points: 1,
+            visual_points: 1,
+            audio_points: 1,
+            video_points: 1,
+            cas_objects: 0,
+        };
+        assert_eq!(
+            summary.total() as usize,
+            c.all().len(),
+            "one non-zero count per collection in all() must sum to all().len()"
+        );
+    }
+
     #[test]
     fn purge_summary_total_sums_every_store() {
+        // Every field is distinct and non-zero on purpose: a store omitted from
+        // `total()` then shows up as a wrong sum rather than passing silently,
+        // which is the same failure mode as a collection omitted from
+        // `PurgeCollections` — an erasure that under-reports what it deleted.
         let summary = PurgeSummary {
             knowledge_points: 3,
             wiki_points: 2,
             visual_points: 1,
+            audio_points: 5,
+            video_points: 6,
             cas_objects: 4,
         };
-        assert_eq!(summary.total(), 10);
+        assert_eq!(summary.total(), 21);
     }
 
     #[test]
@@ -461,12 +563,13 @@ mod tests {
             knowledge: format!("gdpr_isolation_test_knowledge_{suffix}"),
             wiki: format!("gdpr_isolation_test_wiki_{suffix}"),
             visual: format!("gdpr_isolation_test_visual_{suffix}"),
+            audio: format!("gdpr_isolation_test_audio_{suffix}"),
+            video: format!("gdpr_isolation_test_video_{suffix}"),
         };
-        let names = [
-            collections.knowledge.as_str(),
-            collections.wiki.as_str(),
-            collections.visual.as_str(),
-        ];
+        // Derived from `all()`, never re-listed: if a field is added to
+        // PurgeCollections, this test starts covering it automatically instead
+        // of quietly testing a stale subset.
+        let names = collections.all();
 
         for name in names {
             qdrant

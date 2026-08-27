@@ -25,13 +25,33 @@ const jwksRefreshBackoff = 30 * time.Second
 
 // Claims is the verified identity contract minted by Control Plane auth-core.
 type Claims struct {
-	OrgID    string   `json:"org_id"`
-	UserID   string   `json:"user_id"`
-	Email    string   `json:"email,omitempty"`
-	Scopes   []string `json:"scopes,omitempty"`
-	Verified bool     `json:"-"`
+	OrgID string `json:"org_id"`
+	// UserID is set for human principals only. Service-principal tokens carry
+	// ServiceID/PrincipalType instead and MUST leave this empty — see Verify.
+	UserID        string   `json:"user_id"`
+	ServiceID     string   `json:"service_id,omitempty"`
+	PrincipalType string   `json:"principal_type,omitempty"`
+	Email         string   `json:"email,omitempty"`
+	Scopes        []string `json:"scopes,omitempty"`
+	Verified      bool     `json:"-"`
 	jwt.RegisteredClaims
 }
+
+// PrincipalID is the acting identity, whichever kind it is. Mirrors
+// wiki-store-go and documents-api-go so audit rows across the plane name the
+// principal the same way.
+func (c *Claims) PrincipalID() string {
+	if c == nil {
+		return ""
+	}
+	if c.ServiceID != "" {
+		return c.ServiceID
+	}
+	return c.UserID
+}
+
+// IsService reports whether the verified principal is a service, not a person.
+func (c *Claims) IsService() bool { return c != nil && c.ServiceID != "" }
 
 func (c *Claims) HasScope(scope string) bool {
 	if c == nil || !c.Verified {
@@ -164,12 +184,45 @@ func (v *Verifier) Verify(token string) (*Claims, error) {
 	}
 	claims.OrgID = strings.TrimSpace(claims.OrgID)
 	claims.UserID = strings.TrimSpace(claims.UserID)
+	claims.ServiceID = strings.TrimSpace(claims.ServiceID)
+	claims.PrincipalType = strings.ToLower(strings.TrimSpace(claims.PrincipalType))
 	claims.Subject = strings.TrimSpace(claims.Subject)
-	if claims.OrgID == "" || claims.UserID == "" || claims.Subject == "" {
-		return nil, errors.New("authctx: token requires org_id, user_id, and sub")
+	if claims.OrgID == "" || claims.Subject == "" {
+		return nil, errors.New("authctx: token requires org_id and sub")
 	}
-	if claims.Subject != claims.UserID {
-		return nil, errors.New("authctx: ambiguous user identity")
+	// Accept EITHER a user or a service principal, and validate the full shape
+	// of whichever one is claimed. Ported verbatim from wiki-store-go so the
+	// plane has one identity contract rather than four.
+	//
+	// This previously required a `user_id` equal to `sub`, unconditionally.
+	// auth-core's `issuePlaneToken` emits `sub` + `service_id` +
+	// `principal_type: service` for service principals and NO `user_id`, so
+	// every service token was rejected 401 "invalid credentials" — silently,
+	// with nothing logged. For an ORCHESTRATOR that is the wrong way round: its
+	// whole purpose is automated, unattended work (stale-embedding sweeps,
+	// reindex jobs), and those callers are exactly the ones that hold a service
+	// credential rather than a human session.
+	//
+	// Note this is STRICTER than the old check for service tokens, not looser:
+	// a service identity must be internally consistent (principal_type set,
+	// sub == service_id, no user_id, non-empty scopes) and authorization is
+	// still entirely scope-gated afterwards.
+	switch {
+	case claims.ServiceID != "" || claims.PrincipalType == "service":
+		if claims.PrincipalType != "service" || claims.ServiceID == "" ||
+			claims.UserID != "" || claims.Subject != claims.ServiceID ||
+			len(claims.Scopes) == 0 {
+			return nil, errors.New("authctx: ambiguous service identity")
+		}
+	case claims.UserID != "":
+		if claims.PrincipalType != "" && claims.PrincipalType != "user" {
+			return nil, errors.New("authctx: ambiguous user identity")
+		}
+		if claims.Subject != claims.UserID {
+			return nil, errors.New("authctx: ambiguous user identity")
+		}
+	default:
+		return nil, errors.New("authctx: token requires one user or service identity")
 	}
 	claims.Verified = true
 	return claims, nil

@@ -392,6 +392,7 @@ mod tests {
             auth_method: AuthMethod::Jwt,
             scopes: vec!["org:data:write_all".into()],
             zdr: false,
+            sovereign: Some(false),
             acl: EffectiveAcl::allow_all(),
             request_id: "grpc-document-write-regression".into(),
             verified_bearer: None,

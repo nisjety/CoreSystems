@@ -333,3 +333,91 @@ func withoutClaim(base jwt.MapClaims, key string) jwt.MapClaims {
 	delete(result, key)
 	return result
 }
+
+// A real auth-core service-principal token must verify.
+//
+// Regression: this verifier used to require `user_id == sub` unconditionally,
+// and auth-core's `issuePlaneToken` emits `sub` + `service_id` +
+// `principal_type: service` with NO `user_id` for service principals. Every
+// service token therefore got a silent 401 "invalid credentials", which made
+// this service's own evaluation harness unreachable by any
+// automated caller — `eval_golden_judgments` and `quality_eval_runs` sat at
+// zero rows while the golden set was scored out-of-band by a local script.
+func TestVerifierAcceptsServicePrincipalTokens(t *testing.T) {
+	key, publicPEM := testKey(t)
+	verifier, err := NewVerifier(Config{
+		Audience:     testAudience,
+		Issuer:       testIssuer,
+		PublicKeyPEM: publicPEM,
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	claims, err := verifier.Verify(signToken(t, key, serviceClaims()))
+	if err != nil {
+		t.Fatalf("service token must verify: %v", err)
+	}
+	if !claims.IsService() {
+		t.Fatal("expected IsService() to report a service principal")
+	}
+	if got := claims.PrincipalID(); got != testServiceID {
+		t.Fatalf("PrincipalID() = %q, want %q", got, testServiceID)
+	}
+	if claims.UserID != "" {
+		t.Fatalf("service token must not carry a user identity, got %q", claims.UserID)
+	}
+}
+
+// The service branch is STRICTER than the old user-only check, not looser: an
+// internally inconsistent service identity must still fail closed.
+func TestVerifierRejectsMalformedServiceIdentities(t *testing.T) {
+	key, publicPEM := testKey(t)
+	verifier, err := NewVerifier(Config{
+		Audience:     testAudience,
+		Issuer:       testIssuer,
+		PublicKeyPEM: publicPEM,
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		claims jwt.MapClaims
+	}{
+		{name: "service_id without principal_type", claims: withoutClaim(serviceClaims(), "principal_type")},
+		{name: "principal_type without service_id", claims: withoutClaim(serviceClaims(), "service_id")},
+		{name: "sub does not match service_id", claims: mergeClaims(serviceClaims(), jwt.MapClaims{"sub": "service:other"})},
+		{name: "carries both identities", claims: mergeClaims(serviceClaims(), jwt.MapClaims{"user_id": testUserID})},
+		{name: "no scopes", claims: withoutClaim(serviceClaims(), "scopes")},
+		{name: "user_id with service principal_type", claims: mergeClaims(validClaims(), jwt.MapClaims{"principal_type": "service"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := verifier.Verify(signToken(t, key, tt.claims)); err == nil {
+				t.Fatal("expected malformed service identity to be rejected")
+			}
+		})
+	}
+}
+
+const testServiceID = "service:corpus-seeder"
+
+// serviceClaims mirrors the exact shape auth-core mints for a service
+// principal: sub == service_id, principal_type "service", no user_id.
+func serviceClaims() jwt.MapClaims {
+	now := time.Now()
+	return jwt.MapClaims{
+		"iss":            testIssuer,
+		"aud":            testAudience,
+		"sub":            testServiceID,
+		"org_id":         testOrgID,
+		"service_id":     testServiceID,
+		"principal_type": "service",
+		"scopes":         []string{"data:read"},
+		"iat":            now.Unix(),
+		"nbf":            now.Add(-time.Second).Unix(),
+		"exp":            now.Add(5 * time.Minute).Unix(),
+	}
+}

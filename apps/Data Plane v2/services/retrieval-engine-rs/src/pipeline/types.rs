@@ -69,6 +69,14 @@ pub struct RetrievalRequest {
     pub query_expansion: Option<String>,
     pub reranker_model: Option<String>,
     pub zdr_mode: Option<ZdrMode>,
+    /// Sovereign-infrastructure requirement, resolved from the signed JWT
+    /// claim floor + any caller-requested stricter posture (see
+    /// `AuthContext::effective_sovereign_required`). `None` until the auth
+    /// layer sets it; `pipeline::retrieve` treats `None` the same as `Some(true)`
+    /// — fail closed, not fail open, matching every other compliance default
+    /// in this service.
+    #[serde(default)]
+    pub sovereign_required: Option<bool>,
     pub context_budget_tokens: Option<usize>,
     pub context_format: Option<String>,
     /// Optional per-request blend weights (D4+D5 spec §7).
@@ -224,7 +232,7 @@ pub struct RetrievalFiltersInput {
     pub acl_tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoredCandidate {
     pub knowledge_id: String,
     pub document_id: String,
@@ -239,7 +247,7 @@ pub struct ScoredCandidate {
     pub metadata: HashMap<String, QdrantValue>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRef {
     pub document_id: String,
     pub title: String,
@@ -274,7 +282,7 @@ pub struct RetrievalResponse {
     pub suggested_next_tools: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextPack {
     pub facts: Vec<ContextFact>,
     pub total_tokens: usize,
@@ -282,7 +290,7 @@ pub struct ContextPack {
     pub format: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextFact {
     pub knowledge_id: String,
     pub document_id: String,
@@ -293,7 +301,10 @@ pub struct ContextFact {
     pub estimated_tokens: usize,
 }
 
-#[derive(Debug, Clone)]
+/// `Default` is the all-zero timing set, used by the retrieval cache-hit path:
+/// no stage ran, so every duration is honestly zero rather than a replay of
+/// whichever request originally populated the entry.
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)] // surfaced via Debug + tracing; per-stage timings populated incrementally
 pub struct PipelineTimings {
     pub embed_ms: u64,

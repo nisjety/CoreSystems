@@ -453,10 +453,26 @@ async fn handle_message(
         }
         SUBJECT_DOCUMENT_INDEXED => {
             if let Some(document_id) = value.get("document_id").and_then(Value::as_str) {
-                // Clear prior FTS entries for this document before re-indexing so a
-                // re-index after a content update reflects exactly the current
-                // knowledge units — no duplicate chunks and no orphans left behind
-                // from the previous version. (No-op on first index.)
+                // Clear prior FTS entries for this document before re-indexing, so
+                // a re-index after a content update eventually reflects exactly the
+                // current knowledge units with no orphans from the previous version.
+                // (No-op on first index.)
+                //
+                // NOTE — "eventually". Quickwit's delete is not applied inline: it
+                // registers a delete task that takes effect at the next merge, so
+                // the re-index below lands BEFORE the old copies are gone and the
+                // index carries both generations for a while. Measured on a
+                // 1,164-chunk corpus re-driven a few times: 5,215 documents for
+                // 1,164 distinct chunks.
+                //
+                // Queries are correct throughout regardless, because the search
+                // path de-duplicates by `knowledge_id`
+                // (`retrieval-engine-rs/src/search/sparse.rs::dedup_hits`) rather
+                // than trusting the index to be free of duplicates. Do not remove
+                // that de-duplication on the assumption that this delete runs
+                // first — it does not, and Quickwit offers no synchronous form of
+                // it. Awaiting the delete task here would instead stall the
+                // consumer for a merge cycle on every single document update.
                 ctx.quickwit
                     .delete_by_query(&tenant_id_query(org_id, "document_id", document_id))
                     .await?;

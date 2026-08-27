@@ -1,7 +1,7 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
-use event_envelope_rs::{EventSigner, EventVerifier};
+use event_envelope_rs::{EnvelopeError, EventSigner, EventVerifier};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
 use rsa::{RsaPrivateKey, RsaPublicKey};
@@ -384,4 +384,174 @@ fn retrieval_cost_scope_is_producer_specific_and_claim_bound() {
             payload,
         )
         .is_err());
+}
+
+// ── Expired-vs-forged: the distinction that stops silent data loss ──────────
+//
+// A durable queue (max_age 7 days) carries envelopes that live 120s, so a
+// consumer backlog longer than two minutes expires messages in place. Treating
+// that as a forgery discarded 1,044 of 1,164 chunks on a single real ingest.
+// `EnvelopeError::Expired` exists so a consumer can re-drive those; it must
+// therefore be reachable ONLY for an otherwise-perfect envelope.
+
+/// Build an envelope whose `exp` is already in the past but which is otherwise
+/// completely valid — correct key, issuer, scope, audience, payload digest.
+fn expired_envelope_jti(private: &str, age_seconds: i64, jti: &str) -> Vec<u8> {
+    let payload = br#"{"document_id":"doc-go","org_id":"org-go","user_id":"user-go","zdr":false}"#;
+    let now = Utc::now().timestamp();
+    let issued = now - age_seconds;
+    let claims = GoCompatibleClaims {
+        iss: "service:documents-api-go",
+        sub: "service:documents-api-go",
+        aud: vec!["dataplane-events"],
+        principal_type: "service",
+        org_id: "org-go",
+        user_id: "user-go",
+        scopes: vec!["events:documents:publish"],
+        zdr: false,
+        event_type: "dataplane.documents.created",
+        payload_sha256: Sha256::digest(payload)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        jti,
+        iat: issued,
+        nbf: issued,
+        // 120s lifetime, same as TOKEN_TTL_SECONDS, so `exp - iat` stays inside
+        // MAX_TOKEN_TTL_SECONDS and only the expiry itself is at fault.
+        exp: issued + 120,
+    };
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("documents-events-v1".to_owned());
+    let token = encode(
+        &header,
+        &claims,
+        &EncodingKey::from_rsa_pem(private.as_bytes()).expect("encoding key"),
+    )
+    .expect("token");
+    serde_json::to_vec(&serde_json::json!({
+        "authorization": format!("Bearer {token}"),
+        "data": URL_SAFE_NO_PAD.encode(payload),
+    }))
+    .expect("envelope")
+}
+
+fn expired_envelope(private: &str, age_seconds: i64) -> Vec<u8> {
+    expired_envelope_jti(private, age_seconds, &format!("expired-fixture-{age_seconds}"))
+}
+
+#[test]
+fn an_expired_but_authentic_envelope_is_recoverable_not_discarded() {
+    let (private, public) = keys();
+    let verifier = EventVerifier::from_rsa_pem(
+        public.as_bytes(),
+        "service:documents-api-go",
+        "documents-events-v1",
+        "dataplane-events",
+        "events:documents:publish",
+        100,
+    )
+    .expect("verifier");
+
+    // 10 minutes stale: well past both the 120s TTL and the 30s skew.
+    let envelope = expired_envelope(&private, 600);
+    match verifier.verify("dataplane.documents.created", &envelope) {
+        Err(EnvelopeError::Expired(stale)) => {
+            // The claims and payload must be usable, because identifying the
+            // stranded work is the entire point of this variant.
+            assert_eq!(stale.claims.org_id, "org-go");
+            assert_eq!(stale.claims.event_type, "dataplane.documents.created");
+            let payload: serde_json::Value =
+                serde_json::from_slice(&stale.payload).expect("payload is JSON");
+            assert_eq!(payload["document_id"], "doc-go");
+        }
+        other => panic!("expected Expired, got {other:?}"),
+    }
+}
+
+/// The security-critical half. Every way of being wrong OTHER than expiry must
+/// still yield `InvalidEnvelope`, so no forgery can reach the recovery path and
+/// have its (attacker-chosen) payload trusted.
+#[test]
+fn a_forged_envelope_never_reaches_the_expired_recovery_path() {
+    let (private, public) = keys();
+    let (other_private, _) = keys(); // a different signing key entirely
+    let verifier = || {
+        EventVerifier::from_rsa_pem(
+            public.as_bytes(),
+            "service:documents-api-go",
+            "documents-events-v1",
+            "dataplane-events",
+            "events:documents:publish",
+            100,
+        )
+        .expect("verifier")
+    };
+
+    // 1. Expired AND signed by the wrong key: must be InvalidEnvelope, not
+    //    Expired — otherwise an attacker forges "expired" events at will.
+    let wrong_key = expired_envelope(&other_private, 600);
+    assert!(matches!(
+        verifier().verify("dataplane.documents.created", &wrong_key),
+        Err(EnvelopeError::InvalidEnvelope)
+    ));
+
+    // 2. Expired but with a tampered payload (digest no longer matches).
+    let mut tampered: serde_json::Value =
+        serde_json::from_slice(&expired_envelope(&private, 600)).expect("json");
+    tampered["data"] = serde_json::json!(URL_SAFE_NO_PAD.encode(
+        br#"{"document_id":"ATTACKER","org_id":"org-go","user_id":"user-go","zdr":false}"#
+    ));
+    assert!(matches!(
+        verifier().verify(
+            "dataplane.documents.created",
+            &serde_json::to_vec(&tampered).expect("bytes")
+        ),
+        Err(EnvelopeError::InvalidEnvelope)
+    ));
+
+    // 3. Expired but for a subject outside the signer's scope.
+    assert!(matches!(
+        verifier().verify("dataplane.wiki.pages.created", &expired_envelope(&private, 600)),
+        Err(EnvelopeError::InvalidEnvelope)
+    ));
+
+    // 4. Garbage.
+    assert!(matches!(
+        verifier().verify("dataplane.documents.created", b"not-an-envelope"),
+        Err(EnvelopeError::InvalidEnvelope)
+    ));
+}
+
+/// A fresh envelope must still verify normally, and an envelope inside the
+/// clock-skew window must NOT be treated as expired.
+#[test]
+fn a_fresh_envelope_is_unaffected_and_skew_is_still_tolerated() {
+    let (private, public) = keys();
+    let verifier = EventVerifier::from_rsa_pem(
+        public.as_bytes(),
+        "service:documents-api-go",
+        "documents-events-v1",
+        "dataplane-events",
+        "events:documents:publish",
+        100,
+    )
+    .expect("verifier");
+
+    // Fresh: accepted. Distinct `jti` per envelope — replay protection is
+    // per-id, so reusing one would make the second verify fail as a replay and
+    // hide what this test is actually checking.
+    let fresh = expired_envelope_jti(&private, 0, "skew-fresh");
+    assert!(verifier
+        .verify("dataplane.documents.created", &fresh)
+        .is_ok());
+
+    // 130s old: exp passed 10s ago, inside the 30s skew -> still accepted, so
+    // the new explicit check reproduces the library's leeway rather than
+    // tightening it.
+    let barely = expired_envelope_jti(&private, 130, "skew-barely");
+    assert!(
+        verifier.verify("dataplane.documents.created", &barely).is_ok(),
+        "clock skew must still be tolerated"
+    );
 }

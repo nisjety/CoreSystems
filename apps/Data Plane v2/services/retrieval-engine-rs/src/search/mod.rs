@@ -8,5 +8,6 @@ pub mod graph_remote;
 pub mod keyword;
 pub mod rerank;
 pub mod sparse;
+pub mod textquery;
 pub mod timeline;
 pub mod wiki;

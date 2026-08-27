@@ -120,6 +120,7 @@ fn make_request(zdr_mode: &str) -> RetrievalRequest {
                 .parse::<ZdrMode>()
                 .expect("supported test ZDR mode"),
         ),
+        sovereign_required: None,
         user_id: None,
         verified_bearer: None,
         query_expansion: None,

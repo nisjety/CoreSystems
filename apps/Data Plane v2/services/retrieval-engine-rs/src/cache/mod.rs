@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
+use serde::{Deserialize, Serialize};
+
+use crate::pipeline::types::{ContextPack, ScoredCandidate, SourceRef};
 
 pub mod invalidator;
 pub mod org_version;
@@ -48,6 +51,60 @@ pub fn viewer_scope_token(viewer: Option<&str>, granted_docs: &[String]) -> Stri
         g.hash(&mut hasher);
     }
     format!("{viewer}:{:x}", hasher.finish())
+}
+
+/// Composes a retrieval cache key from its ordered components.
+///
+/// Length-prefixes every component instead of joining on a delimiter. A
+/// delimiter-joined key is forgeable whenever a component can contain the
+/// delimiter — and one of these components is raw user query text, so it always
+/// can. `("a|b", "c")` and `("a", "b|c")` would collapse to the same key, which
+/// in a permission-partitioned cache is a cross-request read, not a harmless
+/// collision. Length prefixes make the encoding unambiguous, so distinct input
+/// tuples cannot alias.
+///
+/// The result is hashed, so the key is fixed-size regardless of query length
+/// and no raw query text is stored in a Dragonfly key name.
+pub fn compose_cache_key(components: &[&str]) -> String {
+    let mut canonical = String::new();
+    for component in components {
+        canonical.push_str(&component.len().to_string());
+        canonical.push(':');
+        canonical.push_str(component);
+    }
+    hash_text(&canonical)
+}
+
+/// The retrieval-result payload that is safe to serve to a *different* request.
+///
+/// This exists as its own type rather than caching [`RetrievalResponse`]
+/// wholesale, for two reasons:
+///
+/// 1. **`trace_id` must never be cached.** A trace is the audit record of one
+///    specific retrieval by one specific caller. Replaying a stored trace_id
+///    would attribute a later request to an earlier caller's audit row and make
+///    `/retrieval/{trace_id}` return someone else's provenance. Leaving the
+///    field out of this struct makes that structural — you cannot forget it,
+///    because there is nowhere to put it.
+/// 2. `RetrievalResponse` stays `Serialize`-only. Giving the public response
+///    type a `Deserialize` impl would create a parse surface on a type that is
+///    only ever supposed to be produced by this service, and invites some later
+///    handler accepting one as *input*.
+///
+/// `query`/`org_id`/`zdr_mode` are likewise absent: all three are inputs to the
+/// cache key, so they are already known by the caller reconstructing the
+/// response and re-storing them would just be a chance for the two to disagree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedRetrieval {
+    pub candidates: Vec<ScoredCandidate>,
+    pub sources: Vec<SourceRef>,
+    pub index_version: String,
+    #[serde(default)]
+    pub zdr_actions_applied: Vec<String>,
+    pub low_confidence: bool,
+    pub context_pack: Option<ContextPack>,
+    #[serde(default)]
+    pub suggested_next_tools: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -245,6 +302,78 @@ mod tests {
                 Some("u"),
                 &["d1".to_string(), "d2".to_string(), "d3".to_string()]
             )
+        );
+    }
+
+    /// The forgery this encoding prevents: with a delimiter-joined key, a user
+    /// who can put the delimiter in their query text controls where the
+    /// component boundaries land, and can therefore aim at the key another
+    /// request would compute. Length prefixes make the split unambiguous.
+    #[test]
+    fn a_query_containing_the_separator_cannot_forge_another_requests_key() {
+        // Same characters, different component boundaries — must not alias.
+        assert_ne!(
+            compose_cache_key(&["a:b", "c"]),
+            compose_cache_key(&["a", "b:c"])
+        );
+        assert_ne!(
+            compose_cache_key(&["", "ab"]),
+            compose_cache_key(&["a", "b"])
+        );
+        // An empty component is still a component, not an absent one.
+        assert_ne!(compose_cache_key(&["q", ""]), compose_cache_key(&["q"]));
+    }
+
+    #[test]
+    fn the_same_components_always_produce_the_same_key() {
+        let a = compose_cache_key(&["hva er prisen?", "512", "disabled"]);
+        let b = compose_cache_key(&["hva er prisen?", "512", "disabled"]);
+        assert_eq!(a, b, "the key must be stable across calls");
+        // Order is part of the identity: two requests that differ only in which
+        // component held a value are different requests.
+        assert_ne!(a, compose_cache_key(&["512", "hva er prisen?", "disabled"]));
+    }
+
+    #[test]
+    fn the_key_never_embeds_raw_query_text() {
+        // Keys become Dragonfly key names; a query pasted verbatim into one
+        // would leak content to anyone who can list keys.
+        let key = compose_cache_key(&["patient journal for ola nordmann"]);
+        assert!(!key.contains("ola nordmann"));
+        assert!(!key.contains(' '), "a hash, not a rendered string: {key}");
+    }
+
+    /// `trace_id` in a cached payload would attribute one caller's retrieval to
+    /// another's audit row. The field's absence is the guard, so assert on the
+    /// serialized shape rather than trusting the struct definition to stay put.
+    #[test]
+    fn a_cached_payload_carries_no_trace_or_identity_fields() {
+        let payload = CachedRetrieval {
+            candidates: vec![],
+            sources: vec![],
+            index_version: "v2-current".to_string(),
+            zdr_actions_applied: vec!["reject_mode_filtered_restricted".to_string()],
+            low_confidence: false,
+            context_pack: None,
+            suggested_next_tools: vec![],
+        };
+        let json = serde_json::to_value(&payload).expect("serializable");
+        let object = json.as_object().expect("object payload");
+        for forbidden in ["trace_id", "org_id", "query", "zdr_mode"] {
+            assert!(
+                !object.contains_key(forbidden),
+                "`{forbidden}` must not be cached: it is per-request, not per-result"
+            );
+        }
+
+        // And it must survive a round trip, or every hit degrades to a miss.
+        let restored: CachedRetrieval =
+            serde_json::from_value(json).expect("cached payload must be readable back");
+        assert_eq!(restored.index_version, "v2-current");
+        assert_eq!(
+            restored.zdr_actions_applied,
+            vec!["reject_mode_filtered_restricted".to_string()],
+            "enforcement actions must survive so a hit reports the same posture"
         );
     }
 

@@ -90,6 +90,7 @@ pub async fn run(
     }
 
     let mut messages = consumer.messages().await?;
+    nats_connection::erasure_health::mark_connected(true);
     info!("quickwit-adapter GDPR erasure consumer ready");
 
     while let Some(msg) = messages.next().await {

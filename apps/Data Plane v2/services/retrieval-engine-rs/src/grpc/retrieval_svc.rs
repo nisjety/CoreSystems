@@ -216,6 +216,11 @@ impl RetrievalService for RetrievalSvc {
             query_expansion: req.query_expansion,
             reranker_model: req.reranker_model,
             zdr_mode,
+            // gRPC clients don't send per-request sovereignty yet either — no
+            // wire field exists on `RetrieveRequest` for it. `None` here is
+            // exactly right: `apply_verified_context` below floors it from
+            // the signed claim regardless, same as `zdr_mode` above.
+            sovereign_required: None,
             // gRPC clients don't send per-request mode_mix yet — config defaults apply.
             mode_mix: None,
             context_budget_tokens: req.context_budget_tokens.map(|v| v as usize),
@@ -646,6 +651,7 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
         query_expansion: req.query_expansion,
         reranker_model: req.reranker_model,
         zdr_mode,
+        sovereign_required: None,
         mode_mix: None,
         context_budget_tokens: req.context_budget_tokens.map(|v| v as usize),
         context_format: req.context_format,
@@ -672,6 +678,10 @@ mod zdr_boundary_tests {
             auth_method: AuthMethod::Jwt,
             scopes: vec![],
             zdr,
+            // This helper is specifically the ZDR boundary test; sovereignty
+            // is orthogonal, so it stays at the permissive `false` here
+            // rather than gaining its own parameter nobody exercises yet.
+            sovereign: Some(false),
             acl: EffectiveAcl::allow_all(),
             request_id: "grpc-zdr-boundary".into(),
             verified_bearer: None,

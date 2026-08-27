@@ -19,12 +19,28 @@
 //! unchanged content. It signs with the same producer identity
 //! (`service:embedding-engine-rs` / `embedding-events-v1`) `process_batch`
 //! uses for this exact subject, and publishes the same way (plain core-NATS
-//! `publish`, no JetStream headers) — both current consumers
-//! (`graph-index-rs`, `meilisearch-adapter-rs`) durably capture it via their
-//! own `DATAPLANE_GRAPH` stream (`Interest` retention) regardless of publish
-//! style, and both are idempotent on a repeat (deterministic
-//! content-derived ids / upsert-by-document-id), so re-announcing is always
-//! safe to retry.
+//! `publish`, no JetStream headers) — every consumer durably captures it via
+//! its own stream regardless of publish style, and all are idempotent on a
+//! repeat, so re-announcing is always safe to retry.
+//!
+//! Consumers of this subject, and what a re-announce costs each:
+//!
+//!   - `graph-index-rs` — deterministic content-derived ids, so a repeat
+//!     rewrites the same nodes.
+//!   - `meilisearch-adapter-rs` — upsert by document id.
+//!   - `quickwit-adapter-rs` — deletes the document's chunks and re-indexes
+//!     them from Postgres. This is the ONLY path that refreshes a chunk's
+//!     `context_body` (from `knowledge_units.chunk_context`), because
+//!     contextual retrieval writes that column after the chunk was first
+//!     indexed and nothing else re-announces. So after any contextualization
+//!     backfill, this tool is what makes contextual BM25 actually reach the
+//!     primary sparse backend.
+//!
+//!     Note that Quickwit's delete is asynchronous — it lands at the next
+//!     merge, not before the re-index — so a re-announce transiently leaves
+//!     two generations of each chunk in the index. Retrieval is unaffected:
+//!     the search path de-duplicates by `knowledge_id`. See the note in
+//!     `quickwit-adapter-rs/src/stream.rs` on `SUBJECT_DOCUMENT_INDEXED`.
 //!
 //! This tool touches no `knowledge_units` row and never re-embeds — it is
 //! purely a re-announcement of documents that are already correctly

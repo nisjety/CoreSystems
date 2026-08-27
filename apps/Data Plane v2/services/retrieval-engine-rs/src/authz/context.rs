@@ -33,6 +33,49 @@ pub struct Claims {
     /// Signed Zero Data Retention posture. Required at deserialization so an
     /// absent, null, or non-boolean claim fails authentication closed.
     pub zdr: bool,
+    /// Signed sovereign-infrastructure posture: this org/user requires
+    /// processing to stay on sovereign (currently Norwegian) infrastructure.
+    /// A distinct axis from `zdr`: ZDR is a promise about data RETENTION
+    /// (does the provider keep it), sovereignty is a promise about
+    /// JURISDICTION (which soil the processing happens on). A provider can
+    /// satisfy one without the other.
+    ///
+    /// Unlike `zdr`, this is NOT hard-required at deserialization —
+    /// deliberately, and only because of a real constraint verified against
+    /// the live system: as of 2026-08-22, auth-core's `issuePlaneToken` (the
+    /// only real minter of these tokens) has never heard of this claim and
+    /// emits none. Making it hard-required the way `zdr` is would reject
+    /// every token in production the moment this ships — a full
+    /// authentication outage, not a compliance improvement.
+    ///
+    /// `None` means ABSENT — genuinely unknown, not "required". That
+    /// distinction is load bearing, and getting it wrong took the dense arm
+    /// down: this field previously defaulted an absent claim to `true` on the
+    /// reasoning that the strictest posture is always the safe one. It is not,
+    /// because "sovereignty required" is UNSATISFIABLE by the configured
+    /// embedding provider — Cohere Embed v4 is Azure-hosted, so
+    /// `EMBEDDING_PROVIDER=cohere` plus a blanket `true` made every query
+    /// embedding fail closed and returned HTTP 500 for every dense retrieval
+    /// in the deployment. Since auth-core emits no claim at all, that applied
+    /// to literally every token. A default that makes the primary retrieval
+    /// path unreachable is an outage wearing a compliance costume.
+    ///
+    /// The posture ladder is therefore:
+    ///   * `Some(true)`  — signed floor. Cannot be relaxed by any request field.
+    ///   * `Some(false)` — signed as not required; a caller may still opt IN.
+    ///   * `None`        — unknown, so the CALLER's `sovereign_required`
+    ///                     governs; a caller that declares nothing still fails
+    ///                     closed, because `pipeline::retrieve` treats its own
+    ///                     absent value as `true`.
+    ///
+    /// Nothing here fails open: silence at BOTH levels is still strict. What
+    /// changed is that an authenticated caller can once again declare the
+    /// posture of its own data, which is exactly what the request field is for.
+    /// A PRESENT-but-malformed claim (wrong type) still fails closed via
+    /// ordinary deserialization — only true absence yields `None`.
+    /// Revisit requiring this once auth-core mints it for real.
+    #[serde(default)]
+    pub sovereign: Option<bool>,
     #[serde(default)]
     pub org_id: Option<String>,
     #[serde(default)]
@@ -90,6 +133,11 @@ pub struct AuthContext {
     pub scopes: Vec<String>,
     /// Cryptographically verified request-retention posture from the JWT.
     pub zdr: bool,
+    /// Cryptographically verified sovereign-infrastructure posture from the
+    /// JWT. See [`Claims::sovereign`] for why this is a separate axis from
+    /// `zdr` rather than folded into it, and why `None` (absent claim) means
+    /// unknown rather than required.
+    pub sovereign: Option<bool>,
     pub acl: EffectiveAcl,
     /// Echoed back to the caller in `X-Request-Id` and persisted in
     /// `access_audit_log.request_id` for cross-service correlation.
@@ -122,6 +170,29 @@ impl AuthContext {
         }
     }
 
+    /// Merge caller-requested sovereignty with the cryptographically verified
+    /// authority posture monotonically — same shape as [`Self::effective_zdr_mode`],
+    /// simpler because sovereignty has no `Reject`/`Ephemeral` gradation: a
+    /// query either may only touch sovereign infrastructure, or it may not.
+    /// A signed `sovereign=true` can never be relaxed by an unsigned request
+    /// field; a signed `sovereign=false` still lets a caller opt IN to a
+    /// stricter posture for one particular request.
+    ///
+    /// An ABSENT claim (`None`) defers to the caller rather than imposing the
+    /// strict posture. It has to: the strict posture is unsatisfiable by an
+    /// Azure-hosted embedding provider, so imposing it on an absent claim —
+    /// and auth-core emits none — made every dense query fail closed. Deferring
+    /// is not failing open, because a caller that requests nothing either still
+    /// ends up strict (`pipeline::retrieve` reads its own `None` as `true`).
+    /// See [`Claims::sovereign`] for the full ladder.
+    #[must_use]
+    pub const fn effective_sovereign_required(&self, requested: Option<bool>) -> Option<bool> {
+        match self.sovereign {
+            Some(true) => Some(true),
+            Some(false) | None => requested,
+        }
+    }
+
     /// Build a context that grants org-scoped access only (no per-user ACL).
     /// Used when `CONTROL_PLANE_ENFORCEMENT=off` or for `API_KEY`-only calls
     /// where there is no user identity to enforce against.
@@ -133,6 +204,11 @@ impl AuthContext {
             auth_method: method,
             scopes: vec![],
             zdr: true,
+            // Strictest default, matching `zdr: true` above: absent a verified
+            // claim either way, assume the stricter posture rather than the
+            // permissive one (`Residency::classify`'s doctrine — unproven is
+            // not the same claim as proven-safe).
+            sovereign: Some(true),
             acl: EffectiveAcl::allow_all(),
             request_id,
             verified_bearer: None,
@@ -215,6 +291,7 @@ impl AuthContext {
         }
         req.verified_bearer = self.verified_bearer.clone();
         req.zdr_mode = self.effective_zdr_mode(req.zdr_mode);
+        req.sovereign_required = self.effective_sovereign_required(req.sovereign_required);
 
         // Org-admin super-visibility derives ONLY from a verified scope. This is
         // reached only on the JWT HTTP path; the api-key/agent path carries no
@@ -263,6 +340,7 @@ mod tests {
             auth_method: AuthMethod::Jwt,
             scopes: vec![],
             zdr: false,
+            sovereign: Some(false),
             acl: EffectiveAcl {
                 workspaces: workspaces.into_iter().map(String::from).collect(),
                 ..Default::default()
@@ -314,6 +392,107 @@ mod tests {
             ctx.apply_to_request(&mut request);
             assert_eq!(request.zdr_mode, requested);
         }
+    }
+
+    fn retrieval_request_sovereign(sovereign_required: Option<bool>) -> RetrievalRequest {
+        let mut value = serde_json::json!({
+            "org_id": "body-org",
+            "query": "synthetic boundary test"
+        });
+        if let Some(v) = sovereign_required {
+            value["sovereign_required"] = serde_json::json!(v);
+        }
+        serde_json::from_value(value).expect("valid retrieval request")
+    }
+
+    /// Mirrors `signed_zdr_forces_http_request_to_ephemeral_without_downgrading_reject`.
+    /// No `Reject`-style exception here — sovereignty has no gradation to
+    /// preserve, a signed `sovereign=true` always wins outright.
+    #[test]
+    fn signed_sovereign_forces_every_request_to_required_regardless_of_caller() {
+        let ctx = AuthContext {
+            sovereign: Some(true),
+            ..ctx_with_acl(vec![])
+        };
+
+        for requested in [None, Some(false), Some(true)] {
+            let mut request = retrieval_request_sovereign(requested);
+            ctx.apply_to_request(&mut request);
+            assert_eq!(request.sovereign_required, Some(true));
+        }
+    }
+
+    #[test]
+    fn signed_non_sovereign_preserves_any_stricter_caller_posture() {
+        let ctx = ctx_with_acl(vec![]);
+        for requested in [None, Some(false), Some(true)] {
+            let mut request = retrieval_request_sovereign(requested);
+            ctx.apply_to_request(&mut request);
+            assert_eq!(request.sovereign_required, requested);
+        }
+    }
+
+    /// The regression this whole tri-state exists for.
+    ///
+    /// auth-core mints no `sovereign` claim, so every real token arrives with
+    /// `None`. When `None` was promoted to "required", `sovereign_required`
+    /// came out `Some(true)` for every request no matter what the caller asked
+    /// — and because Azure-hosted Cohere Embed v4 can never satisfy
+    /// sovereignty, every dense query returned HTTP 500. An absent claim must
+    /// therefore defer to the caller, NOT impose the strict posture.
+    #[test]
+    fn an_absent_sovereign_claim_defers_to_the_caller() {
+        let ctx = AuthContext {
+            sovereign: None,
+            ..ctx_with_acl(vec![])
+        };
+
+        for requested in [None, Some(false), Some(true)] {
+            let mut request = retrieval_request_sovereign(requested);
+            ctx.apply_to_request(&mut request);
+            assert_eq!(
+                request.sovereign_required, requested,
+                "an unknown claim must not override the caller's declaration"
+            );
+        }
+    }
+
+    /// Deferring is not failing open: a caller that declares nothing is still
+    /// strict, because `pipeline::retrieve` reads its own `None` as `true`.
+    /// This pins the half of that contract that lives here — the merge leaves
+    /// `None` alone rather than rewriting it to `Some(false)`.
+    #[test]
+    fn an_absent_claim_and_a_silent_caller_stay_undeclared_for_the_pipeline() {
+        let ctx = AuthContext {
+            sovereign: None,
+            ..ctx_with_acl(vec![])
+        };
+
+        let mut request = retrieval_request_sovereign(None);
+        ctx.apply_to_request(&mut request);
+        assert_eq!(
+            request.sovereign_required, None,
+            "must stay None so the pipeline's fail-closed default applies"
+        );
+        // The pipeline's rule, restated here so the two halves cannot drift.
+        assert!(
+            request.sovereign_required.unwrap_or(true),
+            "a silent caller must still resolve to sovereignty required"
+        );
+    }
+
+    /// A signed floor still cannot be relaxed — the fix must not have widened
+    /// anything for a token that actually asserts the requirement.
+    #[test]
+    fn a_signed_sovereign_floor_still_beats_an_opt_out() {
+        let ctx = AuthContext {
+            sovereign: Some(true),
+            ..ctx_with_acl(vec![])
+        };
+
+        let mut request = retrieval_request_sovereign(Some(false));
+        ctx.apply_to_request(&mut request);
+        assert_eq!(request.sovereign_required, Some(true));
     }
 
     #[test]

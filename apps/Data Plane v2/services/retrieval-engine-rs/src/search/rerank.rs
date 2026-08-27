@@ -7,7 +7,45 @@ use serde::{Deserialize, Serialize};
 use crate::pipeline::types::ScoredCandidate;
 
 const MAX_RETRIES: u32 = 2;
-const INITIAL_BACKOFF_MS: u64 = 300;
+/// First backoff step; doubles per attempt (1s, then 2s).
+///
+/// Was 300ms, which is why the reranker was effectively dead under load: the
+/// Azure Foundry S0 tier answers 429 with `Retry-After: 1` and a per-minute
+/// window, so retries at +300ms/+600ms all landed inside the same window and
+/// exhausted. Because rerank failure deliberately degrades to fused order, the
+/// only visible symptom was every candidate carrying `rerank_score: 0.0` —
+/// measured live at a 23% failure rate on light probe traffic, and worse in
+/// bursts. Worst-case added latency is 1s+2s=3s on a rate-limited query, which
+/// is the price of the cross-encoder actually running; a chronically limited
+/// deployment still degrades non-fatally exactly as before.
+const INITIAL_BACKOFF_MS: u64 = 1_000;
+/// Upper bound on a provider-supplied `Retry-After`, so a hostile or confused
+/// upstream cannot pin a retrieval request for a minute.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// Provider-directed backoff: prefer the 429's own `Retry-After` (seconds
+/// form) over the local schedule, since the provider knows its window and the
+/// local guess is what made retries useless before. Capped, and only ever
+/// LENGTHENS the local backoff — a `Retry-After: 0` must not turn the retry
+/// into a same-window hammer.
+fn backoff_for(attempt: u32, retry_after: Option<Duration>) -> Duration {
+    let local = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt.saturating_sub(1)));
+    match retry_after {
+        Some(hinted) => hinted.min(MAX_RETRY_AFTER).max(local),
+        None => local,
+    }
+}
+
+fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
 
 #[derive(Clone)]
 pub struct RerankClient {
@@ -32,6 +70,46 @@ mod security_tests {
         let error = sanitized_rerank_status_error(reqwest::StatusCode::BAD_GATEWAY).to_string();
         assert_eq!(error, "rerank API returned HTTP status 502");
         assert!(!error.contains("document"));
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::{backoff_for, MAX_RETRY_AFTER};
+    use std::time::Duration;
+
+    // Regression: the local schedule must clear the provider's advertised
+    // window. Azure Foundry S0 answers 429 with `Retry-After: 1`; the old
+    // 300ms/600ms schedule retried inside the same window and exhausted, which
+    // — because rerank failure is non-fatal by design — silently disabled the
+    // cross-encoder (23% of probe traffic degraded to fused order).
+    #[test]
+    fn local_schedule_clears_a_one_second_rate_window() {
+        assert!(backoff_for(1, None) >= Duration::from_secs(1));
+        assert_eq!(backoff_for(2, None), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn provider_retry_after_lengthens_but_never_shortens() {
+        // The provider knows its window better than the local guess does.
+        assert_eq!(
+            backoff_for(1, Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+        // A `Retry-After: 0` must not turn the retry into a same-window hammer.
+        assert_eq!(
+            backoff_for(1, Some(Duration::ZERO)),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn provider_retry_after_is_capped() {
+        // A hostile or confused upstream cannot pin a retrieval request.
+        assert_eq!(
+            backoff_for(1, Some(Duration::from_secs(3600))),
+            MAX_RETRY_AFTER
+        );
     }
 }
 
@@ -138,53 +216,7 @@ impl RerankClient {
             top_n,
         };
 
-        let rerank_resp = {
-            let mut last_err = None;
-            let mut result = None;
-
-            for attempt in 0..=MAX_RETRIES {
-                if attempt > 0 {
-                    let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1));
-                    tracing::warn!(attempt, ?backoff, "rerank retry");
-                    tokio::time::sleep(backoff).await;
-                }
-
-                let resp = match self.rerank_post().json(&body).send().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        last_err = Some(anyhow::anyhow!(e).context("rerank API call failed"));
-                        continue;
-                    }
-                };
-
-                if resp.status().is_server_error() || resp.status().as_u16() == 429 {
-                    let status = resp.status();
-                    last_err = Some(sanitized_rerank_status_error(status));
-                    continue;
-                }
-
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    return Err(sanitized_rerank_status_error(status));
-                }
-
-                result = Some(
-                    resp.json::<RerankResponse>()
-                        .await
-                        .context("parse rerank response")?,
-                );
-                break;
-            }
-
-            match result {
-                Some(r) => r,
-                None => {
-                    return Err(
-                        last_err.unwrap_or_else(|| anyhow::anyhow!("rerank retries exhausted"))
-                    )
-                }
-            }
-        };
+        let rerank_resp = self.send_with_retry(&body, Duration::ZERO).await?;
 
         // §14.2 NaN sanitization: if the rerank API returns NaN/Inf, downstream
         // ordering breaks (any comparison with NaN is `false`, so sort becomes
@@ -220,9 +252,70 @@ impl RerankClient {
         &self.model
     }
 
+    /// The one place a rerank HTTP call is made, with 429/5xx retry.
+    ///
+    /// Extracted because it used to exist only inline in the small-list path,
+    /// while `rerank_single` — the sharded path, which is the COMMON one, since
+    /// six fused arms routinely exceed `PARALLEL_SPLIT_AT` candidates — sent
+    /// bare requests. One 429 on any shard failed the whole rerank, and because
+    /// rerank failure deliberately degrades to fused order, the cross-encoder
+    /// was silently absent from most production queries (measured: 91 of 103
+    /// retrievals degraded during one eval window, all 429).
+    ///
+    /// `stagger` delays the FIRST attempt: `rerank_parallel` fires shards
+    /// concurrently, and against a per-second rate window simultaneous shards
+    /// guarantee that all but one 429 on arrival and then retry in lockstep.
+    /// Offsetting each shard's start spreads them across the window instead.
+    async fn send_with_retry(
+        &self,
+        body: &RerankRequest,
+        stagger: Duration,
+    ) -> anyhow::Result<RerankResponse> {
+        if !stagger.is_zero() {
+            tokio::time::sleep(stagger).await;
+        }
+        let mut last_err = None;
+        let mut retry_after: Option<Duration> = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let backoff = backoff_for(attempt, retry_after.take());
+                tracing::warn!(attempt, ?backoff, "rerank retry");
+                tokio::time::sleep(backoff).await;
+            }
+
+            let resp = match self.rerank_post().json(body).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = Some(anyhow::anyhow!(e).context("rerank API call failed"));
+                    continue;
+                }
+            };
+
+            if resp.status().is_server_error() || resp.status().as_u16() == 429 {
+                let status = resp.status();
+                retry_after = parse_retry_after(&resp);
+                last_err = Some(sanitized_rerank_status_error(status));
+                continue;
+            }
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                return Err(sanitized_rerank_status_error(status));
+            }
+
+            return resp
+                .json::<RerankResponse>()
+                .await
+                .context("parse rerank response");
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("rerank retries exhausted")))
+    }
+
     /// Shard the candidate list, rerank each shard concurrently, merge by
-    /// taking the top-N globally. We use a Vec of futures + `join_all` so
-    /// failure of one shard fails the whole call (caller already retries).
+    /// taking the top-N globally. A Vec of futures + `join_all`, so failure of
+    /// one shard fails the whole call — retries live INSIDE each shard's
+    /// `send_with_retry`; nothing above this retries (the postprocess stage
+    /// deliberately degrades to fused order instead).
     async fn rerank_parallel(
         &self,
         query: &str,
@@ -233,10 +326,22 @@ impl RerankClient {
         let per_chunk_top = top_n.max(8);
 
         let mut tasks = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
+        for (i, chunk) in chunks.into_iter().enumerate() {
             // Each chunk is reranked against the same query, asking for the
             // chunk's own top-N. We re-merge globally below.
-            tasks.push(self.rerank_single(query, chunk, per_chunk_top));
+            //
+            // Staggered starts: simultaneous shards against a per-second rate
+            // window guarantee all but one 429 on arrival, then retry in
+            // lockstep and 429 again — the split's whole latency benefit spent
+            // on synchronized failure. The offset spreads shard arrivals across
+            // the window; on an unthrottled provider it costs at most
+            // (shards-1) x 300ms, bounded by the small shard count.
+            tasks.push(self.rerank_single(
+                query,
+                chunk,
+                per_chunk_top,
+                Duration::from_millis(300) * i as u32,
+            ));
         }
 
         let results = futures::future::join_all(tasks).await;
@@ -263,6 +368,7 @@ impl RerankClient {
         query: &str,
         candidates: &[ScoredCandidate],
         top_n: usize,
+        stagger: Duration,
     ) -> anyhow::Result<Vec<ScoredCandidate>> {
         if candidates.is_empty() {
             return Ok(vec![]);
@@ -275,19 +381,7 @@ impl RerankClient {
             top_n,
         };
 
-        let resp = self
-            .rerank_post()
-            .json(&body)
-            .send()
-            .await
-            .context("rerank API call failed")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            return Err(sanitized_rerank_status_error(status));
-        }
-
-        let rerank_resp: RerankResponse = resp.json().await.context("parse rerank response")?;
+        let rerank_resp = self.send_with_retry(&body, stagger).await?;
 
         Ok(rerank_resp
             .results

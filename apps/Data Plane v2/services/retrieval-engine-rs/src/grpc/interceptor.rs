@@ -55,6 +55,9 @@ impl JwtVerifier {
         }
 
         let mut validation = Validation::new(Algorithm::RS256);
+        // "sovereign" deliberately NOT required here — see `Claims::sovereign`'s
+        // doc comment: auth-core does not emit it yet, and requiring it would
+        // reject every real token in production.
         validation.set_required_spec_claims(&["exp", "nbf", "aud", "iss", "sub", "zdr"]);
         validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[self.audience.as_str()]);
@@ -79,6 +82,7 @@ impl JwtVerifier {
             auth_method: AuthMethod::Jwt,
             scopes: claims.scopes,
             zdr: claims.zdr,
+            sovereign: claims.sovereign,
             acl: EffectiveAcl::default(),
             request_id: uuid::Uuid::new_v4().to_string(),
             verified_bearer: Some(token.to_owned()),
@@ -255,11 +259,18 @@ mod tests {
         org_id: &'a str,
         scopes: Vec<&'a str>,
         zdr: bool,
+        sovereign: bool,
         exp: usize,
         nbf: usize,
     }
 
     fn token(org_id: &str, zdr: bool) -> String {
+        // None of these tests are about sovereignty; `false` keeps them
+        // exercising exactly what they exercised before that claim existed.
+        token_with_sovereign(org_id, zdr, false)
+    }
+
+    fn token_with_sovereign(org_id: &str, zdr: bool, sovereign: bool) -> String {
         let now = chrono::Utc::now().timestamp() as usize;
         encode(
             &Header::new(Algorithm::RS256),
@@ -270,6 +281,7 @@ mod tests {
                 org_id,
                 scopes: vec![],
                 zdr,
+                sovereign,
                 exp: now + 300,
                 nbf: now.saturating_sub(5),
             },

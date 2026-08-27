@@ -1,8 +1,17 @@
 //! Recursive, structure-aware text chunker.
 //!
-//! Strategy (PR-E, phased — structural pass; DI-layout + Contextual Retrieval are
-//! wired behind flags in config and remain off until a Document Intelligence
-//! resource + per-chunk LLM budget are approved):
+//! Contextual Retrieval is NOT here. An earlier version of this header claimed
+//! it was "wired behind flags in config"; there were no such flags, and this was
+//! never the right home for it — `builder::process_document` runs its whole
+//! build inside one transaction holding `FOR UPDATE` row locks, so per-chunk LLM
+//! calls would hold those locks for minutes, and this module is deliberately
+//! pure and synchronous with no network client. It now lives in
+//! `embedding-engine-rs::provider::contextualize`, which already holds an
+//! org-bound inference credential, runs off the transaction critical path, and
+//! is the layer that decides what text gets embedded. DI-layout remains
+//! genuinely unbuilt, pending a Document Intelligence resource.
+//!
+//! Strategy (PR-E, phased — structural pass):
 //!   1. Split into structural segments. **Atomic** blocks — markdown tables and
 //!      fenced code — are kept whole (never sentence-split or paragraph-split), so
 //!      a table's rows can't be scattered across chunks (the single biggest recall

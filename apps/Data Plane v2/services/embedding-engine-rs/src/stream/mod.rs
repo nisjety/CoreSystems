@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::jetstream::{self, consumer::PullConsumer, Context as JsContext};
-use event_envelope_rs::{EventClaims, EventSigner, EventVerifier};
+use event_envelope_rs::{EnvelopeError, EventClaims, EventSigner, EventVerifier};
 use futures::StreamExt;
 
 use crate::batch::{self, BatchItem};
@@ -91,6 +91,21 @@ pub async fn run_consumer(
 ) -> anyhow::Result<()> {
     let mut buffer: Vec<(async_nats::jetstream::message::Message, BatchItem)> = Vec::new();
 
+    // Contextual Retrieval, built once for the consumer's lifetime rather than
+    // per batch: it owns a lazily-connected model-plane channel and a token
+    // cache, both of which are wasted if rebuilt per batch. `None` when the
+    // feature is off, which is the default — see `provider::contextualize`.
+    // A *misconfigured* enablement fails here, at startup, rather than silently
+    // degrading every batch to non-contextual embedding.
+    let contextualizer = crate::provider::contextualize::Contextualizer::from_config(&config)?;
+    match contextualizer.as_ref() {
+        Some(c) => tracing::info!(
+            model = c.model_name(),
+            "contextual retrieval ENABLED: one inference call per chunk on first embed"
+        ),
+        None => tracing::info!("contextual retrieval disabled (CONTEXTUAL_RETRIEVAL_ENABLED)"),
+    }
+
     // §16.2.3 — drain on shutdown. A separate task watches SIGTERM/Ctrl-C
     // and flips this flag; the consumer loop checks it after every fetch
     // batch so in-flight work either commits or NACKs cleanly before exit,
@@ -153,7 +168,60 @@ pub async fn run_consumer(
             ) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!(err = %e, subject = %subject, "rejected unauthorized event");
+                    // An EXPIRED envelope is not an attack — it is backlog, and
+                    // it must not be dropped silently.
+                    //
+                    // These events ride a durable queue (`max_age` 7 days) but
+                    // the envelope lives only 120s, so once the consumer is
+                    // more than two minutes behind, messages expire while
+                    // waiting their turn. This arm used to `ack()` them like a
+                    // forgery, which permanently discarded real work: the
+                    // `knowledge_units` row stayed `pending`, no failure was
+                    // recorded, and `index-engine`'s reconciler only re-drives
+                    // `failed` — so nothing ever healed it. A single
+                    // 95-document ingest lost 1,044 of 1,164 chunks this way.
+                    //
+                    // Marking the unit `failed` hands it to that existing
+                    // reconciler, which re-emits it under a FRESH envelope in
+                    // bounded batches. `EnvelopeError::Expired` is only ever
+                    // produced for an envelope that passed every other check
+                    // (signature, key id, issuer, scope, payload digest,
+                    // boundary fields), so the claims used here are
+                    // trustworthy; a forged envelope still lands in the `else`
+                    // and is still dropped.
+                    match e.downcast_ref::<EnvelopeError>() {
+                        Some(EnvelopeError::Expired(stale)) if subject == SUBJECT_CREATED => {
+                            let kid = serde_json::from_slice::<serde_json::Value>(&stale.payload)
+                                .ok()
+                                .and_then(|p| {
+                                    p["knowledge_id"].as_str().map(str::to_owned)
+                                })
+                                .unwrap_or_default();
+                            if kid.is_empty() {
+                                tracing::warn!(
+                                    subject = %subject,
+                                    "expired envelope carried no knowledge_id; cannot re-drive"
+                                );
+                            } else if let Err(error) = batch::mark_units_failed(
+                                &pool,
+                                std::slice::from_ref(&kid),
+                                "signed event envelope expired in the queue before this unit was                                  embedded; re-driven by the failed-embedding reconciler",
+                            )
+                            .await
+                            {
+                                tracing::error!(error = %error, knowledge_id = %kid, "could not mark expired unit for re-drive; it will stay pending");
+                            } else {
+                                tracing::warn!(
+                                    knowledge_id = %kid,
+                                    org_id = %stale.claims.org_id,
+                                    "event envelope expired in queue; unit marked failed for reconciler re-drive"
+                                );
+                            }
+                        }
+                        _ => {
+                            tracing::warn!(err = %e, subject = %subject, "rejected unauthorized event");
+                        }
+                    }
                     let _ = msg.ack().await;
                     continue;
                 }
@@ -253,6 +321,11 @@ pub async fn run_consumer(
                             zdr,
                             user_id: event_claims.user_id,
                             document_date,
+                            // Filled in by the batch pipeline, not here: the
+                            // context is generated from the whole document, and
+                            // attaching document text per chunk at enqueue time
+                            // would duplicate it once per chunk in the buffer.
+                            chunk_context: None,
                         },
                     ));
                 }
@@ -288,7 +361,9 @@ pub async fn run_consumer(
 
         // Process accumulated batch
         if !buffer.is_empty() {
-            let items: Vec<BatchItem> = buffer
+            // `mut`: the batch pipeline's Contextual Retrieval pass writes
+            // each item's embedded text in place before embedding.
+            let mut items: Vec<BatchItem> = buffer
                 .iter()
                 .map(|(_, item)| BatchItem {
                     knowledge_id: item.knowledge_id.clone(),
@@ -299,17 +374,19 @@ pub async fn run_consumer(
                     zdr: item.zdr,
                     user_id: item.user_id.clone(),
                     document_date: item.document_date,
+                    chunk_context: item.chunk_context.clone(),
                 })
                 .collect();
 
             match batch::process_batch(
-                &items,
+                &mut items,
                 &provider,
                 &qdrant,
                 &pool,
                 &config.qdrant_collection,
                 &nats,
                 event_security.signer.as_deref(),
+                contextualizer.as_ref(),
             )
             .await
             {

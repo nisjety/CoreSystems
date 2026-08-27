@@ -6,6 +6,7 @@ mod document_erasure_consumer;
 mod gdpr;
 mod gdpr_nats;
 mod image_consumer;
+mod media_consumer;
 mod provider;
 mod qdrant_writer;
 mod stream;
@@ -259,6 +260,89 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Audio + video arms. Gated only on the endpoint, not on the page-image
+    // event-signing switch above: the media subjects are a separate stream with
+    // their own DLQ, so they neither need nor imply the visual arm being on.
+    match provider::media::MediaEmbeddingProvider::from_config(&cfg) {
+        Ok(Some(media)) => {
+            tracing::info!(
+                endpoint = media.endpoint(),
+                "media embedding (audio/video) enabled"
+            );
+            let nats_client = nats_connection::connect(&cfg.nats_url).await?;
+            let js = async_nats::jetstream::new(nats_client.clone());
+            // Own the DLQ-stream ensure like the page-image consumer does, since
+            // this arm can be the only one running.
+            nats_connection::ensure_or_warn(&js).await;
+            // Two collections because the towers have different dimensions
+            // (CLAP 512 vs the video tower, 512 for X-CLIP / 768 for
+            // SigLIP 2) and Qdrant fixes size per
+            // collection. Ensure both even when the video tower is off, so
+            // enabling it later needs no bootstrap step.
+            for (name, dim) in [
+                (&cfg.qdrant_audio_collection, cfg.audio_embedding_dimension),
+                (&cfg.qdrant_video_collection, cfg.video_embedding_dimension),
+            ] {
+                if let Err(e) = qdrant_writer::ensure_collection(&qdrant, name, dim).await {
+                    tracing::warn!(error = %e, collection = %name, "media collection ensure failed; continuing");
+                }
+            }
+            // Caption-to-text: the temporal fix for the video arm. Off unless
+            // VIDEO_CAPTION_ENABLED — see
+            // docs/core-research/video-temporal-retrieval-gap-2026-08-25.md for
+            // why no embedding tower can do this, and why the answer is text.
+            //
+            // A MISCONFIGURED enablement warns and continues with captioning
+            // off, rather than taking the whole media arm down: the segment
+            // vectors are the primary function here and captions are additive.
+            let captioning = match provider::video_caption::VideoDescriber::from_config(&cfg) {
+                Ok(Some(describer)) => {
+                    tracing::info!(
+                        model = describer.model_name(),
+                        text_collection = %cfg.qdrant_collection,
+                        "video caption-to-text ENABLED: one vision call per video segment, \
+                         indexed into both text arms (restricted documents are skipped)"
+                    );
+                    Some(media_consumer::VideoCaptioning {
+                        describer,
+                        text_provider: provider.clone(),
+                        text_collection: cfg.qdrant_collection.clone(),
+                        pool: pool.clone(),
+                    })
+                }
+                Ok(None) => {
+                    tracing::info!("video caption-to-text disabled (VIDEO_CAPTION_ENABLED)");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "video caption-to-text misconfigured; continuing without captions");
+                    None
+                }
+            };
+            if let Err(e) = media_consumer::spawn(
+                js,
+                nats_client,
+                qdrant.clone(),
+                media,
+                media_consumer::MediaCollections {
+                    audio: cfg.qdrant_audio_collection.clone(),
+                    video: cfg.qdrant_video_collection.clone(),
+                },
+                captioning,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "media-segment subscriber failed to start; continuing");
+            }
+        }
+        Ok(None) => {
+            tracing::info!("media embedding disabled (MEDIA_EMBEDDER_ENDPOINT unset)")
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "media embedding misconfigured; continuing without audio/video arms")
+        }
+    }
+
     // Cross-plane GDPR organization-erasure consumer. Deliberately
     // independent of the embedding/wiki/page-image event_runtime above and
     // spawned as its own supervised task (not raced inside the
@@ -283,11 +367,14 @@ async fn main() -> anyhow::Result<()> {
         let gdpr_nats_user = std::env::var("EMBEDDING_ENGINE_GDPR_NATS_USER").unwrap_or_default();
         let gdpr_nats_password =
             std::env::var("EMBEDDING_ENGINE_GDPR_NATS_PASSWORD").unwrap_or_default();
-        let gdpr_collections = Arc::new(gdpr::PurgeCollections {
-            knowledge: cfg.qdrant_collection.clone(),
-            wiki: wiki_consumer::WIKI_COLLECTION.to_string(),
-            visual: cfg.qdrant_visual_collection.clone(),
-        });
+        let gdpr_collections = Arc::new(gdpr::PurgeCollections::from_config(
+            &cfg,
+            wiki_consumer::WIKI_COLLECTION,
+        ));
+        tracing::info!(
+            collections = ?gdpr_collections.all(),
+            "GDPR org-erasure will purge these collections"
+        );
         tokio::spawn(gdpr_nats::run_supervised(
             qdrant.clone(),
             gdpr_collections,

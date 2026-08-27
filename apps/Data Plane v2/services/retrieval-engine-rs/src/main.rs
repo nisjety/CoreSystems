@@ -308,6 +308,21 @@ async fn main() -> anyhow::Result<()> {
     // Visual RAG arm query embedder (Cohere Embed v4). Online only when
     // COHERE_EMBED_V4_ENDPOINT is set; otherwise the visual arm stays dark and
     // `w_visual` has no effect (text-only deployment).
+    // Audio/video arms. No key and no ZDR gate: the embedder is an in-cluster
+    // self-hosted sidecar, so there is nothing to authenticate to and nothing
+    // egresses. `None` simply leaves both arms dark.
+    let media_embedder = crate::embed::media::MediaQueryEmbedder::from_config(&cfg);
+    match &media_embedder {
+        Some(_) => tracing::info!(
+            audio_collection = %cfg.qdrant_audio_collection,
+            video_collection = %cfg.qdrant_video_collection,
+            w_audio = cfg.w_audio,
+            w_video = cfg.w_video,
+            "media query embedder (audio/video) enabled"
+        ),
+        None => tracing::info!("media query embedder disabled (MEDIA_EMBEDDER_ENDPOINT unset)"),
+    }
+
     let visual_embedder = match crate::embed::visual::VisualQueryEmbedder::from_config(&cfg) {
         Ok(Some(ve)) => {
             tracing::info!("visual query embedder (Embed v4) enabled");
@@ -382,6 +397,7 @@ async fn main() -> anyhow::Result<()> {
         event_signer: retrieval_event_signer,
         sparse_backend,
         visual_embedder,
+        media_embedder,
         colqwen,
         graph_remote,
         keyword_client,

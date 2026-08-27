@@ -66,6 +66,7 @@ async fn writes_one_row_per_event() {
         auth_method: AuthMethod::Jwt,
         scopes: vec!["read".into()],
         zdr: false,
+        sovereign: Some(false),
         acl: EffectiveAcl::allow_all(),
         request_id: "req-test-1".into(),
         verified_bearer: None,

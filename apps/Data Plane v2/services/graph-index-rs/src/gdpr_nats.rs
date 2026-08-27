@@ -87,8 +87,10 @@ pub async fn run_supervised(
     nats_user: String,
     nats_password: String,
 ) {
+    nats_connection::erasure_health::mark_enabled();
     loop {
         if let Err(e) = run_once(&store, &nats_url, &nats_user, &nats_password).await {
+            nats_connection::erasure_health::mark_connected(false);
             tracing::error!(err = %e, "graph-index GDPR erasure consumer stopped; retrying");
         }
         tokio::time::sleep(RECONNECT_BACKOFF).await;
@@ -125,6 +127,7 @@ async fn run_once(
     }
 
     let mut messages = consumer.messages().await?;
+    nats_connection::erasure_health::mark_connected(true);
     tracing::info!("graph-index GDPR erasure consumer ready");
 
     while let Some(msg) = messages.next().await {

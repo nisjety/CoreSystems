@@ -1,4 +1,4 @@
-.PHONY: up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell verevon-net go-tidy
+.PHONY: eval-retrieval eval-gate eval-check up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell verevon-net go-tidy
 
 SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unverified)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -180,6 +180,40 @@ auth-matrix:
 
 smoke:
 	./scripts/smoke-test.sh --with-auth-matrix
+
+# ── Retrieval quality eval ─────────────────────────────────────────────────────
+# Runs the judged golden set (87 hand-authored queries, scripts/eval-*) against
+# the two eval-fixture orgs and scores recall@10 / nDCG@10 / MRR with the
+# corrected goldenMetrics. Run BEFORE and AFTER any change to fusion weights,
+# rerank config, chunking, or embedding models — the 2026-08-26 sweeps are the
+# baseline evidence (see docker-compose.yml comments at W_BM25 / RERANK_TOP_K).
+# Requires: the stack up with the cross-plane overlay, the eval fixture applied
+# (scripts/eval-fixture-membership.sql), and the corpus ingested in
+# org-corpus-baseline / org-corpus-contextual.
+# EVAL_SCRATCH must contain: golden-v2.json + golden-v2-ctx.json (produced by
+# scripts/eval-build-golden-set.py) and seed-cred.txt (the corpus-seeder service
+# credential — a secret, deliberately never in the repo). Defaults to scripts/
+# so a colocated setup needs no arguments.
+eval-retrieval:
+	./scripts/eval-attribution-study.sh "$${EVAL_SCRATCH:-./scripts}"
+	python3 ./scripts/eval-score-attribution.py "$${EVAL_SCRATCH:-./scripts}"
+
+# CI gate: fails (exit 1) when a metric regresses past the measured noise floor,
+# or when the eval itself did not really run (too few queries scored, or queries
+# returning nothing — the shape every silent-stage failure in this service has
+# taken). Tolerances and their derivation live in scripts/eval-gate.py; the
+# committed baseline is scripts/eval-baseline.json, so a regression shows up as
+# a reviewable diff. Re-baseline deliberately:
+#   python3 scripts/eval-gate.py <results-dir> --update
+#
+# Do NOT pipe this target's commands into head/tail in CI — a pipeline exits
+# with the pager's status and would turn a failing gate into a green build.
+eval-gate:
+	python3 ./scripts/eval-gate.py "$${EVAL_SCRATCH:-./scripts}"
+
+# Full loop: measure, attribute, then gate. This is the one to run in CI and
+# before/after any change to fusion weights, rerank config, chunking or models.
+eval-check: eval-retrieval eval-gate
 
 test-security-scripts:
 	./tests/scripts/auth-regression-matrix-test.sh

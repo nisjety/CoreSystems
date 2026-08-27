@@ -86,6 +86,9 @@ pub async fn run_supervised(
     nats_user: String,
     nats_password: String,
 ) {
+    // Readiness is tracked in the shared crate so every Rust service on this
+    // subject reports the same states; see `nats_connection::erasure_health`.
+    nats_connection::erasure_health::mark_enabled();
     loop {
         if let Err(e) = run_once(
             &qdrant,
@@ -97,6 +100,7 @@ pub async fn run_supervised(
         )
         .await
         {
+            nats_connection::erasure_health::mark_connected(false);
             tracing::error!(err = %e, "embedding-engine GDPR erasure consumer stopped; retrying");
         }
         tokio::time::sleep(RECONNECT_BACKOFF).await;
@@ -135,6 +139,7 @@ async fn run_once(
     }
 
     let mut messages = consumer.messages().await?;
+    nats_connection::erasure_health::mark_connected(true);
     tracing::info!("embedding-engine GDPR erasure consumer ready");
 
     while let Some(msg) = messages.next().await {

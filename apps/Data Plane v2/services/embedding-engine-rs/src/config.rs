@@ -66,6 +66,29 @@ pub struct Config {
     #[serde(default = "default_visual_dim")]
     pub visual_embedding_dimension: u64,
 
+    // Audio + video arms, served by the self-hosted `media-embedder` sidecar
+    // (LAION-CLAP / X-CLIP or SigLIP 2). Both dark until `media_embedder_endpoint` is
+    // set, exactly like the visual arm above. Self-hosted out of necessity, not
+    // preference: Azure ships no audio-similarity embedder and its video
+    // analyzer is extraction rather than embedding — see
+    // docs/core-research/embedding-modality-and-rag-audit-2026-08-19.md §3.
+    #[serde(default)]
+    pub media_embedder_endpoint: String,
+    #[serde(default = "default_audio_collection")]
+    pub qdrant_audio_collection: String,
+    /// LAION-CLAP projection dim. Qdrant fixes vector size per collection, so
+    /// changing the tower (e.g. to GLAP) means a new collection, not a resize.
+    #[serde(default = "default_audio_dim")]
+    pub audio_embedding_dimension: u64,
+    #[serde(default = "default_video_collection")]
+    pub qdrant_video_collection: String,
+    /// Video tower projection dim: X-CLIP base-patch32 = 512 (the default),
+    /// SigLIP 2 base/patch16-224 = 768. A tower swap changes the SPACE, not
+    /// just the width, so it always means a new collection. Must match what
+    /// media-embedder's /healthz reports as `dim`.
+    #[serde(default = "default_video_dim")]
+    pub video_embedding_dimension: u64,
+
     #[serde(default = "default_admin_port")]
     pub admin_port: u16,
     #[serde(default = "default_batch_size")]
@@ -101,6 +124,110 @@ pub struct Config {
     pub cas_bucket: String,
     #[serde(default)]
     pub cas_endpoint_url: String,
+
+    // ── Contextual Retrieval (see `provider::contextualize`) ────────────────
+    //
+    // Prepends LLM-generated situating context to each chunk before embedding.
+    // OFF by default, and the default is load-bearing rather than cautious
+    // boilerplate: enabling it spends one inference call per chunk on every
+    // first-time embed, which is a real and unbounded per-tenant cost that
+    // should be a decision, not a side effect of deploying.
+    #[serde(default)]
+    pub contextual_retrieval_enabled: bool,
+    /// Model id passed to inference-core. No default: a silently-chosen model
+    /// would silently choose the cost. Required when the feature is enabled.
+    #[serde(default)]
+    pub contextual_retrieval_model: String,
+    /// Optional provider hint for inference-core's router. Empty = let the
+    /// Model Plane route by its own policy, which is the normal case.
+    #[serde(default)]
+    pub contextual_retrieval_provider_hint: String,
+    /// Chars of document text placed in the prompt. Documents are arbitrary
+    /// user uploads and can be megabytes; the cap is what stops one oversized
+    /// file from either exceeding the model's context window or costing
+    /// hundreds of times a normal document. ~48k chars ≈ 12k tokens.
+    #[serde(default = "default_contextual_max_document_chars")]
+    pub contextual_retrieval_max_document_chars: usize,
+    /// Output cap. The prompt asks for one or two sentences; 128 tokens leaves
+    /// headroom without inviting a paragraph that would dilute the chunk's own
+    /// terms in the embedding.
+    #[serde(default = "default_contextual_max_tokens")]
+    pub contextual_retrieval_max_tokens: i32,
+    #[serde(default = "default_contextual_timeout_ms")]
+    pub contextual_retrieval_timeout_ms: u64,
+    /// How many chunks of one document are contextualized concurrently. Bounded
+    /// so a single large document cannot open a hundred simultaneous inference
+    /// streams and crowd out every other tenant's embedding traffic.
+    #[serde(default = "default_contextual_concurrency")]
+    pub contextual_retrieval_concurrency: usize,
+    /// Retry attempts per chunk when inference answers with a transient status
+    /// (rate limit, unavailable, timeout).
+    ///
+    /// Without this, a provider rate limit silently costs coverage: the chunk
+    /// falls back to embedding raw, the ingest reports success, and nothing
+    /// records that the context is missing. A bulk backfill against an Azure
+    /// deployment with a per-minute quota is exactly the case that hits it —
+    /// measured 864 of 1,164 chunks (74%) contextualized before this existed,
+    /// with the shortfall entirely `ResourceExhausted`.
+    ///
+    /// 4 attempts with the backoff below spans ~30s per chunk, which covers the
+    /// 30-second window Azure's `Retry-After` asks for on this deployment.
+    #[serde(default = "default_contextual_retry_attempts")]
+    pub contextual_retrieval_retry_attempts: u32,
+    /// First backoff step; each subsequent attempt doubles it.
+    #[serde(default = "default_contextual_retry_base_ms")]
+    pub contextual_retrieval_retry_base_ms: u64,
+
+    // ── Caption-to-text for video (see `provider::video_caption`) ───────────
+    //
+    // Describes each video segment's filmstrip in ordered prose and indexes that
+    // prose as TEXT, which is the only way motion and ordering become
+    // retrievable — no video embedding tower distinguishes a video from its
+    // reverse (see docs/core-research/video-temporal-retrieval-gap-2026-08-25.md).
+    //
+    // OFF by default: one vision call per video segment is a real per-tenant
+    // cost, and unlike the rest of the media arm this path EGRESSES content, so
+    // it must be an explicit decision.
+    #[serde(default)]
+    pub video_caption_enabled: bool,
+    /// Vision model id passed to inference-core. No default, so the cost is
+    /// never chosen implicitly. Required when the feature is enabled.
+    #[serde(default)]
+    pub video_caption_model: String,
+    #[serde(default)]
+    pub video_caption_provider_hint: String,
+    /// Output cap. The prompt asks for two to four sentences; 256 tokens leaves
+    /// room for that without inviting an essay that dilutes the retrieval signal.
+    #[serde(default = "default_video_caption_max_tokens")]
+    pub video_caption_max_tokens: i32,
+    #[serde(default = "default_video_caption_timeout_ms")]
+    pub video_caption_timeout_ms: u64,
+}
+
+fn default_video_caption_max_tokens() -> i32 {
+    256
+}
+fn default_video_caption_timeout_ms() -> u64 {
+    60_000
+}
+
+fn default_contextual_max_document_chars() -> usize {
+    48_000
+}
+fn default_contextual_max_tokens() -> i32 {
+    128
+}
+fn default_contextual_timeout_ms() -> u64 {
+    30_000
+}
+fn default_contextual_concurrency() -> usize {
+    4
+}
+fn default_contextual_retry_attempts() -> u32 {
+    4
+}
+fn default_contextual_retry_base_ms() -> u64 {
+    2_000
 }
 
 fn default_deployment() -> String {
@@ -157,6 +284,21 @@ fn default_visual_collection() -> String {
 }
 fn default_visual_dim() -> u64 {
     1536
+}
+fn default_audio_collection() -> String {
+    "dataplane_audio_segments".into()
+}
+fn default_audio_dim() -> u64 {
+    512
+}
+fn default_video_collection() -> String {
+    "dataplane_video_segments_siglip2".into()
+}
+fn default_video_dim() -> u64 {
+    // SigLIP 2 base/patch16-224 (the default tower) projects to 768.
+    // X-CLIP base-patch32 would be 512 — switching towers means switching
+    // BOTH this and the collection, which is why the collection names the tower.
+    768
 }
 fn default_admin_port() -> u16 {
     9202

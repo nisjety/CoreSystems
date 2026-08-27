@@ -4,6 +4,7 @@ use std::fmt::Write as FmtWrite;
 use anyhow::Context;
 use sqlx::PgPool;
 
+use crate::provider::contextualize::Contextualizer;
 use crate::provider::EmbeddingProvider;
 use crate::qdrant_writer::{self, EmbeddingPoint};
 use event_envelope_rs::EventSigner;
@@ -33,19 +34,46 @@ pub struct BatchItem {
     /// connector-supplied date -- the retrieval decay stage treats that as no
     /// penalty, not maximum penalty.
     pub document_date: Option<chrono::DateTime<chrono::Utc>>,
+    /// Contextual Retrieval: LLM-generated sentences situating this chunk
+    /// inside its document. Populated by [`contextualize_items`] and `None`
+    /// whenever the feature is off, the document is restricted (ZDR), or
+    /// generation failed.
+    ///
+    /// The CONTEXT ALONE, not the chunk with the context prepended. The
+    /// composed form is a pure function of this plus `text`
+    /// (`compose_contextualized`), so materialising it here would just
+    /// duplicate the chunk. Storing them apart is also what lets the lexical
+    /// arm index the chunk's own words in exactly one field and the context in
+    /// another — BM25 sums across fields, so a composed string indexed next to
+    /// the chunk would score the chunk's terms twice.
+    ///
+    /// `text` stays the document's own words and remains what the Qdrant
+    /// payload carries and what callers are shown, so a citation never displays
+    /// a model's preamble. See `provider::contextualize`.
+    pub chunk_context: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)] // one optional collaborator added to an existing wide seam
 pub async fn process_batch(
-    items: &[BatchItem],
+    items: &mut [BatchItem],
     provider: &EmbeddingProvider,
     qdrant: &Qdrant,
     pool: &PgPool,
     collection: &str,
     nats: &async_nats::Client,
     event_signer: Option<&EventSigner>,
+    contextualizer: Option<&Contextualizer>,
 ) -> anyhow::Result<()> {
     if items.is_empty() {
         return Ok(());
+    }
+
+    // 0. Contextual Retrieval, before embedding because it changes what gets
+    //    embedded. Infallible and best-effort: on any failure the affected item
+    //    keeps `chunk_context = None` and its raw chunk is embedded, so an
+    //    inference outage degrades retrieval quality without failing an ingest.
+    if let Some(contextualizer) = contextualizer {
+        contextualize_items(items, contextualizer, pool).await;
     }
 
     let kid_list: Vec<String> = items.iter().map(|i| i.knowledge_id.clone()).collect();
@@ -73,7 +101,7 @@ pub async fn process_batch(
     // 2. Upsert to Qdrant
     let points: Vec<EmbeddingPoint> = items
         .iter()
-        .zip(vectors.into_iter())
+        .zip(vectors)
         .map(|(item, vec)| {
             let mut metadata = HashMap::new();
             // P2-3: threaded through as a plain RFC3339 string, matching every
@@ -99,6 +127,25 @@ pub async fn process_batch(
 
     // 3. Mark done in Postgres
     mark_units_done(pool, &kid_list).await?;
+
+    // 3b. Persist the situating context that produced these vectors.
+    //
+    // This is the LEXICAL half of Contextual Retrieval, not just bookkeeping:
+    // `content_tsv` is generated over `text` (weight A) and `chunk_context`
+    // (weight B), so writing the column is what makes the sparse arm contextual.
+    // One generation feeds both arms.
+    //
+    // Best-effort and AFTER the vectors are live, because the two halves fail
+    // independently: if this write fails the vectors are still contextual and
+    // retrieval still works, just with a non-contextual lexical arm for these
+    // units. Failing the batch instead would throw away good vectors over a
+    // recoverable write.
+    //
+    // No staleness hazard against the vector: the context and the vector are
+    // generated in the same pass from the same document text, so they always
+    // agree with each other. A later edit elsewhere in the document makes both
+    // equally old — exactly the freshness contract the vector already had.
+    persist_chunk_context(pool, items).await;
 
     // 4. Check if documents fully indexed
     let indexed_docs = check_documents_indexed(pool, &doc_ids).await?;
@@ -138,12 +185,16 @@ pub async fn process_batch(
     let cost_idempotency_key =
         make_idempotency_key("embed.cost", &kid_list.join(","), provider.model_name());
     let mut cost_groups: HashMap<(&str, Option<&str>, bool), (usize, usize)> = HashMap::new();
-    for item in items {
+    for item in items.iter() {
         let group = cost_groups
             .entry((item.org_id.as_str(), item.user_id.as_deref(), item.zdr))
             .or_default();
         group.0 += 1;
-        group.1 += item.text.len() / 4;
+        // Bill the text that was actually EMBEDDED, not the raw chunk.
+        // Contextual Retrieval makes the embedded string longer than
+        // `item.text`, so measuring the chunk would under-report every
+        // contextualized unit's embedding cost.
+        group.1 += embedded_text(item).len() / 4;
     }
     for ((org_id, user_id, zdr), (count, estimated_tokens)) in cost_groups {
         let cost_event = serde_json::json!({
@@ -188,6 +239,157 @@ fn encode_outbound_event(
     }
 }
 
+/// Contextual Retrieval pass over a mixed-org batch.
+///
+/// Infallible on purpose — every failure mode resolves to "leave
+/// `chunk_context` as `None`", which the embed step already handles by
+/// using the raw chunk. Propagating an error here would let a model-provider
+/// blip fail an ingest that has a perfectly good non-contextual path.
+///
+/// ## ZDR
+///
+/// Restricted (`zdr = true`) items are excluded before anything is read or
+/// sent. The exclusion happens at the *selection* step rather than inside the
+/// provider, so a restricted document's content is never even loaded for this
+/// purpose, let alone put in a prompt.
+///
+/// ## Why documents are fetched here rather than carried on the item
+///
+/// One document produces many chunks, so the document text would be duplicated
+/// once per chunk if the stream consumer attached it at enqueue time — for a
+/// megabyte document with 400 chunks that is hundreds of megabytes of buffer.
+/// Fetching once per distinct document at use time keeps it to one copy.
+/// The exact string handed to the embedding provider for one unit.
+///
+/// A single function so the embed call and the cost estimate cannot disagree
+/// about what was embedded — the bug that would otherwise appear here is billing
+/// the bare chunk while embedding the longer contextualized string.
+fn embedded_text(item: &BatchItem) -> String {
+    match item.chunk_context.as_deref() {
+        Some(context) => {
+            crate::provider::contextualize::compose_contextualized(context, &item.text)
+        }
+        None => item.text.clone(),
+    }
+}
+
+/// Whether one unit may be contextualized at all.
+///
+/// A standalone predicate rather than an inline `continue` so the ZDR exclusion
+/// is a named, directly-testable rule instead of a condition inside a loop. It
+/// is the ONLY place restricted content is filtered out of this path, so it is
+/// worth being able to point at.
+///
+/// * `zdr` — a restricted document's text must never reach a model provider.
+///   Excluding here, at selection, means its content is not even read from
+///   Postgres for this purpose, let alone placed in a prompt.
+/// * empty `document_id` — there is no document to situate the chunk within.
+fn contextualization_eligible(item: &BatchItem) -> bool {
+    !item.zdr && !item.document_id.is_empty()
+}
+
+async fn contextualize_items(
+    items: &mut [BatchItem],
+    contextualizer: &Contextualizer,
+    pool: &PgPool,
+) {
+    // Group eligible item indices by their owning (document_id, org_id). The
+    // org is part of the key, never assumed: `process_batch` deliberately mixes
+    // tenants in one buffer, so a document_id alone is not an identity here.
+    let mut by_document: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if !contextualization_eligible(item) {
+            continue;
+        }
+        by_document
+            .entry((item.document_id.clone(), item.org_id.clone()))
+            .or_default()
+            .push(index);
+    }
+    if by_document.is_empty() {
+        return;
+    }
+
+    let doc_ids: Vec<String> = by_document.keys().map(|(doc, _)| doc.clone()).collect();
+    let org_ids: Vec<String> = by_document.keys().map(|(_, org)| org.clone()).collect();
+
+    // Every row is matched on BOTH document_id and org_id via the paired
+    // unnest, so this cannot return another tenant's document even though the
+    // batch spans tenants and therefore cannot run in one org-scoped
+    // transaction (see `stream`'s note on why `process_batch` must not be
+    // org-scoped).
+    let rows: Vec<(String, String, Option<String>)> = match sqlx::query_as(
+        r#"
+        SELECT d.document_id, d.org_id, d.content
+        FROM documents d
+        JOIN unnest($1::text[], $2::text[]) AS t(document_id, org_id)
+          ON d.document_id = t.document_id AND d.org_id = t.org_id
+        WHERE d.deleted_at IS NULL
+        "#,
+    )
+    .bind(&doc_ids)
+    .bind(&org_ids)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                documents = by_document.len(),
+                "contextual retrieval: document content lookup failed; embedding raw chunks"
+            );
+            return;
+        }
+    };
+
+    let mut contents: HashMap<(String, String), String> = HashMap::new();
+    for (document_id, org_id, content) in rows {
+        if let Some(content) = content.filter(|c| !c.trim().is_empty()) {
+            contents.insert((document_id, org_id), content);
+        }
+    }
+
+    for ((document_id, org_id), indices) in by_document {
+        let Some(document_text) = contents.get(&(document_id.clone(), org_id.clone())) else {
+            // Content missing, empty, or the document was deleted between
+            // enqueue and now. Nothing to situate the chunk against.
+            continue;
+        };
+        let chunks: Vec<&str> = indices
+            .iter()
+            .map(|index| items[*index].text.as_str())
+            .collect();
+        let contexts = contextualizer
+            .contextualize_document(&org_id, document_text, &chunks)
+            .await;
+        if contexts.len() != indices.len() {
+            // The provider contract is one entry per chunk; a mismatch would
+            // mean attaching one chunk's context to another, so drop the whole
+            // document's contexts rather than risk a misalignment.
+            tracing::error!(
+                document_id = %document_id,
+                expected = indices.len(),
+                got = contexts.len(),
+                "contextual retrieval: misaligned context count; embedding raw chunks"
+            );
+            continue;
+        }
+        let mut applied = 0usize;
+        for (index, context) in indices.into_iter().zip(contexts) {
+            if let Some(context) = context {
+                items[index].chunk_context = Some(context);
+                applied += 1;
+            }
+        }
+        tracing::debug!(
+            document_id = %document_id,
+            applied,
+            "contextual retrieval: chunks contextualized"
+        );
+    }
+}
+
 async fn embed_items_by_org(
     items: &[BatchItem],
     provider: &EmbeddingProvider,
@@ -195,12 +397,18 @@ async fn embed_items_by_org(
     // Group by (org_id, zdr) so a restricted-doc batch carries the ZDR signal
     // distinctly from a non-restricted batch for the same org — the embed
     // egress guard then fires only for the restricted group.
+    //
+    // Contextual Retrieval: the EMBEDDED text is the chunk with its situating
+    // context prepended, composed here rather than stored composed. `item.text`
+    // remains what is persisted and shown — only the vector reflects the
+    // added context.
     let mut groups: HashMap<(&str, bool), Vec<(usize, String)>> = HashMap::new();
     for (index, item) in items.iter().enumerate() {
+        let embed_text = embedded_text(item);
         groups
             .entry((item.org_id.as_str(), item.zdr))
             .or_default()
-            .push((index, item.text.clone()));
+            .push((index, embed_text));
     }
 
     let mut vectors_by_index: Vec<Option<Vec<f32>>> = vec![None; items.len()];
@@ -214,7 +422,7 @@ async fn embed_items_by_org(
                 group.len()
             );
         }
-        for ((index, _), vector) in group.into_iter().zip(vectors.into_iter()) {
+        for ((index, _), vector) in group.into_iter().zip(vectors) {
             vectors_by_index[index] = Some(vector);
         }
     }
@@ -223,6 +431,62 @@ async fn embed_items_by_org(
         .into_iter()
         .map(|vector| vector.context("missing embedding vector"))
         .collect()
+}
+
+/// Store each unit's situating context. No-op when nothing was contextualized,
+/// which is the default state of the whole feature.
+///
+/// This write is what turns on contextual BM25: `knowledge_units.content_tsv` is
+/// a generated column over `text` at weight A and `chunk_context` at weight B,
+/// so the lexical arm starts matching the context the moment the column lands —
+/// no separate index build and no query change. The dense arm got the same
+/// context via the embedding a moment earlier, so both halves of the technique
+/// derive from this one generation.
+async fn persist_chunk_context(pool: &PgPool, items: &[BatchItem]) {
+    let mut kids: Vec<String> = Vec::new();
+    let mut contexts: Vec<String> = Vec::new();
+    for item in items {
+        if let Some(context) = item.chunk_context.as_deref() {
+            kids.push(item.knowledge_id.clone());
+            contexts.push(context.to_string());
+        }
+    }
+    if kids.is_empty() {
+        return;
+    }
+    let prompt_version = crate::provider::contextualize::PROMPT_VERSION;
+    // Keyed by knowledge_id only, which is content-derived and globally unique,
+    // so this needs no org predicate of its own — matching the sibling
+    // `mark_units_done` above and index-engine's `parent_window_text` refresh.
+    let result = sqlx::query(
+        r#"
+        UPDATE knowledge_units AS k
+           SET chunk_context = t.chunk_context,
+               context_prompt_version = $3
+          FROM unnest($1::text[], $2::text[]) AS t(knowledge_id, chunk_context)
+         WHERE k.knowledge_id = t.knowledge_id
+        "#,
+    )
+    .bind(&kids)
+    .bind(&contexts)
+    .bind(prompt_version)
+    .execute(pool)
+    .await;
+    match result {
+        Ok(done) => tracing::debug!(
+            rows = done.rows_affected(),
+            prompt_version,
+            "chunk context persisted (dense + lexical arms now both contextual)"
+        ),
+        Err(e) => tracing::warn!(
+            error = %e,
+            units = kids.len(),
+            // Worth being precise about the split failure: the vectors ARE
+            // contextual (that happened at embed time), only the lexical arm
+            // misses out until a re-embed rewrites the column.
+            "chunk context not persisted; vectors are live and contextual, but the lexical arm stays non-contextual for these units"
+        ),
+    }
 }
 
 async fn mark_units_done(pool: &PgPool, knowledge_ids: &[String]) -> anyhow::Result<()> {
@@ -352,6 +616,82 @@ fn make_idempotency_key(prefix: &str, a: &str, b: &str) -> String {
     out.push('-');
     let _ = write!(out, "{hash:016x}");
     out
+}
+
+#[cfg(test)]
+mod contextual_retrieval_tests {
+    use super::*;
+
+    fn item(document_id: &str, zdr: bool) -> BatchItem {
+        BatchItem {
+            knowledge_id: "kid-1".to_string(),
+            document_id: document_id.to_string(),
+            org_id: "org-1".to_string(),
+            chunk_index: 0,
+            text: "Margin improved to 31%.".to_string(),
+            zdr,
+            user_id: None,
+            document_date: None,
+            chunk_context: None,
+        }
+    }
+
+    /// The load-bearing guard: a restricted document's text must never be sent
+    /// to a model provider, so a ZDR unit is excluded before its document
+    /// content is even read.
+    #[test]
+    fn a_restricted_unit_is_never_contextualized() {
+        assert!(!contextualization_eligible(&item("doc-1", true)));
+        assert!(contextualization_eligible(&item("doc-1", false)));
+    }
+
+    #[test]
+    fn a_unit_with_no_owning_document_is_skipped() {
+        // Nothing to situate the chunk within, so there is no context to build.
+        assert!(!contextualization_eligible(&item("", false)));
+        // ZDR still dominates when both conditions apply.
+        assert!(!contextualization_eligible(&item("", true)));
+    }
+
+    /// Contextualization must change what is EMBEDDED without changing what is
+    /// stored or shown — a citation has to render the document's own words.
+    #[test]
+    fn the_embedded_text_is_contextualized_but_the_stored_text_is_not() {
+        let mut unit = item("doc-1", false);
+        let original = unit.text.clone();
+        unit.chunk_context = Some("From ACME's Q2 report.".to_string());
+
+        // What the embedder sees — the same helper `embed_items_by_org` uses.
+        let embedded = embedded_text(&unit);
+        assert!(embedded.starts_with("From ACME's Q2 report."));
+        assert!(embedded.ends_with(&original));
+
+        // What gets stored in the Qdrant payload and returned to callers.
+        assert_eq!(unit.text, original, "the chunk text must be untouched");
+    }
+
+    /// With no context generated, the embedded text must be byte-identical to
+    /// the chunk — the feature being off cannot perturb existing behaviour.
+    #[test]
+    fn without_a_generated_context_the_embedded_text_is_the_raw_chunk() {
+        let unit = item("doc-1", false);
+        assert_eq!(embedded_text(&unit), unit.text);
+    }
+
+    /// Billing follows the embedded text, not the chunk: a contextualized unit
+    /// genuinely costs more to embed, and the ledger must say so.
+    #[test]
+    fn the_cost_estimate_counts_the_contextualized_length() {
+        let raw = item("doc-1", false);
+        let mut contextualized = item("doc-1", false);
+        contextualized.chunk_context =
+            Some("A much longer situating preamble naming the report and period.".to_string());
+        let estimate = |unit: &BatchItem| embedded_text(unit).len() / 4;
+        assert!(
+            estimate(&contextualized) > estimate(&raw),
+            "a contextualized unit must not be billed as if it were the bare chunk"
+        );
+    }
 }
 
 #[cfg(test)]

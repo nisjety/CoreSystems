@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::jetstream::{self, consumer::PullConsumer, Context as JsContext};
-use event_envelope_rs::{EventClaims, EventVerifier};
+use event_envelope_rs::{EnvelopeError, EventClaims, EventVerifier};
 use futures::StreamExt;
 
 use crate::extractor::GraphExtractor;
@@ -242,7 +242,53 @@ pub async fn run_consumer(
                 match decode_event(event_verifier.as_deref(), SUBJECT, &msg.payload, redelivery) {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!(err = %e, "rejected unauthorized graph event");
+                        // An EXPIRED envelope is not a forgery and must not be
+                        // reported as one. `EnvelopeError::Expired` is produced
+                        // only after every authenticity check has already passed
+                        // (signature, key id, issuer, scope, payload digest,
+                        // boundary fields) — the sole thing that failed is the
+                        // clock window. Same distinction embedding-engine draws
+                        // in its `SUBJECT_CREATED` handler.
+                        //
+                        // This matters here more than anywhere else in the plane,
+                        // because graph extraction is INHERENTLY slow: one
+                        // inference call per chunk, tens of seconds per document.
+                        // A backlog of more than a couple of documents therefore
+                        // always outlives the envelope TTL (120s, max 300s), and
+                        // every document behind the head of the queue was being
+                        // dropped and acked — silently, logged as
+                        // "unauthorized", which reads as an attack rather than
+                        // latency. Observed: 12 documents announced, 2 extracted,
+                        // 10 discarded this way with the graph left empty.
+                        //
+                        // Dropping is still the behaviour (accepting an expired
+                        // envelope would weaken a real replay control, and this
+                        // service has no reconciler to hand it to), but it is now
+                        // an explicit, actionable signal naming the document to
+                        // re-announce. The durable fix is a reconciler for this
+                        // subject, or extraction fanned out behind a fresh
+                        // envelope per chunk.
+                        match e.downcast_ref::<EnvelopeError>() {
+                            Some(EnvelopeError::Expired(stale)) => {
+                                let doc = serde_json::from_slice::<serde_json::Value>(
+                                    &stale.payload,
+                                )
+                                .ok()
+                                .and_then(|p| {
+                                    p["document_id"].as_str().map(str::to_owned)
+                                })
+                                .unwrap_or_else(|| "<unknown>".to_string());
+                                tracing::error!(
+                                    document_id = %doc,
+                                    "graph event DROPPED: envelope authentic but expired \
+                                     (consumer is behind the envelope TTL). Extraction did \
+                                     NOT run for this document; re-announce it to retry."
+                                );
+                            }
+                            _ => {
+                                tracing::warn!(err = %e, "rejected unauthorized graph event");
+                            }
+                        }
                         let _ = msg.ack().await;
                         continue;
                     }
@@ -284,10 +330,46 @@ pub async fn run_consumer(
             // extraction. Filtering after the model call is too late: it would
             // disclose private/shared content to the extractor even when the
             // resulting graph rows were discarded.
-            let chunks = store
-                .load_org_visible_chunks(&org_id, doc_id)
-                .await
-                .unwrap_or_default();
+            // `unwrap_or_default()` also collapses a DB error into "no chunks",
+            // so the two cases are logged apart — an empty result is a routine
+            // policy skip, a query failure is not.
+            let chunks = match store.load_org_visible_chunks(&org_id, doc_id).await {
+                Ok(chunks) => chunks,
+                Err(e) => {
+                    tracing::error!(
+                        err = %e,
+                        document_id = doc_id,
+                        org_id = %org_id,
+                        "loading org-visible chunks failed; treating as no chunks"
+                    );
+                    Vec::new()
+                }
+            };
+
+            // Say so when a document is skipped by the visibility policy rather
+            // than extracted.
+            //
+            // Without this the run logged "graph extraction complete,
+            // entities=0" and acked — indistinguishable from extraction running
+            // and finding nothing, and the `all_failed` DLQ guard below is
+            // deliberately gated on `!chunks.is_empty()` so it stays quiet too.
+            // A whole 190-document corpus produced an empty graph this way, with
+            // every document reporting success in ~3ms: the corpus was ingested
+            // `visibility='private'` and this path only reads `'org'`.
+            //
+            // The filter itself is correct and must stay — graph entities are
+            // org-shared, so extracting a private document would leak its
+            // content org-wide through the graph arm. Only the silence was
+            // wrong.
+            if chunks.is_empty() {
+                tracing::info!(
+                    document_id = doc_id,
+                    org_id = %org_id,
+                    "graph extraction skipped: no org-visible live chunks \
+                     (documents must be visibility='org'; private/shared and \
+                     deleted documents are excluded by design)"
+                );
+            }
 
             let mut total_entities = 0usize;
             let mut total_rels = 0usize;

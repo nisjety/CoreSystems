@@ -21,6 +21,13 @@ WORKDIR /app
 RUN pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
+# bitsandbytes lives here rather than in requirements.txt because it is CUDA-only
+# (no MPS/CPU backend) and requirements.txt is also installed on the Apple-Silicon
+# verification path, where it would be dead weight at best. It backs
+# COLQWEN_QUANT=nf4|int8, which is what lets the model fit in real VRAM on a card
+# smaller than ~8 GB — see the COLQWEN_QUANT comment in app.py for the measured
+# numbers behind that.
+RUN pip3 install --no-cache-dir bitsandbytes==0.50.1
 
 COPY app.py .
 

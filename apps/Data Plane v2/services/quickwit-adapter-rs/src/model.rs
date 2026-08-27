@@ -22,6 +22,15 @@ pub struct QuickwitDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub body: String,
+    /// Contextual Retrieval: the LLM-generated sentences situating this chunk in
+    /// its document (`knowledge_units.chunk_context`). A separate searchable
+    /// field, never folded into `body` — `body` is what retrieval-engine-rs
+    /// returns as the candidate's text, and BM25 sums across fields, so merging
+    /// would both show a model's preamble in citations and score the chunk's own
+    /// terms twice. `None` for every non-contextualized entity, which is all of
+    /// them while the feature is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub site_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

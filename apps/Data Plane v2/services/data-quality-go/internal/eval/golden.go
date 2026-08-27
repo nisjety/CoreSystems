@@ -122,8 +122,23 @@ func (noGolden) Load(context.Context, string) (map[string][]string, error) {
 //   - MRR        = 1 / rank of the first relevant hit (0 when none)
 //
 // A retrieved ref matches on EITHER its document id or knowledge id, so
-// judgments can name whole documents or specific chunks. DCG credits each
-// relevant position (chunk-level gain); recall counts distinct judged ids.
+// judgments can name whole documents or specific chunks. Recall counts distinct
+// judged ids.
+//
+// DCG credits each judged id ONCE, at the rank where it was first retrieved, and
+// at most one gain per retrieved position. Both halves of that rule are load
+// bearing, because judgments are document-level while retrieval is chunk-level:
+// a document judged relevant typically has several of its chunks in the top 10.
+// Crediting every matching chunk made DCG count hits that IDCG — which assumes
+// one ideal item per judged id — has no room for, so the ratio ran past 1 (1.40
+// and 1.69 on two real 28-query runs) and the clamp below then reported a
+// flawless 1.0. That is the worse failure: an out-of-range number gets noticed,
+// whereas a saturated one looks like a passing score and silently stops
+// discriminating between a good ranking and a mediocre one.
+//
+// With one gain per newly-found id at strictly increasing ranks, the m credited
+// positions satisfy p_j >= j and m <= min(|R|,10), so DCG <= IDCG by
+// construction and the metric stays rank-sensitive.
 func goldenMetrics(retrieved []RetrievedRef, relevant []string) (recall, ndcg, mrr float64) {
 	if len(relevant) == 0 {
 		return 0, 0, 0
@@ -148,12 +163,24 @@ func goldenMetrics(retrieved []RetrievedRef, relevant []string) (recall, ndcg, m
 		if mrr == 0 {
 			mrr = 1.0 / float64(i+1)
 		}
-		dcg += 1.0 / math.Log2(float64(i)+2)
+		// A judged id already credited at an earlier rank earns no further
+		// gain, and one retrieved item earns at most one gain even when it
+		// satisfies both a document-level and a chunk-level judgment.
+		fresh := false
 		if docHit {
-			found[retrieved[i].DocumentID] = struct{}{}
+			if _, seen := found[retrieved[i].DocumentID]; !seen {
+				found[retrieved[i].DocumentID] = struct{}{}
+				fresh = true
+			}
 		}
 		if chunkHit {
-			found[retrieved[i].KnowledgeID] = struct{}{}
+			if _, seen := found[retrieved[i].KnowledgeID]; !seen {
+				found[retrieved[i].KnowledgeID] = struct{}{}
+				fresh = true
+			}
+		}
+		if fresh {
+			dcg += 1.0 / math.Log2(float64(i)+2)
 		}
 	}
 
@@ -168,6 +195,8 @@ func goldenMetrics(retrieved []RetrievedRef, relevant []string) (recall, ndcg, m
 	if idcg > 0 {
 		ndcg = dcg / idcg
 	}
+	// Unreachable given the accounting above; kept so an out-of-contract value
+	// can never escape to a dashboard if that accounting is ever changed.
 	if ndcg > 1 {
 		ndcg = 1
 	}

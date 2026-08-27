@@ -292,8 +292,20 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok", "service": "graph-index-rs"}))
 }
 
-async fn readyz() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"status": "ready", "service": "graph-index-rs"}))
+async fn readyz() -> impl axum::response::IntoResponse {
+    // The GDPR erasure consumer is part of readiness because its failure was
+    // otherwise invisible: the supervisor retries forever and only logs, so this
+    // process reported ready while org erasure silently stopped being applied.
+    let erasure = nats_connection::erasure_health::readiness();
+    let ok = erasure.is_ready();
+    (
+        if ok { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE },
+        Json(serde_json::json!({
+            "status": if ok { "ready" } else { "not_ready" },
+            "service": "graph-index-rs",
+            "checks": { "gdpr_erasure_consumer": erasure.as_str() }
+        })),
+    )
 }
 
 #[derive(Deserialize)]

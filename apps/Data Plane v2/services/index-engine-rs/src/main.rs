@@ -124,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("NATS_SHARED_URL not set; index-engine GDPR erasure consumer disabled");
             std::future::pending::<()>().await;
         }
+        nats_connection::erasure_health::mark_enabled();
         loop {
             let pool = gdpr_pool.clone();
             let nats_url = gdpr_nats_url.clone();
@@ -133,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!(%error, "GDPR erasure consumer failed; restarting")
                 }
             }
+            nats_connection::erasure_health::mark_connected(false);
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     };

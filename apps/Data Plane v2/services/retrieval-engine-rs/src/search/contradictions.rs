@@ -18,7 +18,7 @@ const CONTRADICTIONS_SQL: &str = "SELECT gc.claim_id, gc.claim_text, COALESCE(gc
      WHERE gc.org_id = $1
        AND jsonb_array_length(COALESCE(gc.contradicted_by_claim_ids, '[]')) > 0
        AND ($4::text IS NULL
-            OR to_tsvector('simple', gc.claim_text) @@ plainto_tsquery('simple', $4))
+            OR to_tsvector('simple', gc.claim_text) @@ websearch_to_tsquery('simple', $4))
        AND ($2::text IS NULL OR (
            jsonb_array_length(COALESCE(gc.source_refs, '[]')) > 0
            AND NOT EXISTS (
@@ -127,7 +127,12 @@ pub async fn search_contradictions(
     .bind(org_id)
     .bind(viewer)
     .bind(granted_ids)
-    .bind(query)
+    // OR-joined — see `search::textquery`; ANDed terms made the claim search
+    // match nothing, which is why the contradiction category was never
+    // emitted. `$4` is an OPTIONAL predicate (`$4::text IS NULL OR ...`), so a
+    // query that sanitizes to nothing binds NULL — "no text filter" — rather
+    // than an empty tsquery that would match no claim at all.
+    .bind(query.map(crate::search::textquery::fts_disjunction).filter(|q| !q.is_empty()))
     .bind(limit)
     .fetch_all(&mut *tx)
     .await?;

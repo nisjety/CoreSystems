@@ -45,7 +45,7 @@
 
 use async_nats::jetstream::{self, consumer::PullConsumer, AckKind};
 use futures::StreamExt;
-use metrics::{counter, histogram};
+use metrics::{counter, gauge, histogram};
 use sqlx::PgPool;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -62,21 +62,46 @@ const INBOX_PREFIX: &str = "_INBOX.RETRIEVAL_ENGINE_GDPR";
 /// misconfigured or momentarily-unavailable shared broker doesn't hot-loop.
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 
+/// Erasure-consumer readiness is tracked in the shared crate
+/// (`nats_connection::erasure_health`) rather than here: the failure it guards
+/// is identical in all five Rust services on this subject, and five copies of a
+/// state machine is how they drift apart.
+pub use nats_connection::erasure_health::{readiness, ErasureReadiness};
+use nats_connection::erasure_health::{mark_connected, mark_enabled};
+
 /// Run the GDPR erasure consumer until the process shuts down, reconnecting
 /// with a fixed backoff on any connect/bind failure or stream-end. Never
 /// returns under normal operation; the caller should `tokio::spawn` this and
 /// treat a returned error as a supervised-task log line, not a fatal one —
 /// the rest of the service must keep serving traffic if the shared broker is
 /// unreachable.
+///
+/// Retrying forever is why this failure used to be invisible, so the loop now
+/// also publishes its state: [`mark_connected`] drives `/readyz`, which starts
+/// failing once the outage outlives the shared grace window.
 pub async fn run_supervised(
     pool: PgPool,
     nats_url: String,
     nats_user: String,
     nats_password: String,
 ) {
+    mark_enabled();
     loop {
         if let Err(e) = run_once(&pool, &nats_url, &nats_user, &nats_password).await {
-            error!(error = %e, "retrieval-engine GDPR erasure consumer stopped; retrying");
+            mark_connected(false);
+            gauge!("dpv2_retrieval_gdpr_erasure_connected").set(0);
+            // Escalate the wording once past the grace window: the plain retry
+            // line is exactly what made this easy to scroll past.
+            if let ErasureReadiness::Stalled { seconds_down } = readiness() {
+                error!(
+                    error = %e,
+                    seconds_down,
+                    "retrieval-engine GDPR erasure consumer STALLED past the readiness grace; \
+                     org erasure is not being applied and /readyz is now failing"
+                );
+            } else {
+                error!(error = %e, "retrieval-engine GDPR erasure consumer stopped; retrying");
+            }
             counter!("dpv2_retrieval_gdpr_erasure_total", "result" => "connect_error").increment(1);
         }
         tokio::time::sleep(RECONNECT_BACKOFF).await;
@@ -111,6 +136,8 @@ async fn run_once(
     }
 
     let mut messages = consumer.messages().await?;
+    mark_connected(true);
+    gauge!("dpv2_retrieval_gdpr_erasure_connected").set(1);
     info!("retrieval-engine GDPR erasure consumer ready");
 
     while let Some(msg) = messages.next().await {

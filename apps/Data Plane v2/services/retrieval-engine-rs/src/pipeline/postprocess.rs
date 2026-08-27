@@ -284,6 +284,18 @@ pub struct TextRerank<'a> {
     /// retaining egress.
     pub requested: bool,
     pub out_n: usize,
+    /// How many fused candidates are handed to the cross-encoder — the
+    /// retrieve-wide / rerank-narrow window. The fused list here can be six
+    /// arms x top_k deep (~150+); sending all of it sharded the rerank into
+    /// several concurrent provider calls per query, which against the Azure
+    /// Foundry S0 per-second quota meant near-guaranteed 429s (measured 93 of
+    /// 94 queries degrading to fused order, retries included — retries cannot
+    /// fix a sustained 5x oversubscription). At or below the client's parallel
+    /// split (50) every query is exactly ONE provider call, cross-encoder
+    /// scores come from a single comparable scoring pass, and a candidate the
+    /// fusion put below rank ~50 was not going to crack the served top-10
+    /// anyway.
+    pub window: usize,
 }
 
 #[async_trait]
@@ -301,12 +313,14 @@ impl NodePostprocessor for TextRerank<'_> {
             ctx.rerank_used_count = 0;
             return Ok(nodes.into_iter().take(self.out_n).collect());
         };
-        let input_count = nodes.len();
-        match reranker.rerank(ctx.query, &nodes, self.out_n).await {
+        // `nodes` arrives in fused order, so the window keeps the fusion's best.
+        let window = self.window.max(self.out_n);
+        let windowed: Vec<ScoredCandidate> = nodes.iter().take(window).cloned().collect();
+        match reranker.rerank(ctx.query, &windowed, self.out_n).await {
             Ok(out) => {
                 // Deliberately NOT re-truncated: the reranker was asked for
                 // `out_n` and its output length is its own contract.
-                ctx.rerank_used_count = input_count;
+                ctx.rerank_used_count = windowed.len();
                 Ok(out)
             }
             Err(e) => {
@@ -699,6 +713,7 @@ mod tests {
             reranker: None,
             requested: true,
             out_n: 2,
+            window: 50,
         };
         let mut c = ctx();
         let got = stage
@@ -717,6 +732,7 @@ mod tests {
             reranker: None,
             requested: false,
             out_n: 1,
+            window: 50,
         };
         let mut c = ctx();
         let got = stage

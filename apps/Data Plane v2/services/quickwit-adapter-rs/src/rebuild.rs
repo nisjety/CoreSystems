@@ -228,6 +228,7 @@ pub async fn index_knowledge_unit_by_id(
             ku.org_id,
             ku.chunk_index,
             ku.text,
+            ku.chunk_context,
             ku.content_hash,
             ku.metadata AS knowledge_metadata,
             ku.updated_at AS knowledge_updated_at,
@@ -275,6 +276,7 @@ pub async fn index_document_knowledge_units(
             ku.org_id,
             ku.chunk_index,
             ku.text,
+            ku.chunk_context,
             ku.content_hash,
             ku.metadata AS knowledge_metadata,
             ku.updated_at AS knowledge_updated_at,
@@ -364,6 +366,9 @@ pub async fn index_wiki_event(
         source: Some("wiki".into()),
         title: string_field(event, &["title"]),
         body: string_field(event, &["content"]).unwrap_or_default(),
+        // Not a knowledge_unit, so there is no chunk context to index;
+        // Contextual Retrieval applies to document chunks only.
+        context_body: None,
         site_id: None,
         drive_id: None,
         item_id: None,
@@ -406,6 +411,7 @@ async fn rebuild_knowledge_units(
                 ku.org_id,
                 ku.chunk_index,
                 ku.text,
+                ku.chunk_context,
                 ku.content_hash,
                 ku.metadata AS knowledge_metadata,
                 ku.updated_at AS knowledge_updated_at,
@@ -602,6 +608,83 @@ fn retrieval_log_is_durable(zdr_mode: Option<&str>) -> bool {
             .as_deref(),
         None | Some("") | Some("off") | Some("disabled") | Some("reject")
     )
+}
+
+#[cfg(test)]
+mod contextual_bm25_tests {
+    use super::{knowledge_row_to_document, KnowledgeRow};
+    use chrono::Utc;
+    use serde_json::json;
+
+    fn row(chunk_context: Option<&str>) -> KnowledgeRow {
+        KnowledgeRow {
+            knowledge_id: "ku-1".into(),
+            document_id: "doc-1".into(),
+            org_id: "org-1".into(),
+            chunk_index: 0,
+            text: "The margin improved to 31 percent.".into(),
+            chunk_context: chunk_context.map(str::to_string),
+            content_hash: Some("h1".into()),
+            knowledge_metadata: json!({}),
+            knowledge_updated_at: Utc::now(),
+            source: "test".into(),
+            title: "ACME Q2".into(),
+            document_metadata: json!({}),
+            document_updated_at: Utc::now(),
+        }
+    }
+
+    /// The invariant that makes contextual BM25 safe on this backend: the
+    /// context goes in its OWN field. `body` must keep only the document's own
+    /// words, because (a) retrieval-engine-rs returns `body` as the candidate's
+    /// text and a citation must not show a model's preamble, and (b) BM25 sums
+    /// across fields, so a composed "context + chunk" string sitting next to the
+    /// chunk would score the chunk's own terms twice.
+    #[test]
+    fn context_is_a_separate_field_and_never_merged_into_body() {
+        let doc = knowledge_row_to_document(row(Some("This is from ACME's Q2 earnings report.")));
+
+        assert_eq!(
+            doc.body, "The margin improved to 31 percent.",
+            "body must stay the document's own words, verbatim"
+        );
+        assert_eq!(
+            doc.context_body.as_deref(),
+            Some("This is from ACME's Q2 earnings report.")
+        );
+        assert!(
+            !doc.body.contains("ACME"),
+            "the context must not leak into body: {}",
+            doc.body
+        );
+        // The chunk's own terms appear in exactly one searchable field.
+        assert!(!doc
+            .context_body
+            .as_deref()
+            .unwrap()
+            .contains("31 percent"));
+    }
+
+    /// Non-contextualized units are the default state (the feature ships off),
+    /// so this is the common path, not an edge case. `context_body` is
+    /// `skip_serializing_if = "Option::is_none"`, so the field must be absent
+    /// from the wire payload rather than sent as an empty string that would
+    /// index a phantom term.
+    #[test]
+    fn a_unit_with_no_context_omits_the_field_entirely() {
+        let doc = knowledge_row_to_document(row(None));
+        assert_eq!(doc.context_body, None);
+
+        let wire = serde_json::to_value(&doc).expect("serializable");
+        assert!(
+            !wire.as_object().expect("object").contains_key("context_body"),
+            "an absent context must not be sent as an empty field"
+        );
+        // And a contextualized one must actually reach the wire.
+        let with = knowledge_row_to_document(row(Some("From the Q2 report.")));
+        let wire = serde_json::to_value(&with).expect("serializable");
+        assert_eq!(wire["context_body"], "From the Q2 report.");
+    }
 }
 
 #[cfg(test)]
@@ -927,6 +1010,8 @@ struct KnowledgeRow {
     org_id: String,
     chunk_index: i32,
     text: String,
+    /// Contextual Retrieval; NULL unless embedding-engine-rs generated one.
+    chunk_context: Option<String>,
     content_hash: Option<String>,
     knowledge_metadata: Value,
     knowledge_updated_at: DateTime<Utc>,
@@ -956,6 +1041,8 @@ fn knowledge_row_to_document(row: KnowledgeRow) -> QuickwitDocument {
         source: Some(row.source),
         title: Some(row.title),
         body: row.text,
+        // Indexed and searched; deliberately NOT merged into `body` above.
+        context_body: row.chunk_context,
         site_id: string_field(lookup, &["site_id"])
             .or_else(|| string_field(fallback, &["site_id"])),
         drive_id: string_field(lookup, &["drive_id"])
@@ -1016,6 +1103,9 @@ fn wiki_version_row_to_document(row: WikiVersionRow) -> QuickwitDocument {
         source: Some("wiki".into()),
         title: Some(row.title),
         body: row.content.unwrap_or_default(),
+        // Not a knowledge_unit, so there is no chunk context to index;
+        // Contextual Retrieval applies to document chunks only.
+        context_body: None,
         site_id: None,
         drive_id: None,
         item_id: None,
@@ -1074,6 +1164,9 @@ fn source_object_row_to_document(row: SourceObjectRow) -> QuickwitDocument {
             .flatten()
             .collect::<Vec<_>>()
             .join("\n"),
+        // Not a knowledge_unit, so there is no chunk context to index;
+        // Contextual Retrieval applies to document chunks only.
+        context_body: None,
         site_id: row.site_id,
         drive_id: row.drive_id,
         item_id: row.item_id,
@@ -1118,6 +1211,9 @@ fn retrieval_run_row_to_document(row: RetrievalRunRow) -> QuickwitDocument {
         source: Some("retrieval".into()),
         title: Some("Retrieval query".into()),
         body: row.query,
+        // Not a knowledge_unit, so there is no chunk context to index;
+        // Contextual Retrieval applies to document chunks only.
+        context_body: None,
         site_id: None,
         drive_id: None,
         item_id: None,
@@ -1164,6 +1260,9 @@ fn wiki_source_log_row_to_document(row: WikiSourceLogRow) -> QuickwitDocument {
         source: Some("wiki_source_log".into()),
         title: Some(row.title),
         body: metadata.to_string(),
+        // Not a knowledge_unit, so there is no chunk context to index;
+        // Contextual Retrieval applies to document chunks only.
+        context_body: None,
         site_id: None,
         drive_id: None,
         item_id: None,

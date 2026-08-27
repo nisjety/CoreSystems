@@ -1,6 +1,8 @@
 pub mod dlq;
+pub mod erasure_health;
 
 pub use dlq::{ensure_dlq_stream, ensure_or_warn, DLQ_STREAM_NAME, DLQ_SUBJECT_FILTER};
+pub use erasure_health::{ErasureReadiness, READINESS_GRACE};
 
 /// Connect to NATS using the Data Plane's token from a dedicated environment
 /// variable. Credentials are deliberately kept out of the URL so they cannot

@@ -218,6 +218,10 @@ async fn audit_unauthorized(
         auth_method: method,
         scopes: vec![],
         zdr: true,
+        // A rejected request has no verified claims to read a real posture
+        // from — strict placeholder, matching `zdr: true` above, not the
+        // permissive default.
+        sovereign: Some(true),
         acl: crate::authz::EffectiveAcl::default(),
         request_id: request_id.to_string(),
         verified_bearer: None,
@@ -252,6 +256,7 @@ fn auth_context_from_verified_claims(
         auth_method: crate::authz::AuthMethod::Jwt,
         scopes: claims.scopes.clone(),
         zdr: claims.zdr,
+        sovereign: claims.sovereign,
         acl: crate::authz::EffectiveAcl::allow_all(),
         request_id,
         verified_bearer: Some(token),
@@ -285,6 +290,9 @@ fn strict_validation_for(
     }
 
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    // "sovereign" deliberately NOT required here — see `Claims::sovereign`'s
+    // doc comment: auth-core does not emit it yet, and requiring it would
+    // reject every real token in production.
     validation.set_required_spec_claims(&["exp", "nbf", "aud", "iss", "sub", "zdr"]);
     validation.set_issuer(&[issuer]);
     validation.set_audience(&[audience]);
@@ -391,6 +399,7 @@ mod auth_security_tests {
             "org_id": "org-a",
             "scopes": [],
             "zdr": false,
+            "sovereign": false,
             "exp": now + 300,
             "nbf": now.saturating_sub(5),
         })
@@ -432,6 +441,86 @@ mod auth_security_tests {
         .expect("valid retrieval request");
         ctx.apply_to_request(&mut request);
         assert_eq!(request.zdr_mode, Some(ZdrMode::Ephemeral));
+    }
+
+    /// Near-mirror of `http_verifier_requires_a_boolean_signed_zdr_claim`, with
+    /// one deliberate difference: a PRESENT `sovereign` claim must be a real
+    /// boolean (a string or number rejects at decode time, same as `zdr`), but
+    /// an ABSENT one decodes as `None` — unknown — rather than rejecting or
+    /// being promoted to "required".
+    ///
+    /// It cannot be hard-required, because auth-core mints no such claim and
+    /// requiring it would reject every token. It must not be promoted either:
+    /// doing so applied the strict posture to every token, and the strict
+    /// posture is unsatisfiable by the Azure-hosted embedding provider, so every
+    /// dense retrieval 500'd. `None` defers to the caller's request field, which
+    /// still fails closed when the caller declares nothing.
+    #[test]
+    fn http_verifier_requires_a_boolean_signed_sovereign_claim() {
+        let (encoding, decoding) = keys();
+        for invalid_sovereign in [Some(json!("false")), Some(json!(0))] {
+            let mut claims = valid_claims();
+            match invalid_sovereign {
+                Some(value) => claims["sovereign"] = value,
+                None => {
+                    claims
+                        .as_object_mut()
+                        .expect("object claims")
+                        .remove("sovereign");
+                }
+            }
+            let token = signed_token(&claims, &encoding);
+            let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+            assert!(
+                decode_verified_claims(&token, &decoding, &validation).is_err(),
+                "non-boolean signed sovereign posture must be rejected"
+            );
+        }
+
+        // auth-core does not emit a "sovereign" claim yet — an absent claim must
+        // decode successfully as UNKNOWN (`None`), not error and not be silently
+        // promoted to "required". Promoting it made the strict posture apply to
+        // every token, and because the strict posture is unsatisfiable by the
+        // Azure-hosted embedding provider, every dense query 500'd.
+        let mut claims = valid_claims();
+        claims
+            .as_object_mut()
+            .expect("object claims")
+            .remove("sovereign");
+        let token = signed_token(&claims, &encoding);
+        let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+        let claims = decode_verified_claims(&token, &decoding, &validation)
+            .expect("absent sovereign claim must decode rather than fail closed");
+        assert_eq!(
+            claims.sovereign, None,
+            "absent sovereign claim must decode as unknown, not as required"
+        );
+
+        let mut restrictive = valid_claims();
+        restrictive["sovereign"] = json!(true);
+        let token = signed_token(&restrictive, &encoding);
+        let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+        let claims = decode_verified_claims(&token, &decoding, &validation)
+            .expect("signed boolean posture is valid");
+        assert_eq!(
+            claims.sovereign,
+            Some(true),
+            "verified posture must reach the HTTP boundary"
+        );
+
+        let ctx = auth_context_from_verified_claims(&claims, "request-1".into(), token);
+        let mut request: RetrievalRequest = serde_json::from_value(json!({
+            "org_id": "org-a",
+            "query": "synthetic boundary query",
+            "sovereign_required": false
+        }))
+        .expect("valid retrieval request");
+        ctx.apply_to_request(&mut request);
+        assert_eq!(
+            request.sovereign_required,
+            Some(true),
+            "a signed sovereign=true claim must floor the request regardless of what it asked for"
+        );
     }
 
     fn signed_token(claims: &Value, key: &EncodingKey) -> String {
@@ -1499,6 +1588,9 @@ fn pack_retrieval_request(
         context_budget_tokens: Some(req.context_budget_tokens),
         context_format: Some(req.context_format),
         zdr_mode: req.zdr_mode,
+        // No wire field on `PackRequest` for this yet — `apply_to_request`
+        // below floors it from the verified claim regardless.
+        sovereign_required: None,
         user_id: None,
         verified_bearer: None,
         query_expansion: None,
@@ -2407,7 +2499,14 @@ async fn readyz(State(pipeline): State<AppState>) -> impl IntoResponse {
         None => true,
     };
 
-    let all_ok = pg_ok && qdrant_ok && cache_ok;
+    // GDPR erasure consumer. Included because its failure was otherwise
+    // invisible: the supervisor retries forever and only logs, so the process
+    // reported healthy while org erasure silently stopped. `Disabled` and
+    // `Reconnecting` are ready; only a stall past the grace window is not.
+    let erasure = crate::gdpr::consumer::readiness();
+    let erasure_ok = erasure.is_ready();
+
+    let all_ok = pg_ok && qdrant_ok && cache_ok && erasure_ok;
     let status = if all_ok {
         StatusCode::OK
     } else {
@@ -2420,7 +2519,12 @@ async fn readyz(State(pipeline): State<AppState>) -> impl IntoResponse {
             "status": if all_ok { "ready" } else { "not_ready" },
             "service": "retrieval-engine-rs",
             "sparse_backend": pipeline.sparse_backend.name(),
-            "checks": { "postgres": pg_ok, "qdrant": qdrant_ok, "cache": cache_ok }
+            "checks": {
+                "postgres": pg_ok,
+                "qdrant": qdrant_ok,
+                "cache": cache_ok,
+                "gdpr_erasure_consumer": erasure.as_str()
+            }
         })),
     )
 }
@@ -2493,6 +2597,7 @@ mod admin_security_tests {
             auth_method: AuthMethod::Jwt,
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             zdr: false,
+            sovereign: Some(false),
             acl: EffectiveAcl::allow_all(),
             request_id: "request-1".into(),
             verified_bearer: None,
@@ -2656,6 +2761,7 @@ mod auxiliary_security_tests {
             auth_method: AuthMethod::Jwt,
             scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
             zdr: false,
+            sovereign: Some(false),
             acl: EffectiveAcl::allow_all(),
             request_id: "aux-security-test".into(),
             verified_bearer: None,

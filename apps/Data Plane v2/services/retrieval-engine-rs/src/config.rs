@@ -48,6 +48,16 @@ pub struct Config {
     pub cohere_api_key: Option<String>,
     #[serde(default = "default_reranker_model")]
     pub reranker_model: String,
+    /// Retrieve-wide / rerank-narrow window: how many fused candidates the
+    /// cross-encoder scores per query. The six-arm fused list can run 150+
+    /// deep; sending all of it sharded each query into several concurrent
+    /// provider calls, which against the Foundry S0 per-second quota meant
+    /// near-total 429 degradation (93/94 queries measured). At 50 — the
+    /// client's parallel-split boundary — every query is exactly one provider
+    /// call and one comparable scoring pass, and a candidate fused below rank
+    /// 50 was not reaching the served top-10 anyway.
+    #[serde(default = "default_rerank_top_k")]
+    pub rerank_top_k: usize,
     // Rerank endpoint. Default = public Cohere. Set RERANK_ENDPOINT to an Azure
     // AI Foundry serverless Cohere rerank URL (and RERANK_USE_API_KEY=true) to
     // use the in-EU deployment instead of the public API.
@@ -90,6 +100,26 @@ pub struct Config {
     pub w_wiki: f32,
     #[serde(default = "default_w_visual")]
     pub w_visual: f32,
+    // Audio/video arms. Default 0.0 — SHADOW, not off-by-accident: these are the
+    // newest and least-proven arms, and neither has been run against the golden
+    // eval set. The visual arm launched at 0.05 only after eval; these stay at
+    // zero until they earn a weight the same way. The arms still embed and
+    // search when weighted, so flipping this is a config change, not a build.
+    #[serde(default = "default_w_media")]
+    pub w_audio: f32,
+    #[serde(default = "default_w_media")]
+    pub w_video: f32,
+    /// Whether the box `media-embedder` runs on is Norwegian-operated
+    /// infrastructure. Self-hosted does not imply sovereign — it only implies
+    /// nothing egresses, which is a ZDR property, not a jurisdiction one.
+    /// Defaults `false`: an unset/unproven claim is `Global`, never
+    /// `Sovereign`, the same doctrine `Residency::classify` already applies
+    /// to every Model Plane provider. Flip this only once the operator can
+    /// actually name the datacenter and confirm it is Norwegian-operated —
+    /// as of 2026-08-22 this has not been established (development has run
+    /// on a laptop), so the safe default is load-bearing, not a placeholder.
+    #[serde(default)]
+    pub media_embedder_sovereign: bool,
     // Keyword arm — Meilisearch typo-tolerant exact-ID/code lookup. Small
     // default (0.05, same calibration as `w_visual` when it launched): a
     // new, unproven arm should start with a modest, provable contribution
@@ -118,6 +148,31 @@ pub struct Config {
     pub cohere_embed_v4_deployment: String,
     #[serde(default = "default_embed_v4_api_version")]
     pub cohere_embed_v4_api_version: String,
+
+    // Audio + video arms, served by the self-hosted `media-embedder` sidecar
+    // (LAION-CLAP for audio, X-CLIP or SigLIP 2 for video). Both arms are dark until
+    // `media_embedder_endpoint` is set, exactly like the visual arm and the
+    // ColQwen reranker — so an unset endpoint costs nothing and never errors.
+    //
+    // These are self-hosted because there is no cloud alternative, not as a
+    // preference: Azure ships no audio-similarity embedding model, and its video
+    // analyzer is extraction/description rather than a dense embedder. See
+    // `docs/core-research/embedding-modality-and-rag-audit-2026-08-19.md` §3.
+    #[serde(default)]
+    pub media_embedder_endpoint: String,
+    #[serde(default = "default_audio_collection")]
+    pub qdrant_audio_collection: String,
+    /// LAION-CLAP's projection dim. Must match the collection's configured size;
+    /// swapping to GLAP (the audit's upgrade path) changes this.
+    #[serde(default = "default_audio_dim")]
+    pub audio_embedding_dimension: usize,
+    #[serde(default = "default_video_collection")]
+    pub qdrant_video_collection: String,
+    /// Video tower projection dim: X-CLIP base-patch32 = 512 (the default),
+    /// SigLIP 2 base/patch16-224 = 768. Must equal the indexing side — a width
+    /// mismatch fails every search, not every write.
+    #[serde(default = "default_video_dim")]
+    pub video_embedding_dimension: usize,
 
     // ColQwen visual reranker (late-interaction MaxSim over Embed-v4's top-K
     // page-image candidates). ON by default, but a no-op until
@@ -280,6 +335,9 @@ fn default_model_plane_inference_retention_posture() -> String {
 fn default_embedding_dim() -> usize {
     3072
 }
+fn default_rerank_top_k() -> usize {
+    50
+}
 fn default_reranker_model() -> String {
     "rerank-english-v3.0".into()
 }
@@ -346,6 +404,24 @@ fn default_recency_decay_half_life_days() -> f32 {
 }
 fn default_query_expansion_blend_weight() -> f32 {
     0.5
+}
+fn default_w_media() -> f32 {
+    0.0
+}
+fn default_audio_collection() -> String {
+    "dataplane_audio_segments".into()
+}
+fn default_audio_dim() -> usize {
+    512
+}
+fn default_video_collection() -> String {
+    "dataplane_video_segments_siglip2".into()
+}
+fn default_video_dim() -> usize {
+    // SigLIP 2 base/patch16-224 (the default tower) projects to 768.
+    // X-CLIP base-patch32 would be 512 — switching towers means switching
+    // BOTH this and the collection, which is why the collection names the tower.
+    768
 }
 fn default_embed_v4_deployment() -> String {
     "Cohere-embed-4".into()

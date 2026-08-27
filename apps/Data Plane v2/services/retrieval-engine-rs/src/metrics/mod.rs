@@ -82,6 +82,19 @@ pub fn record_zero_results(org_id: &str) {
     counter!("dpv2_retrieval_zero_results_total", "org_id" => org_id.to_string()).increment(1);
 }
 
+/// Retrieval-result cache outcomes, counted per org so a tenant whose hit rate
+/// collapses (churning corpus bumping `org_version`, or a per-user grant set
+/// that fragments the scope) is visible without reading logs. Hits and misses
+/// are separate counters rather than a ratio gauge so both the rate and the
+/// absolute volume survive aggregation.
+pub fn record_retrieval_cache_hit(org_id: &str) {
+    counter!("dpv2_retrieval_cache_hits_total", "org_id" => org_id.to_string()).increment(1);
+}
+
+pub fn record_retrieval_cache_miss(org_id: &str) {
+    counter!("dpv2_retrieval_cache_misses_total", "org_id" => org_id.to_string()).increment(1);
+}
+
 pub fn record_audit_write_failure(org_id: &str) {
     counter!("dpv2_audit_write_failures_total", "org_id" => org_id.to_string()).increment(1);
 }

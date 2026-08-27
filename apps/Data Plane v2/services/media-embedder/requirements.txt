@@ -1,0 +1,23 @@
+# Both towers are native to transformers, which is what keeps this file short.
+#
+# Audio — LAION-CLAP: ClapModel/ClapProcessor ship in transformers, so the audio
+# tower needs no third-party model package. That is what makes it CPU-viable and
+# deployable without waiting for GPU capacity, per
+# docs/core-research/embedding-modality-and-rag-audit-2026-08-19.md §3.
+#
+# Video — SigLIP 2 over ffmpeg-sampled frames: also native to transformers
+# (AutoModel/AutoProcessor). This replaced LanguageBind, which was the only
+# reason this file used to carry an opt-in extras install of decord, av,
+# pytorchvideo, opencv, timm and ftfy — ~2 GB of wheels, several unmaintained,
+# needed purely to make it import. None of that is required now; the video arm
+# needs ffmpeg (already installed for audio) plus pillow to hand frames to the
+# processor. See app.py's module docstring for the full rationale.
+transformers>=4.51,<5
+fastapi>=0.110
+uvicorn[standard]>=0.27
+httpx>=0.27
+numpy>=1.26
+# Frame decode for the video tower. Small, maintained, and required by the
+# transformers image processors regardless of tower.
+pillow>=10.3
+# torch is installed separately (CPU or CUDA wheel, chosen in the Dockerfile).

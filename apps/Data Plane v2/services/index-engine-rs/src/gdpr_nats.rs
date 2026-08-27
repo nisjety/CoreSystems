@@ -86,6 +86,7 @@ pub async fn run(pool: PgPool, nats_url: String) -> anyhow::Result<()> {
     }
 
     let mut messages = consumer.messages().await?;
+    nats_connection::erasure_health::mark_connected(true);
     info!("index-engine GDPR erasure consumer ready");
 
     while let Some(msg) = messages.next().await {

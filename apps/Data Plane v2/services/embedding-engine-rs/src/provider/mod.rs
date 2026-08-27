@@ -9,7 +9,10 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+pub mod contextualize;
 mod inference_auth;
+pub mod media;
+pub mod video_caption;
 pub mod visual;
 use inference_auth::{InferenceTokenClient, RetentionPosture};
 
@@ -79,6 +82,9 @@ struct CohereEmbeddingClient {
     api_key: String,
     model: String,
     api_version: String,
+    /// Matryoshka output width, sent on every request. See
+    /// [`validate_matryoshka_dimension`].
+    output_dimension: u32,
 }
 
 #[derive(Serialize)]
@@ -92,6 +98,48 @@ struct CohereEmbedRequest<'a> {
     model: &'a str,
     input: &'a [String],
     input_type: &'a str,
+    /// Requested Matryoshka truncation width.
+    ///
+    /// MEASURED CAVEAT (2026-08-25, live `embed-v-4-0` on Azure AI Foundry):
+    /// this deployment **ignores it** — 256/512/1024/1536 all return 1536. It
+    /// is still sent because it is the correct parameter against Cohere's
+    /// native API, and harmless here, but it must NOT be relied on and it is
+    /// NOT what protects the collection/vector width invariant. The
+    /// response-width check in `embed_batch` is.
+    ///
+    /// Sending it REQUIRES the `extra-parameters: pass-through` header; without
+    /// that header Foundry 400s the entire request.
+    output_dimension: u32,
+}
+
+/// Cohere Embed v4's Matryoshka-supported output widths.
+///
+/// Embed v4 is trained so a prefix of the full 1536-dim vector is itself a
+/// usable embedding (Matryoshka representation learning), but only at these
+/// four cut points.
+///
+/// Validating against this set stops an impossible width being configured. It
+/// does NOT mean the width is honoured — the Foundry deployment measured on
+/// 2026-08-25 returns 1536 for all four. Treat a non-default value as a
+/// request, and let the response-width check report whether it was granted.
+const COHERE_MATRYOSHKA_DIMENSIONS: [u64; 4] = [256, 512, 1024, 1536];
+
+/// Fail closed on a dimension Embed v4 cannot produce.
+///
+/// Rejecting at construction (startup) rather than on first embed matters: the
+/// alternative is a service that boots healthy, creates a Qdrant collection at
+/// the bad width, and only fails once real documents arrive. The query side
+/// (`retrieval-engine-rs`) validates the identical set, so an unusable width
+/// cannot be half-adopted across the two engines.
+fn validate_matryoshka_dimension(dimension: u64, env_var: &str) -> anyhow::Result<u32> {
+    if !COHERE_MATRYOSHKA_DIMENSIONS.contains(&dimension) {
+        anyhow::bail!(
+            "{env_var}={dimension} is not a Cohere Embed v4 Matryoshka width; \
+             expected one of {COHERE_MATRYOSHKA_DIMENSIONS:?}"
+        );
+    }
+    // Every value in the set fits u32; the cast cannot truncate.
+    Ok(dimension as u32)
 }
 
 #[derive(Deserialize)]
@@ -129,6 +177,9 @@ impl EmbeddingProvider {
                 &cfg.cohere_embed_v4_api_key,
                 &cfg.cohere_embed_v4_deployment,
                 &cfg.cohere_embed_v4_api_version,
+                // Same value `main.rs` sizes the Qdrant collection with, so the
+                // wire width and the collection width cannot drift apart.
+                cfg.embedding_dimension,
             ),
             other => anyhow::bail!(
                 "unsupported EMBEDDING_PROVIDER `{other}`; expected `model_plane`, `azure_openai`, or `cohere`"
@@ -210,6 +261,7 @@ impl EmbeddingProvider {
         api_key: &str,
         model: &str,
         api_version: &str,
+        output_dimension: u64,
     ) -> anyhow::Result<Self> {
         if endpoint.trim().is_empty() {
             anyhow::bail!("COHERE_EMBED_V4_ENDPOINT is required when EMBEDDING_PROVIDER=cohere");
@@ -217,6 +269,7 @@ impl EmbeddingProvider {
         if api_key.trim().is_empty() {
             anyhow::bail!("COHERE_EMBED_V4_API_KEY is required when EMBEDDING_PROVIDER=cohere");
         }
+        let output_dimension = validate_matryoshka_dimension(output_dimension, "EMBEDDING_DIMENSION")?;
         Ok(Self {
             inner: EmbeddingBackend::Cohere(CohereEmbeddingClient {
                 http: Client::builder()
@@ -227,6 +280,7 @@ impl EmbeddingProvider {
                 api_key: api_key.to_string(),
                 model: model.to_string(),
                 api_version: api_version.to_string(),
+                output_dimension,
             }),
         })
     }
@@ -454,6 +508,7 @@ impl CohereEmbeddingClient {
             model: &self.model,
             input: texts,
             input_type: "document",
+            output_dimension: self.output_dimension,
         };
 
         let mut last_err = None;
@@ -470,6 +525,17 @@ impl CohereEmbeddingClient {
                 .http
                 .post(&url)
                 .header("api-key", &self.api_key)
+                // REQUIRED whenever `output_dimension` is on the body. Azure AI
+                // Foundry's model-inference gateway validates against the base
+                // schema and rejects anything extra with `400: Extra parameters
+                // ['output_dimension'] are not allowed when extra-parameters is
+                // not set or set to be 'error'`. `pass-through` forwards them.
+                //
+                // Learned the hard way: a unit test can only assert the field is
+                // serialized, so this is invisible until a real call. Without the
+                // header EVERY embed 400s — the arm looks configured and embeds
+                // nothing.
+                .header("extra-parameters", "pass-through")
                 .json(&body)
                 .send()
                 .await
@@ -484,6 +550,34 @@ impl CohereEmbeddingClient {
                             "Cohere text embedding count mismatch: got {}, want {}",
                             embed_resp.data.len(),
                             texts.len()
+                        );
+                    }
+                    // THE actual guard on the width invariant.
+                    //
+                    // `main.rs` has already created the Qdrant collection at
+                    // `EMBEDDING_DIMENSION`, and Qdrant fixes vector size per
+                    // collection. Requesting a width does not guarantee getting
+                    // it — Foundry ignores `output_dimension` entirely — so the
+                    // only reliable check is on the response. Failing here names
+                    // the real cause; without it the mismatch surfaces later as
+                    // an opaque Qdrant upsert rejection, or (worse) as an arm
+                    // that quietly indexes nothing.
+                    //
+                    // The query side has always done this
+                    // (`retrieval-engine-rs`'s orchestrator validates every
+                    // vector it embeds); this closes the same hole on the
+                    // indexing side.
+                    if let Some(bad) = embed_resp
+                        .data
+                        .iter()
+                        .find(|d| d.embedding.len() as u32 != self.output_dimension)
+                    {
+                        anyhow::bail!(
+                            "Cohere returned {}-dim vectors but EMBEDDING_DIMENSION is {} — the                              Qdrant collection is sized for {} and every upsert would fail. This                              provider ignores `output_dimension`, so set EMBEDDING_DIMENSION to                              the width it actually returns ({}) and re-embed into a fresh                              collection.",
+                            bad.embedding.len(),
+                            self.output_dimension,
+                            self.output_dimension,
+                            bad.embedding.len()
                         );
                     }
                     return Ok(embed_resp.data.into_iter().map(|d| d.embedding).collect());
@@ -552,7 +646,7 @@ mod tests {
 
     #[test]
     fn cohere_requires_endpoint_and_key() {
-        let err = match EmbeddingProvider::cohere("", "", "Cohere-embed-4", "2024-05-01-preview") {
+        let err = match EmbeddingProvider::cohere("", "", "Cohere-embed-4", "2024-05-01-preview", 1536) {
             Ok(_) => panic!("empty endpoint should fail"),
             Err(err) => err,
         };
@@ -566,6 +660,7 @@ mod tests {
             "",
             "Cohere-embed-4",
             "2024-05-01-preview",
+            1536,
         ) {
             Ok(_) => panic!("empty api key should fail"),
             Err(err) => err,
@@ -583,6 +678,7 @@ mod tests {
             "k",
             "Cohere-embed-4",
             "2024-05-01-preview",
+            1536,
         )
         .expect("cohere provider");
         assert_eq!(provider.provider_name(), "cohere");
@@ -599,12 +695,73 @@ mod tests {
             model: "Cohere-embed-4",
             input: &texts,
             input_type: "document",
+            output_dimension: 1536,
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["model"], "Cohere-embed-4");
         assert_eq!(v["input_type"], "document");
         assert_eq!(v["input"][0], "hei");
         assert_eq!(v["input"][1], "verden");
+        assert_eq!(
+            v["output_dimension"], 1536,
+            "the Matryoshka width must be on the wire, not left to the API default"
+        );
+    }
+
+    /// The trap this closes: `EMBEDDING_DIMENSION` sizes the Qdrant collection,
+    /// so a width that never reached Cohere produced a collection and a vector
+    /// that disagreed — a write-time failure for whoever tuned it down.
+    #[test]
+    fn a_truncated_matryoshka_width_reaches_the_wire() {
+        let texts = vec!["hei".to_string()];
+        for dim in COHERE_MATRYOSHKA_DIMENSIONS {
+            let width = validate_matryoshka_dimension(dim, "EMBEDDING_DIMENSION")
+                .expect("supported Matryoshka width");
+            let req = CohereEmbedRequest {
+                model: "Cohere-embed-4",
+                input: &texts,
+                input_type: "document",
+                output_dimension: width,
+            };
+            let v = serde_json::to_value(&req).unwrap();
+            assert_eq!(v["output_dimension"], dim);
+        }
+    }
+
+    /// Fail closed at construction, not on first embed: the bad-width service
+    /// would otherwise boot healthy and create a Qdrant collection Cohere can
+    /// never fill.
+    #[test]
+    fn an_unsupported_dimension_is_rejected_before_any_collection_is_created() {
+        for bad in [0_u64, 1, 384, 768, 1024 + 1, 3072] {
+            let err = match EmbeddingProvider::cohere(
+                "https://x.services.ai.azure.com",
+                "k",
+                "Cohere-embed-4",
+                "2024-05-01-preview",
+                bad,
+            ) {
+                Ok(_) => panic!("width {bad} must fail closed"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string().contains("Matryoshka"),
+                "unexpected error for {bad}: {err}"
+            );
+        }
+        // 768 is a plausible-looking mistake (it is the *video* arm's width),
+        // so confirm the supported set still builds.
+        for good in COHERE_MATRYOSHKA_DIMENSIONS {
+            if let Err(e) = EmbeddingProvider::cohere(
+                "https://x.services.ai.azure.com",
+                "k",
+                "Cohere-embed-4",
+                "2024-05-01-preview",
+                good,
+            ) {
+                panic!("{good} must be accepted: {e}");
+            }
+        }
     }
 
     /// ZDR egress guard: a restricted chunk must fail closed BEFORE any
@@ -617,6 +774,7 @@ mod tests {
             "fake-key",
             "Cohere-embed-4",
             "2024-05-01-preview",
+            1536,
         )
         .expect("cohere provider");
         let err = provider
@@ -639,6 +797,7 @@ mod tests {
             "fake-key",
             "Cohere-embed-4",
             "2024-05-01-preview",
+            1536,
         )
         .expect("cohere provider");
         let err = provider

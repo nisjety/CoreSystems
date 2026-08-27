@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 
+pub mod media;
 mod service_auth;
 pub mod visual;
 
@@ -77,6 +78,10 @@ struct CohereEmbeddingClient {
     api_key: String,
     model: String,
     api_version: String,
+    /// Matryoshka output width. See [`validate_matryoshka_dimension`] — this
+    /// MUST equal the indexing side's `EMBEDDING_DIMENSION`, or query vectors
+    /// and stored vectors have different widths and Qdrant rejects the search.
+    output_dimension: u32,
 }
 
 #[derive(Serialize)]
@@ -90,6 +95,35 @@ struct CohereEmbedRequest<'a> {
     model: &'a str,
     input: &'a [String],
     input_type: &'a str,
+    /// Matryoshka truncation width, always explicit — see the indexing-side
+    /// twin in `embedding-engine-rs/src/provider/mod.rs` for why omitting it
+    /// silently returns the native 1536 no matter what the config says.
+    output_dimension: u32,
+}
+
+/// Cohere Embed v4's Matryoshka-supported output widths — the query-side twin
+/// of `embedding-engine-rs`'s identical constant. Duplicated rather than shared
+/// because these two services deploy independently: a shared crate would let a
+/// single edit silently move both sides at once, and the whole point of
+/// validating here is that the query side fails on its own if it is configured
+/// to a width the corpus was not indexed at.
+const COHERE_MATRYOSHKA_DIMENSIONS: [usize; 4] = [256, 512, 1024, 1536];
+
+/// Fail closed at startup on a width Embed v4 cannot produce.
+///
+/// The query side has a second, sharper reason to validate than the indexing
+/// side: a mismatched query width does not fail at write time, it fails on
+/// every single search. Catching it at construction turns a total retrieval
+/// outage into a refused boot.
+fn validate_matryoshka_dimension(dimension: usize, env_var: &str) -> anyhow::Result<u32> {
+    if !COHERE_MATRYOSHKA_DIMENSIONS.contains(&dimension) {
+        anyhow::bail!(
+            "{env_var}={dimension} is not a Cohere Embed v4 Matryoshka width; \
+             expected one of {COHERE_MATRYOSHKA_DIMENSIONS:?}"
+        );
+    }
+    // Every value in the set fits u32; the cast cannot truncate.
+    Ok(dimension as u32)
 }
 
 #[derive(Deserialize)]
@@ -126,6 +160,10 @@ impl EmbeddingClient {
                 &cfg.cohere_embed_v4_api_key,
                 &cfg.cohere_embed_v4_deployment,
                 &cfg.cohere_embed_v4_api_version,
+                // Same field the orchestrator already length-checks every
+                // returned vector against (`config.embedding_dimension`), so
+                // the wire width and the assertion width are one value.
+                cfg.embedding_dimension,
             ),
             "deterministic_test"
                 if deterministic_test_allowed(
@@ -193,6 +231,7 @@ impl EmbeddingClient {
         api_key: &str,
         model: &str,
         api_version: &str,
+        output_dimension: usize,
     ) -> anyhow::Result<Self> {
         if endpoint.trim().is_empty() {
             anyhow::bail!("COHERE_EMBED_V4_ENDPOINT is required when EMBEDDING_PROVIDER=cohere");
@@ -200,6 +239,8 @@ impl EmbeddingClient {
         if api_key.trim().is_empty() {
             anyhow::bail!("COHERE_EMBED_V4_API_KEY is required when EMBEDDING_PROVIDER=cohere");
         }
+        let output_dimension =
+            validate_matryoshka_dimension(output_dimension, "EMBEDDING_DIMENSION")?;
         Ok(Self {
             inner: EmbeddingBackend::Cohere(CohereEmbeddingClient {
                 http: Client::new(),
@@ -207,6 +248,7 @@ impl EmbeddingClient {
                 api_key: api_key.to_string(),
                 model: model.to_string(),
                 api_version: api_version.to_string(),
+                output_dimension,
             }),
         })
     }
@@ -506,6 +548,7 @@ impl CohereEmbeddingClient {
             self.endpoint, self.api_version
         );
         let body = CohereEmbedRequest {
+            output_dimension: self.output_dimension,
             model: &self.model,
             input: texts,
             // Query side: Embed v4 asymmetrically optimizes query vs document
@@ -526,6 +569,17 @@ impl CohereEmbeddingClient {
                 .http
                 .post(&url)
                 .header("api-key", &self.api_key)
+                // REQUIRED whenever `output_dimension` is on the body. Azure AI
+                // Foundry's model-inference gateway validates against the base
+                // schema and rejects anything extra with `400: Extra parameters
+                // ['output_dimension'] are not allowed when extra-parameters is
+                // not set or set to be 'error'`. `pass-through` forwards them.
+                //
+                // Learned the hard way on the indexing side: a unit test can
+                // only assert the field is serialized, so this is invisible
+                // until a real call. Without the header EVERY embed 400s — here
+                // that means every query fails, not just every write.
+                .header("extra-parameters", "pass-through")
                 .json(&body)
                 .send()
                 .await
@@ -608,7 +662,7 @@ mod tests {
 
     #[test]
     fn cohere_requires_endpoint_and_key() {
-        let err = match EmbeddingClient::cohere("", "", "Cohere-embed-4", "2024-05-01-preview") {
+        let err = match EmbeddingClient::cohere("", "", "Cohere-embed-4", "2024-05-01-preview", 1536) {
             Ok(_) => panic!("empty endpoint should fail"),
             Err(err) => err,
         };
@@ -622,6 +676,7 @@ mod tests {
             "",
             "Cohere-embed-4",
             "2024-05-01-preview",
+            1536,
         ) {
             Ok(_) => panic!("empty api key should fail"),
             Err(err) => err,
@@ -639,6 +694,7 @@ mod tests {
             "k",
             "Cohere-embed-4",
             "2024-05-01-preview",
+            1536,
         )
         .expect("cohere client");
         assert_eq!(client.provider_name(), "cohere");
@@ -656,11 +712,67 @@ mod tests {
             model: "Cohere-embed-4",
             input: &texts,
             input_type: "query",
+            output_dimension: 1536,
         };
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["model"], "Cohere-embed-4");
         assert_eq!(v["input_type"], "query");
         assert_eq!(v["input"][0], "hva er prisen?");
+        assert_eq!(
+            v["output_dimension"], 1536,
+            "the query width must be explicit or it silently reverts to native 1536"
+        );
+    }
+
+    /// A query embedded at a different Matryoshka width than the corpus was
+    /// indexed at fails on *every* search, not at write time — so the width
+    /// must be refused at boot rather than discovered in production.
+    #[test]
+    fn an_unsupported_query_dimension_refuses_to_construct() {
+        for bad in [0_usize, 1, 384, 768, 3072] {
+            let err = match EmbeddingClient::cohere(
+                "https://x.services.ai.azure.com",
+                "k",
+                "Cohere-embed-4",
+                "2024-05-01-preview",
+                bad,
+            ) {
+                Ok(_) => panic!("width {bad} must fail closed"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string().contains("Matryoshka"),
+                "unexpected error for {bad}: {err}"
+            );
+        }
+        // Every truncation width Embed v4 actually supports must still build,
+        // and must carry that exact width onto the wire.
+        for good in COHERE_MATRYOSHKA_DIMENSIONS {
+            let width = validate_matryoshka_dimension(good, "EMBEDDING_DIMENSION")
+                .unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));
+            assert_eq!(width as usize, good);
+            if let Err(e) = EmbeddingClient::cohere(
+                "https://x.services.ai.azure.com",
+                "k",
+                "Cohere-embed-4",
+                "2024-05-01-preview",
+                good,
+            ) {
+                panic!("{good} must build: {e}");
+            }
+        }
+    }
+
+    /// The two engines are deployed separately, so their width lists must stay
+    /// literally identical — a value one side accepts and the other rejects is
+    /// a half-adopted dimension change, which is the failure this guards.
+    #[test]
+    fn the_supported_width_set_matches_the_indexing_side() {
+        assert_eq!(
+            COHERE_MATRYOSHKA_DIMENSIONS,
+            [256, 512, 1024, 1536],
+            "keep in lockstep with embedding-engine-rs::provider::COHERE_MATRYOSHKA_DIMENSIONS"
+        );
     }
 
     /// ZDR egress guard: a restricted query must fail closed BEFORE any
@@ -673,6 +785,7 @@ mod tests {
             "fake-key",
             "Cohere-embed-4",
             "2024-05-01-preview",
+            1536,
         )
         .expect("cohere client");
         let err = client
@@ -696,6 +809,7 @@ mod tests {
             "fake-key",
             "Cohere-embed-4",
             "2024-05-01-preview",
+            1536,
         )
         .expect("cohere client");
         let err = client

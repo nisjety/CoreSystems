@@ -84,12 +84,21 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok", "service": "quickwit-adapter-rs"}))
 }
 
-async fn readyz(State(state): State<ApiState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ready",
-        "service": "quickwit-adapter-rs",
-        "index": state.rebuild.quickwit.index_id(),
-    }))
+async fn readyz(State(state): State<ApiState>) -> impl axum::response::IntoResponse {
+    // The GDPR erasure consumer is part of readiness because its failure was
+    // otherwise invisible: the supervisor retries forever and only logs, so this
+    // process reported ready while org erasure silently stopped being applied.
+    let erasure = nats_connection::erasure_health::readiness();
+    let ok = erasure.is_ready();
+    (
+        if ok { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE },
+        Json(serde_json::json!({
+            "status": if ok { "ready" } else { "not_ready" },
+            "service": "quickwit-adapter-rs",
+            "index": state.rebuild.quickwit.index_id(),
+            "checks": { "gdpr_erasure_consumer": erasure.as_str() }
+        })),
+    )
 }
 
 async fn rebuild_index(

@@ -188,12 +188,14 @@ fn signed_event_consumers_enabled(value: &str) -> bool {
 /// connection failure (missing pre-provisioned consumer, dropped broker
 /// connection, etc.) rather than letting the task exit silently.
 async fn run_gdpr_erasure_worker(pool: sqlx::PgPool, nats_url: String, quickwit: QuickwitClient) {
+    nats_connection::erasure_health::mark_enabled();
     loop {
         if let Err(error) = gdpr_nats::run(pool.clone(), nats_url.clone(), quickwit.clone()).await {
             tracing::error!(?error, "quickwit-adapter GDPR erasure consumer failed");
         } else {
             tracing::warn!("quickwit-adapter GDPR erasure consumer ended unexpectedly");
         }
+        nats_connection::erasure_health::mark_connected(false);
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }

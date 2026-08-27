@@ -1,11 +1,12 @@
 //! Verified Space scope for the first Data Plane retrieval vertical.
 //!
-//! A [`VerifiedSpaceAuthority`] can only be constructed by a future Control
-//! decision verifier at the service boundary. It is deliberately not
-//! deserializable from HTTP/gRPC input. The resolver then maps the canonical
-//! Space reference to one Data-owned resource target. Existing document
-//! ownership/grant visibility remains an additional post-filter; a Space never
-//! widens a document ACL.
+//! A [`VerifiedSpaceAuthority`] can only be constructed by
+//! [`verify_retrieval_space_decision`] below, which the HTTP `retrieve` handler
+//! and the gRPC retrieval methods call at their service boundary. It is
+//! deliberately not deserializable from HTTP/gRPC input. The resolver then
+//! maps the canonical Space reference to one Data-owned resource target.
+//! Existing document ownership/grant visibility remains an additional
+//! post-filter; a Space never widens a document ACL.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
@@ -264,7 +265,6 @@ fn intersect_exact_filter(
 /// The query is tenant-scoped and requires the current resource authorization
 /// reference to match. A revoked/missing/ambiguous binding fails closed before
 /// retrieval; the caller must not fall back to raw workspace filters.
-#[allow(dead_code)] // wired when the Control decision verifier lands at the boundary
 pub async fn resolve_space_retrieval_scope(
     pool: &PgPool,
     authority: VerifiedSpaceAuthority,
@@ -302,7 +302,6 @@ pub async fn resolve_space_retrieval_scope(
 }
 
 #[derive(sqlx::FromRow)]
-#[allow(dead_code)] // constructed by the deferred boundary resolver above
 struct SpaceBindingRow {
     workspace_id: Option<String>,
     collection_id: Option<String>,

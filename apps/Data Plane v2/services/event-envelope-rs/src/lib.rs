@@ -85,6 +85,25 @@ pub enum EnvelopeError {
     InvalidConfiguration,
     #[error("invalid signed event envelope")]
     InvalidEnvelope,
+    /// The envelope is **fully authentic but stale**: correct signature, key id,
+    /// issuer, scope, payload digest and boundary fields — only `exp` has
+    /// passed. Carried separately from [`Self::InvalidEnvelope`] because the two
+    /// demand opposite handling.
+    ///
+    /// A forged envelope must be dropped. An expired one must NOT be, because
+    /// expiry here is usually not an attack — it is backlog. These events ride a
+    /// durable JetStream queue whose `max_age` is 7 days, while the envelope
+    /// lives [`TOKEN_TTL_SECONDS`] (120s), so any consumer backlog longer than
+    /// two minutes expires messages *in place*. Dropping those silently loses
+    /// real data: the observed failure was 1,044 of 1,164 chunks discarded on a
+    /// single 95-document ingest, each leaving its `knowledge_units` row stuck
+    /// at `pending` with nothing to heal it.
+    ///
+    /// The claims and payload are attached precisely because they are
+    /// trustworthy, so a consumer can identify the affected work and re-drive
+    /// it. Boxed to keep the enum small.
+    #[error("signed event envelope expired")]
+    Expired(Box<VerifiedEvent>),
     #[error("signed event replay rejected")]
     Replay,
     #[error("signed event replay cache unavailable")]
@@ -243,6 +262,13 @@ impl EventVerifier {
         validation.set_issuer(&[self.expected_issuer.as_str()]);
         validation.leeway = CLOCK_SKEW_SECONDS as u64;
         validation.validate_nbf = true;
+        // Expiry is checked explicitly at the END of this function instead, so
+        // that a stale-but-authentic envelope can be distinguished from a forged
+        // one. Turning the library check off does NOT weaken anything: the
+        // manual check below applies the same `exp` and the same skew, `exp`
+        // stays in `set_required_spec_claims`, and the
+        // `exp - iat > MAX_TOKEN_TTL_SECONDS` bound still caps the lifetime.
+        validation.validate_exp = false;
         validation.set_required_spec_claims(&["exp", "iss", "aud", "sub", "nbf", "iat", "jti"]);
         let claims = decode::<EventClaims>(token, &self.key, &validation)
             .map_err(|_| EnvelopeError::InvalidEnvelope)?
@@ -283,6 +309,21 @@ impl EventVerifier {
             || (self.required_scope == "events:wiki:publish" && claims.zdr)
         {
             return Err(EnvelopeError::InvalidEnvelope);
+        }
+
+        // Expiry LAST, and only once everything else has passed — so
+        // `Expired` can only ever describe an envelope that is authentic in
+        // every other respect. A forged or malformed envelope has already
+        // returned `InvalidEnvelope` above and can never reach this branch.
+        //
+        // The replay id is deliberately NOT consumed for an expired envelope:
+        // the event is not being accepted here, and burning its `jti` would
+        // stop the re-driven copy from being processed.
+        if claims.exp < now - CLOCK_SKEW_SECONDS {
+            return Err(EnvelopeError::Expired(Box::new(VerifiedEvent {
+                claims,
+                payload,
+            })));
         }
 
         self.consume_replay_id(&claims.jti, claims.exp, now, allow_known_replay)?;

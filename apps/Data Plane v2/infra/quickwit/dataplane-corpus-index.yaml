@@ -57,6 +57,25 @@ doc_mapping:
       tokenizer: default
       record: position
       fieldnorms: true
+    # Contextual Retrieval (Anthropic, 2024) — the LLM-generated sentences
+    # situating a chunk inside its document, written by embedding-engine-rs.
+    #
+    # A SEPARATE field from `body`, never merged into it, for two reasons:
+    #   * `body` is what retrieval-engine-rs returns as the candidate's text
+    #     (search/sparse.rs reads `body`), and a citation must show the
+    #     document's own words, not a model's preamble about them.
+    #   * BM25 sums across fields. Indexing "context + chunk" here while `body`
+    #     already holds the chunk would score the chunk's own terms twice and
+    #     silently re-weight every lexical result.
+    #
+    # This mirrors the Postgres fallback exactly, where content_tsv carries
+    # `text` at weight A and `chunk_context` at weight B — so the primary sparse
+    # backend and its fallback agree on structure, not just on tokenizer.
+    - name: context_body
+      type: text
+      tokenizer: default
+      record: position
+      fieldnorms: true
     - name: site_id
       type: text
       tokenizer: raw
@@ -120,5 +139,11 @@ search_settings:
   default_search_fields:
     - title
     - body
+    # Contextual Retrieval's lexical half: an unqualified query term now also
+    # matches a chunk's situating context, which is what makes a chunk findable
+    # by the entity or date it only mentions implicitly. Listed AFTER body so
+    # the ordering reflects intent, though Quickwit sums field scores rather
+    # than preferring by position.
+    - context_body
     - source
     - path

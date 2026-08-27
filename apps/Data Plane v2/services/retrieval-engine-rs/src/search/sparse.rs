@@ -23,6 +23,20 @@ pub trait SparseSearchBackend: Send + Sync {
 
 pub type DynSparseSearchBackend = Arc<dyn SparseSearchBackend>;
 
+/// How many times `top_k` to request from Quickwit before de-duplicating.
+///
+/// Duplicates arise from Quickwit's asynchronous deletes (see the de-dup block
+/// in `QuickwitSparseBackend::search`), and a duplicate consumes a slot that a
+/// distinct chunk should have had. 4x covers the ~4.5x duplication observed on
+/// a corpus re-driven several times while still bounding the response size; the
+/// de-dup loop stops as soon as it has `top_k` distinct chunks, so the extra
+/// hits cost nothing on a clean index.
+const DEDUP_OVERFETCH: usize = 4;
+
+/// Absolute ceiling on `max_hits`, so a large `top_k` cannot ask Quickwit for
+/// an unbounded page.
+const MAX_HITS: usize = 500;
+
 pub struct PostgresSparseBackend {
     pool: PgPool,
 }
@@ -94,9 +108,13 @@ impl SparseSearchBackend for QuickwitSparseBackend {
 
         let quickwit_query = build_quickwit_query(org_id, query);
         let url = format!("{}/api/v1/{}/search", self.base_url, self.index_id);
+        // Over-fetch, because the hits are de-duplicated below and duplicates
+        // would otherwise silently shrink the arm's contribution. See
+        // `DEDUP_OVERFETCH`.
+        let requested = top_k.saturating_mul(DEDUP_OVERFETCH).min(MAX_HITS);
         let body = serde_json::json!({
             "query": quickwit_query,
-            "max_hits": top_k
+            "max_hits": requested
         });
 
         let response = self
@@ -108,12 +126,7 @@ impl SparseSearchBackend for QuickwitSparseBackend {
             .error_for_status()?;
         let parsed: QuickwitSearchResponse = response.json().await?;
 
-        Ok(parsed
-            .hits
-            .into_iter()
-            .enumerate()
-            .filter_map(|(idx, hit)| hit.into_candidate(top_k, idx))
-            .collect())
+        Ok(dedup_hits(parsed.hits, requested, top_k))
     }
 }
 
@@ -179,6 +192,22 @@ pub async fn bm25_search(
     // verified caller claims), so this reads through an org-scoped transaction.
     // The SQL still binds `org_id` itself — the database policy is a backstop
     // against that filter being dropped or mis-edited later, not a replacement.
+    // The terms are OR-joined and matched with `websearch_to_tsquery`, NOT
+    // `plainto_tsquery`. `plainto_tsquery` ANDs every word (`'a' & 'b' & …`), so
+    // a natural-language question required all of its words inside one
+    // 512-char chunk — measured on the live corpus, "how does retrieval combine
+    // dense sparse and graph results" matched 0 rows that way and 1,161 as a
+    // disjunction. This arm was returning nothing for realistic queries and
+    // reporting no error, exactly like the Quickwit path (see
+    // `build_quickwit_query`). Union-then-rank is what a BM25-style arm is for;
+    // `ts_rank_cd` below does the ranking, and rare terms dominate it, so common
+    // words dilute the score rather than filtering everything out.
+    //
+    // `websearch_to_tsquery` rather than a hand-built `to_tsquery` string
+    // because it is total on user input: it never raises a syntax error, so the
+    // sanitized terms cannot combine into something that fails the query.
+    // Verified: `a or or or -- \\ ) | & ! or b` parses to `'a' | 'or' | 'b'`.
+    let fts_query = crate::search::textquery::fts_disjunction(query);
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<_, BM25Row>(
         r#"
@@ -186,12 +215,12 @@ pub async fn bm25_search(
             knowledge_id,
             document_id,
             text,
-            ts_rank_cd(content_tsv, plainto_tsquery('simple', $1)) AS rank_score,
+            ts_rank_cd(content_tsv, websearch_to_tsquery('simple', $1)) AS rank_score,
             chunk_index,
             metadata
         FROM knowledge_units
         WHERE org_id = $2
-          AND content_tsv @@ plainto_tsquery('simple', $1)
+          AND content_tsv @@ websearch_to_tsquery('simple', $1)
           -- Phase 4 read-your-writes: the sparse (FTS) arm needs no vectors, so
           -- surface just-chunked content immediately (status 'pending') instead
           -- of waiting for the async embed. Exclude only 'failed'. The ownership
@@ -202,7 +231,7 @@ pub async fn bm25_search(
         LIMIT $3
         "#,
     )
-    .bind(query)
+    .bind(&fts_query)
     .bind(org_id)
     .bind(top_k as i64)
     .fetch_all(&mut *tx)
@@ -296,33 +325,91 @@ impl QuickwitHit {
     }
 }
 
+/// Collapse Quickwit hits to at most `top_k` distinct chunks, keeping the
+/// best-ranked occurrence of each `knowledge_id`.
+///
+/// Quickwit is append-only and its `delete_by_query` is ASYNCHRONOUS — the
+/// delete becomes a task applied at merge time, not before the next write. The
+/// adapter's re-index path (`documents.indexed`) deletes and then immediately
+/// re-indexes, so every content update or re-crawl leaves the previous copies
+/// in place alongside the new ones until a merge catches up. Measured on a
+/// 1,164-chunk corpus that had been re-driven a few times: 5,215 hits for 1,164
+/// distinct chunks.
+///
+/// Fusion already keys on `knowledge_id`, so duplicates could never corrupt the
+/// final ranking — but they consume this arm's `top_k` slots BEFORE fusion sees
+/// them, which quietly collapses sparse recall (30 hits that are really 8
+/// chunks). De-duplicating makes the arm correct for whatever state the index is
+/// in, rather than assuming it is clean — which, for an eventually-consistent
+/// store, it periodically is not.
+fn dedup_hits(hits: Vec<QuickwitHit>, requested: usize, top_k: usize) -> Vec<ScoredCandidate> {
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(top_k);
+    let mut out: Vec<ScoredCandidate> = Vec::with_capacity(top_k);
+    for (idx, hit) in hits.into_iter().enumerate() {
+        let Some(candidate) = hit.into_candidate(requested, idx) else {
+            continue;
+        };
+        if !seen.insert(candidate.knowledge_id.clone()) {
+            continue;
+        }
+        out.push(candidate);
+        if out.len() >= top_k {
+            break;
+        }
+    }
+    out
+}
+
+/// Build the Quickwit query for one lexical search.
+///
+/// The user's terms become a DISJUNCTION — `("a" OR "b" OR "c")` — inside the
+/// tenant filter. Two reasons, both learned the hard way:
+///
+/// 1. Quickwit's default operator is AND, and this function used to join terms
+///    with a bare space. So a natural-language question required every one of
+///    its words to co-occur inside a single 512-char chunk, which essentially
+///    never happens: measured against a live 1,164-chunk corpus, "how does
+///    retrieval combine dense sparse and graph results" returned 0 hits joined
+///    by spaces and 5,460 joined by OR. The lexical arm was silently returning
+///    nothing for every realistic query while looking perfectly healthy — the
+///    fusion step just had no sparse candidates to weigh. Union-then-rank is
+///    also what BM25 *is*; requiring all terms is boolean retrieval wearing a
+///    BM25 label, and Quickwit already ranks the matched set by BM25, so common
+///    words are down-weighted by IDF rather than needing a stopword list.
+///
+/// 2. Every term is quoted, which is what makes the disjunction safe. Terms
+///    come from user input, and `AND` / `OR` / `NOT` survive sanitization as
+///    ordinary words — unquoted, they are parsed as operators. A query ending
+///    in "or" used to produce a dangling operator and a hard 400 from Quickwit;
+///    quoted, it is just a term (verified live: a query containing bare `OR AND
+///    OR` fails to parse, the quoted form returns hits).
 fn build_quickwit_query(org_id: &str, query: &str) -> String {
-    let cleaned_terms = sanitize_query(query);
+    let terms = sanitize_terms(query);
     let org_filter = format!(
         "org_id:{} AND entity_type:{}",
         quote_term(org_id),
         quote_term("knowledge_unit")
     );
-    if cleaned_terms.is_empty() {
+    if terms.is_empty() {
         org_filter
     } else {
-        format!("{org_filter} AND ({cleaned_terms})")
+        let disjunction = terms
+            .iter()
+            .map(|term| quote_term(term))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        format!("{org_filter} AND ({disjunction})")
     }
 }
 
-fn sanitize_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .filter_map(|term| {
-            let cleaned: String = term
-                .chars()
-                .filter(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-                .collect();
-            (!cleaned.is_empty()).then_some(cleaned)
-        })
-        .take(32)
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Reduce a user query to bare terms. Delegates to
+/// [`crate::search::textquery::sanitize_terms`] — the same sanitization now
+/// backs the Quickwit disjunction here, both Postgres graph tiers and the
+/// contradictions claim search, so there is one definition rather than four
+/// copies that can drift apart.
+fn sanitize_terms(query: &str) -> Vec<String> {
+    crate::search::textquery::sanitize_terms(query)
 }
 
 fn quote_term(value: &str) -> String {
@@ -406,9 +493,83 @@ mod tests {
 
         assert!(query.contains("org_id:\"org-1\""));
         assert!(query.contains("entity_type:\"knowledge_unit\""));
-        assert!(query.contains("alpha beta"));
+        assert!(query.contains("\"alpha\" OR \"beta\""));
         assert!(!query.contains("site:ignored"));
         assert!(!query.contains("../bad"));
+    }
+
+    // Regression: Quickwit's default operator is AND, so joining terms with a
+    // bare space made a natural-language question require every word inside one
+    // 512-char chunk. Measured live: 0 hits space-joined vs 5,460 OR-joined on
+    // the same query and corpus. The arm returned nothing for realistic queries
+    // while reporting no error at all.
+    #[test]
+    fn multi_term_queries_are_a_disjunction_not_a_conjunction() {
+        let query = build_quickwit_query(
+            "org-1",
+            "how does retrieval combine dense sparse and graph results",
+        );
+
+        let terms = query
+            .split_once(" AND (")
+            .expect("term group present")
+            .1
+            .trim_end_matches(')');
+        assert!(
+            !terms.contains(" AND "),
+            "terms must not be ANDed together: {terms}"
+        );
+        assert_eq!(
+            terms.matches(" OR ").count(),
+            8,
+            "9 terms should yield 8 OR joins: {terms}"
+        );
+    }
+
+    // Terms come from user input, and AND/OR/NOT survive sanitization as words.
+    // Unquoted they parse as operators — a dangling one is a hard 400 from
+    // Quickwit. Quoting every term makes them ordinary terms instead.
+    #[test]
+    fn operator_keywords_in_user_input_cannot_become_operators() {
+        let query = build_quickwit_query("org-1", "cats OR AND NOT dogs");
+
+        let terms = query
+            .split_once(" AND (")
+            .expect("term group present")
+            .1
+            .trim_end_matches(')');
+        // Every user word is quoted; the only unquoted OR is the join itself.
+        for word in ["cats", "OR", "AND", "NOT", "dogs"] {
+            assert!(
+                terms.contains(&format!("\"{word}\"")),
+                "{word} should appear quoted in {terms}"
+            );
+        }
+        // 5 terms -> 4 joins. If a bare keyword had leaked through as an
+        // operator the count would differ and Quickwit would fail to parse.
+        assert_eq!(terms.matches(" OR ").count(), 4, "{terms}");
+    }
+
+    #[test]
+    fn a_query_of_only_punctuation_falls_back_to_the_tenant_filter() {
+        let query = build_quickwit_query("org-1", "??? !!! :::");
+
+        assert!(query.contains("org_id:\"org-1\""));
+        assert!(
+            !query.contains(" AND ("),
+            "no term group should be emitted: {query}"
+        );
+    }
+
+    #[test]
+    fn the_term_count_is_capped() {
+        let long = (0..100)
+            .map(|i| format!("term{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let query = build_quickwit_query("org-1", &long);
+        let terms = query.split_once(" AND (").expect("terms").1;
+        assert_eq!(terms.matches(" OR ").count(), 31, "32 terms -> 31 joins");
     }
 
     #[tokio::test]
@@ -437,6 +598,85 @@ mod tests {
         assert_eq!(primary.calls(), 1);
         assert_eq!(fallback.calls(), 0);
         assert_eq!(results[0].knowledge_id, "k2");
+    }
+
+    fn quickwit_hit(knowledge_id: &str, score: f32) -> QuickwitHit {
+        serde_json::from_value(serde_json::json!({
+            "score": score,
+            "knowledge_id": knowledge_id,
+            "document_id": "doc-1",
+            "body": "text",
+            "chunk_index": 0,
+        }))
+        .expect("hit fixture parses")
+    }
+
+    // Regression: an index carrying duplicates must still yield `top_k` DISTINCT
+    // chunks. Before de-duplication this arm returned `top_k` *rows*, which on a
+    // re-indexed corpus meant a handful of chunks repeated — sparse recall
+    // collapsed silently, because every row looked like a legitimate hit.
+    #[test]
+    fn dedup_hits_returns_distinct_chunks_from_a_duplicated_index() {
+        // Four copies of every chunk, interleaved the way Quickwit returns them
+        // when several splits each hold a generation of the same document.
+        let mut hits = Vec::new();
+        for copy in 0..4 {
+            for chunk in 0..10 {
+                hits.push(quickwit_hit(
+                    &format!("k{chunk}"),
+                    100.0 - (chunk as f32) - (copy as f32) * 0.01,
+                ));
+            }
+        }
+        assert_eq!(hits.len(), 40);
+
+        let got = dedup_hits(hits, 40, 10);
+
+        assert_eq!(got.len(), 10, "should fill top_k with distinct chunks");
+        let ids: Vec<&str> = got.iter().map(|c| c.knowledge_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9"],
+            "first occurrence of each chunk wins, and Quickwit's order is preserved"
+        );
+    }
+
+    #[test]
+    fn dedup_hits_keeps_the_highest_scoring_copy() {
+        // Quickwit returns hits in descending score order, so the first copy of
+        // a chunk is its best-scoring copy — the survivor must carry that score,
+        // not a later duplicate's.
+        let got = dedup_hits(
+            vec![
+                quickwit_hit("k1", 9.5),
+                quickwit_hit("k1", 2.0),
+                quickwit_hit("k2", 1.0),
+            ],
+            3,
+            10,
+        );
+
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].knowledge_id, "k1");
+        assert!(
+            (got[0].sparse_score - 9.5).abs() < f32::EPSILON,
+            "kept copy should score 9.5, got {}",
+            got[0].sparse_score
+        );
+        assert_eq!(got[1].knowledge_id, "k2");
+    }
+
+    #[test]
+    fn dedup_hits_is_a_no_op_on_a_clean_index() {
+        let got = dedup_hits(
+            vec![quickwit_hit("k1", 3.0), quickwit_hit("k2", 2.0)],
+            8,
+            10,
+        );
+
+        assert_eq!(got.len(), 2, "fewer hits than top_k must pass through");
+        assert_eq!(got[0].knowledge_id, "k1");
+        assert_eq!(got[1].knowledge_id, "k2");
     }
 
     #[test]

@@ -165,6 +165,7 @@ fn test_principal(mut request: Request<()>) -> Result<Request<()>, Status> {
         auth_method: AuthMethod::Jwt,
         scopes: vec!["org:data:write_all".into()],
         zdr: false,
+        sovereign: Some(false),
         acl: EffectiveAcl::allow_all(),
         request_id: "grpc-integration-test".into(),
         verified_bearer: None,

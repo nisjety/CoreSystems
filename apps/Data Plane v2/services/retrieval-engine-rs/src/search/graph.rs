@@ -16,10 +16,10 @@ use crate::pipeline::types::ScoredCandidate;
 /// step-6 canonical gate still re-filters every candidate afterwards.
 const GRAPH_ARM_SQL: &str = "WITH matched AS (
         SELECT ge.entity_id,
-               ts_rank_cd(to_tsvector('simple', ge.entity_text), plainto_tsquery('simple', $2)) AS rank
+               ts_rank_cd(to_tsvector('simple', ge.entity_text), websearch_to_tsquery('simple', $2)) AS rank
         FROM graph_entities ge
         WHERE ge.org_id = $1
-          AND to_tsvector('simple', ge.entity_text) @@ plainto_tsquery('simple', $2)
+          AND to_tsvector('simple', ge.entity_text) @@ websearch_to_tsquery('simple', $2)
         ORDER BY rank DESC
         LIMIT 25
      ),
@@ -57,8 +57,8 @@ fn graph_arm_sql() -> &'static str {
 const SEED_ENTITY_SQL: &str = "SELECT ge.entity_id
      FROM graph_entities ge
      WHERE ge.org_id = $1
-       AND to_tsvector('simple', ge.entity_text) @@ plainto_tsquery('simple', $2)
-     ORDER BY ts_rank_cd(to_tsvector('simple', ge.entity_text), plainto_tsquery('simple', $2)) DESC
+       AND to_tsvector('simple', ge.entity_text) @@ websearch_to_tsquery('simple', $2)
+     ORDER BY ts_rank_cd(to_tsvector('simple', ge.entity_text), websearch_to_tsquery('simple', $2)) DESC
      LIMIT $3";
 
 /// Entities → chunks grounding for the remote arm. Takes the traversed
@@ -99,9 +99,13 @@ pub async fn seed_entities_for_query(
     // The SQL still binds `org_id` itself — the database policy is a backstop
     // against that filter being dropped or mis-edited later, not a replacement.
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+        // OR-joined: both tsquery builders AND bare words, so a
+        // natural-language question could not match a short entity phrase.
+        // See `search::textquery`.
+        let fts = crate::search::textquery::fts_disjunction(query);
     let rows = sqlx::query_as::<_, (String,)>(seed_entity_sql())
         .bind(org_id)
-        .bind(query)
+        .bind(&fts)
         .bind(limit)
         .fetch_all(&mut *tx)
         .await?;
@@ -162,9 +166,13 @@ pub async fn graph_arm_candidates(
     // Phase 1 RLS: single-org retrieval path, same rationale as
     // `seed_entities_for_query` above.
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+        // OR-joined: both tsquery builders AND bare words, so a
+        // natural-language question could not match a short entity phrase.
+        // See `search::textquery`.
+        let fts = crate::search::textquery::fts_disjunction(query);
     let rows = sqlx::query_as::<_, (String, String, String)>(graph_arm_sql())
         .bind(org_id)
-        .bind(query)
+        .bind(&fts)
         .bind(limit)
         .fetch_all(&mut *tx)
         .await?;
@@ -215,7 +223,7 @@ pub struct GraphClaimHit {
 
 const GRAPH_ENTITY_SQL: &str = "SELECT entity_id, entity_text, entity_type, COALESCE(confidence, 0)
      FROM graph_entities
-     WHERE org_id = $1 AND to_tsvector('simple', entity_text) @@ plainto_tsquery('simple', $2)
+     WHERE org_id = $1 AND to_tsvector('simple', entity_text) @@ websearch_to_tsquery('simple', $2)
        AND ($4::text IS NULL OR (
            jsonb_array_length(COALESCE(graph_entities.source_refs, '[]')) > 0
            AND NOT EXISTS (
@@ -234,7 +242,7 @@ const GRAPH_ENTITY_SQL: &str = "SELECT entity_id, entity_text, entity_type, COAL
                   )
            )
        ))
-     ORDER BY ts_rank_cd(to_tsvector('simple', entity_text), plainto_tsquery('simple', $2)) DESC
+     ORDER BY ts_rank_cd(to_tsvector('simple', entity_text), websearch_to_tsquery('simple', $2)) DESC
      LIMIT $3";
 
 const GRAPH_RELATIONSHIP_SQL: &str =
@@ -359,9 +367,13 @@ pub async fn graph_expansion_search(
     // a backstop, not a replacement for the explicit filter.
     let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
 
+        // OR-joined: both tsquery builders AND bare words, so a
+        // natural-language question could not match a short entity phrase.
+        // See `search::textquery`.
+        let fts = crate::search::textquery::fts_disjunction(query);
     let entity_rows = sqlx::query_as::<_, (String, String, String, f64)>(graph_entity_sql())
         .bind(org_id)
-        .bind(query)
+        .bind(&fts)
         .bind(max_entities)
         .bind(viewer)
         .bind(granted_ids)
