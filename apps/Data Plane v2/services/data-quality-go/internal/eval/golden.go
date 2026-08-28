@@ -13,12 +13,30 @@ import (
 	"github.com/triodelab/dataplane/shared/go/orgscope"
 )
 
-// GoldenSource loads an org's judged queries: normalized query → the ids
-// (document and/or knowledge ids) a human/agent judged relevant. Evals score
-// judged queries with REAL recall@10/nDCG@10/MRR; unjudged queries keep the
-// candidate-count proxy, honestly labeled (QueryResult.MetricSource).
+// Query classes a golden judgment can carry. `QueryClassNaturalLanguage` is
+// also the column default (see the query_class migration) — every row written
+// before this classification existed genuinely IS that class, since
+// eval-build-golden-set.py hand-authors only natural-language questions.
+const (
+	QueryClassNaturalLanguage   = "natural_language"
+	QueryClassLexicalIdentifier = "lexical_identifier"
+)
+
+// GoldenJudgment is one query's judged answer: which ids are relevant, and
+// what class of query it is. The class is what lets the scorecard segment
+// (Scorecard.ByClass) rather than blend metrics across query shapes that
+// respond to retrieval changes in opposite directions — see the migration
+// that added the column for the measured case.
+type GoldenJudgment struct {
+	RelevantIDs []string
+	QueryClass  string
+}
+
+// GoldenSource loads an org's judged queries: normalized query → judgment.
+// Evals score judged queries with REAL recall@10/nDCG@10/MRR; unjudged queries
+// keep the candidate-count proxy, honestly labeled (QueryResult.MetricSource).
 type GoldenSource interface {
-	Load(ctx context.Context, orgID string) (map[string][]string, error)
+	Load(ctx context.Context, orgID string) (map[string]GoldenJudgment, error)
 }
 
 // NormalizeQuery is the join key between judgments and traces: lowercase with
@@ -39,11 +57,11 @@ func NewPostgresGoldenStore(pool *pgxpool.Pool) *PostgresGoldenStore {
 //
 // Phase 1 RLS: reached from the /v1/evals/golden handler (authctx claims) and
 // from RunEval, which is always executing on behalf of one org's evaluation.
-func (s *PostgresGoldenStore) Load(ctx context.Context, orgID string) (map[string][]string, error) {
+func (s *PostgresGoldenStore) Load(ctx context.Context, orgID string) (map[string]GoldenJudgment, error) {
 	return orgscope.InOrgScope(ctx, s.pool, orgID,
-		func(ctx context.Context, tx pgx.Tx) (map[string][]string, error) {
+		func(ctx context.Context, tx pgx.Tx) (map[string]GoldenJudgment, error) {
 			rows, err := tx.Query(ctx, `
-				SELECT query_norm, relevant_ids
+				SELECT query_norm, relevant_ids, query_class
 				FROM eval_golden_judgments
 				WHERE org_id = $1
 			`, orgID)
@@ -53,11 +71,11 @@ func (s *PostgresGoldenStore) Load(ctx context.Context, orgID string) (map[strin
 			defer rows.Close()
 
 			// Drained inside the scope: rows die at COMMIT.
-			golden := make(map[string][]string)
+			golden := make(map[string]GoldenJudgment)
 			for rows.Next() {
-				var queryNorm string
+				var queryNorm, queryClass string
 				var raw []byte
-				if err := rows.Scan(&queryNorm, &raw); err != nil {
+				if err := rows.Scan(&queryNorm, &raw, &queryClass); err != nil {
 					return nil, fmt.Errorf("scan golden judgment: %w", err)
 				}
 				var ids []string
@@ -65,7 +83,7 @@ func (s *PostgresGoldenStore) Load(ctx context.Context, orgID string) (map[strin
 					return nil, fmt.Errorf("decode golden judgment ids: %w", err)
 				}
 				if len(ids) > 0 {
-					golden[queryNorm] = ids
+					golden[queryNorm] = GoldenJudgment{RelevantIDs: ids, QueryClass: queryClass}
 				}
 			}
 			if err := rows.Err(); err != nil {
@@ -81,29 +99,39 @@ func (s *PostgresGoldenStore) Load(ctx context.Context, orgID string) (map[strin
 // policy's WITH CHECK and this INSERT agree by construction — the scope makes
 // a future edit that sourced org_id from the request body fail closed instead
 // of writing into another tenant.
-func (s *PostgresGoldenStore) Upsert(ctx context.Context, orgID, query string, relevantIDs []string) error {
+// queryClass empty is normalized to QueryClassNaturalLanguage here (not just
+// left to the DB column default) so every writer — the HTTP handler, a direct
+// caller, a future one — gets the same behavior for "caller didn't say",
+// rather than the classification depending on whether the row was INSERTed
+// (gets the column default) or UPDATEd (gets an explicit empty string).
+func (s *PostgresGoldenStore) Upsert(ctx context.Context, orgID, query string, relevantIDs []string, queryClass string) error {
 	raw, err := json.Marshal(relevantIDs)
 	if err != nil {
 		return fmt.Errorf("encode golden judgment ids: %w", err)
 	}
+	if strings.TrimSpace(queryClass) == "" {
+		queryClass = QueryClassNaturalLanguage
+	}
 	return orgscope.WithOrgScope(ctx, s.pool, orgID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO eval_golden_judgments (org_id, query_norm, relevant_ids)
-			VALUES ($1, $2, $3)
+			INSERT INTO eval_golden_judgments (org_id, query_norm, relevant_ids, query_class)
+			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (org_id, query_norm)
-			DO UPDATE SET relevant_ids = EXCLUDED.relevant_ids, updated_at = NOW()
-		`, orgID, NormalizeQuery(query), raw); err != nil {
+			DO UPDATE SET relevant_ids = EXCLUDED.relevant_ids,
+			              query_class = EXCLUDED.query_class,
+			              updated_at = NOW()
+		`, orgID, NormalizeQuery(query), raw, queryClass); err != nil {
 			return fmt.Errorf("upsert golden judgment: %w", err)
 		}
 		return nil
 	})
 }
 
-// List returns the org's judged queries (normalized) with their relevant ids.
+// List returns the org's judged queries (normalized) with their judgments.
 //
 // Phase 1 RLS: no direct queries — Load opens its own scope. Deliberately not
 // scoped here as well, which would nest.
-func (s *PostgresGoldenStore) List(ctx context.Context, orgID string) (map[string][]string, error) {
+func (s *PostgresGoldenStore) List(ctx context.Context, orgID string) (map[string]GoldenJudgment, error) {
 	return s.Load(ctx, orgID)
 }
 
@@ -111,8 +139,8 @@ func (s *PostgresGoldenStore) List(ctx context.Context, orgID string) (map[strin
 // via the labeled proxy path.
 type noGolden struct{}
 
-func (noGolden) Load(context.Context, string) (map[string][]string, error) {
-	return map[string][]string{}, nil
+func (noGolden) Load(context.Context, string) (map[string]GoldenJudgment, error) {
+	return map[string]GoldenJudgment{}, nil
 }
 
 // goldenMetrics computes real judged metrics over the top-10 retrieved refs.

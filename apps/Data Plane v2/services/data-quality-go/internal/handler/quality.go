@@ -49,8 +49,8 @@ type EvalRunner interface {
 // GoldenStore manages the org's judged queries (golden sets) that upgrade eval
 // metrics from candidate-count proxies to real recall/nDCG/MRR.
 type GoldenStore interface {
-	Upsert(ctx context.Context, orgID, query string, relevantIDs []string) error
-	List(ctx context.Context, orgID string) (map[string][]string, error)
+	Upsert(ctx context.Context, orgID, query string, relevantIDs []string, queryClass string) error
+	List(ctx context.Context, orgID string) (map[string]eval.GoldenJudgment, error)
 }
 
 func NewQualityHandler(r EvalRunner, g GoldenStore, s *trust.Scorer, c *gates.Checker, l *lint.Linter, cq *cost.Query) *QualityHandler {
@@ -259,6 +259,10 @@ func (h *QualityHandler) UpsertGolden(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Query       string   `json:"query"`
 		RelevantIDs []string `json:"relevant_ids"`
+		// QueryClass is optional. Omitted (or blank) defaults to
+		// eval.QueryClassNaturalLanguage in the store, so every existing
+		// caller of this endpoint keeps working unchanged.
+		QueryClass string `json:"query_class"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -279,7 +283,7 @@ func (h *QualityHandler) UpsertGolden(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.golden.Upsert(r.Context(), orgID, req.Query, req.RelevantIDs); err != nil {
+	if err := h.golden.Upsert(r.Context(), orgID, req.Query, req.RelevantIDs, req.QueryClass); err != nil {
 		log.Error().Err(err).Str("org_id", orgID).Msg("golden judgment upsert failed")
 		writeError(w, http.StatusInternalServerError, "failed to store golden judgment")
 		return

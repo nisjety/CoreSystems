@@ -149,7 +149,9 @@ func TestScoreLabelsGoldenVsProxy(t *testing.T) {
 		{Query: "Judged Query", TotalMS: 10, Candidates: 5, Retrieved: refs("d1")},
 		{Query: "unjudged query", TotalMS: 20, Candidates: 5},
 	}
-	golden := map[string][]string{"judged query": {"d1"}}
+	golden := map[string]GoldenJudgment{
+		"judged query": {RelevantIDs: []string{"d1"}, QueryClass: QueryClassNaturalLanguage},
+	}
 
 	sc := score("hybrid", traces, golden)
 
@@ -160,9 +162,55 @@ func TestScoreLabelsGoldenVsProxy(t *testing.T) {
 		t.Fatalf("judged query labeled %q", sc.Details[0].MetricSource)
 	}
 	almost(t, "judged recall", sc.Details[0].RecallAt10, 1.0)
+	if sc.Details[0].QueryClass != QueryClassNaturalLanguage {
+		t.Fatalf("judged query class = %q, want %q", sc.Details[0].QueryClass, QueryClassNaturalLanguage)
+	}
 	if sc.Details[1].MetricSource != model.MetricSourceProxy {
 		t.Fatalf("unjudged query labeled %q", sc.Details[1].MetricSource)
 	}
 	// Proxy path unchanged: min(5/10, 1) = 0.5.
 	almost(t, "proxy recall", sc.Details[1].RecallAt10, 0.5)
+	if sc.Details[1].QueryClass != "" {
+		t.Fatalf("a proxy-scored query must carry no class, got %q", sc.Details[1].QueryClass)
+	}
+	// The whole reason ByClass exists: it must be reachable per class, not
+	// just folded into the blended Mean* fields above.
+	classSummary, ok := sc.ByClass[QueryClassNaturalLanguage]
+	if !ok {
+		t.Fatalf("ByClass missing %q: %+v", QueryClassNaturalLanguage, sc.ByClass)
+	}
+	if classSummary.QueriesRun != 1 {
+		t.Fatalf("class queries_run = %d, want 1", classSummary.QueriesRun)
+	}
+	almost(t, "class recall", classSummary.MeanRecall, 1.0)
+}
+
+// A second class must get its own bucket, and a query class must never leak
+// into another class's mean — this is the failure mode ByClass exists to
+// prevent (a lexical regression hiding inside a natural-language average).
+func TestScoreSegmentsByQueryClass(t *testing.T) {
+	traces := []RetrievalTrace{
+		{Query: "prose query", TotalMS: 10, Candidates: 5, Retrieved: refs("d1")},
+		{Query: "IDENTIFIER_TOKEN", TotalMS: 10, Candidates: 5, Retrieved: refs("wrong")},
+	}
+	golden := map[string]GoldenJudgment{
+		"prose query":      {RelevantIDs: []string{"d1"}, QueryClass: QueryClassNaturalLanguage},
+		"identifier_token": {RelevantIDs: []string{"d2"}, QueryClass: QueryClassLexicalIdentifier},
+	}
+
+	sc := score("hybrid", traces, golden)
+
+	nl, ok := sc.ByClass[QueryClassNaturalLanguage]
+	if !ok {
+		t.Fatalf("missing natural_language class: %+v", sc.ByClass)
+	}
+	lex, ok := sc.ByClass[QueryClassLexicalIdentifier]
+	if !ok {
+		t.Fatalf("missing lexical_identifier class: %+v", sc.ByClass)
+	}
+	almost(t, "natural_language recall (hit)", nl.MeanRecall, 1.0)
+	almost(t, "lexical_identifier recall (miss)", lex.MeanRecall, 0.0)
+	if nl.QueriesRun != 1 || lex.QueriesRun != 1 {
+		t.Fatalf("class counts = nl:%d lex:%d, want 1/1", nl.QueriesRun, lex.QueriesRun)
+	}
 }

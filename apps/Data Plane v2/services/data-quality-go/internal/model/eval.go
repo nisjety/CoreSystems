@@ -42,13 +42,31 @@ type Scorecard struct {
 	QueriesRun int    `json:"queries_run"`
 	// GoldenQueries counts how many of QueriesRun were judged against a
 	// golden set — 0 means every aggregate below is proxy-derived.
-	GoldenQueries int           `json:"golden_queries"`
-	MeanRecall    float64       `json:"mean_recall_at_10"`
-	MeanNDCG      float64       `json:"mean_ndcg_at_10"`
-	MeanMRR       float64       `json:"mean_mrr"`
-	MeanLatency   float64       `json:"mean_latency_ms"`
-	P95Latency    float64       `json:"p95_latency_ms"`
-	Details       []QueryResult `json:"details,omitempty"`
+	GoldenQueries int     `json:"golden_queries"`
+	MeanRecall    float64 `json:"mean_recall_at_10"`
+	MeanNDCG      float64 `json:"mean_ndcg_at_10"`
+	MeanMRR       float64 `json:"mean_mrr"`
+	MeanLatency   float64 `json:"mean_latency_ms"`
+	P95Latency    float64 `json:"p95_latency_ms"`
+	// ByClass segments the golden-judged queries by `query_class` (e.g.
+	// "natural_language", "lexical_identifier") so a class-specific regression
+	// is visible even when it moves the blended MeanRecall/MeanNDCG/MeanMRR
+	// above by less than their noise floor. Proxy-scored queries carry no
+	// class and are never bucketed here — see QueryResult.QueryClass.
+	// Omitted (not an empty map) when no judged query ran, so an eval with
+	// zero golden coverage doesn't render a misleading empty breakdown.
+	ByClass map[string]ClassSummary `json:"by_class,omitempty"`
+	Details []QueryResult           `json:"details,omitempty"`
+}
+
+// ClassSummary is one query class's slice of Scorecard — the per-class
+// analogue of the top-level Mean* fields, computed over golden-judged queries
+// of that class only.
+type ClassSummary struct {
+	QueriesRun int     `json:"queries_run"`
+	MeanRecall float64 `json:"mean_recall_at_10"`
+	MeanNDCG   float64 `json:"mean_ndcg_at_10"`
+	MeanMRR    float64 `json:"mean_mrr"`
 }
 
 type QueryResult struct {
@@ -59,6 +77,10 @@ type QueryResult struct {
 	LatencyMs    float64 `json:"latency_ms"`
 	Candidates   int     `json:"candidates_returned"`
 	MetricSource string  `json:"metric_source,omitempty"`
+	// QueryClass is set only when MetricSource is MetricSourceGolden — a proxy
+	// score has no judgment to classify, so it carries no class rather than a
+	// guessed or default one.
+	QueryClass string `json:"query_class,omitempty"`
 }
 
 type CreateEvalInput struct {

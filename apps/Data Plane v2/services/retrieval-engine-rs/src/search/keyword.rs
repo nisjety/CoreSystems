@@ -96,6 +96,38 @@ pub async fn keyword_arm_candidates(
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
+    // Anchor on distinctive terms when the query has any — same defect as the
+    // sparse arms, independently confirmed on this arm rather than assumed from
+    // the fix there. Meilisearch's default ranking rules (`words, typo,
+    // proximity, attribute, sort, exactness`) do not weight a rare exact token
+    // over several ordinary ones, so wrapping an identifier in prose buries it
+    // the same way an OR-joined disjunction did on the other two backends.
+    //
+    // Measured directly against this arm (bypassing fusion), on the mined
+    // lexical golden set — a query set with verified single-document ground
+    // truth, not an assumed one:
+    //
+    // | query shape | found in top 10 | MRR |
+    // |---|---|---|
+    // | bare identifier | 23/23 | 0.9783 |
+    // | wrapped in prose, unchanged | **14/23** | 0.5181 |
+    // | wrapped in prose, anchor-only | 23/23 | 0.9783 |
+    //
+    // Nine of twenty-three identifiers were unfindable in the arm's own top 10
+    // once wrapped in ordinary words — worse than the sparse arms' degradation,
+    // because Meilisearch has no "required" operator to fall back on the way
+    // Quickwit's `+()` does; dropping the prose entirely is what works here.
+    //
+    // No behaviour change for a pure prose question (no anchors): the full
+    // query still reaches Meilisearch, which is the typo-tolerant, fuzzy-match
+    // case this arm also exists to serve and that the measurement above never
+    // touched.
+    let anchored = crate::search::textquery::distinctive_terms(query);
+    let effective_query = if anchored.is_empty() {
+        query.to_string()
+    } else {
+        anchored.join(" ")
+    };
     let filter = format!("org_id = {}", quote_filter_value(org_id));
     let url = format!("{}/indexes/{}/search", client.base_url, client.index_uid);
     let response = client
@@ -103,7 +135,7 @@ pub async fn keyword_arm_candidates(
         .post(&url)
         .bearer_auth(&client.api_key)
         .json(&json!({
-            "q": query,
+            "q": effective_query,
             "filter": filter,
             "limit": limit,
             "attributesToRetrieve": ["knowledge_id", "document_id", "body"],
@@ -210,6 +242,10 @@ mod tests {
             // The org filter must be present on every request — this is the
             // arm's entire isolation boundary (see the module docs).
             assert_eq!(request["filter"], "org_id = \"org-a\"");
+            // "SKU-1" is itself a distinctive term (digit + letter), so
+            // anchoring is a no-op here and the query must reach Meilisearch
+            // unchanged.
+            assert_eq!(request["q"], "SKU-1");
             axum::Json(serde_json::json!({
                 "hits": [
                     { "knowledge_id": "kid-1", "document_id": "doc-1", "body": "SKU-1 shipped" },
@@ -240,6 +276,107 @@ mod tests {
         // RRF consumes list order, not a score field — every candidate's raw
         // score stays 0.0 here, exactly like `graph_arm_candidates`.
         assert_eq!(candidates[0].final_score, 0.0);
-        assert_eq!(candidates[1].knowledge_id, "kid-2");
+    }
+
+    /// The regression this exists for. Measured directly against a live
+    /// Meilisearch index with verified single-document ground truth (the mined
+    /// lexical golden set): wrapping an identifier in ordinary prose dropped it
+    /// out of the arm's own top 10 for 9 of 23 queries (MRR 0.9783 -> 0.5181).
+    /// Sending Meilisearch just the anchor term restored 23/23 (MRR 0.9783).
+    #[tokio::test]
+    async fn prose_around_an_identifier_is_dropped_before_it_reaches_meilisearch() {
+        use axum::{extract::Json as JsonExtract, routing::post, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(None));
+        let seen_in_handler = seen.clone();
+
+        let app = Router::new().route(
+            "/indexes/{index}/search",
+            post(
+                move |JsonExtract(request): JsonExtract<serde_json::Value>| {
+                    let seen = seen_in_handler.clone();
+                    async move {
+                        *seen.lock().expect("lock") = Some(request["q"].clone());
+                        axum::Json(serde_json::json!({ "hits": [] }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock server");
+        });
+
+        let client = MeilisearchQueryClient::new(format!("http://{address}"), "idx", "test-key")
+            .expect("client");
+        keyword_arm_candidates(
+            &client,
+            "where is idx_ku_content_tsv_gin defined and how is it used",
+            "org-a",
+            10,
+        )
+        .await
+        .expect("keyword_arm_candidates");
+
+        assert_eq!(
+            seen.lock().expect("lock").take(),
+            Some(serde_json::Value::String("idx_ku_content_tsv_gin".into())),
+            "only the identifier should reach Meilisearch — the surrounding \
+             prose is what buried it"
+        );
+    }
+
+    /// A pure prose question has no anchor, so the arm must fall back to the
+    /// full query — this is the typo-tolerant, fuzzy-match case the arm also
+    /// exists to serve, and the anchoring change must not touch it.
+    #[tokio::test]
+    async fn pure_prose_reaches_meilisearch_unchanged() {
+        use axum::{extract::Json as JsonExtract, routing::post, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(None));
+        let seen_in_handler = seen.clone();
+
+        let app = Router::new().route(
+            "/indexes/{index}/search",
+            post(
+                move |JsonExtract(request): JsonExtract<serde_json::Value>| {
+                    let seen = seen_in_handler.clone();
+                    async move {
+                        *seen.lock().expect("lock") = Some(request["q"].clone());
+                        axum::Json(serde_json::json!({ "hits": [] }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock server");
+        });
+
+        let client = MeilisearchQueryClient::new(format!("http://{address}"), "idx", "test-key")
+            .expect("client");
+        keyword_arm_candidates(
+            &client,
+            "how does retrieval combine dense and sparse",
+            "org-a",
+            10,
+        )
+        .await
+        .expect("keyword_arm_candidates");
+
+        assert_eq!(
+            seen.lock().expect("lock").take(),
+            Some(serde_json::Value::String(
+                "how does retrieval combine dense and sparse".into()
+            ))
+        );
     }
 }

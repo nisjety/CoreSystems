@@ -195,23 +195,46 @@ func (r *Runner) RunCompare(ctx context.Context, input model.CompareEvalInput) (
 	return &model.CompareResult{ScorecardA: scA, ScorecardB: scB, Diffs: diffs, Winner: winner}, nil
 }
 
+// classAccumulator sums one query class's golden-judged metrics, so ByClass
+// can be built with the same "sum then divide" shape as the top-level means
+// rather than a second, differently-computed pass over the results.
+type classAccumulator struct {
+	n                          int
+	sumRecall, sumNDCG, sumMRR float64
+}
+
 // score computes the scorecard. Queries with a golden judgment score REAL
 // recall@10/nDCG@10/MRR against the trace's persisted top-10 candidates;
 // unjudged queries keep the candidate-count proxy — each row is labeled
 // (`metric_source`: "golden" | "proxy") so aggregates are never mistaken for
-// judged quality when no golden set exists.
-func score(strategy string, traces []RetrievalTrace, golden map[string][]string) model.Scorecard {
+// judged quality when no golden set exists. Golden results are additionally
+// bucketed by `query_class` (Scorecard.ByClass) so a class-specific regression
+// stays visible even when it moves the blended means by less than their noise
+// floor — see the migration that added the column.
+func score(strategy string, traces []RetrievalTrace, golden map[string]GoldenJudgment) model.Scorecard {
 	results := make([]model.QueryResult, 0, len(traces))
 	var sumRecall, sumNDCG, sumMRR, sumLatency float64
 	goldenQueries := 0
+	byClass := make(map[string]*classAccumulator)
 	latencies := make([]float64, 0, len(traces))
 	for _, trace := range traces {
 		var recall, ndcg, mrr float64
+		var queryClass string
 		source := model.MetricSourceProxy
-		if relevant, judged := golden[NormalizeQuery(trace.Query)]; judged {
-			recall, ndcg, mrr = goldenMetrics(trace.Retrieved, relevant)
+		if judgment, judged := golden[NormalizeQuery(trace.Query)]; judged {
+			recall, ndcg, mrr = goldenMetrics(trace.Retrieved, judgment.RelevantIDs)
 			source = model.MetricSourceGolden
+			queryClass = judgment.QueryClass
 			goldenQueries++
+			acc, ok := byClass[queryClass]
+			if !ok {
+				acc = &classAccumulator{}
+				byClass[queryClass] = acc
+			}
+			acc.n++
+			acc.sumRecall += recall
+			acc.sumNDCG += ndcg
+			acc.sumMRR += mrr
 		} else {
 			recall = math.Min(float64(trace.Candidates)/10.0, 1.0)
 			ndcg = recall * 0.9
@@ -222,7 +245,7 @@ func score(strategy string, traces []RetrievalTrace, golden map[string][]string)
 		result := model.QueryResult{
 			Query: trace.Query, RecallAt10: recall, NDCGAt10: ndcg, MRR: mrr,
 			LatencyMs: float64(trace.TotalMS), Candidates: trace.Candidates,
-			MetricSource: source,
+			MetricSource: source, QueryClass: queryClass,
 		}
 		results = append(results, result)
 		sumRecall += recall
@@ -234,8 +257,22 @@ func score(strategy string, traces []RetrievalTrace, golden map[string][]string)
 	sort.Float64s(latencies)
 	p95Idx := int(math.Ceil(0.95*float64(len(latencies)))) - 1
 	n := float64(len(results))
+	var classSummaries map[string]model.ClassSummary
+	if len(byClass) > 0 {
+		classSummaries = make(map[string]model.ClassSummary, len(byClass))
+		for class, acc := range byClass {
+			cn := float64(acc.n)
+			classSummaries[class] = model.ClassSummary{
+				QueriesRun: acc.n,
+				MeanRecall: acc.sumRecall / cn,
+				MeanNDCG:   acc.sumNDCG / cn,
+				MeanMRR:    acc.sumMRR / cn,
+			}
+		}
+	}
 	return model.Scorecard{
 		Strategy: strategy, QueriesRun: len(results), GoldenQueries: goldenQueries,
+		ByClass:    classSummaries,
 		MeanRecall: sumRecall / n,
 		MeanNDCG:   sumNDCG / n, MeanMRR: sumMRR / n, MeanLatency: sumLatency / n,
 		P95Latency: latencies[p95Idx], Details: results,

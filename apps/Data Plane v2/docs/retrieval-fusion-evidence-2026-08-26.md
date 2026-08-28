@@ -995,3 +995,114 @@ contextual cell improved.
   lexemes, as are `retries` and `retry`), which is right for identifiers and
   wrong for prose. A second, language-stemmed tsvector OR'd with the `simple`
   one is the usual answer; it needs a corpus that can show the difference.
+
+---
+
+# Addendum — round 10: the keyword arm had the same defect, worse; and the blended metric is now split
+
+Pushed to stop measuring only the easy case for the lexical class ("make real
+keyword search work") and to stop reporting one blended number for classes that
+respond to changes in opposite directions ("make it first-class in the eval
+service"). Two independent fixes, cross-verified against each other.
+
+## The Meilisearch keyword arm buried prose-wrapped identifiers worse than the sparse arms did
+
+The round-9 anchoring fix covered Quickwit and Postgres FTS. Meilisearch is a
+third, independently-implemented lexical backend (its own tokenizer, its own
+ranking rules, raw free text rather than a hand-built query string) and was
+never verified to share the defect — or the fix.
+
+**First, a correction to my own method.** My first live probe used
+`internal/jobs/executor.go` as a "known-answer" query, picked via `LIMIT 1` on
+whichever document turned up first. It actually occurs in **3 documents**, so
+the "wrong document ranked first" I initially reported was not a bug — that
+document legitimately mentions the path 5 times. The Quickwit OR-flood evidence
+in round 9 was unaffected (it checked for the literal phrase's presence in
+retrieved text, not a specific `document_id`), but this specific Meilisearch
+finding had to be redone against ground truth that is actually verified: the
+mined lexical golden set, built by the single/two-document uniqueness rule.
+
+Measured directly against the arm (bypassing fusion, so this isolates
+Meilisearch's own ranking, not RRF):
+
+| query shape | found in top 10 | MRR |
+|---|---|---|
+| bare identifier | 23/23 | 0.9783 |
+| wrapped in prose, unchanged | **14/23** | 0.5181 |
+| wrapped in prose, anchor-only | 23/23 | 0.9783 |
+
+**Nine of twenty-three identifiers were unfindable in the arm's OWN top 10**
+once wrapped in ordinary words — a worse failure than either sparse backend,
+because Meilisearch has no "required" operator to fall back on the way
+Quickwit's `+()` does. Its default ranking rules (`words, typo, proximity,
+attribute, sort, exactness`) simply don't weight one rare exact token over
+several ordinary ones.
+
+Fixed the same way as round 9, reusing the same pure function rather than a
+parallel implementation: `keyword_arm_candidates` now sends Meilisearch
+`textquery::distinctive_terms(query).join(" ")` when the query has any anchors,
+dropping the prose entirely rather than trying to keep it as an optional clause
+(Meilisearch's `q` is free text with no such operator). A pure prose question
+(no anchors) is unchanged — full query still reaches Meilisearch, which is the
+typo-tolerant fuzzy-match case this arm also exists to serve.
+
+## The eval service reported one blended number; a class-specific regression could hide inside it
+
+The offline gate (`scripts/eval-gate.py`) already treats the lexical and
+natural-language classes as separate cells, for a measured reason: `w_bm25` is
+worth +0.37 nDCG on identifiers and costs nDCG on prose, so averaging them
+together lets the two effects partially cancel. The **in-service** eval
+(`data-quality-go`, which scores real traffic against `eval_golden_judgments`
+rather than a fixed offline file) had no such segmentation — `Scorecard`
+reported one `mean_recall_at_10`/`mean_ndcg_at_10`/`mean_mrr` across every
+golden-judged query, blended.
+
+Added a `query_class` column (migration `20260828140000`, `NOT NULL DEFAULT
+'natural_language'` — correct for all 87 existing rows, which are hand-authored
+natural-language questions, not a placeholder needing a backfill) and threaded
+it through: `GoldenJudgment{RelevantIDs, QueryClass}` replaces the bare
+`[]string` in `GoldenSource`, `score()` buckets golden-judged results by class
+into `Scorecard.ByClass map[string]ClassSummary`, and a new
+`scripts/eval-seed-lexical-judgments.py` upserts the already-mined
+`golden-lexical*.json` pair durably (kept separate from the miner itself, the
+same way `eval-build-golden-set.py`/`seed_golden_set.py` already split mining
+from seeding for the natural-language set — re-deriving queries in the seeder
+would let the gate and the in-service eval silently judge different queries as
+"the lexical class").
+
+Verified live, end to end, both fixes together — this is also the strongest
+confirmation the anchoring fix actually works, because it comes from a
+completely independent scoring path (`data-quality-go`'s own `goldenMetrics`
+in Go, not the Python harness used everywhere else in this document): seeded
+46 judgments (23 per org, `query_class='lexical_identifier'`), ran the mined
+queries against the live, anchored keyword+sparse arms to generate fresh
+traces, then triggered `POST /v1/evals/retrieval` and read back the scorecard.
+
+`org-corpus-baseline`, 100 most-recent traces, 100 golden-judged:
+
+| class | n | recall@10 | nDCG@10 | MRR |
+|---|---|---|---|---|
+| blended (old behaviour) | 100 | 0.9200 | 0.7918 | 0.7502 |
+| natural_language | 77 | 0.8961 | 0.7409 | 0.6907 |
+| lexical_identifier | 23 | **1.0000** | **0.9622** | **0.9493** |
+
+The lexical numbers are byte-identical to the direct-measurement figures above
+and to round 9's anchored sparse-arm result — three independent instruments
+(direct Meilisearch queries, the Python retrieval harness, and now this Go
+service) agreeing is the confirmation that matters, not any one of them alone.
+The blended row is exactly the failure this exists to catch: it sits between
+the two classes and would absorb a lexical-only regression into noise the same
+way the offline gate's blended metric would have.
+
+`org-corpus-contextual` reproduced the same `lexical_identifier` figures
+(1.0000 / 0.9622 / 0.9493) — consistent with round 9's finding that contextual
+embedding makes no measurable difference to exact-identifier lookup.
+
+Verified: 18 new/changed Rust tests in `search/keyword.rs` (all passing), Go
+`internal/eval` and `internal/handler` suites green with two new tests pinning
+the segmentation (including that a proxy-scored — unjudged — query carries no
+class, so an absent judgment can never be silently miscounted into either
+bucket), migration applied cleanly to the live database with row counts
+unchanged before/after (2,328 knowledge_units, 87 pre-existing judgments intact
+and correctly defaulted), full `cargo fmt`/`cargo test --workspace` and
+`go vet`/`go test ./...` clean.
