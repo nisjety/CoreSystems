@@ -1,0 +1,80 @@
+name: Data Plane v2 Nightly Retrieval Eval
+
+# Runs the retrieval-quality gate (scripts/eval-gate.py) against the committed
+# baseline every night, plus on demand. See scripts/eval-nightly.sh for the
+# full reasoning; short version:
+#
+# This CANNOT run on GitHub-hosted runners. The eval needs an already-ingested
+# corpus (no ingestion script exists in this repo to rebuild it from a clean
+# checkout — a real gap, tracked, not solved by this workflow), Control
+# Plane's auth-service reachable to mint bearer tokens (its own bootstrap
+# needs secret files that don't exist on a fresh checkout either), and live
+# Cohere/Azure credentials that cost real money per call. All three already
+# exist, continuously, on the machine that runs the Data Plane v2 + Control
+# Plane dev/eval stack — so this targets a SELF-HOSTED runner registered on
+# that machine, rather than trying to reconstruct any of that from nothing.
+#
+# No GitHub Actions secrets are used or needed: the runner reads the
+# corpus-seeder credential directly from Control Plane's own
+# .env.generated-secrets file on that host at run time (see
+# scripts/eval-nightly.sh) — it is never stored here.
+#
+# ## One-time setup this workflow assumes
+#
+# A self-hosted runner labeled `dp2-eval`, registered on the host that runs
+# the Data Plane v2 + Control Plane stacks. Register one from this repo's
+# Settings -> Actions -> Runners -> "New self-hosted runner" (that page issues
+# a short-lived, host-specific registration command — there is nothing to
+# script here, it has to come from an authenticated GitHub session). Give the
+# runner the extra label `dp2-eval` when the setup wizard asks for labels.
+
+on:
+  schedule:
+    # 03:17 UTC — off-peak, and deliberately not on the hour so it doesn't
+    # stack with every other project's midnight/top-of-hour cron jobs on a
+    # shared host.
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  # A ~40-minute job plus a slow night could still be running when the next
+  # trigger fires (cron, or someone clicking "Run workflow"). Queue rather
+  # than run two evals against the same live stack at once — concurrent runs
+  # would contend for the same retrieval cache and corpus, not just waste
+  # provider calls.
+  group: dataplane-v2-eval-nightly
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: "apps/Data Plane v2"
+
+jobs:
+  eval:
+    name: Retrieval quality gate
+    runs-on: [self-hosted, dp2-eval]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run the eval and gate on the result
+        # The runner is necessarily Windows (it needs Docker Desktop access to
+        # this stack's containers) — GitHub's Windows runners default `run:`
+        # to PowerShell, which cannot execute this #!/bin/sh script. `bash`
+        # here resolves to Git for Windows' bash, already required on this
+        # host for the docker/cygpath/python3 tool chain the script uses (no
+        # `make` dependency — confirmed `make` is not on PATH in this exact
+        # shell, so eval-nightly.sh calls the underlying scripts directly).
+        shell: bash
+        run: ./scripts/eval-nightly.sh
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataplane-v2-eval-results-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/dpv2-eval-*/*.json
+            ${{ runner.temp }}/dpv2-eval-*/*.log
+          if-no-files-found: warn
+          retention-days: 30

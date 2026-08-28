@@ -156,6 +156,24 @@ def main():
     baseline = json.load(open(BASELINE, encoding="utf-8"))
 
     failures, warnings = [], []
+
+    # A baselined cell that produced NO result file this run is not "nothing to
+    # compare" — it is the darkest form of the failure this gate exists to
+    # catch: not degraded, not zero-result, just entirely absent. The loop
+    # below iterates `current`, so a cell missing from `current` was never
+    # being visited at all — caught live 2026-08-28: a transient 401/500 storm
+    # killed the two natural-language `rr-on` cells mid-run (auth token expiry
+    # partway through an ~87-query, several-minute cell is the suspected
+    # cause), `eval-gate.py` still printed GATE PASSED, because the two
+    # lexical cells that DID complete were the only ones ever checked. The
+    # gate was silently skipping its two largest, longest-established cells.
+    missing = sorted(set(baseline) - set(current))
+    for org in missing:
+        failures.append(
+            f"{org}: baselined at {baseline[org]['queries']} queries, but "
+            f"produced NO result file this run — the eval for this cell did "
+            f"not complete, not just regress")
+
     print(f"{'cell':<22}{'metric':<14}{'baseline':>10}{'current':>10}{'delta':>9}{'slack':>8}  verdict")
     print("-" * 84)
     for org, cur in sorted(current.items()):

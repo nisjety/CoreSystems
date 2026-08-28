@@ -1106,3 +1106,196 @@ bucket), migration applied cleanly to the live database with row counts
 unchanged before/after (2,328 knowledge_units, 87 pre-existing judgments intact
 and correctly defaulted), full `cargo fmt`/`cargo test --workspace` and
 `go vet`/`go test ./...` clean.
+
+---
+
+# Addendum — round 11: making the eval run by itself
+
+Pushed to close the last open item: the retrieval-quality gate existed and was
+verified in both directions, but nothing ran it without a human remembering to.
+
+## The real blocker was never "needs a self-hosted machine" as a preference
+
+Investigated whether a GitHub-hosted runner could boot everything fresh instead
+of depending on a persistent host, since that would remove an ops burden.
+Concretely, three things would need to exist from a clean checkout:
+
+1. **An ingested corpus.** There is no committed script anywhere in this repo
+   that walks source documents and POSTs them into `documents-api` to build
+   `org-corpus-baseline`/`org-corpus-contextual`. The corpus (95 documents,
+   1,164 chunks — this repository's own markdown docs, cross-referenced by
+   filename against the golden set's query titles) was assembled once, by some
+   process not captured in version control. Every eval script's own docs list
+   "the corpus ingested" as a precondition, never as something they create.
+2. **Control Plane's `auth-service` reachable.** Its compose service
+   (`auth-core`) needs 11 gitignored per-service `.env`/`.env.docker` files.
+   `run-control-plane.sh` — which DOES fully automate the ~90 cross-plane
+   tokens, the JWT/Ed25519 signing keys, and (relevantly) the corpus-seeder
+   credential itself — refuses to run at all unless those 11 files already
+   exist. Ten have a manual-fill-in `.env.example` template; one
+   (`.env.docker`) has no template in the repo at all.
+3. **Live Cohere/Azure credentials.** Unavoidable regardless of where the
+   compute runs — the eval calls the same paid providers retrieval does.
+
+None of this is a hard technical wall (a GitHub-hosted runner can absolutely
+run docker-compose — `docker-smoke` already proves it for DP2 alone). It is
+real, un-scripted setup work: writing a corpus-ingestion pipeline and a
+from-nothing Control Plane bootstrap are each their own project, not a CI
+config. **All three already exist, continuously, on whatever machine runs the
+live dev/eval stack** — so the honest, buildable-now design points at THAT
+machine, not because self-hosted was assumed, but because rebuilding the
+alternative would mean building the two missing pipelines first.
+
+## What shipped
+
+- **`scripts/golden-v2.json` / `golden-v2-ctx.json` committed** — the 87
+  hand-authored natural-language judgments existed only in one local scratch
+  directory all session, which would not survive to any other environment,
+  runner or otherwise. They cannot be regenerated (hand-authored on purpose:
+  model-generated questions bias lexical measurements — round 1). This was the
+  single most important gap to close: without it, no automation of any shape
+  has anything to score the natural-language class against. Pure query text +
+  this deployment's internal UUIDs — no secrets.
+- **`scripts/eval-nightly.sh`** — orchestrates: preflight (stack healthy,
+  credential present — fails in seconds with a specific message rather than
+  40 minutes into a run), stage the committed natural-language set, re-mine
+  the lexical class fresh (cheap — pure SQL, no LLM calls — so it self-heals
+  if corpus content ever legitimately changes rather than trusting a stale
+  snapshot), run both query classes, gate against the committed baseline
+  (`scripts/eval-baseline.json`), then refresh the in-service by-class
+  scorecard (round 10) as an informational, non-gating signal.
+- **`scripts/eval-refresh-inservice-scorecard.sh`** — mints a token per org,
+  triggers `POST /v1/evals/retrieval`, prints the `by_class` breakdown.
+- **`.github/workflows/dataplane-v2-eval-nightly.yml`** — `schedule` (nightly)
+  + `workflow_dispatch`, `runs-on: [self-hosted, dp2-eval]`, a `concurrency`
+  guard (a slow run and the next night's cron must not both hit the same live
+  stack), uploads the per-step logs as artifacts.
+
+**No GitHub Actions secrets.** The runner reads the corpus-seeder credential
+directly from Control Plane's own `.env.generated-secrets` on the host at run
+time — the same file every eval command this whole document describes already
+reads it from. It is never stored in GitHub, never logged.
+
+**A method note, since round 8 hit this exact trap twice already:** every
+step in `eval-nightly.sh` that must be allowed to fail the job runs to a file
+first, with its exit status checked as a plain variable assignment — never
+`cmd | tail`, which reports `tail`'s exit status under `set -e`, not `cmd`'s.
+
+## Six real bugs, none found by reading — all found by actually running it
+
+Consistent with every other fix in this document: the design above was correct
+on paper and wrong in six concrete ways, each caught only by running the
+script against the live stack and watching it fail. The last two are more
+serious than the first four — not a broken helper script, but the gate itself
+silently checking less than it claimed to, and a systemic (not occasional)
+cause behind the specific failure that exposed it.
+
+1. **`make` is not on PATH in this shell.** `eval-nightly.sh` first called
+   `make eval-retrieval` / `eval-retrieval-lexical` / `eval-gate`, mirroring
+   the Makefile targets. `command -v make` exits 1 on this exact host — the
+   very first live run failed at "Retrieval — natural language" with
+   `command not found`. Rewritten to call the underlying scripts directly
+   (`eval-attribution-study.sh`, `eval-score-attribution.py`,
+   `eval-lexical-cell.sh`, `eval-gate.py`), which is what the Makefile targets
+   do anyway and removes a CI-environment prerequisite nobody asked for.
+2. **`run_eval_hybrid.py` was never staged.** Every eval script mounts the
+   work dir into a throwaway container and runs this exact filename from
+   inside it — a manual `cp scripts/eval-run-retrieval.py
+   $WORK/run_eval_hybrid.py` I had been doing by hand all session, never
+   written into the automation itself. `eval-lexical-cell.sh` fails fast and
+   loud on the missing file; `eval-attribution-study.sh` has no such check —
+   all 14 of its cells failed silently inside their containers while the
+   script still printed `STUDY COMPLETE`. Nothing was ever falsely reported as
+   passing (`eval-gate.py`'s existing `raise SystemExit` on zero result files
+   — round 8 — would have caught it downstream), but it would have burned
+   through every cell before saying why. Fixed by staging the file at the top
+   of `eval-nightly.sh`, alongside the golden set.
+3. **A `set -e` trap in the poll loop, one call after the code comment warning
+   about exactly this trap.** `eval-refresh-inservice-scorecard.sh` polled
+   eval-run status with `[ "$STATUS" = completed ] || [ "$STATUS" = failed ]
+   && break`. As a single AND-OR list, its own overall exit status is what
+   `set -e` checks — on the very first poll where the status is still
+   pending (neither side true), the list's exit status is false, and `set -e`
+   would abort the ENTIRE informational step, before ever polling a second
+   time. Never fired in practice because `RunEval` executes inline and is
+   already `completed` on the first check (confirmed both live test runs) —
+   which is exactly why it survived unnoticed until called out explicitly
+   here. Fixed with an explicit `if`/`break`. Two sibling command-substitution
+   assignments (`RUN=$(docker exec ...)`, `EVAL_ID=$(... | python3 ...)`) had
+   the same class of hazard — a failing inner command aborting the script
+   before its own very-next-line fallback check ever ran — and got the same
+   `|| true` treatment.
+4. **A Python quoting bug inside a shell quoting bug.** The scorecard
+   printer's first version used f-strings with backslash-escaped dict keys
+   (`f"{sc[\"queries_run\"]}"`) to survive being embedded in a double-quoted
+   f-string — a `SyntaxError` on Python < 3.12 ("f-string expression part
+   cannot include a backslash"). Switching those keys to single quotes
+   "fixed" the syntax error and broke something worse: the whole block sits
+   inside a single-quoted `python3 -c '...'` shell string, and a single quote
+   inside a single-quoted shell string closes it — `sc['queries_run']` reached
+   Python as the bareword `sc[queries_run]`, a `NameError`. Two different
+   quoting layers, two different failures, from the same line. Fixed by
+   dropping f-strings for this block in favor of `%`-formatting with
+   double-quoted keys throughout, matching every other `python3 -c` call
+   already in this file.
+5. **`eval-gate.py` silently skipped a baselined cell that produced no output
+   at all — the exact class of failure this gate exists to catch, in the one
+   shape it could not see.** `collect()` globs whatever `st-rr-on-*.json`
+   files exist and returns them as `current`; the main loop is
+   `for org, cur in sorted(current.items())`. A cell present in the committed
+   baseline but ABSENT from `current` is never visited by that loop — not
+   warned about, not failed, simply never looked at. Caught live, for real,
+   not as a hypothetical: the very first unattended end-to-end run hit bug 6
+   below, which killed the `rr-on baseline`/`rr-on contextual` cells mid-run
+   before they ever wrote a result file. The two lexical cells (unaffected,
+   short enough to finish inside one token's TTL) were the only ones `current`
+   contained, and `eval-gate.py` printed **GATE PASSED**, having compared
+   exactly those two and never so much as mentioned the two missing ones. An
+   automation whose core promise is "catches a regression" cannot have a shape
+   of failure where it checks less than it claims and still reports green.
+   Fixed: before the main loop, every cell in the committed baseline that is
+   absent from `current` is now an explicit, named failure
+   ("{org}: baselined at N queries, but produced NO result file this run").
+   Verified both directions on real data from this incident — exit 1 against
+   the actual broken run (both missing cells named), exit 0 unchanged against
+   an earlier run where all four cells completed.
+6. **The root cause bug 5 exposed: natural-language cells can systemically
+   outlive the auth token's TTL, not occasionally.** `eval-attribution-study.sh`
+   minted one token per cell and ran that cell's full 87 queries against it in
+   a single `docker run`. `PLANE_TOKEN_TTL_DATA_PLANE_SECONDS` defaults to
+   300s; observed per-query latency in the SAME run ranged p50 2.7-3.6s to p95
+   4.2-5.1s, so 87 queries plus `EVAL_DELAY_MS=600` pacing lands at roughly
+   270-330s — squarely straddling the TTL, not comfortably under it. This is
+   why `[77] FAIL 401` / `[78] FAIL 401` showed up ~77 queries into an 87-query
+   cell: the token expired mid-run, and every query after that point failed
+   the same way. With bug 5 fixed, this stops being invisible — but a nightly
+   gate that fails on token expiry nearly every night is exactly as useless as
+   one that silently skips a cell: neither one is reporting anything about
+   retrieval quality. `eval-run-retrieval.py`'s own `token()` docstring already
+   named the intended fix — "chunking lets the caller mint a fresh token per
+   slice, which is more robust than a background refresher racing the run" —
+   and `EVAL_OFFSET`/`EVAL_LIMIT` already existed for exactly this (used by
+   `eval-deep-graph-tier.sh`); it had just never been wired into
+   `eval-attribution-study.sh`. Fixed by chunking each cell into `CHUNK=25`
+   query slices, minting a fresh token before every slice, and merging the
+   slices' JSON arrays back into one file afterward — `eval-score-attribution.py`
+   and `eval-gate.py` stay unaware chunking ever happened. `eval-lexical-cell.sh`
+   was left as-is: its 23-query cells finish in ~90-130s, comfortably inside
+   the TTL with real margin, not the coin-flip the 87-query cells were — the
+   same chunking is there to reach for if that class ever grows enough to
+   need it.
+
+## What this does not solve, on purpose
+
+The corpus-ingestion pipeline and Control-Plane-from-a-clean-checkout
+bootstrap are real gaps, both flagged above, neither solved here — building
+either safely (the second one mints security-relevant signing keys) is its
+own project and would have been rushed inside this task. If the host this
+targets is ever torn down and rebuilt, this workflow fails loudly at the
+preflight step, which is the correct behavior until that work happens: a clear
+failure, not a silent false pass.
+
+**One step is not automatable at all**: registering the self-hosted runner
+itself needs a short-lived, host-specific token from an authenticated GitHub
+session (Settings → Actions → Runners → "New self-hosted runner"). Nothing
+can script or pre-generate that safely.

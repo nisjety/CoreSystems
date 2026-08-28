@@ -1,0 +1,525 @@
+[
+ {
+  "query": "why was the LanguageBind video tower removed and what replaced it",
+  "relevant_ids": [
+   "7404a063-95ab-4ea5-ba7f-4eaaf30db71c"
+  ]
+ },
+ {
+  "query": "can any video embedding model tell a clip from its own reverse",
+  "relevant_ids": [
+   "7404a063-95ab-4ea5-ba7f-4eaaf30db71c"
+  ]
+ },
+ {
+  "query": "is there a benchmark that checks whether retrieval understands the order events happen in",
+  "relevant_ids": [
+   "7404a063-95ab-4ea5-ba7f-4eaaf30db71c"
+  ]
+ },
+ {
+  "query": "we index video but motion is invisible to search \u2014 what did we do about it",
+  "relevant_ids": [
+   "7404a063-95ab-4ea5-ba7f-4eaaf30db71c"
+  ]
+ },
+ {
+  "query": "how does retrieval combine dense sparse and graph results into one ranking",
+  "relevant_ids": [
+   "e5e9935c-3159-4baf-8916-2a3e8d21238f"
+  ]
+ },
+ {
+  "query": "how does the retrieval service prove who it is when calling the inference service",
+  "relevant_ids": [
+   "e5e9935c-3159-4baf-8916-2a3e8d21238f"
+  ]
+ },
+ {
+  "query": "which metrics does the retrieval quality evaluation compute",
+  "relevant_ids": [
+   "7469e93c-b1e0-4259-8f72-2cff5c00d5f6"
+  ]
+ },
+ {
+  "query": "why can't I read back the result of an evaluation run",
+  "relevant_ids": [
+   "7469e93c-b1e0-4259-8f72-2cff5c00d5f6"
+  ]
+ },
+ {
+  "query": "how does the golden judgment set join to retrieval traces",
+  "relevant_ids": [
+   "7469e93c-b1e0-4259-8f72-2cff5c00d5f6"
+  ]
+ },
+ {
+  "query": "which retrieval gaps were still open according to the gap analysis",
+  "relevant_ids": [
+   "807561b8-7667-4e1e-a5e7-6a22f4f074d3"
+  ]
+ },
+ {
+  "query": "what was the plan for durable retrieval quality improvements",
+  "relevant_ids": [
+   "f14cb09f-a8e8-4022-b275-2e25d49adc0a"
+  ]
+ },
+ {
+  "query": "how do documents get chunked before embedding",
+  "relevant_ids": [
+   "d7c72f25-b741-40dd-bbde-aa86f6790389"
+  ]
+ },
+ {
+  "query": "which service is responsible for re-driving failed embeddings",
+  "relevant_ids": [
+   "d7c72f25-b741-40dd-bbde-aa86f6790389"
+  ]
+ },
+ {
+  "query": "did the chunking service ever get stuck restarting over and over",
+  "relevant_ids": [
+   "d7c72f25-b741-40dd-bbde-aa86f6790389"
+  ]
+ },
+ {
+  "query": "what did rebuilding the embedding service under compose actually verify",
+  "relevant_ids": [
+   "c64c0004-d48c-44a4-8a8a-33012844005a"
+  ]
+ },
+ {
+  "query": "how do stale embeddings get detected",
+  "relevant_ids": [
+   "14b62451-b651-4ccb-ba3a-db150f89d823"
+  ]
+ },
+ {
+  "query": "what jobs can the data orchestrator run",
+  "relevant_ids": [
+   "14b62451-b651-4ccb-ba3a-db150f89d823"
+  ]
+ },
+ {
+  "query": "does the orchestrator remember what it was doing after a restart",
+  "relevant_ids": [
+   "14b62451-b651-4ccb-ba3a-db150f89d823"
+  ]
+ },
+ {
+  "query": "what does the quickwit adapter rebuild endpoint do",
+  "relevant_ids": [
+   "82553de0-6c78-46d2-8194-506c0815b5f5"
+  ]
+ },
+ {
+  "query": "how long before a deleted document stops turning up in search results",
+  "relevant_ids": [
+   "777b53b4-0421-4f4b-a180-3c28b8201402"
+  ]
+ },
+ {
+  "query": "why does the same source object show up twice in the search index",
+  "relevant_ids": [
+   "777b53b4-0421-4f4b-a180-3c28b8201402"
+  ]
+ },
+ {
+  "query": "does the search adapter's schema actually match the database",
+  "relevant_ids": [
+   "82553de0-6c78-46d2-8194-506c0815b5f5"
+  ]
+ },
+ {
+  "query": "how is the knowledge graph built from documents",
+  "relevant_ids": [
+   "c1b5b8d7-ffe3-4c67-bb6e-26cb8a094b53"
+  ]
+ },
+ {
+  "query": "there was a reproducible bug in the graph service \u2014 where exactly was it",
+  "relevant_ids": [
+   "c1b5b8d7-ffe3-4c67-bb6e-26cb8a094b53"
+  ]
+ },
+ {
+  "query": "what node types and relationships does the graph database store",
+  "relevant_ids": [
+   "a2ef62bd-45c2-461e-a258-39083ba549e4"
+  ]
+ },
+ {
+  "query": "how do we stop a multi-hop graph walk from surfacing documents someone may not see",
+  "relevant_ids": [
+   "a2ef62bd-45c2-461e-a258-39083ba549e4"
+  ]
+ },
+ {
+  "query": "how are page images reranked with a vision model",
+  "relevant_ids": [
+   "b342e9c7-67f6-4bdb-991c-320db3c2c94f"
+  ]
+ },
+ {
+  "query": "what GPU memory does the visual reranker need and what quantization",
+  "relevant_ids": [
+   "b342e9c7-67f6-4bdb-991c-320db3c2c94f"
+  ]
+ },
+ {
+  "query": "why did the first attempts at a visual pipeline design not work",
+  "relevant_ids": [
+   "bd6e295e-22c6-4b62-977e-68ab648cbdbe"
+  ]
+ },
+ {
+  "query": "which mistakes should we avoid when building the image search path",
+  "relevant_ids": [
+   "bd6e295e-22c6-4b62-977e-68ab648cbdbe"
+  ]
+ },
+ {
+  "query": "why did we pick LAION CLAP for the audio arm",
+  "relevant_ids": [
+   "3ce47d32-3e06-4c3b-9129-f02cda0d18e5"
+  ]
+ },
+ {
+  "query": "does Azure offer an audio similarity embedding service",
+  "relevant_ids": [
+   "3ce47d32-3e06-4c3b-9129-f02cda0d18e5"
+  ]
+ },
+ {
+  "query": "how does the wiki store approve and version pages",
+  "relevant_ids": [
+   "c7aa1237-2117-4146-9b95-5e840adc2ec7"
+  ]
+ },
+ {
+  "query": "listing wiki pages was failing with a server error \u2014 what caused it",
+  "relevant_ids": [
+   "c7aa1237-2117-4146-9b95-5e840adc2ec7"
+  ]
+ },
+ {
+  "query": "what is weak about how the wiki service scopes requests to a tenant",
+  "relevant_ids": [
+   "c7aa1237-2117-4146-9b95-5e840adc2ec7"
+  ]
+ },
+ {
+  "query": "what is inside the event we publish when a wiki version goes live",
+  "relevant_ids": [
+   "9abf7d8a-b14b-4d5d-8a60-f9c9d070c198"
+  ]
+ },
+ {
+  "query": "how should a consumer treat fields it does not recognise in an event",
+  "relevant_ids": [
+   "9abf7d8a-b14b-4d5d-8a60-f9c9d070c198"
+  ]
+ },
+ {
+  "query": "which service owns document creation and idempotent ingest",
+  "relevant_ids": [
+   "edf42420-3863-49fb-8629-8d0e541a3b31"
+  ]
+ },
+ {
+  "query": "how does the documents service work out who is making a request",
+  "relevant_ids": [
+   "edf42420-3863-49fb-8629-8d0e541a3b31"
+  ]
+ },
+ {
+  "query": "what does the control plane own compared to other planes",
+  "relevant_ids": [
+   "926b71af-1baf-4d14-8c6a-fad7ba2c6986"
+  ]
+ },
+ {
+  "query": "what rules decide which plane gets to own a new capability",
+  "relevant_ids": [
+   "387b9e9b-4aaa-4a70-9d5f-36fbc476d522"
+  ]
+ },
+ {
+  "query": "is there one table showing what every plane is responsible for",
+  "relevant_ids": [
+   "387b9e9b-4aaa-4a70-9d5f-36fbc476d522"
+  ]
+ },
+ {
+  "query": "what is the overall architecture of the whole platform across planes",
+  "relevant_ids": [
+   "d5c72a05-4519-4c8e-aace-eb5cd2ef89a6"
+  ]
+ },
+ {
+  "query": "what does convex-core own and what is explicitly not its job",
+  "relevant_ids": [
+   "64507daf-1421-4ccd-b32d-c03e5fdab19a"
+  ]
+ },
+ {
+  "query": "where do realtime collaborative workspace projections live",
+  "relevant_ids": [
+   "64507daf-1421-4ccd-b32d-c03e5fdab19a"
+  ]
+ },
+ {
+  "query": "which services sit on the reasoning and inference side",
+  "relevant_ids": [
+   "0f0bf968-7e02-4d48-abe5-d061e8a2cbb5"
+  ]
+ },
+ {
+  "query": "what is the model gateway for",
+  "relevant_ids": [
+   "0f0bf968-7e02-4d48-abe5-d061e8a2cbb5"
+  ]
+ },
+ {
+  "query": "how do browser automation sessions get executed and sandboxed",
+  "relevant_ids": [
+   "43eeea5d-8c7d-4725-b3e9-27e82539ff74"
+  ]
+ },
+ {
+  "query": "what does integration-corev2 actually do",
+  "relevant_ids": [
+   "e282c95d-1c5e-4779-a0fe-7ee42d67fffd"
+  ]
+ },
+ {
+  "query": "what is finspo-core responsible for",
+  "relevant_ids": [
+   "e282c95d-1c5e-4779-a0fe-7ee42d67fffd"
+  ]
+ },
+ {
+  "query": "which part of ingestion handles bringing in existing files",
+  "relevant_ids": [
+   "e282c95d-1c5e-4779-a0fe-7ee42d67fffd"
+  ]
+ },
+ {
+  "query": "what storage and event systems does the data plane sit on",
+  "relevant_ids": [
+   "1ec3acd9-b9c3-4a73-a74c-6f11bfb1b306"
+  ]
+ },
+ {
+  "query": "which events does the control plane publish when an organization changes",
+  "relevant_ids": [
+   "926b71af-1baf-4d14-8c6a-fad7ba2c6986"
+  ]
+ },
+ {
+  "query": "why is Convex only allowed to hold a read-only copy",
+  "relevant_ids": [
+   "926b71af-1baf-4d14-8c6a-fad7ba2c6986"
+  ]
+ },
+ {
+  "query": "how do we keep Convex in step with the authoritative user records",
+  "relevant_ids": [
+   "6a81003d-73b5-4983-ba77-d6e1819765b2"
+  ]
+ },
+ {
+  "query": "what stops one tenant from seeing another tenant's documents",
+  "relevant_ids": [
+   "e5e9935c-3159-4baf-8916-2a3e8d21238f"
+  ]
+ },
+ {
+  "query": "why did we decide to give Spaces their own rows owned by control",
+  "relevant_ids": [
+   "04cdff51-901f-4438-9260-48ae81ee8c06"
+  ]
+ },
+ {
+  "query": "could we not have reused an existing workspace identifier for Spaces",
+  "relevant_ids": [
+   "04cdff51-901f-4438-9260-48ae81ee8c06"
+  ]
+ },
+ {
+  "query": "does the agent registry answer who is allowed to act, or just who is present",
+  "relevant_ids": [
+   "78ac0fa1-a739-4592-96a9-083fe413e6bb"
+  ]
+ },
+ {
+  "query": "what happens when an organization requests GDPR erasure of its data",
+  "relevant_ids": [
+   "c64c0004-d48c-44a4-8a8a-33012844005a",
+   "807561b8-7667-4e1e-a5e7-6a22f4f074d3"
+  ]
+ },
+ {
+  "query": "which privacy classes do we label data with",
+  "relevant_ids": [
+   "326bb8e5-b5e2-4e93-8017-b0a4e3a17627"
+  ]
+ },
+ {
+  "query": "where does the scraping proxy sit in our privacy story",
+  "relevant_ids": [
+   "326bb8e5-b5e2-4e93-8017-b0a4e3a17627"
+  ]
+ },
+ {
+  "query": "which ports does the base stack expose on the host",
+  "relevant_ids": [
+   "9467a2f3-576b-4989-a342-a9ec6cdc6db2"
+  ]
+ },
+ {
+  "query": "how does one service address another inside the docker network",
+  "relevant_ids": [
+   "9467a2f3-576b-4989-a342-a9ec6cdc6db2"
+  ]
+ },
+ {
+  "query": "which env file do I use for local dev versus running in docker",
+  "relevant_ids": [
+   "4264dfc6-bd1d-47e2-88ea-8237da58b728"
+  ]
+ },
+ {
+  "query": "in what order should I start the tiers when bringing the stack up",
+  "relevant_ids": [
+   "b363d75f-aff6-4edb-95b6-30b89cca535d"
+  ]
+ },
+ {
+  "query": "what is the rollout strategy when shipping to production",
+  "relevant_ids": [
+   "9b5b3b8a-f234-487f-9afc-f7d8790378ab"
+  ]
+ },
+ {
+  "query": "which secrets have to be present before a production deploy",
+  "relevant_ids": [
+   "9b5b3b8a-f234-487f-9afc-f7d8790378ab"
+  ]
+ },
+ {
+  "query": "how do I get automatic deploys triggered from GitHub",
+  "relevant_ids": [
+   "52c76aee-aecf-4d11-8e38-93443a63ced4"
+  ]
+ },
+ {
+  "query": "my deploy hook is not firing \u2014 what should I check",
+  "relevant_ids": [
+   "52c76aee-aecf-4d11-8e38-93443a63ced4"
+  ]
+ },
+ {
+  "query": "how is strict TLS terminated in front of the stack",
+  "relevant_ids": [
+   "f4fe8e0e-d6e4-4322-8e8d-e32e2cdb500a"
+  ]
+ },
+ {
+  "query": "which security headers does the edge add",
+  "relevant_ids": [
+   "f4fe8e0e-d6e4-4322-8e8d-e32e2cdb500a"
+  ]
+ },
+ {
+  "query": "I am getting a 525 SSL error from the edge \u2014 why",
+  "relevant_ids": [
+   "ebb8113f-b6ab-4fc2-992b-bcc5b4d60351"
+  ]
+ },
+ {
+  "query": "how do I restore the data plane from a backup",
+  "relevant_ids": [
+   "549528ab-8513-474f-a400-7f7d1f300265"
+  ]
+ },
+ {
+  "query": "the vector store is corrupt but the database is fine \u2014 what now",
+  "relevant_ids": [
+   "549528ab-8513-474f-a400-7f7d1f300265"
+  ]
+ },
+ {
+  "query": "what exactly does a backup capture",
+  "relevant_ids": [
+   "549528ab-8513-474f-a400-7f7d1f300265"
+  ]
+ },
+ {
+  "query": "how do we move traffic from the old version to the new one",
+  "relevant_ids": [
+   "d7f8861f-e9d9-4a68-bc4b-25a33781bb5c"
+  ]
+ },
+ {
+  "query": "what is the point of the shadow traffic stage",
+  "relevant_ids": [
+   "d7f8861f-e9d9-4a68-bc4b-25a33781bb5c"
+  ]
+ },
+ {
+  "query": "hvordan sikrer vi at sletting av kunnskap faktisk fjerner vektorene",
+  "relevant_ids": [
+   "c64c0004-d48c-44a4-8a8a-33012844005a"
+  ]
+ },
+ {
+  "query": "kva slags jobber k\u00f8yrer datakvalitetstenesta",
+  "relevant_ids": [
+   "7469e93c-b1e0-4259-8f72-2cff5c00d5f6"
+  ]
+ },
+ {
+  "query": "kva reglar avgjer kven som eig kva",
+  "relevant_ids": [
+   "387b9e9b-4aaa-4a70-9d5f-36fbc476d522"
+  ]
+ },
+ {
+  "query": "hvilke porter er tilgjengelige p\u00e5 verten",
+  "relevant_ids": [
+   "9467a2f3-576b-4989-a342-a9ec6cdc6db2"
+  ]
+ },
+ {
+  "query": "hvordan setter jeg opp automatisk utrulling fra GitHub",
+  "relevant_ids": [
+   "52c76aee-aecf-4d11-8e38-93443a63ced4"
+  ]
+ },
+ {
+  "query": "hvordan gjenoppretter jeg systemet etter at databasen er \u00f8delagt",
+  "relevant_ids": [
+   "549528ab-8513-474f-a400-7f7d1f300265"
+  ]
+ },
+ {
+  "query": "kva gjer vi n\u00e5r ein organisasjon ber om \u00e5 bli sletta",
+  "relevant_ids": [
+   "326bb8e5-b5e2-4e93-8017-b0a4e3a17627"
+  ]
+ },
+ {
+  "query": "what was the plan for durable retrieval quality improvements in august",
+  "relevant_ids": [
+   "f14cb09f-a8e8-4022-b275-2e25d49adc0a"
+  ]
+ },
+ {
+  "query": "what is the overall architecture of the whole platform and its planes",
+  "relevant_ids": [
+   "d5c72a05-4519-4c8e-aace-eb5cd2ef89a6"
+  ]
+ }
+]
