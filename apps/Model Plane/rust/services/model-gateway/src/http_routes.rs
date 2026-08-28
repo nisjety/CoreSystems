@@ -6690,7 +6690,6 @@ async fn get_thread_context(
 ) -> Result<Json<ThreadContextResponse>, (StatusCode, Json<serde_json::Value>)> {
     use mp_contracts::model_plane::v1::GetContextAssemblyRequest;
 
-    let _ = &claims;
     let budget = crate::sse::context_assembly_budget();
     let response = state
         .session_client
@@ -6703,6 +6702,12 @@ async fn get_thread_context(
                 policy_id: String::new(),
                 workspace_id: String::new(),
                 agent_id: String::new(),
+                // This endpoint deliberately forwards no Data Plane bearer (see
+                // the fn doc above), so no live retrieval this posture would
+                // govern is ever triggered here. Still resolved from the
+                // caller's own signed claim, rather than hardcoded, so the
+                // field says something true if that ever changes.
+                sovereign_required: claims.effective_sovereign_required(None),
             },
             &bearer,
         )?)

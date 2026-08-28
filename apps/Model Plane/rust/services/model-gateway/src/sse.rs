@@ -843,6 +843,7 @@ pub async fn invoke_stream_sse(
         &user_content,
         &model_bearer,
         data_plane_bearer.as_ref(),
+        sovereign_retrieval,
     )
     .await;
     let recent_thread_messages = load_recent_thread_messages(
@@ -2466,6 +2467,13 @@ async fn load_context_assembly_messages(
     current_user_content: &str,
     bearer: &VerifiedModelBearer,
     data_plane_bearer: Option<&VerifiedBearer>,
+    // Already resolved from the caller's signed `sovereign` claim and this
+    // turn's privacy floor (`mp_contracts::dataplane_posture`) — see
+    // `sovereign_retrieval` at this function's call site. Forwarded onto
+    // `GetContextAssemblyRequest.sovereign_required` so session-core's own
+    // retrieval fan-out inherits the same posture as every other Data Plane
+    // call this turn makes, instead of falling back to a no-signal default.
+    sovereign_required: bool,
 ) -> Option<ContextAssemblyMessages> {
     // session-core's gRPC interceptor requires the caller's verified session
     // bearer as `authorization` metadata (auth.rs extract_bearer); a bare call
@@ -2479,6 +2487,7 @@ async fn load_context_assembly_messages(
             policy_id: String::new(),
             workspace_id: String::new(),
             agent_id: String::new(),
+            sovereign_required,
         },
         bearer,
     ) {

@@ -67,15 +67,26 @@ pinned to sovereign model serving must not have its grounding embedded
 off-jurisdiction on the way there. `sse.rs` derives it once and threads it
 into grounding and `run_tool_rounds`.
 
-**Left open, deliberately, and named in the code rather than left to be
-rediscovered:** execution-core's `knowledge_search` and session-core's context
-assembly both send the no-signal default because neither has anything better.
-`RunAgentRequest` carries `min_privacy_tier` and agent.rs already threads it
-onto every `InferRequest`, but `ExecuteStepRequest` has no such field, so it
-never reaches the executor. Closing that means a proto field plus threading it
-through `runtime_loop::execute_step*` — a change worth doing on its own, not
-inside this one. Until then a sovereign-pinned agent run gets sovereign model
-serving and non-sovereign retrieval embedding.
+**Closed same day.** execution-core's `knowledge_search` and session-core's
+context assembly both sent the no-signal default at first, because neither had
+a signal to do better with. Two different fixes, because the two callers hold
+different things:
+
+- `ExecuteStepRequest` gained `min_privacy_tier = 10` (mirroring
+  `RunAgentRequest`'s field 11), threaded through every `execute_step*`
+  variant to `execute_knowledge_search`, which derives a posture from it via
+  `effective_sovereign_required(None, ...)` — execution-core holds no signed
+  sovereignty claim of its own, only the run's privacy floor.
+- `GetContextAssemblyRequest` gained a plain `bool sovereign_required = 7`
+  instead — model-gateway, the sole caller, has ALREADY resolved its signed
+  claim against the request-declared value into `sovereign_retrieval` by the
+  time it calls session-core, so forwarding that resolved bool is more correct
+  than handing session-core a bare tier and making it re-derive without the
+  claim. Plain `bool`, not tri-state: one caller, no "said nothing" state
+  worth keeping distinct from `false`.
+
+A sovereign-pinned run now gets sovereign retrieval embedding on both paths,
+not just sovereign model serving.
 
 **Guarded by source-text, not by types.** Of the five `RetrieveRequest`
 construction sites, three use `..Default::default()`, which fills the field

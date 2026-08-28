@@ -61,6 +61,7 @@ async fn bench_step() -> runtime_loop::StepOutcome {
         None, // no browser event sink → noop tool path does not use it
         None, // no state store → noop tool path does not use it
         false,
+        0,
         None,
         None,
         None,

@@ -2379,9 +2379,19 @@ type GetContextAssemblyRequest struct {
 	// Workspace identifier; empty skips workspace segment.
 	WorkspaceId string `protobuf:"bytes,5,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
 	// Agent identifier override; empty falls back to runs.agent_id lookup via run_id.
-	AgentId       string `protobuf:"bytes,6,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	AgentId string `protobuf:"bytes,6,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
+	// Sovereignty posture for the Data Plane v2 retrieval this assembly may
+	// trigger, already resolved by the calling gateway from its signed
+	// `sovereign` claim and request-declared value
+	// (`mp_contracts::dataplane_posture`) — session-core holds no claim of its
+	// own for this axis, so it forwards this verbatim onto
+	// `RetrieveRequest.sovereign_required` rather than re-deriving from a raw
+	// tier. Plain `bool`, not tri-state: this is an internal RPC with exactly
+	// one caller, unlike the multi-tenant Data Plane wire, so there is no
+	// "caller said nothing" state worth distinguishing from `false`.
+	SovereignRequired bool `protobuf:"varint,7,opt,name=sovereign_required,json=sovereignRequired,proto3" json:"sovereign_required,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GetContextAssemblyRequest) Reset() {
@@ -2454,6 +2464,13 @@ func (x *GetContextAssemblyRequest) GetAgentId() string {
 		return x.AgentId
 	}
 	return ""
+}
+
+func (x *GetContextAssemblyRequest) GetSovereignRequired() bool {
+	if x != nil {
+		return x.SovereignRequired
+	}
+	return false
 }
 
 type GetContextAssemblyResponse struct {
@@ -5029,7 +5046,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x13ReplayThreadRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12$\n" +
 	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\x12\x14\n" +
-	"\x05limit\x18\x03 \x01(\rR\x05limit\"\xc9\x01\n" +
+	"\x05limit\x18\x03 \x01(\rR\x05limit\"\xf8\x01\n" +
 	"\x19GetContextAssemblyRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x1d\n" +
@@ -5037,7 +5054,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"max_tokens\x18\x03 \x01(\rR\tmaxTokens\x12\x1b\n" +
 	"\tpolicy_id\x18\x04 \x01(\tR\bpolicyId\x12!\n" +
 	"\fworkspace_id\x18\x05 \x01(\tR\vworkspaceId\x12\x19\n" +
-	"\bagent_id\x18\x06 \x01(\tR\aagentId\"\x83\x01\n" +
+	"\bagent_id\x18\x06 \x01(\tR\aagentId\x12-\n" +
+	"\x12sovereign_required\x18\a \x01(\bR\x11sovereignRequired\"\x83\x01\n" +
 	"\x1aGetContextAssemblyResponse\x12:\n" +
 	"\bsegments\x18\x01 \x03(\v2\x1e.model_plane.v1.ContextSegmentR\bsegments\x12)\n" +
 	"\x10estimated_tokens\x18\x02 \x01(\rR\x0festimatedTokens\"i\n" +

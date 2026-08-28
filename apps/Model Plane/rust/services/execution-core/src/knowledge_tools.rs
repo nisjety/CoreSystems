@@ -11,6 +11,11 @@
 //!
 //! Transport — gRPC against `dataplane.retrieval.v2.RetrievalService`. The
 //! generated client + messages live in `mp-contracts`.
+//!
+//! Sovereignty posture: this crate holds no signed `sovereign` claim (that
+//! lives on the auth token, not the step), so the only signal it can offer
+//! Data Plane v2 is the run's `min_privacy_tier` — see `build_request` and
+//! `mp_contracts::dataplane_posture`.
 
 // `# Errors` prose for `Result<String, String>` is noise; `doc_markdown`
 // over-flags wire tokens. Low-signal pedantic lints — scoped-allowed.
@@ -59,10 +64,15 @@ impl KnowledgeClient {
         query: &str,
         top_k: i32,
         zdr: bool,
+        // The run's `ExecuteStepRequest.min_privacy_tier` (field 10), the wire
+        // numeric of the shared `PrivacyTier` enum. Only the SOVEREIGN value
+        // says anything on the sovereignty axis; see
+        // `mp_contracts::dataplane_posture::sovereign_required_from_privacy_tier`.
+        min_privacy_tier: i32,
         bearer: &str,
     ) -> Result<String, String> {
         let top_k = top_k.clamp(1, MAX_TOP_K);
-        let request = build_request(org_id, user_id, query, top_k, zdr, bearer)?;
+        let request = build_request(org_id, user_id, query, top_k, zdr, min_privacy_tier, bearer)?;
         let response = self
             .client
             .clone()
@@ -80,6 +90,7 @@ fn build_request(
     query: &str,
     top_k: i32,
     zdr: bool,
+    min_privacy_tier: i32,
     bearer: &str,
 ) -> Result<tonic::Request<RetrieveRequest>, String> {
     if bearer.trim().is_empty() || bearer != bearer.trim() {
@@ -87,6 +98,23 @@ fn build_request(
     }
     let authorization = MetadataValue::try_from(format!("Bearer {bearer}"))
         .map_err(|_| "knowledge retrieval credential is malformed".to_owned())?;
+    // Jurisdiction axis, and it must be populated: Data Plane v2 reads an
+    // absent `sovereign_required` as `true` (fail-closed, since absence of
+    // proof is not proof that egress is permitted), which Azure-hosted Cohere
+    // Embed v4 can never satisfy — so an omitted field made every governed-loop
+    // `knowledge_search` fail before retrieval ran.
+    //
+    // This crate holds no signed sovereignty claim (`ExecuteStepRequest` has
+    // no such field, and none is planned — that lives on the auth token, not
+    // the step), so `claim` is always `None` here; the run's privacy floor is
+    // the only signal available, exactly like every other caller with no claim
+    // of its own. A signed `sovereign = true` on the forwarded user bearer
+    // still wins: retrieval-engine-rs re-applies its own floor on receipt, so
+    // this can fail to raise the posture but never relax one.
+    let sovereign_required = mp_contracts::dataplane_posture::effective_sovereign_required(
+        None,
+        mp_contracts::dataplane_posture::sovereign_required_from_privacy_tier(min_privacy_tier),
+    );
     let mut request = tonic::Request::new(RetrieveRequest {
         org_id: org_id.to_owned(),
         query: query.to_owned(),
@@ -97,29 +125,7 @@ fn build_request(
             Some(user_id.to_owned())
         },
         zdr_mode: zdr.then(|| "ephemeral".to_owned()),
-        // Jurisdiction axis, and it must be populated: Data Plane v2 reads an
-        // absent `sovereign_required` as `true` (fail-closed, since absence of
-        // proof is not proof that egress is permitted), which Azure-hosted
-        // Cohere Embed v4 can never satisfy — so `..Default::default()`'s `None`
-        // made every governed-loop `knowledge_search` fail before retrieval ran.
-        //
-        // The value is the declared no-signal default, and this crate has no
-        // signal to do better with TODAY: `ExecuteStepRequest` carries `zdr`
-        // (field 9) but no privacy floor, so the run's `min_privacy_tier` —
-        // which `RunAgentRequest` does carry, and which agent.rs already threads
-        // onto every `InferRequest` — never reaches this executor. Closing that
-        // means a `min_privacy_tier` field on `ExecuteStepRequest` plus
-        // threading it through `runtime_loop::execute_step*`; until then a
-        // sovereign-pinned agent run gets sovereign MODEL serving and
-        // non-sovereign retrieval EMBEDDING, and this comment is the only place
-        // that says so.
-        //
-        // A signed `sovereign = true` on the forwarded user bearer still wins:
-        // retrieval-engine-rs re-applies its own floor on receipt, so this can
-        // fail to raise the posture but never relax one.
-        sovereign_required: Some(
-            mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
-        ),
+        sovereign_required: Some(sovereign_required),
         ..Default::default()
     });
     request
@@ -398,7 +404,7 @@ mod tests {
 
     #[test]
     fn knowledge_request_forwards_verified_bearer_and_zdr_without_identity_headers() {
-        let request = build_request("org-a", "user-a", "query", 5, true, "signed-token")
+        let request = build_request("org-a", "user-a", "query", 5, true, 0, "signed-token")
             .expect("build authenticated request");
 
         assert_eq!(
@@ -413,5 +419,41 @@ mod tests {
         assert_eq!(request.get_ref().org_id, "org-a");
         assert_eq!(request.get_ref().user_id.as_deref(), Some("user-a"));
         assert_eq!(request.get_ref().zdr_mode.as_deref(), Some("ephemeral"));
+    }
+
+    /// The gap this module used to name in a comment: a run pinned to
+    /// SOVEREIGN privacy tier now gets a sovereign retrieval posture too, not
+    /// just sovereign model serving. `4` is `PrivacyTier::PRIVACY_TIER_SOVEREIGN`
+    /// — pinned against the generated enum in `dataplane_posture`'s own test,
+    /// so this one is free to use the literal.
+    #[test]
+    fn a_sovereign_privacy_tier_raises_the_retrieval_posture_too() {
+        const PRIVACY_TIER_SOVEREIGN: i32 = 4;
+        let request = build_request(
+            "org-a",
+            "user-a",
+            "query",
+            5,
+            false,
+            PRIVACY_TIER_SOVEREIGN,
+            "signed-token",
+        )
+        .expect("build authenticated request");
+        assert_eq!(request.get_ref().sovereign_required, Some(true));
+    }
+
+    /// Every other tier says nothing about jurisdiction, so it must not raise
+    /// OR lower the posture — it lands on the ordinary no-signal default.
+    #[test]
+    fn a_non_sovereign_privacy_tier_defers_to_the_no_signal_default() {
+        for tier in [0, 1, 2, 3] {
+            let request = build_request("org-a", "user-a", "query", 5, false, tier, "signed-token")
+                .expect("build authenticated request");
+            assert_eq!(
+                request.get_ref().sovereign_required,
+                Some(mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL),
+                "tier {tier} must not decide the sovereignty axis"
+            );
+        }
     }
 }

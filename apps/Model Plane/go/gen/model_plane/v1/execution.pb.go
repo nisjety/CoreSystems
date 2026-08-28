@@ -563,9 +563,17 @@ type ExecuteStepRequest struct {
 	UserId string `protobuf:"bytes,8,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	// Zero-Data-Retention posture. The executor must not create durable run,
 	// step, audit-content, cache, or tool-output state when true.
-	Zdr           bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Zdr bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Minimum privacy tier this step must respect, mirroring
+	// `RunAgentRequest.min_privacy_tier` (field 11) for the direct single-step
+	// surface. Read today by `knowledge_search`'s Data Plane retrieval to derive
+	// a sovereignty posture when no signed claim exists — the SOVEREIGN tier is
+	// the only value that means anything to that axis; every other tier defers.
+	// UNSPECIFIED imposes no constraint. Field 10 was free on this message; it
+	// is unrelated to `RunAgentRequest`'s 11, which is a different message.
+	MinPrivacyTier PrivacyTier `protobuf:"varint,10,opt,name=min_privacy_tier,json=minPrivacyTier,proto3,enum=model_plane.v1.PrivacyTier" json:"min_privacy_tier,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ExecuteStepRequest) Reset() {
@@ -659,6 +667,13 @@ func (x *ExecuteStepRequest) GetZdr() bool {
 		return x.Zdr
 	}
 	return false
+}
+
+func (x *ExecuteStepRequest) GetMinPrivacyTier() PrivacyTier {
+	if x != nil {
+		return x.MinPrivacyTier
+	}
+	return PrivacyTier_PRIVACY_TIER_UNSPECIFIED
 }
 
 // ExecuteStepResponse — result of a single step execution.
@@ -1026,7 +1041,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
 	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\x12\x1a\n" +
 	"\bgrounded\x18\x04 \x01(\bR\bgrounded\x121\n" +
-	"\x14compaction_triggered\x18\x05 \x01(\bR\x13compactionTriggered\"\x8e\x02\n" +
+	"\x14compaction_triggered\x18\x05 \x01(\bR\x13compactionTriggered\"\xd5\x02\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +
@@ -1037,7 +1052,9 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\fhook_context\x18\x06 \x01(\tR\vhookContext\x12\x15\n" +
 	"\x06org_id\x18\a \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\b \x01(\tR\x06userId\x12\x10\n" +
-	"\x03zdr\x18\t \x01(\bR\x03zdr\"\xa7\x01\n" +
+	"\x03zdr\x18\t \x01(\bR\x03zdr\x12E\n" +
+	"\x10min_privacy_tier\x18\n" +
+	" \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\x0eminPrivacyTier\"\xa7\x01\n" +
 	"\x13ExecuteStepResponse\x12\x17\n" +
 	"\astep_id\x18\x01 \x01(\tR\x06stepId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x16\n" +
@@ -1102,23 +1119,24 @@ var file_model_plane_v1_execution_proto_depIdxs = []int32{
 	10, // 0: model_plane.v1.RunAgentRequest.tools:type_name -> model_plane.v1.ToolDefinition
 	11, // 1: model_plane.v1.RunAgentRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
 	12, // 2: model_plane.v1.RunAgentRequest.autonomy_rung:type_name -> model_plane.v1.AutonomyRung
-	4,  // 3: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
-	6,  // 4: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
-	13, // 5: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	8,  // 6: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
-	2,  // 7: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
-	0,  // 8: model_plane.v1.ExecutionCore.ExecuteScheduledStep:input_type -> model_plane.v1.ExecuteScheduledStepRequest
-	5,  // 9: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
-	7,  // 10: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
-	14, // 11: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	9,  // 12: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
-	3,  // 13: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
-	1,  // 14: model_plane.v1.ExecutionCore.ExecuteScheduledStep:output_type -> model_plane.v1.ExecuteScheduledStepResponse
-	9,  // [9:15] is the sub-list for method output_type
-	3,  // [3:9] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	11, // 3: model_plane.v1.ExecuteStepRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	4,  // 4: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
+	6,  // 5: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
+	13, // 6: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	8,  // 7: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
+	2,  // 8: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
+	0,  // 9: model_plane.v1.ExecutionCore.ExecuteScheduledStep:input_type -> model_plane.v1.ExecuteScheduledStepRequest
+	5,  // 10: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
+	7,  // 11: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
+	14, // 12: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	9,  // 13: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
+	3,  // 14: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
+	1,  // 15: model_plane.v1.ExecutionCore.ExecuteScheduledStep:output_type -> model_plane.v1.ExecuteScheduledStepResponse
+	10, // [10:16] is the sub-list for method output_type
+	4,  // [4:10] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_execution_proto_init() }

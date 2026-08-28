@@ -426,6 +426,9 @@ async fn browser_run_start(
             org_id,
             user_id,
             zdr: false,
+            // browser_agent never reaches knowledge_search, so there is no
+            // sovereignty derivation for this field to feed.
+            min_privacy_tier: mp_contracts::model_plane::v1::PrivacyTier::Unspecified as i32,
         });
         let authorization = format!("Bearer {}", execution_bearer.as_str())
             .parse()

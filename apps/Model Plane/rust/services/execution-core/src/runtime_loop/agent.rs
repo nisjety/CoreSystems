@@ -1344,6 +1344,7 @@ async fn run_rounds(
                             None,
                             None,
                             zdr,
+                            req.min_privacy_tier,
                             ctx.data_plane_bearer,
                             ctx.session_bearer,
                             Some(ctx.inference_bearer),

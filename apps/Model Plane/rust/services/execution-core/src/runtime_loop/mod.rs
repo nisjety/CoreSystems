@@ -279,6 +279,10 @@ pub async fn execute_step(
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
     zdr: bool,
+    // `ExecuteStepRequest.min_privacy_tier` (field 10) / `RunAgentRequest`'s
+    // field of the same name, depending on caller. Only reaches
+    // `knowledge_search` today — see `execute_knowledge_search`.
+    min_privacy_tier: i32,
     data_plane_bearer: Option<&str>,
     session_bearer: Option<&str>,
     inference_bearer: Option<&str>,
@@ -298,6 +302,7 @@ pub async fn execute_step(
         browser_event_sink,
         state,
         zdr,
+        min_privacy_tier,
         data_plane_bearer,
         session_bearer,
         inference_bearer,
@@ -330,6 +335,10 @@ pub(crate) async fn execute_step_with_browser_grant(
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
     zdr: bool,
+    // `ExecuteStepRequest.min_privacy_tier` (field 10) / `RunAgentRequest`'s
+    // field of the same name, depending on caller. Only reaches
+    // `knowledge_search` today — see `execute_knowledge_search`.
+    min_privacy_tier: i32,
     data_plane_bearer: Option<&str>,
     session_bearer: Option<&str>,
     inference_bearer: Option<&str>,
@@ -350,6 +359,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         browser_event_sink,
         state,
         zdr,
+        min_privacy_tier,
         data_plane_bearer,
         session_bearer,
         inference_bearer,
@@ -387,6 +397,10 @@ pub(crate) async fn execute_step_with_subagent(
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
     zdr: bool,
+    // `ExecuteStepRequest.min_privacy_tier` (field 10) / `RunAgentRequest`'s
+    // field of the same name, depending on caller. Only reaches
+    // `knowledge_search` today — see `execute_knowledge_search`.
+    min_privacy_tier: i32,
     data_plane_bearer: Option<&str>,
     session_bearer: Option<&str>,
     inference_bearer: Option<&str>,
@@ -407,6 +421,7 @@ pub(crate) async fn execute_step_with_subagent(
         browser_event_sink,
         state,
         zdr,
+        min_privacy_tier,
         data_plane_bearer,
         session_bearer,
         inference_bearer,
@@ -435,6 +450,10 @@ async fn execute_step_inner(
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
     zdr: bool,
+    // `ExecuteStepRequest.min_privacy_tier` (field 10) / `RunAgentRequest`'s
+    // field of the same name, depending on caller. Only reaches
+    // `knowledge_search` today — see `execute_knowledge_search`.
+    min_privacy_tier: i32,
     data_plane_bearer: Option<&str>,
     session_bearer: Option<&str>,
     inference_bearer: Option<&str>,
@@ -536,7 +555,15 @@ async fn execute_step_inner(
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
         execute_web_fetch(tool_input, org_id).await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
-        execute_knowledge_search(tool_input, org_id, user_id, zdr, data_plane_bearer).await
+        execute_knowledge_search(
+            tool_input,
+            org_id,
+            user_id,
+            zdr,
+            min_privacy_tier,
+            data_plane_bearer,
+        )
+        .await
     } else if tool_name == SAVE_MEMORY_TOOL {
         execute_save_memory(
             tool_input,
@@ -940,6 +967,11 @@ async fn execute_knowledge_search(
     org_id: &str,
     user_id: &str,
     zdr: bool,
+    // `ExecuteStepRequest.min_privacy_tier` (field 10), threaded down so
+    // `KnowledgeClient::search` can derive a sovereignty posture from the run's
+    // own privacy floor when no signed claim exists. See
+    // `knowledge_tools::build_request`.
+    min_privacy_tier: i32,
     data_plane_bearer: Option<&str>,
 ) -> tool_bridge::ToolExecution {
     let input = match parse_knowledge_input(tool_input) {
@@ -968,6 +1000,7 @@ async fn execute_knowledge_search(
             &input.query,
             input.top_k,
             zdr,
+            min_privacy_tier,
             data_plane_bearer,
         )
         .await
@@ -1995,6 +2028,7 @@ mod tests {
                 None,
                 None,
                 false,
+                0,
                 None,
                 None,
                 None,
@@ -2024,6 +2058,7 @@ mod tests {
                 None,
                 None,
                 false,
+                0,
                 None,
                 None,
                 None,
@@ -2050,6 +2085,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             None,
             None,
             None,
@@ -2080,6 +2116,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             None,
             None,
             None,
@@ -2116,6 +2153,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             None,
             None,
             None,
@@ -2142,6 +2180,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             None,
             None,
             None,
@@ -2168,6 +2207,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             None,
             None,
             None,
@@ -2195,6 +2235,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             None,
             None,
             None,
@@ -2283,6 +2324,7 @@ mod tests {
             None,
             None,
             false,
+            0,
             None,
             None,
             None,

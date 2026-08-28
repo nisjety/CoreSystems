@@ -644,6 +644,17 @@ message GetContextAssemblyRequest {
 
   // Agent identifier override; empty falls back to runs.agent_id lookup via run_id.
   string agent_id = 6;
+
+  // Sovereignty posture for the Data Plane v2 retrieval this assembly may
+  // trigger, already resolved by the calling gateway from its signed
+  // `sovereign` claim and request-declared value
+  // (`mp_contracts::dataplane_posture`) — session-core holds no claim of its
+  // own for this axis, so it forwards this verbatim onto
+  // `RetrieveRequest.sovereign_required` rather than re-deriving from a raw
+  // tier. Plain `bool`, not tri-state: this is an internal RPC with exactly
+  // one caller, unlike the multi-tenant Data Plane wire, so there is no
+  // "caller said nothing" state worth distinguishing from `false`.
+  bool sovereign_required = 7;
 }
 
 message GetContextAssemblyResponse {

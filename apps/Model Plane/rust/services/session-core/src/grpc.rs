@@ -3439,6 +3439,7 @@ async fn get_context_assembly_inner(
             &thread_messages,
             req.max_tokens,
             &memory.retrieval,
+            req.sovereign_required,
             dataplane_bearer,
         )
         .await;
@@ -5435,6 +5436,12 @@ impl SessionService {
         thread_messages: &[(String, String)],
         max_tokens: u32,
         local_fallback: &[String],
+        // Already resolved by the calling gateway from its signed `sovereign`
+        // claim and request-declared value — see
+        // `GetContextAssemblyRequest.sovereign_required`'s doc. This crate holds
+        // no claim of its own for the axis, so it is forwarded verbatim rather
+        // than re-derived.
+        sovereign_required: bool,
         bearer: Option<&DelegatedDataPlaneBearer>,
     ) -> RetrievalEvidence {
         let local = || RetrievalEvidence {
@@ -5516,16 +5523,15 @@ impl SessionService {
             // retrievals fail before retrieval ran (silently: the `Err` arm
             // below falls back to local context).
             //
-            // The value itself is the declared no-signal default, and session-core
-            // genuinely has no signal to do better with today: this path is
-            // reached with a `DelegatedDataPlaneBearer` and no verified claims of
-            // its own, and `AssembleContextRequest` carries no privacy floor. A
-            // signed `sovereign = true` on the forwarded bearer is still honoured
-            // — retrieval-engine-rs re-applies its own floor on receipt — so this
-            // cannot relax a signed posture, only fail to raise one.
-            sovereign_required: Some(
-                mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
-            ),
+            // Forwarded from `GetContextAssemblyRequest.sovereign_required`
+            // (see this fn's `sovereign_required` param doc) rather than
+            // re-derived: the calling gateway already resolved its signed
+            // `sovereign` claim against its request-declared value, and this
+            // crate has no claim of its own to add. A signed `sovereign = true`
+            // on the forwarded bearer is still honoured regardless —
+            // retrieval-engine-rs re-applies its own floor on receipt — so
+            // this can only fail to raise the posture, never relax one.
+            sovereign_required: Some(sovereign_required),
         };
 
         let request = match authorize_dataplane(retrieve_req, bearer) {

@@ -830,9 +830,20 @@ services:
       # reqwest is built with rustls webpki-roots here, which ignores the system
       # trust store, so the dev CA is loaded explicitly by path.
       EXECUTION_CORE_TICKET_CA_BUNDLE: ${EXECUTION_CORE_TICKET_CA_BUNDLE:-/etc/internal-tls/ca.crt}
-      CONTROL_PLANE_USER_CORE_URL: ${CONTROL_PLANE_USER_CORE_URL:-https://user-core-tls:8443}
+      # Empty by default, matching .env.example and
+      # scripts/tests/tickets-create-config-contract-test.sh: `ticket_tools`'s
+      # `AgentTicketActionClient::from_env` requires all four of these
+      # together, and treats "all absent" as a clean disabled state but "some
+      # present" as a fatal misconfiguration. A non-empty default on the two
+      # URLs while the two tokens stayed empty (as they arrived here) is
+      # exactly that fatal state — it crash-loops execution-core on every
+      # restart, discovered 2026-08-28 rolling out the sovereignty-posture fix
+      # in this same file. Set all four (see CONTROL_PLANE_USER_CORE_URL's
+      # sibling tokens below) together to actually enable the ticket-owner
+      # adapter; do not give only the URLs a real value again.
+      CONTROL_PLANE_USER_CORE_URL: ${CONTROL_PLANE_USER_CORE_URL:-}
       EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN: ${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:-}
-      CONVERSATION_CORE_AGENT_ACTION_URL: ${CONVERSATION_CORE_AGENT_ACTION_URL:-https://conversation-core-tls:8443}
+      CONVERSATION_CORE_AGENT_ACTION_URL: ${CONVERSATION_CORE_AGENT_ACTION_URL:-}
       CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN: ${CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN:-}
       EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN: ${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:-}
       EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK:-false}
