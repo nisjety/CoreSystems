@@ -1,0 +1,68 @@
+# Physical Service Split - CI/CD Configuration
+
+name: Social Core Service CI/CD
+
+# social-core previously had no CI workflow of its own at all, so its
+# Postgres-gated org-scoping test (repository_postgres_test.go,
+# SOCIAL_CORE_TEST_DATABASE_URL) skipped silently in every environment —
+# "ran green" meant only that Go's package-level ok line covers a skip the
+# same way it covers a pass. This wires a real Postgres service container so
+# that test (and the rest of the package's fakeRepository-based suite)
+# actually executes on every change, mirroring org-service.yml's pattern.
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'apps/Application Plane/social-core/**'
+      - '.github/workflows/social-core-service.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'apps/Application Plane/social-core/**'
+
+env:
+  SERVICE_NAME: social-core
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Application Plane/social-core'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: social_core
+          POSTGRES_PASSWORD: social_core
+          POSTGRES_DB: social_core_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U social_core"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: 'apps/Application Plane/social-core/go.sum'
+
+      - name: Install dependencies
+        run: go mod download
+
+      # internal/social's repository_postgres_test.go self-applies
+      # social-core's own migrations via database.RunMigrations at test
+      # time, so no schema bootstrap is needed here beyond a reachable,
+      # empty database.
+      - name: Run tests
+        env:
+          SOCIAL_CORE_TEST_DATABASE_URL: postgres://social_core:social_core@localhost:5432/social_core_test?sslmode=disable
+        run: go test -v -p 1 ./...
+
+      - name: Build
+        run: go build -v ./cmd/server
