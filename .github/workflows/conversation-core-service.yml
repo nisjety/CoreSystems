@@ -1,12 +1,17 @@
 name: Conversation Core (Go) CI
 
 # conversation-core-go (apps/Application Plane/conversation-core/conversation-core-go)
-# had zero CI workflows of any kind before this file. Its test suite is fully
-# self-contained: internal/integration and internal/consumers tests run
-# against in-process fakes/httptest, internal/database/migrations_contract_test.go
-# only asserts against the migration SQL text on disk, and no t.Skip / DSN
-# env-var-gated Postgres or NATS integration suite was found anywhere in the
-# module — so no service containers are needed to run `go test ./...` here.
+# had zero CI workflows of any kind before this file. Most of its test suite
+# is self-contained: internal/integration and internal/consumers tests run
+# against in-process fakes/httptest, and internal/database/migrations_contract_test.go
+# only asserts against the migration SQL text on disk. But the module does
+# have real, TEST_DATABASE_URL-gated Postgres integration suites --
+# internal/http/agent_ticket_grants_live_test.go (owner-grant lifecycle) and
+# internal/conversation/csat_postgres_test.go (ticket_csat_outcomes org
+# scoping) -- which previously skipped silently because no CI job ever set
+# that env var. The postgres service below gives them a real, disposable
+# database; RunMigrations applies conversation-core-go's own migrations at
+# test time, so no separate migration/build step is needed here.
 
 on:
   push:
@@ -25,6 +30,20 @@ jobs:
     defaults:
       run:
         working-directory: 'apps/Application Plane/conversation-core/conversation-core-go'
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: conversation_core
+          POSTGRES_PASSWORD: conversation_core
+          POSTGRES_DB: conversation_core_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U conversation_core"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v7
 
@@ -38,6 +57,8 @@ jobs:
         run: go mod download
 
       - name: Run tests
+        env:
+          TEST_DATABASE_URL: postgres://conversation_core:conversation_core@localhost:5432/conversation_core_test?sslmode=disable
         run: go test -v ./...
 
       - name: Build
