@@ -75,7 +75,15 @@
       "documents:write",
       "graph:read"
     ],
-    "scopesByAudience": {}
+    "scopesByAudience": {
+      "data-plane": [
+        "data:quality:admin",
+        "data:read",
+        "documents:read",
+        "documents:write",
+        "graph:read"
+      ]
+    }
   },
   "embedding-engine": {
     "allowAnyOrg": true,
