@@ -8,15 +8,58 @@ set -euo pipefail
 # ($root/.env.generated-secrets). Compose interpolation runs before env_file
 # injection, so this runner merges every service-local file plus the secrets store
 # into a temp env-file passed via --env-file, and supplies development values for
-# any missing required interpolation variables. Generated credentials are persisted
+# any missing required interpolation variables. Cross-plane owner files (Control
+# Plane's and Model Plane's) are merged in first, at the lowest precedence, so a
+# per-core file always wins over them. Generated credentials are persisted
 # once and reused (stable across bring-ups + per-service recreates). Never writes
 # credentials to a tracked file; must not be used with a production overlay.
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
+# Cross-plane owner files, lowest precedence (any per-core value below still
+# wins; Compose's later --env-file wins on a duplicate key).
+#
+# Control Plane's run-control-plane.sh mints and persists several credentials
+# this plane must present or accept UNCHANGED: APPLICATION_CONVEX_CONTROL_NATS_PASSWORD,
+# APPLICATION_CONVEX_CONTROL_PROJECTION_KEY, APPLICATION_NATS_PROVISIONER_PASSWORD,
+# AUDIT_APPLICATION_NATS_PASSWORD, CONVERSATION_CORE_GDPR_NATS_PASSWORD and
+# NOTIFICATION_CORE_GDPR_NATS_PASSWORD (control-shared-nats and audit-core
+# enforce/present these against Control's copy). Reading Control's real file
+# instead of re-generating or hand-copying these values here is deliberate:
+# convex-core/.env's own history (its removed APPLICATION_CONVEX_CONTROL_*
+# pair) documents the exact copy-drifts-from-the-owner failure this avoids.
+# Matches build-verevon-services.sh's plane_env_files() "Application Plane"
+# case and Model Plane's scripts/compose.sh, which load this same file the
+# same way. Optional: a bring-up before Control Plane has ever run still
+# proceeds, and the specific ${VAR:?} interpolation error at that point says
+# exactly what is missing.
+#
+# Model Plane's deploy/.env follows, still below every per-core file.
+# APPLICATION_CONVEX_MODEL_NATS_PASSWORD and APPLICATION_INSIGHT_MODEL_NATS_PASSWORD
+# are NOT Control-owned despite the naming resemblance to the credentials
+# above: Model Plane's own NATS broker (model-plane-nats-1) authorizes against
+# apps/Model Plane/deploy/.env's copy of these two values (confirmed
+# 2026-08-30 directly against the running container's baked-in env). Control's
+# run-control-plane.sh ALSO mints a value under these same two names, for its
+# own release-credential preflight (validate-release-credentials.sh) — no
+# broker ever authorizes against that copy, so it is orphaned. Today
+# convex-core/.env and insight-core/.env each hand-hardcode the correct
+# Model-Plane-sourced value directly (see those files' own comments), which is
+# the only reason Control's orphaned copy has never won here. insight-core/.env's
+# comment records that hardcode was almost deleted once (2026-08-20) as
+# believed-redundant with the Control owner-file load above — it is not
+# redundant. Loading Model Plane's file here too means a future removal of
+# the per-core hardcode fails safe instead of silently resolving to Control's
+# wrong value. Optional, same as the Control file above.
+env_files=()
+control_owner_secrets="$root/../Control Plane/.env.generated-secrets"
+[[ -f "$control_owner_secrets" ]] && env_files+=("$control_owner_secrets")
+model_owner_env="$root/../Model Plane/deploy/.env"
+[[ -f "$model_owner_env" ]] && env_files+=("$model_owner_env")
+
 # Per-core environment files (each core also loads its own via `env_file:`).
-env_files=(
+env_files+=(
   "$root/convex-core/.env"
   "$root/conversation-core/.env"
   "$root/notification-core/.env"
