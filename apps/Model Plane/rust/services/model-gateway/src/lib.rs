@@ -50,6 +50,8 @@ pub mod rate_limit;
 pub mod readiness;
 pub mod relevance;
 pub mod retrieval;
+pub mod retrieval_metadata;
+pub mod retrieval_tools;
 pub mod runtime_registries;
 pub mod security_events;
 pub mod semantic_screening;

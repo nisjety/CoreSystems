@@ -151,14 +151,15 @@ pub fn normalize(
     let min_privacy_tier = match req.min_privacy_tier {
         None | Some(0) => None,
         Some(value) => {
-            let tier = mp_contracts::model_plane::v1::PrivacyTier::try_from(value).map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!("unknown privacy tier value: {value}"),
-                    })),
-                )
-            })?;
+            let tier =
+                mp_contracts::model_plane::v1::PrivacyTier::try_from(value).map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": format!("unknown privacy tier value: {value}"),
+                        })),
+                    )
+                })?;
             // 0 (UNSPECIFIED) imposes no constraint, mirroring inference-core:
             // GLOBAL=1 is a real floor and IS honored.
             (tier != mp_contracts::model_plane::v1::PrivacyTier::Unspecified).then_some(tier)
@@ -291,10 +292,7 @@ mod tests {
             req.min_privacy_tier = Some(unknown);
             let error = normalize(&req).expect_err("unknown tier must be refused");
             let message = error.1 .0.to_string();
-            assert!(
-                message.contains("unknown privacy tier"),
-                "got: {message}"
-            );
+            assert!(message.contains("unknown privacy tier"), "got: {message}");
         }
     }
 }

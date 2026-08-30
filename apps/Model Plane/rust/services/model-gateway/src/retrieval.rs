@@ -137,6 +137,26 @@ pub struct Grounding {
     pub sources: Vec<GroundingSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph: Option<GroundingGraph>,
+    /// Follow-up tool affordances derived from Data Plane v2's
+    /// `suggested_next_tools`, already mapped to gateway tool names the model
+    /// can actually call (see [`crate::retrieval_metadata::hinted_tool_names`]).
+    ///
+    /// ADVISORY. These are heuristics computed from the signal in one response —
+    /// low rerank confidence, three or more sources, nothing retrieved — not
+    /// instructions. Nothing here narrows what the model may do next, and an
+    /// empty list means only "no hint", never "no other tool applies".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub suggested_next_tools: Vec<String>,
+    /// Zero Data Retention enforcement actions Data Plane v2 reports having
+    /// applied to THIS result set (e.g. `reject_mode_filtered_restricted`,
+    /// `ephemeral_no_trace_persist`).
+    ///
+    /// Carried because a caller that cannot observe enforcement cannot
+    /// propagate it, and ZDR has to survive every content-carrying boundary.
+    /// Read at the gateway's retention decision by
+    /// [`crate::retrieval_metadata::retention_posture_conflict`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub zdr_actions_applied: Vec<String>,
     #[serde(skip_serializing)]
     pub context_block: String,
     #[serde(skip_serializing)]
@@ -633,6 +653,17 @@ pub fn build_grounding(query: &str, resp: &RetrieveResponse) -> Grounding {
     let (entries, citations, injection_flagged) = build_context_entries(resp, &sources_by_doc);
     let facts = build_grounding_facts(resp, &sources_by_doc);
     let sources = build_grounding_sources(&facts);
+    // Data Plane v2's advisory side channel (proto field 10). Total decode: an
+    // absent or malformed Struct yields empty lists, so grounding is never at
+    // the mercy of advisory data.
+    let metadata = crate::retrieval_metadata::from_struct(resp.retrieval_metadata.as_ref());
+    let suggested_next_tools: Vec<String> = metadata
+        .hinted_tools()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let context_block = build_context_block(&entries, injection_flagged, None);
+    let context_block = with_next_tool_advice(context_block, &suggested_next_tools);
 
     Grounding {
         mode: "hybrid".to_owned(),
@@ -644,9 +675,33 @@ pub fn build_grounding(query: &str, resp: &RetrieveResponse) -> Grounding {
         facts,
         sources,
         graph: None,
-        context_block: build_context_block(&entries, injection_flagged, None),
+        suggested_next_tools,
+        zdr_actions_applied: metadata.zdr_actions_applied,
+        context_block,
         citations,
     }
+}
+
+/// Append Data Plane's follow-up hints to the context block as an affordance
+/// the model can act on, or leave the block untouched when there are none.
+///
+/// Worded as an option, not an instruction, and deliberately so. The hints are
+/// heuristics from one response's signal; the model has the answer in front of
+/// it and this module does not. A turn that is already well grounded should
+/// ignore them, and the wording has to make that the obvious reading — an
+/// imperative here would spend a round on a redundant lookup every time three
+/// sources happened to agree. An empty block stays empty: advice with no
+/// evidence attached is not context.
+fn with_next_tool_advice(context_block: String, tools: &[String]) -> String {
+    if tools.is_empty() || context_block.is_empty() {
+        return context_block;
+    }
+    format!(
+        "{context_block}
+
+Data Plane suggests these tools MIGHT surface more relevant          material for this question: {}. This is a heuristic from the retrieval signal, not          a finding — use them only if the context above does not already answer the question,          and ignore them otherwise.",
+        tools.join(", ")
+    )
 }
 
 fn render_graph_context(graph: &GroundingGraph) -> String {
@@ -699,6 +754,11 @@ fn graph_only_grounding(query: &str, graph: GroundingGraph) -> Grounding {
         facts: Vec::new(),
         sources: Vec::new(),
         graph: Some(graph),
+        // The unary retrieval never returned, so there is no Data Plane advice
+        // to carry — including none about ZDR enforcement, which is the honest
+        // report: nothing was enforced because nothing was retrieved.
+        suggested_next_tools: Vec::new(),
+        zdr_actions_applied: Vec::new(),
         context_block,
         citations: Vec::new(),
     }
@@ -728,7 +788,7 @@ pub fn data_plane_zdr_mode(zdr: bool) -> Option<String> {
     zdr.then(|| "ephemeral".to_owned())
 }
 
-fn retrieval_http_base_url() -> String {
+pub(crate) fn retrieval_http_base_url() -> String {
     std::env::var("DATAPLANE_RETRIEVAL_HTTP_URL")
         .or_else(|_| std::env::var("DATA_PLANE_RETRIEVAL_URL"))
         .unwrap_or_else(|_| "http://dpv2-retrieval-engine:8004".to_owned())
@@ -871,6 +931,13 @@ pub async fn retrieve(
     org_id: &str,
     query: &str,
     zdr: bool,
+    // Jurisdiction posture for this turn, already merged from the caller's
+    // signed `sovereign` claim and privacy floor by
+    // `mp_contracts::dataplane_posture`. A `bool` rather than an `Option`
+    // because the one value this must never send is "nothing": Data Plane v2
+    // reads an absent `sovereign_required` as `true`, which its Azure-hosted
+    // embedding provider cannot satisfy, and every dense query fails closed.
+    sovereign_required: bool,
     space_decision: Option<&str>,
 ) -> Option<Grounding> {
     let query = query.trim();
@@ -884,6 +951,7 @@ pub async fn retrieve(
         top_k: DEFAULT_TOP_K,
         user_id: None,
         zdr_mode: data_plane_zdr_mode(zdr),
+        sovereign_required: Some(sovereign_required),
         context_budget_tokens: Some(DEFAULT_CONTEXT_BUDGET_TOKENS),
         context_format: Some(CONTEXT_FORMAT.to_owned()),
         ..Default::default()

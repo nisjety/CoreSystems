@@ -84,8 +84,7 @@ type SessionCoreClient interface {
 	ReplayThread(ctx context.Context, in *ReplayThreadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
 	// Assemble the full context window for a model call.
 	// Order: policy -> workspace -> agent -> user -> thread recent -> episodic
-	//
-	//	-> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
+	//        -> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
 	GetContextAssembly(ctx context.Context, in *GetContextAssemblyRequest, opts ...grpc.CallOption) (*GetContextAssemblyResponse, error)
 	// Trigger on-demand checkpoint compaction for all runs with pending events.
 	CompactNow(ctx context.Context, in *CompactNowRequest, opts ...grpc.CallOption) (*CompactNowResponse, error)
@@ -469,8 +468,7 @@ type SessionCoreServer interface {
 	ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error
 	// Assemble the full context window for a model call.
 	// Order: policy -> workspace -> agent -> user -> thread recent -> episodic
-	//
-	//	-> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
+	//        -> skill index -> skill expansion -> retrieval snippets -> current prompt/tool output.
 	GetContextAssembly(context.Context, *GetContextAssemblyRequest) (*GetContextAssemblyResponse, error)
 	// Trigger on-demand checkpoint compaction for all runs with pending events.
 	CompactNow(context.Context, *CompactNowRequest) (*CompactNowResponse, error)

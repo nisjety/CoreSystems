@@ -28,6 +28,29 @@ message RetrieveRequest {
   // for this request. Per-request weights (not yet on this proto) still
   // win when callers eventually start sending them.
   optional string agent_id = 13;
+  // Sovereignty posture, and the counterpart to `zdr_mode` above. Mirror of
+  // Data Plane v2's `optional bool sovereign_required = 14` — the field number
+  // is the wire contract, not a local choice, and must stay 14.
+  //
+  // Until DP2 added this field there was no way for a gRPC caller to declare
+  // the axis at all, and DP2's orchestrator resolves
+  // `req.sovereign_required.unwrap_or(true)` — a deliberate fail-closed
+  // default, because absence of proof is not proof that egress is permitted.
+  // So every Model Plane retrieval over gRPC resolved to
+  // `sovereign_required = true`, which the configured embedding provider
+  // (Cohere Embed v4, Azure-hosted) can never satisfy, and every dense query
+  // failed before any retrieval happened. It surfaced as "ZDR content must
+  // not egress to the Cohere Embed v4 text path" even with
+  // `zdr_mode: disabled`, because DP2's embed guard is
+  // `embed_zdr || sovereign_required` and its message names only the first
+  // term. Check sovereignty before ZDR if that string ever reappears.
+  //
+  // See `model-gateway::dataplane::effective_retrieval_sovereign_required`
+  // for how the Model Plane derives the value it sends.
+  //
+  // Additive and wire-compatible in both directions: a caller that sends
+  // nothing still resolves to DP2's fail-closed default.
+  optional bool sovereign_required = 14;
 }
 
 message Filters {

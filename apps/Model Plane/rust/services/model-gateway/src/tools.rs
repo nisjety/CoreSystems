@@ -160,6 +160,9 @@ pub async fn handle_code_interpreter(
         org_id: org_id.to_owned(),
         user_id: user_id.to_owned(),
         zdr,
+        // code_interpreter never reaches knowledge_search, so there is no
+        // sovereignty derivation for this field to feed.
+        min_privacy_tier: mp_contracts::model_plane::v1::PrivacyTier::Unspecified as i32,
     });
     request.metadata_mut().insert(
         "authorization",

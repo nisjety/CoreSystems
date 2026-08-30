@@ -354,6 +354,17 @@ pub async fn invoke_stream_sse(
     // once here so every derived call site threads it without re-deriving.
     let min_privacy_tier_wire = crate::normalize::min_privacy_tier_wire(&normalized);
     let effective_zdr = claims.effective_zdr(req.zdr);
+    // Jurisdiction posture for every Data Plane retrieval this turn makes, the
+    // counterpart to `effective_zdr` above. Derived once, from the two things
+    // that can honestly speak for the axis: the token's signed `sovereign`
+    // claim, and a caller who set the privacy floor to SOVEREIGN for this turn
+    // — a turn constrained to sovereign model serving must not have its
+    // grounding embedded off-jurisdiction on the way there.
+    let sovereign_retrieval = claims.effective_sovereign_required(
+        mp_contracts::dataplane_posture::sovereign_required_from_privacy_tier(
+            min_privacy_tier_wire,
+        ),
+    );
     let pii_redaction_required = crate::moderation::pii_redaction_required(
         &features,
         &state.http_client,
@@ -401,6 +412,7 @@ pub async fn invoke_stream_sse(
                 &org_id,
                 &req.content,
                 true,
+                sovereign_retrieval,
                 req.space_context
                     .as_ref()
                     .map(|context| context.retrieval_decision_token.as_str()),
@@ -831,6 +843,7 @@ pub async fn invoke_stream_sse(
         &user_content,
         &model_bearer,
         data_plane_bearer.as_ref(),
+        sovereign_retrieval,
     )
     .await;
     let recent_thread_messages = load_recent_thread_messages(
@@ -931,6 +944,7 @@ pub async fn invoke_stream_sse(
                     &org_id,
                     &req.content,
                     effective_zdr,
+                    sovereign_retrieval,
                     req.space_context
                         .as_ref()
                         .map(|context| context.retrieval_decision_token.as_str()),
@@ -952,6 +966,7 @@ pub async fn invoke_stream_sse(
                     &org_id,
                     &req.content,
                     effective_zdr,
+                    sovereign_retrieval,
                     req.space_context
                         .as_ref()
                         .map(|context| context.retrieval_decision_token.as_str()),
@@ -963,6 +978,31 @@ pub async fn invoke_stream_sse(
     } else {
         None
     };
+    // ZDR propagation checkpoint. `effective_zdr` fixed this turn's retention
+    // posture up at the top, BEFORE any retrieval ran, so Data Plane v2's report
+    // of what it actually enforced necessarily arrives after the decision — this
+    // is the only place the two can be compared, and until now the report was
+    // discarded at the gRPC boundary and never reached here at all.
+    //
+    // Expected never to fire: this branch is the durable path, and the gateway
+    // only ever asks Data Plane for `ephemeral` when `effective_zdr` is already
+    // true, in which case the turn took `zdr_direct_stream` and is not here. That
+    // is two call sites agreeing, not an enforced invariant, so it is checked
+    // rather than assumed — same posture as the `!effective_zdr` re-check that
+    // guards durable thread titles further down.
+    if let Some(actions) = grounding
+        .as_ref()
+        .map(|payload| payload.zdr_actions_applied.as_slice())
+    {
+        if crate::retrieval_metadata::retention_posture_conflict(!effective_zdr, actions) {
+            tracing::warn!(
+                request_id = %request_id,
+                org_id = %org_id,
+                actions = ?actions,
+                "Data Plane applied ZDR enforcement to grounding on a durable turn"
+            );
+        }
+    }
     let context_block = grounding.as_ref().map(|payload| {
         if payload.low_confidence {
             format!(
@@ -1493,6 +1533,7 @@ pub async fn invoke_stream_sse(
                     .as_ref()
                     .map(VerifiedCapabilityBearer::as_str),
                 effective_zdr,
+                sovereign_retrieval,
                 min_privacy_tier_wire,
                 &model_clone,
                 messages,
@@ -2426,6 +2467,13 @@ async fn load_context_assembly_messages(
     current_user_content: &str,
     bearer: &VerifiedModelBearer,
     data_plane_bearer: Option<&VerifiedBearer>,
+    // Already resolved from the caller's signed `sovereign` claim and this
+    // turn's privacy floor (`mp_contracts::dataplane_posture`) — see
+    // `sovereign_retrieval` at this function's call site. Forwarded onto
+    // `GetContextAssemblyRequest.sovereign_required` so session-core's own
+    // retrieval fan-out inherits the same posture as every other Data Plane
+    // call this turn makes, instead of falling back to a no-signal default.
+    sovereign_required: bool,
 ) -> Option<ContextAssemblyMessages> {
     // session-core's gRPC interceptor requires the caller's verified session
     // bearer as `authorization` metadata (auth.rs extract_bearer); a bare call
@@ -2439,6 +2487,7 @@ async fn load_context_assembly_messages(
             policy_id: String::new(),
             workspace_id: String::new(),
             agent_id: String::new(),
+            sovereign_required,
         },
         bearer,
     ) {

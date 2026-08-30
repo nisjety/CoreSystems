@@ -587,6 +587,13 @@ pub struct RetrieveBody {
     pub context_format: Option<String>,
     #[serde(default)]
     pub zdr_mode: Option<String>,
+    /// Caller-declared sovereignty posture for this one retrieval — the
+    /// jurisdiction axis, sibling to `zdr_mode`'s retention axis. Omitted means
+    /// "no opinion", and the signed `sovereign` claim decides (see
+    /// [`mp_contracts::dataplane_posture`]); a signed `sovereign = true` floors
+    /// this at `true` regardless of what is sent here.
+    #[serde(default, alias = "sovereignRequired")]
+    pub sovereign_required: Option<bool>,
     /// Phase 4 durable-retrieval readiness await (best-effort, opt-in). When set
     /// (> 0) **and** `filters.document_ids` is non-empty, the gateway waits up to
     /// this many milliseconds (capped at [`MAX_READY_WAIT_MS`]) for each named
@@ -629,6 +636,11 @@ pub async fn retrieve(
 ) -> Result<Json<Value>, HttpJsonError> {
     let effective_zdr_mode = effective_retrieval_zdr_mode(claims.zdr, body.zdr_mode.as_deref())
         .map_err(|message| (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))))?;
+    // The jurisdiction axis, resolved the same way one line below its retention
+    // sibling: signed claim first, caller's declared value second. Sending
+    // nothing at all is what made every gRPC dense query fail closed upstream,
+    // so this is always populated.
+    let effective_sovereign_required = claims.effective_sovereign_required(body.sovereign_required);
     let filters = body.filters.unwrap_or_default();
 
     // Phase 4: optionally give Data Plane v2's async index/embed pipeline a
@@ -671,6 +683,7 @@ pub async fn retrieve(
             context_budget_tokens: body.context_budget_tokens,
             context_format: body.context_format,
             agent_id: None,
+            sovereign_required: Some(effective_sovereign_required),
         },
         &bearer,
     )?;
@@ -681,6 +694,17 @@ pub async fn retrieve(
         .await
         .map_err(|e| grpc_err(&e))?
         .into_inner();
+    // Data Plane v2's advisory side channel (proto field 10): follow-up endpoint
+    // hints, and — the compliance half — which ZDR enforcement actions it
+    // actually applied to these results. Both were computed on every request and
+    // dropped at the gRPC boundary until 2026-08-27, and then ignored here.
+    //
+    // Forwarded verbatim, as Data Plane paths rather than gateway tool names,
+    // because this endpoint is a proxy: its callers are Model Plane clients
+    // making their own retention and follow-up decisions, and a caller that
+    // cannot observe enforcement cannot propagate it. The endpoint→tool mapping
+    // is the tool loop's concern, not a pass-through surface's.
+    let metadata = crate::retrieval_metadata::from_struct(resp.retrieval_metadata.as_ref());
     Ok(Json(json!({
         "candidates": resp.candidates.iter().map(candidate_value).collect::<Vec<_>>(),
         "sources": resp.sources.iter().map(source_value).collect::<Vec<_>>(),
@@ -691,6 +715,8 @@ pub async fn retrieve(
         "low_confidence": resp.low_confidence,
         "context_pack": resp.context_pack.as_ref().map(context_pack_value),
         "pending_documents": pending_documents,
+        "suggested_next_tools": metadata.suggested_next_tools,
+        "zdr_actions_applied": metadata.zdr_actions_applied,
     })))
 }
 
@@ -1716,6 +1742,7 @@ mod zdr_contract_tests {
             aud: Some("model-gateway".to_owned()),
             scopes: Vec::new(),
             zdr,
+            sovereign: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,

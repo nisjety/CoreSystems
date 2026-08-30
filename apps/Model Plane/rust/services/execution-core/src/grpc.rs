@@ -842,6 +842,7 @@ impl ExecutionCore for ExecutionService {
             Some(&browser_sink),
             Some(&self.state),
             req.zdr,
+            req.min_privacy_tier,
             Some(data_plane_bearer.as_str()),
             Some(session_bearer.as_str()),
             Some(inference_bearer.as_str()),

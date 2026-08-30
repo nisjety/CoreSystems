@@ -56,6 +56,21 @@ pub struct Claims {
     /// Request bodies may make this stricter, but can never turn it off.
     #[serde(default)]
     pub zdr: bool,
+    /// Sovereign-infrastructure posture asserted by the verified issuer: this
+    /// principal's content may only be processed on sovereign (currently
+    /// Norwegian) infrastructure. A distinct axis from [`Self::zdr`] — ZDR is
+    /// about RETENTION, sovereignty is about JURISDICTION — and Data Plane v2
+    /// reads it under the same name from the same auth-core token.
+    ///
+    /// Tri-state on purpose, and NOT `bool` like `zdr` above. `None` means the
+    /// claim is genuinely ABSENT, which is today's reality for every real
+    /// token: auth-core's `issuePlaneToken` has never minted this claim. That
+    /// is different from a signed `Some(false)`, and collapsing the two is
+    /// what took Data Plane v2's dense arm down — see
+    /// [`mp_contracts::dataplane_posture`] for the full ladder and for what
+    /// silence resolves to.
+    #[serde(default)]
+    pub sovereign: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -480,6 +495,16 @@ impl Claims {
         self.zdr || request_zdr
     }
 
+    /// The sovereignty posture to put on a Data Plane v2 `RetrieveRequest`,
+    /// combining this token's signed claim with whatever the caller declared
+    /// for one request. Sibling of [`Self::effective_zdr`] for the other
+    /// privacy axis; the merge rules live in
+    /// [`mp_contracts::dataplane_posture::effective_sovereign_required`].
+    #[must_use]
+    pub const fn effective_sovereign_required(&self, requested: Option<bool>) -> bool {
+        mp_contracts::dataplane_posture::effective_sovereign_required(self.sovereign, requested)
+    }
+
     /// Enforces tenant isolation: returns `Err(FORBIDDEN)` when
     /// `self.org_id != expected`.
     ///
@@ -687,6 +712,7 @@ fn dev_bypass_claims(headers: &HeaderMap) -> Claims {
         aud: None,
         scopes: Vec::new(),
         zdr: false,
+        sovereign: None,
         principal_type: Some("user".to_owned()),
         service_id: None,
         reason: None,
@@ -1359,6 +1385,7 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: false,
+            sovereign: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -1388,6 +1415,7 @@ mod tests {
             aud: Some("model-gateway".into()),
             scopes: vec!["models:read".into(), "models:invoke".into()],
             zdr: false,
+            sovereign: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -1427,6 +1455,7 @@ mod tests {
             aud: None,
             scopes: Vec::new(),
             zdr: false,
+            sovereign: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -2319,6 +2348,7 @@ mod tests {
             aud: Some("model-gateway".into()),
             scopes: Vec::new(),
             zdr: false,
+            sovereign: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -2595,6 +2625,7 @@ mod tests {
                 aud: Some("model-gateway".to_owned()),
                 scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
                 zdr: false,
+                sovereign: None,
                 principal_type: Some("service".to_owned()),
                 service_id: Some(service_id.to_owned()),
                 reason: Some("execute Control-authorized Space deletion".to_owned()),

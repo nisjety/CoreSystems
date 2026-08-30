@@ -41,9 +41,32 @@ type RetrieveRequest struct {
 	// exists for (org_id, agent_id), the row's `weights` become defaults
 	// for this request. Per-request weights (not yet on this proto) still
 	// win when callers eventually start sending them.
-	AgentId       *string `protobuf:"bytes,13,opt,name=agent_id,json=agentId,proto3,oneof" json:"agent_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	AgentId *string `protobuf:"bytes,13,opt,name=agent_id,json=agentId,proto3,oneof" json:"agent_id,omitempty"`
+	// Sovereignty posture, and the counterpart to `zdr_mode` above. Mirror of
+	// Data Plane v2's `optional bool sovereign_required = 14` — the field number
+	// is the wire contract, not a local choice, and must stay 14.
+	//
+	// Until DP2 added this field there was no way for a gRPC caller to declare
+	// the axis at all, and DP2's orchestrator resolves
+	// `req.sovereign_required.unwrap_or(true)` — a deliberate fail-closed
+	// default, because absence of proof is not proof that egress is permitted.
+	// So every Model Plane retrieval over gRPC resolved to
+	// `sovereign_required = true`, which the configured embedding provider
+	// (Cohere Embed v4, Azure-hosted) can never satisfy, and every dense query
+	// failed before any retrieval happened. It surfaced as "ZDR content must
+	// not egress to the Cohere Embed v4 text path" even with
+	// `zdr_mode: disabled`, because DP2's embed guard is
+	// `embed_zdr || sovereign_required` and its message names only the first
+	// term. Check sovereignty before ZDR if that string ever reappears.
+	//
+	// See `model-gateway::dataplane::effective_retrieval_sovereign_required`
+	// for how the Model Plane derives the value it sends.
+	//
+	// Additive and wire-compatible in both directions: a caller that sends
+	// nothing still resolves to DP2's fail-closed default.
+	SovereignRequired *bool `protobuf:"varint,14,opt,name=sovereign_required,json=sovereignRequired,proto3,oneof" json:"sovereign_required,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RetrieveRequest) Reset() {
@@ -165,6 +188,13 @@ func (x *RetrieveRequest) GetAgentId() string {
 		return *x.AgentId
 	}
 	return ""
+}
+
+func (x *RetrieveRequest) GetSovereignRequired() bool {
+	if x != nil && x.SovereignRequired != nil {
+		return *x.SovereignRequired
+	}
+	return false
 }
 
 type Filters struct {
@@ -1580,7 +1610,7 @@ var File_dataplane_retrieval_v2_retrieval_v2_proto protoreflect.FileDescriptor
 
 const file_dataplane_retrieval_v2_retrieval_v2_proto_rawDesc = "" +
 	"\n" +
-	")dataplane/retrieval/v2/retrieval_v2.proto\x12\x16dataplane.retrieval.v2\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x93\x05\n" +
+	")dataplane/retrieval/v2/retrieval_v2.proto\x12\x16dataplane.retrieval.v2\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xde\x05\n" +
 	"\x0fRetrieveRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x14\n" +
 	"\x05query\x18\x02 \x01(\tR\x05query\x129\n" +
@@ -1595,7 +1625,8 @@ const file_dataplane_retrieval_v2_retrieval_v2_proto_rawDesc = "" +
 	" \x01(\tH\x05R\azdrMode\x88\x01\x01\x127\n" +
 	"\x15context_budget_tokens\x18\v \x01(\x05H\x06R\x13contextBudgetTokens\x88\x01\x01\x12*\n" +
 	"\x0econtext_format\x18\f \x01(\tH\aR\rcontextFormat\x88\x01\x01\x12\x1e\n" +
-	"\bagent_id\x18\r \x01(\tH\bR\aagentId\x88\x01\x01B\n" +
+	"\bagent_id\x18\r \x01(\tH\bR\aagentId\x88\x01\x01\x122\n" +
+	"\x12sovereign_required\x18\x0e \x01(\bH\tR\x11sovereignRequired\x88\x01\x01B\n" +
 	"\n" +
 	"\b_user_idB\a\n" +
 	"\x05_roleB\x12\n" +
@@ -1605,7 +1636,8 @@ const file_dataplane_retrieval_v2_retrieval_v2_proto_rawDesc = "" +
 	"\t_zdr_modeB\x18\n" +
 	"\x16_context_budget_tokensB\x11\n" +
 	"\x0f_context_formatB\v\n" +
-	"\t_agent_id\"\x91\x02\n" +
+	"\t_agent_idB\x15\n" +
+	"\x13_sovereign_required\"\x91\x02\n" +
 	"\aFilters\x12%\n" +
 	"\x0edocument_types\x18\x01 \x03(\tR\rdocumentTypes\x12 \n" +
 	"\vdepartments\x18\x02 \x03(\tR\vdepartments\x12\x1c\n" +

@@ -794,8 +794,14 @@ mod privacy_tier_tests {
     #[test]
     fn classification_combines_geography_and_retention() {
         // No ZDR attestation: geography alone caps at EU residency.
-        assert_eq!(PrivacyTier::classify(&caps(Residency::Global, false)), PrivacyTier::Global);
-        assert_eq!(PrivacyTier::classify(&caps(Residency::Eu, false)), PrivacyTier::EuResident);
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Global, false)),
+            PrivacyTier::Global
+        );
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Eu, false)),
+            PrivacyTier::EuResident
+        );
         assert_eq!(
             PrivacyTier::classify(&caps(Residency::Norway, false)),
             PrivacyTier::EuResident,
@@ -814,7 +820,10 @@ mod privacy_tier_tests {
             "EU residency plus a ZDR contract is ZdrContractual — SOVEREIGN is \
              Norway-only per the pinned contract"
         );
-        assert_eq!(PrivacyTier::classify(&caps(Residency::Norway, true)), PrivacyTier::Sovereign);
+        assert_eq!(
+            PrivacyTier::classify(&caps(Residency::Norway, true)),
+            PrivacyTier::Sovereign
+        );
     }
 }
 

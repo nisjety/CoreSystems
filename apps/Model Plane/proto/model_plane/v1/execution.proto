@@ -214,6 +214,15 @@ message ExecuteStepRequest {
   // Zero-Data-Retention posture. The executor must not create durable run,
   // step, audit-content, cache, or tool-output state when true.
   bool zdr = 9;
+
+  // Minimum privacy tier this step must respect, mirroring
+  // `RunAgentRequest.min_privacy_tier` (field 11) for the direct single-step
+  // surface. Read today by `knowledge_search`'s Data Plane retrieval to derive
+  // a sovereignty posture when no signed claim exists — the SOVEREIGN tier is
+  // the only value that means anything to that axis; every other tier defers.
+  // UNSPECIFIED imposes no constraint. Field 10 was free on this message; it
+  // is unrelated to `RunAgentRequest`'s 11, which is a different message.
+  PrivacyTier min_privacy_tier = 10;
 }
 
 // ExecuteStepResponse — result of a single step execution.

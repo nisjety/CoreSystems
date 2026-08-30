@@ -489,6 +489,8 @@ mod tests {
                 low_confidence: false,
                 fact_count: 1,
                 source_count: 1,
+                suggested_next_tools: Vec::new(),
+                zdr_actions_applied: Vec::new(),
                 facts: vec![crate::retrieval::GroundingFact {
                     knowledge_id: "kid-1".into(),
                     document_id: "doc-1".into(),

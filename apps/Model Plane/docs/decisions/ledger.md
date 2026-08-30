@@ -22,6 +22,122 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-08-28 — Data Plane retrieval: what to send when nothing declares a sovereignty posture
+
+**State:** `implemented`
+(`mp-contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL`)
+
+Data Plane v2 added `RetrieveRequest.sovereign_required` (field 14) after
+finding that its absence took the dense arm down for every gRPC caller —
+which is every Model Plane retrieval. The orchestrator resolves
+`unwrap_or(true)`, a deliberate fail-closed default, and Azure-hosted Cohere
+Embed v4 cannot satisfy sovereignty, so a request that said nothing failed
+before retrieving anything. It surfaced as `ZDR content must not egress to
+the Cohere Embed v4 text path` on requests with `zdr_mode: disabled`, because
+the embed guard is `embed_zdr || sovereign_required` and its message names
+only the first term. Check sovereignty before ZDR if that string reappears.
+
+**The decision is what to send when nobody has said anything**, because that
+is the common case: auth-core's `issuePlaneToken` has never minted a
+`sovereign` claim, so no real token carries one.
+
+Three candidates, and two of them are the outage:
+
+- `true` — what the wire already meant by silence. Ships the outage as a
+  constant.
+- absent — byte-identical to `true` at Data Plane v2. The same outage with
+  less honesty about it.
+- `false` — says the true thing about a Model Plane request today: the plane
+  holds no attestation that this content is sovereignty-restricted.
+
+Chose `false`, as a **named constant with a test pinning it**, not an
+inline literal at five call sites. It is reached only when BOTH inputs are
+silent: a signed `sovereign = true` still floors the value and cannot be
+relaxed by any request field, and a caller declaring the axis for one request
+still wins. Sovereignty for MODEL serving is a separate live mechanism
+(`PrivacyTier`/`Residency` in inference-core) and is untouched.
+
+**Trigger to revisit:** auth-core minting the `sovereign` claim. At that point
+the constant stops being reachable for any principal that has one, and this
+entry can be archived.
+
+**Where a real signal exists, it is threaded, not defaulted.** A chat turn
+with `min_privacy_tier = PRIVACY_TIER_SOVEREIGN` resolves to `true` — a turn
+pinned to sovereign model serving must not have its grounding embedded
+off-jurisdiction on the way there. `sse.rs` derives it once and threads it
+into grounding and `run_tool_rounds`.
+
+**Closed same day.** execution-core's `knowledge_search` and session-core's
+context assembly both sent the no-signal default at first, because neither had
+a signal to do better with. Two different fixes, because the two callers hold
+different things:
+
+- `ExecuteStepRequest` gained `min_privacy_tier = 10` (mirroring
+  `RunAgentRequest`'s field 11), threaded through every `execute_step*`
+  variant to `execute_knowledge_search`, which derives a posture from it via
+  `effective_sovereign_required(None, ...)` — execution-core holds no signed
+  sovereignty claim of its own, only the run's privacy floor.
+- `GetContextAssemblyRequest` gained a plain `bool sovereign_required = 7`
+  instead — model-gateway, the sole caller, has ALREADY resolved its signed
+  claim against the request-declared value into `sovereign_retrieval` by the
+  time it calls session-core, so forwarding that resolved bool is more correct
+  than handing session-core a bare tier and making it re-derive without the
+  claim. Plain `bool`, not tri-state: one caller, no "said nothing" state
+  worth keeping distinct from `false`.
+
+A sovereign-pinned run now gets sovereign retrieval embedding on both paths,
+not just sovereign model serving.
+
+**Guarded by source-text, not by types.** Of the five `RetrieveRequest`
+construction sites, three use `..Default::default()`, which fills the field
+with `None` and compiles forever. Data Plane v2's own fix for this shipped
+green with the live RPC still failing, because a second hand-maintained
+construction site was missed. `retrieval_sovereignty_contract.rs` walks the
+workspace and requires every literal to set the field.
+
+## 2026-08-28 — Data Plane's `suggested_next_tools`: always-advertised tools, not dynamic injection
+
+**State:** `implemented` (`model-gateway::retrieval_metadata`,
+`model-gateway::retrieval_tools`)
+
+Data Plane v2 computes `suggested_next_tools` on every retrieval — honest,
+signal-derived hints naming which of its typed endpoints is worth trying next
+— and now returns them in `RetrieveResponse.retrieval_metadata`. The gateway
+had no reference to the field, and offered the model exactly one of the
+endpoints a hint can name, so a hint had nowhere to land.
+
+**Rejected: injecting hinted tools into the offered set mid-loop.** It is a
+parallel tool-registration mechanism competing with `builtin_tool_defs`, and
+it makes the tool list a function of the last retrieval — so the same
+conversation offers different tools on different rounds for reasons the model
+cannot see.
+
+**Shipped instead:** the three missing endpoints became ordinary builtins
+(`knowledge_graph_search`, `knowledge_wiki_search`,
+`knowledge_contradictions`), advertised unconditionally, for the same reason
+`result_query` is: a hint arrives mid-loop and the model can only act on it if
+the tool is already in the list it was given. The hint itself rides back on
+the `knowledge_search` result, mapped to gateway tool names, with anything
+unmapped dropped — a hint naming a tool that does not exist reads to the model
+as a broken environment rather than a missing capability, and
+`every_hinted_tool_is_actually_advertised` keeps the map and the tool list from
+drifting apart.
+
+Advisory throughout: they are heuristics from one response's signal, the
+grounding block words them as an option and says to ignore them when the
+context already answers the question, and a malformed or absent `Struct`
+decodes to empty lists rather than an error.
+
+`zdr_actions_applied` rides the same field and is not advisory — it reports
+which ZDR enforcement actions Data Plane actually applied, and a caller that
+cannot observe enforcement cannot propagate it. It reaches the gateway's
+retention decision as a check (`retention_posture_conflict`) that should never
+fire today, written as a check rather than an assumption because "the gateway
+only asks for `ephemeral` when it is already on the persistence-free path" is
+two call sites agreeing, not an enforced invariant.
+
+---
+
 ## 2026-08-22 — Sandbox-backend interface: defer a `SandboxBackend` trait
 
 **State:** `rejected` (for now — same shape as the letta-bridge entry below;
