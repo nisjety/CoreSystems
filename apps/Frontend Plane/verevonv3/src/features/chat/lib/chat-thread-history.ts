@@ -5,6 +5,7 @@ import {
   writeClientJson,
   writeClientValue,
 } from '@/shared/session/client-storage'
+import type { ChatEffectClass } from '@/shared/chat/effect-class'
 
 export const CHAT_ACTIVE_THREAD_KEY = 'verevon.chat.threadId'
 export const CHAT_THREAD_HISTORY_KEY = 'verevon.chat.threadHistory.v1'
@@ -36,6 +37,10 @@ export type ChatThreadHistoryItem = {
   title: string
   titleKind?: ChatThreadTitleKind
   updatedAt: string
+  /** Server-owned latest run hint used by the calm thread rail. */
+  latestRunId?: string
+  latestRunStatus?: string
+  latestRunUpdatedAt?: string
   /** User-pinned to the top of the sidebar (see `togglePinnedChatThread`). Local-only — never synced from the server. */
   pinned?: boolean
 }
@@ -46,6 +51,10 @@ export type ChatThreadHistoryInput = {
   title?: string
   titleKind?: ChatThreadTitleKind
   updatedAt?: string
+  /** Optional server-owned latest run hint; omitted fields carry forward. */
+  latestRunId?: string
+  latestRunStatus?: string
+  latestRunUpdatedAt?: string
   /** Omit to leave the stored pin state untouched (see `withPinnedCarry`). */
   pinned?: boolean
 }
@@ -57,6 +66,8 @@ export type ChatThreadTranscriptTurn = {
   content: string
   createdAt: string
   costUsd?: number
+  /** Server-derived effect evidence from the durable run proof bundle. */
+  effectClass?: ChatEffectClass
   confidence?: number
   files?: unknown[]
   grounding?: unknown
@@ -79,6 +90,12 @@ export type ChatThreadTranscriptTurn = {
   model?: string
   modelUsed?: string
   outputTokens?: number
+  /** Durable orchestration run id for an agentic/Do turn. */
+  runId?: string
+  /** Whether this turn was submitted as a plan/Do run. */
+  planMode?: boolean
+  /** Durable autonomy grant recorded on a plan/Do run. */
+  grantedRung?: 'read_only' | 'workspace_write' | 'danger_full_access'
   reasoning?: string
   requestId?: string
   role: 'assistant' | 'user'
@@ -153,7 +170,7 @@ export function upsertChatThreadHistory(input: ChatThreadHistoryInput): ChatThre
 
   const existing = readChatThreadHistory()
   const current = existing.find((candidate) => candidate.threadId === item.threadId)
-  const resolved = withPinnedCarry(withTitleLock(item, current), current)
+  const resolved = withLatestRunCarry(withPinnedCarry(withTitleLock(item, current), current), current)
 
   // Replace in place, then order by activity. Position derives from
   // `updatedAt`, never from write order — selecting an old thread rewrites its
@@ -185,6 +202,9 @@ export function togglePinnedChatThread(threadId: string): ChatThreadHistoryItem[
     titleKind: current.titleKind,
     preview: current.preview,
     updatedAt: current.updatedAt,
+    latestRunId: current.latestRunId,
+    latestRunStatus: current.latestRunStatus,
+    latestRunUpdatedAt: current.latestRunUpdatedAt,
     pinned: !current.pinned,
   })
 }
@@ -202,7 +222,7 @@ export function replaceChatThreadHistory(inputs: ChatThreadHistoryInput[]): Chat
     // server snapshot would clobber a freshly generated title, and a full
     // server-session resync would silently unpin every pinned thread.
     const matchingStored = stored.find((candidate) => candidate.threadId === item.threadId)
-    collected.push(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored))
+    collected.push(withLatestRunCarry(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored), matchingStored))
   }
   // Sort BEFORE truncating, exactly as `upsertChatThreadHistory` already does.
   // Truncating first — which this used to do, breaking out of the loop at the
@@ -283,6 +303,9 @@ function normalizeHistoryInput(input: ChatThreadHistoryInput): ChatThreadHistory
     ...(titleKind ? { titleKind } : {}),
     preview: normalizeDisplayText(input.preview, 'Open live session', maxPreviewLength),
     updatedAt: normalizeTimestamp(input.updatedAt),
+    ...(normalizeOptionalText(input.latestRunId) ? { latestRunId: normalizeOptionalText(input.latestRunId) } : {}),
+    ...(normalizeOptionalText(input.latestRunStatus) ? { latestRunStatus: normalizeOptionalText(input.latestRunStatus) } : {}),
+    ...(input.latestRunUpdatedAt ? { latestRunUpdatedAt: normalizeTimestamp(input.latestRunUpdatedAt) } : {}),
     // Only present when the caller explicitly passed a boolean — absent
     // (undefined) means "unspecified", which `withPinnedCarry` resolves
     // against whatever is already stored rather than treating it as unpin.
@@ -329,6 +352,23 @@ function withPinnedCarry(
     return unpinned
   }
   return current?.pinned ? { ...item, pinned: true } : item
+}
+
+/**
+ * Snapshot writes usually carry title/preview only. Preserve the last
+ * server-owned run hint in that case so a local transcript refresh cannot
+ * erase the status chip before the next authoritative thread-list read.
+ */
+function withLatestRunCarry(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  return {
+    ...item,
+    ...(item.latestRunId === undefined && current?.latestRunId ? { latestRunId: current.latestRunId } : {}),
+    ...(item.latestRunStatus === undefined && current?.latestRunStatus ? { latestRunStatus: current.latestRunStatus } : {}),
+    ...(item.latestRunUpdatedAt === undefined && current?.latestRunUpdatedAt ? { latestRunUpdatedAt: current.latestRunUpdatedAt } : {}),
+  }
 }
 
 /**
@@ -388,6 +428,7 @@ function normalizeTranscriptTurn(turn: ChatThreadTranscriptTurn): ChatThreadTran
     citations: Array.isArray(turn.citations) ? turn.citations : undefined,
     confidence: normalizeOptionalNumber(turn.confidence),
     costUsd: normalizeOptionalNumber(turn.costUsd),
+    effectClass: normalizeEffectClass(turn.effectClass),
     createdAt: normalizeTimestamp(turn.createdAt),
     files: Array.isArray(turn.files) ? turn.files : undefined,
     grounding: isRecord(turn.grounding) ? turn.grounding : undefined,
@@ -396,8 +437,11 @@ function normalizeTranscriptTurn(turn: ChatThreadTranscriptTurn): ChatThreadTran
     model: normalizeOptionalText(turn.model),
     modelUsed: normalizeOptionalText(turn.modelUsed),
     outputTokens: normalizeOptionalNumber(turn.outputTokens),
+    planMode: typeof turn.planMode === 'boolean' ? turn.planMode : undefined,
+    grantedRung: normalizeGrantedRung(turn.grantedRung),
     reasoning: normalizeOptionalText(turn.reasoning),
     requestId: normalizeOptionalText(turn.requestId),
+    runId: normalizeOptionalText(turn.runId),
     status: normalizeTranscriptTurnStatus(turn.status),
     toolCalls: Array.isArray(turn.toolCalls) ? turn.toolCalls : undefined,
     tools: normalizeToolIds(turn.tools),
@@ -473,8 +517,22 @@ function normalizeOptionalNumber(value: number | undefined): number | undefined 
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+function normalizeEffectClass(value: ChatEffectClass | undefined): ChatEffectClass | undefined {
+  return value === 'read_only'
+    || value === 'proposed_effect'
+    || value === 'effectful'
+    || value === 'external_receipt'
+    || value === 'unknown'
+    ? value
+    : undefined
+}
+
 function normalizeTranscriptTurnStatus(value: ChatThreadTranscriptTurn['status'] | undefined): ChatThreadTranscriptTurn['status'] | undefined {
   return value === 'error' || value === 'stopped' || value === 'waiting' ? value : undefined
+}
+
+function normalizeGrantedRung(value: ChatThreadTranscriptTurn['grantedRung'] | undefined): ChatThreadTranscriptTurn['grantedRung'] | undefined {
+  return value === 'read_only' || value === 'workspace_write' || value === 'danger_full_access' ? value : undefined
 }
 
 function normalizeTranscriptStepStatus(value: ChatThreadTranscriptStep['status'] | undefined): ChatThreadTranscriptStep['status'] | null {
@@ -510,6 +568,11 @@ function isChatThreadHistoryItem(value: unknown): value is ChatThreadHistoryItem
     typeof record.preview === 'string' &&
     typeof record.updatedAt === 'string' &&
     !Number.isNaN(Date.parse(record.updatedAt)) &&
+    (record.latestRunId === undefined || typeof record.latestRunId === 'string') &&
+    (record.latestRunStatus === undefined || typeof record.latestRunStatus === 'string') &&
+    (record.latestRunUpdatedAt === undefined || (
+      typeof record.latestRunUpdatedAt === 'string' && !Number.isNaN(Date.parse(record.latestRunUpdatedAt))
+    )) &&
     (record.pinned === undefined || typeof record.pinned === 'boolean')
   )
 }
@@ -548,11 +611,15 @@ function isChatThreadTranscriptTurn(value: unknown): value is ChatThreadTranscri
     (record.model === undefined || typeof record.model === 'string') &&
     (record.modelUsed === undefined || typeof record.modelUsed === 'string') &&
     (record.requestId === undefined || typeof record.requestId === 'string') &&
+    (record.runId === undefined || typeof record.runId === 'string') &&
+    (record.planMode === undefined || typeof record.planMode === 'boolean') &&
+    (record.grantedRung === undefined || record.grantedRung === 'read_only' || record.grantedRung === 'workspace_write' || record.grantedRung === 'danger_full_access') &&
     (record.status === undefined || record.status === 'error' || record.status === 'stopped' || record.status === 'waiting') &&
     (record.inputTokens === undefined || typeof record.inputTokens === 'number') &&
     (record.outputTokens === undefined || typeof record.outputTokens === 'number') &&
     (record.latencyMs === undefined || typeof record.latencyMs === 'number') &&
     (record.costUsd === undefined || typeof record.costUsd === 'number') &&
+    (record.effectClass === undefined || record.effectClass === 'read_only' || record.effectClass === 'proposed_effect' || record.effectClass === 'effectful' || record.effectClass === 'external_receipt' || record.effectClass === 'unknown') &&
     (record.confidence === undefined || typeof record.confidence === 'number') &&
     (record.reasoning === undefined || typeof record.reasoning === 'string') &&
     (record.citations === undefined || Array.isArray(record.citations)) &&

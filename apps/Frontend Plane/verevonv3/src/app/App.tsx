@@ -13,6 +13,7 @@ const TicketingPage = lazy(() => import('@/features/tickets/components/Ticketing
 const SupportPage = lazy(() => import('@/features/support/components/SupportPage'))
 const AgentsPage = lazy(() => import('@/features/agents/components/AgentsPage'))
 const AgentRunConsole = lazy(() => import('@/features/agents/components/AgentRunConsole'))
+const FleetRunConsole = lazy(() => import('@/features/agents/components/FleetRunConsole'))
 const AgentInstallationsPage = lazy(() => import('@/features/agents/components/AgentInstallationsPage'))
 const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
 const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDashboardPage'))
@@ -202,6 +203,7 @@ export const Router = createRouter({
         { path: '/agents/installations', component: AgentInstallationsPage },
         { path: '/agents/chief-core', component: ChiefCoreRoutingPage },
         { path: '/agents/runs', component: AgentRunConsole },
+        { path: '/agents/fleets/:fleetId', component: () => <FleetRunConsole fleetId={window.location.pathname.split('/').pop()!} /> },
         { path: '/agents/cost', component: CostDashboardPage },
         { path: '/agents/quality', component: OpsQualityPage },
         { path: '/ingestions', component: VerevonIngestionsPage },

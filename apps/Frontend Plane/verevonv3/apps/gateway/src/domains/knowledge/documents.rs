@@ -44,7 +44,7 @@ pub(super) async fn list_documents(
 /// flow: the SPA sends `{ title, content, sourceUrl?, type? }` (the user-chosen
 /// markdown subset) and the gateway fills the rest of the Data Plane contract
 /// (source, zdr_classification, org scoping) server-side.
-pub(super) async fn create_document(
+pub(crate) async fn create_document(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

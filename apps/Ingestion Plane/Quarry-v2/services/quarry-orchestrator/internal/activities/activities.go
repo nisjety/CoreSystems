@@ -22,15 +22,17 @@ import (
 	"time"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
+	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/controlauth"
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/errs"
 )
 
 // Config holds endpoint URLs and bearer tokens for the upstream services.
 type Config struct {
-	RuntimeBaseURL   string
-	ControlBaseURL   string
-	RuntimeAuthToken string
-	ControlAuthToken string
+	RuntimeBaseURL    string
+	ControlBaseURL    string
+	RuntimeAuthToken  string
+	ControlAuthToken  string
+	ControlHMACSecret string
 	// EdgeBaseURL + EdgeAuthToken target quarry-edge's internal change
 	// endpoint (/v1/internal/change/record). The baseline+diff store is
 	// Rust and edge-local, so the Go change-monitor activity persists
@@ -274,6 +276,9 @@ func (a *Activities) Checkpoint(ctx context.Context, in CheckpointInput) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", idempotencyKey(in.RunID, strconv.FormatUint(uint64(in.Visited), 10), strconv.FormatUint(uint64(in.Frontier), 10)))
 	setAuth(req, a.cfg.ControlAuthToken)
+	if err := controlauth.Sign(req, body, a.cfg.ControlHMACSecret); err != nil {
+		return errs.New(errs.CategoryNetwork, op, err).Temporal()
+	}
 
 	resp, err := a.http.Do(req)
 	if err != nil {
@@ -316,6 +321,9 @@ func (a *Activities) EmitEvent(ctx context.Context, runID string, event quarryco
 		req.Header.Set("Idempotency-Key", event.IdempotencyKey)
 	}
 	setAuth(req, a.cfg.ControlAuthToken)
+	if err := controlauth.Sign(req, body, a.cfg.ControlHMACSecret); err != nil {
+		return errs.New(errs.CategoryNetwork, op, err).Temporal()
+	}
 
 	resp, err := a.http.Do(req)
 	if err != nil {

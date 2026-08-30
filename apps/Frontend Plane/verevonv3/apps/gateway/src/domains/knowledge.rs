@@ -1,8 +1,8 @@
 mod diagnostics;
-mod documents;
+pub(crate) mod documents;
 mod imports;
 mod operating_map;
-mod products;
+pub(crate) mod products;
 mod quarry;
 mod retrieval;
 pub(crate) mod shared;

@@ -154,7 +154,7 @@ fn to_run_item(job: &Value) -> Value {
 
 // ── Create ────────────────────────────────────────────────────────────────
 
-pub(super) async fn create_run(
+pub(crate) async fn create_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

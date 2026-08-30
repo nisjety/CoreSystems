@@ -30,14 +30,16 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
+	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/controlauth"
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/workflows"
 )
 
 // Config wires the dispatcher to control plane + Temporal.
 type Config struct {
-	ControlBaseURL   string
-	ControlAuthToken string
-	TaskQueue        string
+	ControlBaseURL    string
+	ControlAuthToken  string
+	ControlHMACSecret string
+	TaskQueue         string
 	// Interval between control polls. Defaults to 2s when zero. Keep
 	// short for dev (onboarding flow has a 12s deadline) and consider
 	// raising it in production once a push notification (NATS event)
@@ -221,6 +223,9 @@ func (m *Manager) markFailed(
 	if m.cfg.ControlAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+m.cfg.ControlAuthToken)
 	}
+	if err := controlauth.Sign(req, body, m.cfg.ControlHMACSecret); err != nil {
+		return err
+	}
 	resp, err := m.http.Do(req)
 	if err != nil {
 		return err
@@ -321,6 +326,9 @@ func (m *Manager) markRunning(ctx context.Context, jobID quarrycontracts.ID, run
 	if m.cfg.ControlAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+m.cfg.ControlAuthToken)
 	}
+	if err := controlauth.Sign(req, body, m.cfg.ControlHMACSecret); err != nil {
+		return err
+	}
 	resp, err := m.http.Do(req)
 	if err != nil {
 		return err
@@ -345,6 +353,9 @@ func (m *Manager) listJobs(ctx context.Context) ([]job, error) {
 	req.Header.Set("Accept", "application/json")
 	if m.cfg.ControlAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+m.cfg.ControlAuthToken)
+	}
+	if err := controlauth.Sign(req, nil, m.cfg.ControlHMACSecret); err != nil {
+		return nil, err
 	}
 	resp, err := m.http.Do(req)
 	if err != nil {
@@ -412,9 +423,9 @@ func scrapeInputFromJob(j job, runID string) (workflows.ScrapeJobInput, error) {
 		UserID: userFromParams(j.Params),
 		Ingest: ingestFromParams(j.Params),
 		RunID:  runID,
-		JobID: string(j.ID),
-		OrgID: orgFromParams(j.Params),
-		URL:   url,
+		JobID:  string(j.ID),
+		OrgID:  orgFromParams(j.Params),
+		URL:    url,
 	}, nil
 }
 
@@ -451,9 +462,9 @@ func batchInputFromJob(j job, runID string) (workflows.BatchJobInput, error) {
 		UserID: userFromParams(j.Params),
 		Ingest: ingestFromParams(j.Params),
 		RunID:  runID,
-		JobID: string(j.ID),
-		OrgID: orgFromParams(j.Params),
-		URLs:  urls,
+		JobID:  string(j.ID),
+		OrgID:  orgFromParams(j.Params),
+		URLs:   urls,
 	}, nil
 }
 

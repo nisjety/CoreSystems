@@ -161,7 +161,7 @@ export function OutboundVerevonRail(props: { intent: OutboundIntent | null; orgI
           <>
             <header class="verevon-outbound-verevon__header">
               <div><Sparkles class="size-4" /><strong>Verevon</strong></div>
-              <Show when={threadId()}>{(id) => <a href={`/chat?thread_id=${encodeURIComponent(id())}`} link>{i18n.tr('Åpne i Chat', 'Open in Chat')}<ArrowUpRight class="size-3.5" /></a>}</Show>
+              <Show when={Boolean(threadId())}><a href={`/support?view=all&conversation_id=${encodeURIComponent(intent().conversation_id)}`} link>{i18n.tr('Åpne kildesamtale', 'Open source conversation')}<ArrowUpRight class="size-3.5" /></a></Show>
             </header>
 
             <section class="verevon-outbound-verevon__context" aria-label={i18n.tr('Kvitteringskontekst', 'Receipt context')}>

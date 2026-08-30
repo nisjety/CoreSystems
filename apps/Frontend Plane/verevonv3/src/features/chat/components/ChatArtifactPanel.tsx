@@ -67,6 +67,7 @@ import {
   type ArtifactPanelItem,
   type IconComponent,
 } from './chat-types'
+import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 
 const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   binary: FileSpreadsheet,
@@ -438,7 +439,7 @@ export function ArtifactHtmlPreview(props: { html: string; title: string }) {
       <iframe
         title={`Forhåndsvisning av ${props.title}`}
         sandbox="allow-scripts"
-        srcdoc={props.html}
+        srcdoc={sandboxHtmlDocument(props.html)}
         referrerpolicy="no-referrer"
         loading="lazy"
       />

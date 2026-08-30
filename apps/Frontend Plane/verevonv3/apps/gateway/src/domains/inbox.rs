@@ -655,7 +655,7 @@ async fn list_ai_actions(
 // The browser may create only allow-listed reviewable proposals. It cannot
 // select an arbitrary action kind, actor, org, or executor payload; those
 // powers remain in conversation-core and the authenticated session.
-async fn create_ai_text_proposal(
+pub(crate) async fn create_ai_text_proposal(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<Value>,

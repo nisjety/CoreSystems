@@ -39,6 +39,12 @@ const (
 	CodeDriverFailed     ErrorCode = "DRIVER_FAILED"
 	CodeUpstreamBlocked  ErrorCode = "UPSTREAM_BLOCKED"
 	CodeInternal         ErrorCode = "INTERNAL"
+	// CodeUnsupported mirrors Rust's `ErrorCode::Unsupported`
+	// (501 Not Implemented). Reserved for routes that are wired
+	// but require a runtime dependency that isn't configured
+	// (Temporal client, GPU driver, etc.) — never a silent
+	// 200-OK lie.
+	CodeUnsupported      ErrorCode = "UNSUPPORTED"
 )
 
 func (c ErrorCode) HTTPStatus() int {
@@ -59,6 +65,8 @@ func (c ErrorCode) HTTPStatus() int {
 		return 504
 	case CodeDriverFailed, CodeUpstreamBlocked:
 		return 502
+	case CodeUnsupported:
+		return 501
 	default:
 		return 500
 	}

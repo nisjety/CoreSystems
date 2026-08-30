@@ -56,14 +56,10 @@ async fn main() -> Result<()> {
     // operator can flip the kill switch without restarting.
     let poller_handle = finetune_poller::spawn(&app_state);
 
-    // Graceful shutdown on SIGTERM
-    let shutdown = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-        info!("SIGTERM received, shutting down");
-    };
+    // Graceful shutdown. Windows does not expose Unix signal modules through
+    // Tokio, so the local development path listens for Ctrl-C while Linux
+    // containers retain the SIGTERM contract used by orchestrators.
+    let shutdown = shutdown_signal();
 
     if let Some(handle) = poller_handle {
         tokio::select! {
@@ -82,4 +78,23 @@ async fn main() -> Result<()> {
 
     info!("model-gateway stopped");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+        info!("SIGTERM received, shutting down");
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl-C handler");
+        info!("Ctrl-C received, shutting down");
+    }
 }

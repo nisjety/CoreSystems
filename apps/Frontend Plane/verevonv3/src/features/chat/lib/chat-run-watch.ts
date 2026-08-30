@@ -27,6 +27,7 @@
 import {
   type BrowserActionDispatchedEvent,
   type BrowserObservationReceivedEvent,
+  type DurableRunEvent,
 } from '@/shared/api/run-console-client'
 import {
   gatewayBaseUrl,
@@ -99,8 +100,12 @@ export type ChatRunActivityEntry = {
 
 export type ChatRunWatchState = {
   runId: string
+  /** Last server event id observed on the run stream, for lossless resume. */
+  lastEventId: string | null
   /** Whether the run-event stream is still open (`onDone`/`onError` clear it). */
   live: boolean
+  /** User pause state for the browser loop; changes only from server events. */
+  controlState: 'running' | 'paused'
   /** Zero Data Retention turn — decides `withheld` vs `unavailable`. */
   zdr: boolean
   error: string | null
@@ -113,7 +118,7 @@ const MAX_BROWSER_STEPS = 48
 const CHAT_RUN_VIEWPORT = { height: 800, width: 1280 }
 
 export function emptyChatRunWatch(runId: string, zdr: boolean): ChatRunWatchState {
-  return { activity: [], error: null, live: true, runId, steps: [], zdr }
+  return { activity: [], controlState: 'running', error: null, lastEventId: null, live: true, runId, steps: [], zdr }
 }
 
 /**
@@ -219,6 +224,99 @@ export function applyBrowserObservation(
       url: event.pageUrl,
     }),
   )
+}
+
+function payloadString(payload: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return undefined
+}
+
+/**
+ * Reduce one persisted browser event into the same state machine used by live
+ * SSE. The durable route only returns this allowlisted reference/metadata
+ * projection, so replay cannot smuggle executable content or hidden reasoning
+ * into the Work canvas.
+ */
+export function applyDurableRunEvent(state: ChatRunWatchState, event: DurableRunEvent): ChatRunWatchState {
+  const payload = event.payload
+  const runId = payloadString(payload, 'run_id', 'runId')
+  if (runId && runId !== state.runId) return state
+  const base = { at: event.at }
+  switch (event.eventType) {
+    case 'EVENT_TYPE_BROWSER_ACTION_DISPATCHED':
+      return applyBrowserAction(state, {
+        actionId: payloadString(payload, 'action_id', 'actionId'),
+        actionType: payloadString(payload, 'action_type', 'actionType'),
+        reason: payloadString(payload, 'reason'),
+        runId: state.runId,
+        url: payloadString(payload, 'url'),
+        at: base.at,
+      })
+    case 'EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED':
+      return applyBrowserObservation(state, {
+        actionId: payloadString(payload, 'action_id', 'actionId'),
+        domSnapshotRef: payloadString(payload, 'dom_snapshot_ref', 'domSnapshotRef'),
+        pageTitle: payloadString(payload, 'page_title', 'pageTitle'),
+        pageUrl: payloadString(payload, 'page_url', 'pageUrl'),
+        runId: state.runId,
+        screenshotRef: payloadString(payload, 'screenshot_ref', 'screenshotRef'),
+        status: payloadString(payload, 'status'),
+        at: base.at,
+      })
+    case 'EVENT_TYPE_BROWSER_RUN_PAUSED':
+      return appendActivity({ ...state, controlState: 'paused' }, {
+        at: event.at,
+        detail: 'Nettleserkjøringen ble satt på pause.',
+        id: `durable-${event.eventId}`,
+        kind: 'pause',
+        title: 'Pauset',
+      })
+    case 'EVENT_TYPE_BROWSER_RUN_RESUMED':
+      return appendActivity({ ...state, controlState: 'running' }, {
+        at: event.at,
+        detail: 'Nettleserkjøringen fortsatte.',
+        id: `durable-${event.eventId}`,
+        kind: 'resume',
+        title: 'Fortsatte',
+      })
+    case 'EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED':
+      return appendActivity(state, {
+        at: event.at,
+        detail: [
+          payloadString(payload, 'action_type', 'actionType'),
+          payloadString(payload, 'reason'),
+        ].filter(Boolean).join(' · ') || 'En nettleserhandling venter på godkjenning.',
+        id: `durable-${event.eventId}`,
+        kind: 'approval',
+        status: 'pending',
+        title: 'Nettleserhandling krever godkjenning',
+      })
+    case 'EVENT_TYPE_BROWSER_ACTION_DECIDED':
+      return appendActivity(state, {
+        at: event.at,
+        detail: payloadString(payload, 'decision')
+          ? `Beslutning: ${payloadString(payload, 'decision')}.`
+          : 'Godkjenningsbeslutning mottatt.',
+        id: `durable-${event.eventId}`,
+        kind: 'approval',
+        status: payloadString(payload, 'decision'),
+        title: 'Godkjenning behandlet',
+      })
+    case 'EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED':
+      return appendActivity(state, {
+        at: event.at,
+        detail: payloadString(payload, 'verification_reason') ?? 'Fortsettelsen ble verifisert.',
+        id: `durable-${event.eventId}`,
+        kind: 'step',
+        status: payloadString(payload, 'verification_status', 'verificationStatus'),
+        title: 'Verifisert fortsettelse',
+      })
+    default:
+      return state
+  }
 }
 
 /** A screenshot URL that failed to load — recorded so we never retry a broken `<img>`. */

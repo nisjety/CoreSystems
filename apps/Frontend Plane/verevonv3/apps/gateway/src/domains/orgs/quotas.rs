@@ -69,7 +69,7 @@ pub(super) async fn list_quotas(
 /// blindly: 0 is a legitimate ceiling ("no allowance") and must stay
 /// distinguishable from an omitted field, while a negative ceiling is
 /// meaningless and would otherwise be stored as an unreachable cap.
-pub(super) async fn set_quota(
+pub(crate) async fn set_quota(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path((id, key)): Path<(String, String)>,

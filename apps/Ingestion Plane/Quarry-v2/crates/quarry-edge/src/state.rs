@@ -56,6 +56,12 @@ pub struct AppState {
     /// same handle fused into the hybrid `search` provider above. `Some` when
     /// `DATA_PLANE_URL` is configured; `None` makes find-similar return 501.
     pub vector_index: Option<Arc<dyn VectorIndex>>,
+    /// W1 — operator-configured proxy pool name (from
+    /// `QUARRY_PROXY_POOL`). Empty string means "no operator pool
+    /// wired" and forces the per-run affinity resolver to the
+    /// first-party pool. Held as a `String` (not `Option`) so the
+    /// resolver stays a single-expression call in the agent hot path.
+    pub proxy_pool_name: String,
     /// IMAGES vertical (`POST /v1/search/images`). The web `search` provider
     /// above is the `SmartSearchRouter` and has no image concept, so image
     /// search talks to SearXNG directly. `Some` when `SEARXNG_URL` is
@@ -131,4 +137,8 @@ pub struct AppState {
     /// P7 — live agent runs keyed by run_id (session + observation ctx + lease).
     #[cfg(feature = "browser-agent")]
     pub agent_runs: crate::agent_routes::AgentRuns,
+    /// W5 — fleet registry. In-process for dev/single-node; production
+    /// wires the orchestrator's durable fleet store. Shared across the
+    /// fleet REST surface and the agent events SSE (`?fleet_id=`).
+    pub fleets: crate::fleet_routes::FleetState,
 }

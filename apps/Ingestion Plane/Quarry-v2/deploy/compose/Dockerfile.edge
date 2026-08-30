@@ -99,7 +99,7 @@ ENV CARGO_BUILD_RUSTFLAGS="--cfg=reqwest_unstable"
 # Docker Desktop VM — a from-scratch build otherwise spawns one rustc+LLVM per
 # core and can OOM (which silently kills the build with exit 101).
 ENV CARGO_BUILD_JOBS=2
-ARG QUARRY_EDGE_FEATURES=grpc,http3,postgres-queue
+ARG QUARRY_EDGE_FEATURES=grpc,http3,postgres-queue,browser-agent
 
 # Cook dependencies only, from the recipe. This is the expensive layer and it
 # is invalidated only when the dependency graph (Cargo.toml/Cargo.lock) changes,
@@ -182,12 +182,18 @@ RUN set -e; \
     rm -f /tmp/apt-install.log; \
     rm -rf /var/lib/apt/lists/*; \
     echo 'quarry:x:65532:' >> /etc/group; \
-    echo 'quarry:x:65532:65532::/nonexistent:/usr/sbin/nologin' >> /etc/passwd
+    mkdir -p /var/lib/quarry/home/.config /var/lib/quarry/home/.cache /var/lib/quarry/chromium; \
+    chown -R 65532:65532 /var/lib/quarry; \
+    echo 'quarry:x:65532:65532::/var/lib/quarry/home:/usr/sbin/nologin' >> /etc/passwd
 
 COPY --from=build --chown=quarry:quarry \
     /out/quarry-edge-rs /usr/local/bin/quarry-edge-rs
 
-ENV CHROME=/usr/bin/chromium
+ENV CHROME=/usr/bin/chromium \
+    HOME=/var/lib/quarry/home \
+    XDG_CONFIG_HOME=/var/lib/quarry/home/.config \
+    XDG_CACHE_HOME=/var/lib/quarry/home/.cache \
+    QUARRY_BROWSER_PROFILE_ROOT=/var/lib/quarry/chromium
 
 USER quarry
 EXPOSE 8082

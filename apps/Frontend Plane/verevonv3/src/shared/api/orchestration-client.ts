@@ -110,13 +110,31 @@ export async function resumeRun(runId: string, signal?: AbortSignal): Promise<vo
   })
 }
 
+/** Durable result of an authorized run cancellation. */
+export type RunCancellation = {
+  runId?: string
+  cancelled: boolean
+  status?: string
+  /** Session Core RUN_CANCELLED event id, when a receipt exists. */
+  receiptId?: string
+}
+
 /** Cancel a run (e.g. the user rejects and wants to stop the whole run). */
-export async function cancelRun(runId: string, signal?: AbortSignal): Promise<void> {
-  await requestJson<unknown>(`/api/v1/orchestration/runs/${encodeURIComponent(runId)}/cancel`, {
-    method: 'POST',
-    body: '{}',
-    signal,
-  })
+export async function cancelRun(runId: string, signal?: AbortSignal): Promise<RunCancellation> {
+  const payload = await requestJson<Record<string, unknown>>(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/cancel`,
+    {
+      method: 'POST',
+      body: '{}',
+      signal,
+    },
+  )
+  return {
+    runId: str(payload.run_id) ?? str(payload.runId),
+    cancelled: payload.cancelled === true || str(payload.status)?.toLowerCase() === 'cancelled',
+    status: str(payload.status),
+    receiptId: str(payload.receipt_id) ?? str(payload.receiptId),
+  }
 }
 
 // ── Run console reads ─────────────────────────────────────────────────────────
@@ -131,42 +149,101 @@ type RawTodo = Record<string, unknown>
 export type Plan = {
   id: string
   runId?: string
+  threadId?: string
+  author?: string
   /** Lifecycle state (uppercased provider enum name), rendered as-is. */
   state?: string
   /** Free-form human-friendly summary of the plan, when present. */
   summary?: string
+  /** Ordered steps emitted by the orchestration service. */
+  steps?: PlanStep[]
+  /** Previous plan id when this plan supersedes an earlier revision. */
+  supersedes?: string
+}
+
+export type PlanStep = {
+  id: string
+  title: string
+  operation?: string
+  state?: string
 }
 
 /** A thread's todo as reported by model-gateway's orchestration API. */
 export type Todo = {
   id: string
   threadId?: string
+  runId?: string
   /** Lifecycle state (uppercased provider enum name), rendered as-is. */
   state?: string
   /** Human-friendly todo title/description, when present. */
   title?: string
+  description?: string
+  priority?: string
+  blockedBy?: string[]
 }
 
 function normalizePlan(raw: RawPlan): Plan | null {
   const id = str(raw.id) ?? str(raw.plan_id) ?? str(raw.planId)
   if (!id) return null
-  return {
+  const plan: Plan = {
     id,
     runId: str(raw.run_id) ?? str(raw.runId),
     state: str(raw.state) ?? str(raw.status),
     summary: str(raw.summary) ?? str(raw.detail) ?? str(raw.description),
   }
+  const threadId = str(raw.thread_id) ?? str(raw.threadId)
+  if (threadId) plan.threadId = threadId
+  const author = str(raw.author)
+  if (author) plan.author = author
+  const rawSteps = Array.isArray(raw.steps) ? raw.steps : undefined
+  if (rawSteps) {
+    plan.steps = rawSteps
+      .map((item): PlanStep | null => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+        const step = item as Record<string, unknown>
+        const stepId = str(step.id) ?? str(step.step_id) ?? str(step.stepId)
+        const title = str(step.title) ?? str(step.name) ?? str(step.operation)
+        if (!stepId || !title) return null
+        return {
+          id: stepId,
+          title,
+          operation: str(step.operation),
+          state: str(step.state) ?? str(step.status),
+        }
+      })
+      .filter((step): step is PlanStep => step !== null)
+  }
+  const supersedes = str(raw.supersedes) ?? str(raw.supersedes_id) ?? str(raw.supersedesId)
+  if (supersedes) plan.supersedes = supersedes
+  return plan
 }
 
 function normalizeTodo(raw: RawTodo): Todo | null {
   const id = str(raw.id) ?? str(raw.todo_id) ?? str(raw.todoId)
   if (!id) return null
-  return {
+  const todo: Todo = {
     id,
     threadId: str(raw.thread_id) ?? str(raw.threadId),
     state: str(raw.state) ?? str(raw.status),
     title: str(raw.title) ?? str(raw.summary) ?? str(raw.detail) ?? str(raw.description),
   }
+  const runId = str(raw.run_id) ?? str(raw.runId)
+  if (runId) todo.runId = runId
+  const description = str(raw.description)
+  if (description) todo.description = description
+  const priority = str(raw.priority)
+  if (priority) todo.priority = priority
+  const blockedBy = Array.isArray(raw.blocked_by)
+    ? raw.blocked_by
+    : Array.isArray(raw.blockedBy)
+      ? raw.blockedBy
+      : undefined
+  if (blockedBy) {
+    todo.blockedBy = blockedBy.filter(
+      (item): item is string => typeof item === 'string' && item.trim().length > 0,
+    )
+  }
+  return todo
 }
 
 /** List a run's plans (initial hydration for the run console). */
@@ -179,11 +256,20 @@ export async function listPlans(runId: string, signal?: AbortSignal): Promise<Pl
   return list.map(normalizePlan).filter((p): p is Plan => p !== null)
 }
 
+function isAbortSignal(value: AbortSignal | { runId?: string; signal?: AbortSignal }): value is AbortSignal {
+  return Boolean(value && typeof value === 'object' && 'aborted' in value && 'addEventListener' in value)
+}
+
 /** List a thread's todos (initial hydration for the run console). */
-export async function listTodos(threadId: string, signal?: AbortSignal): Promise<Todo[]> {
+export async function listTodos(
+  threadId: string,
+  options: AbortSignal | { runId?: string; signal?: AbortSignal } = {},
+): Promise<Todo[]> {
+  const normalized = isAbortSignal(options) ? { signal: options } : options
+  const query = normalized.runId ? `?run_id=${encodeURIComponent(normalized.runId)}` : ''
   const payload = await requestJson<{ todos?: RawTodo[] }>(
-    `/api/v1/orchestration/threads/${encodeURIComponent(threadId)}/todos`,
-    { signal },
+    `/api/v1/orchestration/threads/${encodeURIComponent(threadId)}/todos${query}`,
+    { signal: normalized.signal },
   )
   const list = Array.isArray(payload.todos) ? payload.todos : []
   return list.map(normalizeTodo).filter((t): t is Todo => t !== null)

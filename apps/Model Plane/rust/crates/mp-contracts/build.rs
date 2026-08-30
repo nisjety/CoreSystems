@@ -4,6 +4,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("../../../proto")
         .canonicalize()
         .expect("proto/ directory must exist relative to mp-contracts crate");
+    // `std::fs::canonicalize` returns an extended-length `\\?\` path on
+    // Windows. `protoc` accepts the same path when opening an individual
+    // file, but fails to resolve imports against an extended-length
+    // `--proto_path` on some installations. Strip only that Windows prefix;
+    // all other canonicalization (including OneDrive link resolution) stays
+    // intact.
+    #[cfg(windows)]
+    let proto_root = proto_root
+        .to_str()
+        .and_then(|path| path.strip_prefix(r"\\?\"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or(proto_root);
 
     let mp_protos = &[
         "model_plane/v1/ids.proto",

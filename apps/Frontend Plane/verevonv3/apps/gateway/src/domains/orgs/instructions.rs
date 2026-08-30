@@ -51,12 +51,12 @@ pub(super) async fn get_org_instructions(
 }
 
 #[derive(Deserialize)]
-pub(super) struct UpdateOrgInstructionsRequest {
+pub(crate) struct UpdateOrgInstructionsRequest {
     #[serde(default)]
-    instructions: Option<String>,
+    pub(crate) instructions: Option<String>,
 }
 
-pub(super) async fn update_org_instructions(
+pub(crate) async fn update_org_instructions(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,

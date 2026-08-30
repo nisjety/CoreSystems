@@ -21,3 +21,11 @@ base64 = { workspace = true }
 [dev-dependencies]
 # Property tests for the change-history serde round-trip contract.
 proptest = "1"
+# Property tests in `tests/properties.rs` exercise URL parsing
+# (`quarry_security::heur::blocks_private_host` and
+# `resolve_guard`) and content/text fingerprinting
+# (`quarry_transform::fingerprint`). Both are dev-only — `quarry-core`
+# itself never depends on either at runtime, so the property tests live
+# in `tests/` and pull the two crates in just for the test target.
+quarry-security = { path = "../quarry-security" }
+quarry-transform = { path = "../quarry-transform" }

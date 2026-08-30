@@ -8,10 +8,10 @@
 //!   `checkpoint_index` from its checkpoint count.
 //! * `ListRuns` — a thread's runs, org-scoped, newest-first, with an
 //!   `after_run_id` ULID cursor + `limit` and a `has_more` flag.
-//! * `CancelRun` — flips a non-terminal run to `cancelled`, org-scoped. The
-//!   durable cancel *event* fan-out is driven separately by the gateway's
-//!   `RUN_CANCEL_REQUESTED` NATS publish; this is the authoritative status flip
-//!   so the read model reflects the cancellation immediately.
+//! * `CancelRun` — flips a non-terminal run to `cancelled`, org-scoped, and
+//!   appends the durable `RUN_CANCELLED` event in the same transaction. The
+//!   returned event id is the cancellation receipt; the read model and audit
+//!   record therefore cannot disagree about whether the stop was recorded.
 //!
 //! Token usage (`input_tokens` / `output_tokens`) is not tracked in session-core
 //! — it lives on the inference path — so those fields are reported as 0 here.
@@ -19,6 +19,7 @@
 // tonic::Status is the unavoidable large Err for gRPC; boxing breaks the service-trait contract.
 #![allow(clippy::result_large_err)]
 
+use chrono::Utc;
 use mp_contracts::model_plane::v1::{
     self as pb,
     run_service_server::{RunService, RunServiceServer},
@@ -27,6 +28,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
+use mp_ids::new_ulid;
 
 use crate::auth::{
     authorize_operation, authorize_owner_row, authorize_run_action_authority_service,
@@ -145,6 +147,7 @@ impl ThreadOwnerLookup for PgThreadOwnerLookup {
 /// unbounded scan. Mirrors the bounded-page convention used across the cores.
 const MAX_LIST_LIMIT: i64 = 200;
 const DEFAULT_LIST_LIMIT: i64 = 50;
+const RUN_CANCELLED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunCancelled";
 
 fn record_metrics(method: &'static str, started: Instant, is_ok: bool) {
     let status = if is_ok { "ok" } else { "error" };
@@ -727,21 +730,103 @@ impl RunService for RunServiceImpl {
 
             if is_terminal(&status) {
                 // Already terminal — not cancellable. Report not-cancelled rather
-                // than erroring so a double-cancel is idempotent at the UI.
-                return Ok(Response::new(pb::CancelRunResponse { cancelled: false }));
+                // than erroring so a double-cancel is idempotent at the UI. If a
+                // cancellation receipt already exists, return it so a retry can
+                // still render the same durable proof instead of losing it.
+                let receipt: Option<(String,)> = sqlx::query_as(
+                    "SELECT id FROM events
+                     WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'
+                     ORDER BY ts DESC, id DESC LIMIT 1",
+                )
+                .bind(&req.run_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                return Ok(Response::new(pb::CancelRunResponse {
+                    cancelled: false,
+                    receipt_id: receipt.map_or_else(String::new, |(id,)| id),
+                }));
             }
 
-            sqlx::query(
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            // The status transition and receipt are one transaction. A caller
+            // can never observe a cancelled run without the event that proves
+            // who cancelled it and why.
+            let updated: Option<(String,)> = sqlx::query_as(
                 "UPDATE runs
                  SET status = 'cancelled', ended_at = now(), updated_at = now()
-                 WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+                 WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')
+                 RETURNING id",
             )
             .bind(&req.run_id)
-            .execute(&self.pool)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-            Ok(Response::new(pb::CancelRunResponse { cancelled: true }))
+            let Some((run_id,)) = updated else {
+                // A concurrent terminalization won the race. Re-read the
+                // receipt through the same service contract rather than
+                // claiming that this request performed the cancellation.
+                tx.rollback()
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                let receipt: Option<(String,)> = sqlx::query_as(
+                    "SELECT id FROM events
+                     WHERE run_id = $1 AND event_type = 'RUN_CANCELLED'
+                     ORDER BY ts DESC, id DESC LIMIT 1",
+                )
+                .bind(&req.run_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                return Ok(Response::new(pb::CancelRunResponse {
+                    cancelled: false,
+                    receipt_id: receipt.map_or_else(String::new, |(id,)| id),
+                }));
+            };
+
+            let receipt_id = new_ulid();
+            let now = Utc::now();
+            let idempotency_key = format!("run_cancelled:{run_id}");
+            sqlx::query(
+                "INSERT INTO events
+                    (id, event_type, run_id, payload, ts, org_id, user_id,
+                     correlation_id, causation_id, idempotency_key, resource_ref,
+                     type_url, producer, schema_version)
+                 SELECT $1, 'RUN_CANCELLED', r.id, $2, $3, r.org_id, r.user_id,
+                        r.id, '', $4, $5, $6, 'session-core', 1
+                 FROM runs AS r WHERE r.id = $7
+                 ON CONFLICT (org_id, idempotency_key)
+                 WHERE idempotency_key <> '' DO NOTHING",
+            )
+            .bind(&receipt_id)
+            .bind(serde_json::json!({
+                "run_id": &run_id,
+                "reason": req.reason.trim(),
+                "cancelled_by": caller.user_id().unwrap_or_else(|| caller.principal_id()),
+            }))
+            .bind(now)
+            .bind(&idempotency_key)
+            .bind(format!("run:{run_id}"))
+            .bind(RUN_CANCELLED_TYPE_URL)
+            .bind(&run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+            tx.commit()
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            Ok(Response::new(pb::CancelRunResponse {
+                cancelled: true,
+                receipt_id,
+            }))
         }
         .await;
         record_metrics("cancel_run", started, result.is_ok());

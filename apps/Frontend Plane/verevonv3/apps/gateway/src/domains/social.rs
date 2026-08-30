@@ -602,14 +602,14 @@ struct CreatePostBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct InboxDraftBody {
-    ticket_id: String,
-    ticket_title: String,
-    support_ticket_id: Option<String>,
-    conversation_id: Option<String>,
-    customer_name: Option<String>,
-    channel: Option<String>,
-    excerpt: Option<String>,
+pub(crate) struct InboxDraftBody {
+    pub(crate) ticket_id: String,
+    pub(crate) ticket_title: String,
+    pub(crate) support_ticket_id: Option<String>,
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) customer_name: Option<String>,
+    pub(crate) channel: Option<String>,
+    pub(crate) excerpt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -620,21 +620,21 @@ struct ScheduleBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateCampaignBody {
-    name: String,
-    brief: Option<String>,
-    goal: Option<String>,
-    status: Option<String>,
-    platforms: Option<Vec<String>>,
-    starts_at: Option<String>,
-    ends_at: Option<String>,
+pub(crate) struct CreateCampaignBody {
+    pub(crate) name: String,
+    pub(crate) brief: Option<String>,
+    pub(crate) goal: Option<String>,
+    pub(crate) status: Option<String>,
+    pub(crate) platforms: Option<Vec<String>>,
+    pub(crate) starts_at: Option<String>,
+    pub(crate) ends_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DecideApprovalBody {
-    decision: String,
-    reason: Option<String>,
+pub(crate) struct DecideApprovalBody {
+    pub(crate) decision: String,
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -707,7 +707,7 @@ async fn list_approvals(
     }
 }
 
-async fn decide_approval(
+pub(crate) async fn decide_approval(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
@@ -766,7 +766,7 @@ async fn list_campaigns(
     }
 }
 
-async fn create_campaign(
+pub(crate) async fn create_campaign(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<CreateCampaignBody>,
@@ -978,7 +978,7 @@ async fn create_post(
     }
 }
 
-async fn create_draft_from_inbox(
+pub(crate) async fn create_draft_from_inbox(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<InboxDraftBody>,

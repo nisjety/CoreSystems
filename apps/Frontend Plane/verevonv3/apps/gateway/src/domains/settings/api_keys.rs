@@ -54,7 +54,7 @@ pub(super) async fn list_api_keys(
     (StatusCode::OK, Json(ok(api_keys)))
 }
 
-pub(super) async fn create_api_key(
+pub(crate) async fn create_api_key(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -123,7 +123,7 @@ pub(super) async fn create_api_key(
     )
 }
 
-pub(super) async fn delete_api_key(
+pub(crate) async fn delete_api_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,

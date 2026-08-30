@@ -10,6 +10,7 @@ pub mod cache;
 pub mod change_history;
 pub mod contracts;
 pub mod crawl_denial;
+pub mod driver_meta;
 pub mod envelope;
 pub mod error;
 pub mod event;

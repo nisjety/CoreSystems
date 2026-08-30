@@ -15,8 +15,30 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 
+# Cross-plane owner file, lowest precedence (any per-core value below still
+# wins). Control Plane's run-control-plane.sh mints and persists several
+# credentials this plane must present or accept UNCHANGED:
+# APPLICATION_CONVEX_CONTROL_NATS_PASSWORD, APPLICATION_CONVEX_CONTROL_PROJECTION_KEY,
+# APPLICATION_NATS_PROVISIONER_PASSWORD, AUDIT_APPLICATION_NATS_PASSWORD,
+# CONVERSATION_CORE_GDPR_NATS_PASSWORD and NOTIFICATION_CORE_GDPR_NATS_PASSWORD
+# (control-shared-nats and audit-core enforce/present these against Control's
+# copy, verified directly against the running containers). Reading Control's
+# real file instead of re-generating or hand-copying these values here is
+# deliberate: convex-core/.env's own history (its removed
+# APPLICATION_CONVEX_CONTROL_* pair) documents the exact copy-drifts-from-the-
+# owner failure this avoids. Matches build-verevon-services.sh's
+# plane_env_files() "Application Plane" case and Model Plane's
+# scripts/compose.sh, which already load this same file the same way — this
+# script's own top-of-file comment claimed this was already happening, but the
+# load was missing until now. Optional: a bring-up before Control Plane has
+# ever run still proceeds, and the specific ${VAR:?} interpolation error at
+# that point says exactly what is missing.
+env_files=()
+control_owner_secrets="$root/../Control Plane/.env.generated-secrets"
+[[ -f "$control_owner_secrets" ]] && env_files+=("$control_owner_secrets")
+
 # Per-core environment files (each core also loads its own via `env_file:`).
-env_files=(
+env_files+=(
   "$root/convex-core/.env"
   "$root/conversation-core/.env"
   "$root/notification-core/.env"

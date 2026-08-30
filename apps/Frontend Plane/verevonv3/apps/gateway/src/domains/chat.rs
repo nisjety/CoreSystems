@@ -1,6 +1,6 @@
 mod documents;
 pub(crate) mod history;
-mod json_handlers;
+pub(crate) mod json_handlers;
 pub(crate) mod shared;
 mod streams;
 pub(crate) mod support;
@@ -47,6 +47,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(json_handlers::get_thread_messages),
         )
         .route(
+            "/api/v1/chat/threads/{thread_id}/events",
+            get(json_handlers::get_thread_events),
+        )
+        .route(
             "/api/v1/chat/threads/{thread_id}/context",
             get(json_handlers::get_thread_context),
         )
@@ -68,6 +72,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/runs/{run_id}/events",
             get(streams::run_events_stream),
+        )
+        .route(
+            "/api/v1/runs/{run_id}/events/replay",
+            get(streams::run_events_replay),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }

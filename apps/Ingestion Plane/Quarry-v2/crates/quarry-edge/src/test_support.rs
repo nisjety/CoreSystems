@@ -77,6 +77,7 @@ impl Driver for StubDriver {
                 headers: vec![],
                 body: b"<html><body>plain text, no anchors</body></html>".to_vec(),
                 duration_ms: 1,
+                served_by: DriverKind::Static,
             }),
         }
     }
@@ -88,6 +89,10 @@ impl Driver for StubDriver {
 pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
     let (tx, mut rx) = mpsc::channel(8);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    // Register the stub under its own `kind` so `build_driver(plan)`
+    // resolves to the stub instead of returning an empty registry.
+    let mut drivers = DriverRegistry::new(static_driver.kind());
+    drivers.register(static_driver.clone());
     AppState {
         readiness: crate::state::ReadinessState {
             durable: true,
@@ -97,10 +102,13 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
         require_browser_grants: false,
         driver: static_driver,
-        drivers: DriverRegistry::new(DriverKind::Static),
+        drivers,
         http3: None,
         security: Arc::new(quarry_security::preflight::DefaultEngine::new()),
         artifacts: Arc::new(InMemoryStore::new()),
+        // W1: no operator pool in tests; the per-run resolver falls
+        // back to first-party egress when empty.
+        proxy_pool_name: String::new(),
         control_base_url: String::new(),
         redis: None,
         cache: None,
@@ -133,6 +141,8 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         browser_egress_proxy: None,
         #[cfg(feature = "browser-agent")]
         agent_runs: crate::agent_routes::new_runs(),
+        #[cfg(feature = "browser-agent")]
+        fleets: crate::fleet_routes::new_fleet_state(),
     }
 }
 

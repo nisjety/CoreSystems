@@ -738,9 +738,13 @@ verify_oneshot_declarations() {
 verify_unique_migration_versions() {
   local duplicates
 
-  duplicates="$(find "$CORE_ROOT/apps" -type f -path '*/migrations/*.sql' \
-      ! -path '*/node_modules/*' ! -path '*/target/*' ! -path '*/dist/*' -print \
-    | awk -F/ '
+  duplicates="$( (
+    for plane_dir in "$CORE_ROOT"/apps/*/; do
+      [[ -d "$plane_dir" ]] || continue
+      find "$plane_dir" -type f -path '*/migrations/*.sql' \
+        ! -path '*/node_modules/*' ! -path '*/target/*' ! -path '*/dist/*' -print
+    done
+  ) | awk -F/ '
         {
           file=$NF
           # Paired migration systems intentionally use the same version for

@@ -56,6 +56,10 @@ struct AgUiRunState {
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/ag-ui/stream", post(stream_agent_ui))
+        .route(
+            "/api/v1/ag-ui/stream/{request_id}",
+            axum::routing::get(resume_agent_ui),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
@@ -75,13 +79,88 @@ async fn stream_agent_ui(
                 .into_response();
         }
     };
+    // Keep the AG-UI adapter on the same governed ingress path as native chat:
+    // normalize retention and support context, resolve Space persona/context,
+    // and require the delegated audiences needed by Model Gateway's typed
+    // boundary. Sending only the model bearer makes a nominally valid AG-UI
+    // request fail as soon as it selects tools, grounding, or agentic work.
+    let body = shared::normalized_model_body(body, &headers);
+    let mut body = crate::domains::chat::support::enrich_model_body(&state, &user, body).await;
+    if let Err(message) = crate::domains::chat::history::enforce_support_thread_policy(&mut body) {
+        return shared::invalid_chat_request(message).into_response();
+    }
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if let Err((status, body)) = crate::domains::spaces::inject_mentioned_space_agent_persona(
+        &state, &user, &org_id, &mut body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_authored_instructions(&state, &user, &org_id, &mut body)
+            .await
+    {
+        return (status, body).into_response();
+    }
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_personal_thread_context(&state, &user, &org_id, &mut body)
+            .await
+    {
+        return (status, body).into_response();
+    }
+    let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
+    let mut body = shared::with_identity_context(body, &user.user_name, &org_name);
+    shared::apply_org_zdr_posture(&state, &user, &mut body).await;
+
     let token = shared::model_token(&state, &user, &headers).await;
+    let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
+    let ingestion_token = shared::ingestion_token(&state, &user, &headers).await;
+    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let execution_token = match shared::required_execution_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let cost_token = match shared::required_cost_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let session_token = match shared::required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
     let url = format!("{}/v1/invoke/stream", state.model_gateway_url);
     // Streaming client (no overall 25s timeout) so the agent run isn't severed mid-stream.
     let mut req = state.streaming_client.request(Method::POST, url);
 
     if let Some(token) = token {
         req = req.bearer_auth(token);
+    }
+
+    req = req
+        .header(
+            "x-inference-authorization",
+            format!("Bearer {inference_token}"),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {execution_token}"),
+        )
+        .header("x-cost-authorization", format!("Bearer {cost_token}"))
+        .header("x-session-authorization", format!("Bearer {session_token}"))
+        .header("x-user-id", &user.user_id)
+        .header("x-org-id", &org_id);
+    if let Some(token) = data_plane_token {
+        req = req.header("x-data-plane-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = ingestion_token {
+        req = req.header("x-ingestion-authorization", format!("Bearer {token}"));
+    }
+    if let Some(last_event_id) = headers.get("last-event-id").and_then(|v| v.to_str().ok()) {
+        req = req.header("last-event-id", last_event_id);
     }
 
     if shared::zdr_flag(&headers) || bool_field(&body, "zdr").unwrap_or(false) {
@@ -99,6 +178,91 @@ async fn stream_agent_ui(
         }
     };
 
+    relay_ag_ui_response(upstream, None).await
+}
+
+/// Resume an AG-UI stream from Model Gateway's durable request buffer. The
+/// transformed endpoint deliberately mirrors native `/chat/stream/resume`: it
+/// forwards the cursor and preserves the delegated audience headers, then
+/// applies the same AG-UI projection to replayed native frames.
+async fn resume_agent_ui(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    axum::extract::Path(request_id): axum::extract::Path<String>,
+) -> Response {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let execution_token = match shared::required_execution_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let cost_token = match shared::required_cost_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let session_token = match shared::required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
+    let ingestion_token = shared::ingestion_token(&state, &user, &headers).await;
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let url = format!(
+        "{}/v1/invoke/resume/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&request_id),
+    );
+    let mut req = state.streaming_client.request(Method::GET, url);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    req = req
+        .header(
+            "x-inference-authorization",
+            format!("Bearer {inference_token}"),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {execution_token}"),
+        )
+        .header("x-cost-authorization", format!("Bearer {cost_token}"))
+        .header("x-session-authorization", format!("Bearer {session_token}"))
+        .header("x-user-id", &user.user_id)
+        .header("x-org-id", &org_id);
+    if let Some(token) = data_plane_token {
+        req = req.header("x-data-plane-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = ingestion_token {
+        req = req.header("x-ingestion-authorization", format!("Bearer {token}"));
+    }
+    if let Some(last_event_id) = headers.get("last-event-id").and_then(|v| v.to_str().ok()) {
+        req = req.header("last-event-id", last_event_id);
+    }
+    if shared::zdr_flag(&headers) {
+        req = req.header("x-zdr", "true");
+    }
+
+    let upstream = match req.send().await {
+        Ok(resp) => resp,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(crate::envelope::upstream_unavailable()),
+            )
+                .into_response();
+        }
+    };
+    relay_ag_ui_response(upstream, Some(request_id)).await
+}
+
+async fn relay_ag_ui_response(
+    upstream: reqwest::Response,
+    initial_run_id: Option<String>,
+) -> Response {
     let status_u16 = upstream.status().as_u16();
     if status_u16 >= 400 {
         return (
@@ -119,7 +283,10 @@ async fn stream_agent_ui(
     let output = stream! {
         let mut buffer = String::new();
         let mut parser = SseParseState::default();
-        let mut run = AgUiRunState::default();
+        let mut run = AgUiRunState {
+            run_id: initial_run_id,
+            ..AgUiRunState::default()
+        };
 
         while let Some(chunk) = upstream_stream.next().await {
             let chunk = match chunk {
@@ -203,6 +370,10 @@ fn normalize_run_agent_input(body: Value) -> Result<Value, String> {
     let zdr = lookup_bool(&body, forwarded, data, &["zdr"]).unwrap_or(false);
     let browse_web =
         lookup_bool(&body, forwarded, data, &["browseWeb", "browse_web"]).unwrap_or(false);
+    let deep_research =
+        lookup_bool(&body, forwarded, data, &["deepResearch", "deep_research"]).unwrap_or(false);
+    let plan_mode =
+        lookup_bool(&body, forwarded, data, &["planMode", "plan_mode"]).unwrap_or(false);
     let attachments = lookup_value(&body, forwarded, data, &["attachments"])
         .filter(|value| value.is_array())
         .cloned()
@@ -243,6 +414,8 @@ fn normalize_run_agent_input(body: Value) -> Result<Value, String> {
         ),
     );
     out.insert("generate_image".to_owned(), Value::Bool(generate_image));
+    out.insert("deep_research".to_owned(), Value::Bool(deep_research));
+    out.insert("plan_mode".to_owned(), Value::Bool(plan_mode));
     out.insert("attachments".to_owned(), attachments);
     out.insert(
         "features".to_owned(),
@@ -269,6 +442,38 @@ fn normalize_run_agent_input(body: Value) -> Result<Value, String> {
     }
     if let Some(session_key) = session_key {
         out.insert("session_key".to_owned(), Value::String(session_key));
+    }
+
+    for (output_key, input_keys) in [
+        ("space_ref", &["spaceRef", "space_ref"][..]),
+        (
+            "mentioned_agent_ref",
+            &["mentionedAgentRef", "mentioned_agent_ref"][..],
+        ),
+        (
+            "support_context_query",
+            &["supportContextQuery", "support_context_query"][..],
+        ),
+        ("effort", &["effort"][..]),
+        (
+            "min_privacy_tier",
+            &["minPrivacyTier", "min_privacy_tier"][..],
+        ),
+    ] {
+        if let Some(value) = lookup_string(&body, forwarded, data, input_keys) {
+            out.insert(output_key.to_owned(), Value::String(value));
+        }
+    }
+    for (output_key, input_keys) in [
+        ("regenerated", &["regenerated"][..]),
+        (
+            "edited_resubmit",
+            &["editedResubmit", "edited_resubmit"][..],
+        ),
+    ] {
+        if let Some(value) = lookup_bool(&body, forwarded, data, input_keys) {
+            out.insert(output_key.to_owned(), Value::Bool(value));
+        }
     }
 
     Ok(Value::Object(out))
@@ -533,6 +738,7 @@ fn parse_sse_line(state: &mut SseParseState, raw: &str) -> Option<SseFrame> {
 }
 
 fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
+    let upstream_id = frame.id.clone();
     let payload = serde_json::from_str::<Value>(&frame.data).unwrap_or(Value::Null);
     let event = frame.event.as_deref().unwrap_or_default();
     if event != "connected" && run.run_id.is_none() {
@@ -542,14 +748,20 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
             .or_else(|| Some(format!("run-{}", chrono::Utc::now().timestamp_millis())));
     }
 
-    match event {
+    let mapped = match event {
         "connected" => {
-            run.run_id = string_field(&payload, "request_id").or(frame.id);
+            // AG-UI's `runId` is the durable orchestration identity. Keep the
+            // native invocation/request id alongside it for the replay URL —
+            // Model Gateway's resume endpoint is keyed by request id.
+            run.run_id = string_field(&payload, "run_id")
+                .or_else(|| string_field(&payload, "request_id"))
+                .or(frame.id);
             run.thread_id = string_field(&payload, "thread_id");
 
             vec![ag_ui_event(json!({
                 "type": "RUN_STARTED",
                 "runId": run_id(run),
+                "requestId": string_field(&payload, "request_id"),
                 "threadId": run.thread_id.clone(),
                 "input": {
                     "model": string_field(&payload, "model_used").or_else(|| string_field(&payload, "model")),
@@ -562,27 +774,27 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
                 .unwrap_or_default();
 
             if delta.is_empty() {
-                return Vec::new();
-            }
+                Vec::new()
+            } else {
+                let mut events = Vec::new();
+                if !run.text_started {
+                    run.text_started = true;
+                    events.push(ag_ui_event(json!({
+                        "type": "TEXT_MESSAGE_START",
+                        "messageId": message_id(run),
+                        "role": "assistant",
+                        "runId": run_id(run),
+                    })));
+                }
 
-            let mut events = Vec::new();
-            if !run.text_started {
-                run.text_started = true;
                 events.push(ag_ui_event(json!({
-                    "type": "TEXT_MESSAGE_START",
+                    "type": "TEXT_MESSAGE_CONTENT",
                     "messageId": message_id(run),
-                    "role": "assistant",
+                    "delta": delta,
                     "runId": run_id(run),
                 })));
+                events
             }
-
-            events.push(ag_ui_event(json!({
-                "type": "TEXT_MESSAGE_CONTENT",
-                "messageId": message_id(run),
-                "delta": delta,
-                "runId": run_id(run),
-            })));
-            events
         }
         "done" | "stopped" => {
             let mut events = Vec::new();
@@ -594,11 +806,18 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
                 })));
             }
             run.text_started = false;
+            // AG-UI's current RunFinished contract uses a discriminated
+            // outcome. Keep the native stopped/completed detail as an
+            // additive status for Verevon consumers while emitting the
+            // standard success discriminator for interoperable clients.
+            let outcome_status = if event == "stopped" { "stopped" } else { "completed" };
             events.push(ag_ui_event(json!({
                 "type": "RUN_FINISHED",
-                "runId": string_field(&payload, "request_id").unwrap_or_else(|| run_id(run)),
+                "runId": string_field(&payload, "run_id").unwrap_or_else(|| run_id(run)),
+                "requestId": string_field(&payload, "request_id"),
                 "threadId": run.thread_id.clone(),
-                "outcome": { "status": if event == "stopped" { "stopped" } else { "completed" } },
+                "outcome": { "type": "success", "status": outcome_status },
+                "result": { "status": outcome_status },
                 "modelUsed": string_field(&payload, "model_used").or_else(|| string_field(&payload, "modelUsed")),
                 "outputTokens": number_field(&payload, "output_tokens").or_else(|| number_field(&payload, "outputTokens")),
             })));
@@ -622,6 +841,11 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
                 ag_ui_event(json!({
                     "type": "TOOL_CALL_ARGS",
                     "toolCallId": string_field(&payload, "id").unwrap_or_else(|| format!("tool-{}", run_id(run))),
+                    // AG-UI streams tool arguments as JSON fragments in
+                    // `delta`. Preserve the parsed native value as an
+                    // additive `args` field for Verevon's focused renderer.
+                    "delta": serde_json::to_string(&payload.get("args").cloned().unwrap_or(Value::Null))
+                        .unwrap_or_else(|_| "null".to_owned()),
                     "args": payload.get("args").cloned().unwrap_or(Value::Null),
                     "runId": run_id(run),
                 })),
@@ -636,10 +860,30 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
             "type": "TOOL_CALL_RESULT",
             "toolCallId": string_field(&payload, "id"),
             "content": payload.get("result").cloned().unwrap_or(payload),
+            "messageId": message_id(run),
+            "role": "tool",
             "runId": run_id(run),
         }))],
-        "artifact" | "attachment" | "reasoning_delta" | "usage" | "citation" | "grounding"
-        | "step_update" => {
+        "artifact"
+        | "attachment"
+        | "reasoning_delta"
+        | "usage"
+        | "citation"
+        | "grounding"
+        | "step_update"
+        // Governance and browser lifecycle events are deliberately carried as
+        // non-executable CUSTOM payloads. The AG-UI adapter preserves their
+        // typed native fields so the Verevon projection can render pauses,
+        // approvals, and receipts without inventing a second mutation path.
+        | "approval_state_changed"
+        | "awaiting_approval"
+        | "run_paused_for_approval"
+        | "run_resumed_after_approval"
+        | "browser_action_approval_required"
+        | "browser_action_decided"
+        | "approval_continuation_verified"
+        | "browser_run_paused"
+        | "browser_run_resumed" => {
             vec![ag_ui_event(json!({
                 "type": "CUSTOM",
                 "name": event,
@@ -647,13 +891,38 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
                 "runId": run_id(run),
             }))]
         }
-        _ => vec![ag_ui_event(json!({
-            "type": "CUSTOM",
-            "name": if event.is_empty() { "upstream" } else { event },
-            "value": payload,
-            "runId": run_id(run),
-        }))],
-    }
+        _ => {
+            // AG-UI distinguishes application-defined CUSTOM events from
+            // opaque passthrough data. An unknown native stream frame has no
+            // Verevon projection contract, so expose it as RAW rather than
+            // allowing a future client to treat it as an executable custom
+            // command.
+            let native_name = if event.is_empty() { "upstream" } else { event };
+            vec![ag_ui_event(json!({
+                "type": "RAW",
+                "event": { "name": native_name, "payload": payload },
+                "source": "verevon.native-chat-stream",
+                "runId": run_id(run),
+            }))]
+        }
+    };
+
+    attach_event_ids(mapped, upstream_id)
+}
+
+/// Preserve the upstream SSE cursor on every AG-UI frame. A single native
+/// frame can expand into several AG-UI events (for example a tool call), so
+/// those expanded events intentionally share the native numeric id. Model
+/// Gateway parses `Last-Event-ID` as `u64`; inventing suffixes would make an
+/// AG-UI reconnect lose its cursor and replay the entire buffer.
+fn attach_event_ids(events: Vec<Event>, upstream_id: Option<String>) -> Vec<Event> {
+    let Some(upstream_id) = upstream_id else {
+        return events;
+    };
+    events
+        .into_iter()
+        .map(|event| event.id(upstream_id.clone()))
+        .collect()
 }
 
 fn map_error(run: &mut AgUiRunState, message: String) -> Vec<Event> {
@@ -674,7 +943,24 @@ fn map_error(run: &mut AgUiRunState, message: String) -> Vec<Event> {
     events
 }
 
-fn ag_ui_event(data: Value) -> Event {
+fn ag_ui_event(mut data: Value) -> Event {
+    // AG-UI base event properties are optional on the wire, but emitting a
+    // timestamp and adapter metadata makes the bridge observable without
+    // leaking native payloads or credentials. Existing fields win so a
+    // future typed mapper can provide a producer timestamp explicitly.
+    if let Value::Object(object) = &mut data {
+        object
+            .entry("timestamp".to_owned())
+            .or_insert_with(|| Value::String(chrono::Utc::now().to_rfc3339()));
+        object.entry("metadata".to_owned()).or_insert_with(|| {
+            json!({
+                "verevon": {
+                    "adapter": "native-chat",
+                    "protocolVersion": "1",
+                }
+            })
+        });
+    }
     Event::default().data(data.to_string())
 }
 
@@ -748,6 +1034,15 @@ mod tests {
                 "features": ["tools", "artifacts"],
                 "generateImage": true,
                 "browseWeb": true,
+                "deepResearch": true,
+                "planMode": true,
+                "effort": "deep",
+                "spaceRef": "space_1",
+                "mentionedAgentRef": "agent_1",
+                "supportContextQuery": "find the source",
+                "minPrivacyTier": "eu_resident",
+                "regenerated": true,
+                "editedResubmit": false,
                 "zdr": true
             },
             "data": { "model": "legacy-model" }
@@ -761,6 +1056,15 @@ mod tests {
         assert_eq!(normalized["thread_id"], "thread_1");
         assert_eq!(normalized["session_key"], "thread_1");
         assert_eq!(normalized["generate_image"], true);
+        assert_eq!(normalized["deep_research"], true);
+        assert_eq!(normalized["plan_mode"], true);
+        assert_eq!(normalized["effort"], "deep");
+        assert_eq!(normalized["space_ref"], "space_1");
+        assert_eq!(normalized["mentioned_agent_ref"], "agent_1");
+        assert_eq!(normalized["support_context_query"], "find the source");
+        assert_eq!(normalized["min_privacy_tier"], "eu_resident");
+        assert_eq!(normalized["regenerated"], true);
+        assert_eq!(normalized["edited_resubmit"], false);
         assert_eq!(normalized["zdr"], true);
 
         let tool_names: Vec<&str> = normalized["tools"]

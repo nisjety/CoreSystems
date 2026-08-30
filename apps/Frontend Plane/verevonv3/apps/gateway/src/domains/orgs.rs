@@ -1,12 +1,12 @@
-mod deletion;
+pub(crate) mod deletion;
 mod info;
-mod instructions;
-mod members;
-mod quotas;
+pub(crate) mod instructions;
+pub(crate) mod members;
+pub(crate) mod quotas;
 mod roles;
-mod settings;
+pub(crate) mod settings;
 mod shared;
-mod switch;
+pub(crate) mod switch;
 
 use axum::{
     routing::{delete, get, patch, post, put},

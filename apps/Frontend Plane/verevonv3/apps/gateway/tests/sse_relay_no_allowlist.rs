@@ -111,7 +111,9 @@ fn upstream_event_names() -> Vec<String> {
 
     let mut names = Vec::new();
     for line in body.lines() {
-        let Some(arrow) = line.find("=>") else { continue };
+        let Some(arrow) = line.find("=>") else {
+            continue;
+        };
         let rest = &line[arrow..];
         let Some(open) = rest.find('"') else { continue };
         let after = &rest[open + 1..];

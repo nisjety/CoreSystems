@@ -151,7 +151,7 @@ fn to_quarry_source(source: &Value) -> Option<Value> {
 /// — we never read a client header/body for org. The create body we forward
 /// carries ONLY `{name, url, kind, monitor?, preset?, config?}`; any client
 /// `org_id` field is dropped by [`build_create_source_body`].
-pub(super) async fn create_source(
+pub(crate) async fn create_source(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -190,7 +190,7 @@ pub(super) async fn create_source(
 ///
 /// Org scope is enforced at the edge (and control) from the verified JWT — a
 /// cross-tenant id resolves to 404 there, never a foreign delete.
-pub(super) async fn delete_source(
+pub(crate) async fn delete_source(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

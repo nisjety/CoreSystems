@@ -1,4 +1,4 @@
-mod api_keys;
+pub(crate) mod api_keys;
 mod preferences;
 mod session;
 mod settings_handlers;

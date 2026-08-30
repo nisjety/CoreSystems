@@ -333,9 +333,7 @@ fn is_pre_org_onboarding_route(path: &str) -> bool {
 fn optionally_resolves_active_membership(path: &str) -> bool {
     matches!(
         path,
-        "/api/v1/session/current"
-            | "/api/v1/me/session-context"
-            | "/api/v1/onboarding/lifecycle"
+        "/api/v1/session/current" | "/api/v1/me/session-context" | "/api/v1/onboarding/lifecycle"
     )
 }
 

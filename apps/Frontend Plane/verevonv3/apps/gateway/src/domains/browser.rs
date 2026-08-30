@@ -100,28 +100,28 @@ impl BrowserProfileScope {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateSessionBody {
-    url: String,
+pub(crate) struct CreateSessionBody {
+    pub(crate) url: String,
     #[serde(default)]
-    profile_id: Option<String>,
+    pub(crate) profile_id: Option<String>,
     #[serde(default)]
-    persistent_profile: bool,
+    pub(crate) persistent_profile: bool,
     #[serde(default)]
-    viewport: Option<Viewport>,
+    pub(crate) viewport: Option<Viewport>,
     /// Phase 3: caller-requested Zero Data Retention mode. Enforcement of
     /// "a ZDR session may never attach a persistent profile" happens
     /// server-side in `create_session` (`reject_zdr_persistent_profile`) —
     /// this flag is never trusted blindly for anything else, it only gates
     /// that one check plus the metadata recorded for this session.
     #[serde(default)]
-    zdr: bool,
+    pub(crate) zdr: bool,
     /// Phase 3 continuation: explicit scope for the profile this session
     /// attaches (new or existing). Optional for back-compat — when
     /// omitted, the effective scope is inferred from `profile_id`/
     /// `persistent_profile` exactly as before (see
     /// `effective_profile_scope`).
     #[serde(default)]
-    scope: Option<BrowserProfileScope>,
+    pub(crate) scope: Option<BrowserProfileScope>,
 }
 
 /// Resolves the real scope a session's profile attachment implies, so the
@@ -238,21 +238,21 @@ pub(crate) fn new_browser_run_store() -> BrowserRunStore {
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
-struct Viewport {
-    width: u32,
-    height: u32,
+pub(crate) struct Viewport {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 #[derive(Debug, Deserialize)]
-struct ActionBody {
-    action: Value,
+pub(crate) struct ActionBody {
+    pub(crate) action: Value,
     #[serde(default)]
-    actor: BrowserActionActor,
+    pub(crate) actor: BrowserActionActor,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum BrowserActionActor {
+pub(crate) enum BrowserActionActor {
     Agent,
     #[default]
     Human,
@@ -282,51 +282,51 @@ impl BrowserControlMode {
 }
 
 #[derive(Debug, Deserialize)]
-struct ControlBody {
-    mode: BrowserControlMode,
+pub(crate) struct ControlBody {
+    pub(crate) mode: BrowserControlMode,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct NewTabBody {
+pub(crate) struct NewTabBody {
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SuggestActionBody {
+pub(crate) struct SuggestActionBody {
     #[serde(default)]
-    goal: String,
+    pub(crate) goal: String,
     #[serde(default = "default_include_screenshot")]
-    include_screenshot: bool,
+    pub(crate) include_screenshot: bool,
 }
 
 #[derive(Debug, Deserialize)]
-struct RestoreProbeBody {
-    url: String,
+pub(crate) struct RestoreProbeBody {
+    pub(crate) url: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct StartAiRunBody {
-    goal: String,
+pub(crate) struct StartAiRunBody {
+    pub(crate) goal: String,
     #[serde(default)]
-    allowed_domains: Option<Vec<String>>,
+    pub(crate) allowed_domains: Option<Vec<String>>,
     #[serde(default)]
-    max_steps: Option<i32>,
+    pub(crate) max_steps: Option<i32>,
     #[serde(default)]
-    max_runtime_s: Option<i32>,
+    pub(crate) max_runtime_s: Option<i32>,
     #[serde(default)]
-    stop_criteria: Option<String>,
+    pub(crate) stop_criteria: Option<String>,
     /// Accepted for API back-compat only — deliberately never read. See
     /// `build_ai_run_request`'s doc comment: this controls a confirmed-broken
     /// legacy gate in execution-core, and the gateway must never arm it.
     #[allow(dead_code)]
     #[serde(default)]
-    require_approval: Option<bool>,
+    pub(crate) require_approval: Option<bool>,
     #[serde(default)]
-    max_cost_usd: Option<f64>,
+    pub(crate) max_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -448,7 +448,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
-async fn create_session(
+pub(crate) async fn create_session(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -660,7 +660,7 @@ async fn get_owner_timeline(
     (StatusCode::OK, Json(ok(unwrap_data(&body)))).into_response()
 }
 
-async fn run_action(
+pub(crate) async fn run_action(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -758,7 +758,7 @@ async fn run_action(
     (StatusCode::OK, Json(ok(response))).into_response()
 }
 
-async fn set_control_mode(
+pub(crate) async fn set_control_mode(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -840,7 +840,7 @@ async fn get_tabs(
         .into_response()
 }
 
-async fn new_tab(
+pub(crate) async fn new_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -903,7 +903,7 @@ async fn new_tab(
         .into_response()
 }
 
-async fn select_tab(
+pub(crate) async fn select_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -922,7 +922,7 @@ async fn select_tab(
     .await
 }
 
-async fn close_tab(
+pub(crate) async fn close_tab(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -1020,7 +1020,7 @@ async fn tab_mutation(
         .into_response()
 }
 
-async fn close_session(
+pub(crate) async fn close_session(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -1053,7 +1053,7 @@ async fn close_session(
     (StatusCode::OK, Json(ok(json!({ "closed": true })))).into_response()
 }
 
-async fn suggest_action(
+pub(crate) async fn suggest_action(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -1260,7 +1260,7 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
 /// unbuilt; risk-based HITL *gating* of individual risky actions is live as
 /// of Phase 5 (see `build_ai_run_request` above and
 /// `docs/BROWSER_WORKSPACE_PLAN.md`).
-async fn start_ai_run(
+pub(crate) async fn start_ai_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -1386,7 +1386,7 @@ async fn start_ai_run(
 /// (`{"action": "pause" | "resume" | "stop"}`) is forwarded verbatim to
 /// model-gateway, which maps it onto `ExecutionCore`'s
 /// `PauseRun`/`ResumeRun`/`CancelRun` RPCs.
-async fn control_ai_run(
+pub(crate) async fn control_ai_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -2306,13 +2306,13 @@ async fn list_profiles(
 /// scope is a contradiction; ephemeral browsing simply attaches no
 /// profile at all.
 #[derive(Debug, Deserialize)]
-struct CreateProfileBody {
+pub(crate) struct CreateProfileBody {
     #[serde(default)]
-    name: Option<String>,
-    scope: BrowserProfileScope,
+    pub(crate) name: Option<String>,
+    pub(crate) scope: BrowserProfileScope,
 }
 
-async fn create_browser_profile(
+pub(crate) async fn create_browser_profile(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -2353,14 +2353,14 @@ async fn create_browser_profile(
 /// present; rescoping to `ephemeral` is rejected the same way creation
 /// is (delete the profile instead of "rescoping it away").
 #[derive(Debug, Deserialize)]
-struct RenameProfileBody {
+pub(crate) struct RenameProfileBody {
     #[serde(default)]
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     #[serde(default)]
-    scope: Option<BrowserProfileScope>,
+    pub(crate) scope: Option<BrowserProfileScope>,
 }
 
-async fn rename_browser_profile(
+pub(crate) async fn rename_browser_profile(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -2417,7 +2417,7 @@ async fn rename_browser_profile(
     (StatusCode::OK, Json(ok(unwrap_data(&resp_body)))).into_response()
 }
 
-async fn restore_profile_probe(
+pub(crate) async fn restore_profile_probe(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -2461,7 +2461,7 @@ async fn restore_profile_probe(
     (StatusCode::OK, Json(ok(unwrap_data(&body)))).into_response()
 }
 
-async fn delete_profile(
+pub(crate) async fn delete_profile(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

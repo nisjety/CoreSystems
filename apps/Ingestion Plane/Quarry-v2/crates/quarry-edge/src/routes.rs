@@ -272,6 +272,11 @@ pub fn router(state: AppState) -> Router {
         // P7 — agentic browser loop (real chromiumoxide). No-op router when
         // the `browser-agent` feature is disabled. Inherits `require_auth`.
         .merge(crate::agent_routes::agent_router())
+        // W5 — fleet orchestration. Shares the same auth scope as agent
+        // runs (create/list/get/member/budget all org-scoped via verified
+        // JWT). No-op when the `browser-agent` feature is disabled so
+        // default builds stay lean.
+        .merge(crate::fleet_routes::fleet_router())
         .layer(middleware::from_fn(
             crate::auth::require_service_route_scope,
         ))
@@ -1213,6 +1218,7 @@ mod tests {
             http3,
             security: Arc::new(quarry_security::preflight::DefaultEngine::new()),
             artifacts,
+            proxy_pool_name: String::new(),
             control_base_url: String::new(),
             redis: None,
             cache: None,
@@ -1245,6 +1251,8 @@ mod tests {
             browser_egress_proxy: None,
             #[cfg(feature = "browser-agent")]
             agent_runs: crate::agent_routes::new_runs(),
+            #[cfg(feature = "browser-agent")]
+            fleets: crate::fleet_routes::new_fleet_state(),
         }
     }
 

@@ -20,7 +20,9 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  untrack,
 } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import {
   CameraOff,
   CircleAlert,
@@ -28,19 +30,26 @@ import {
   ImageOff,
   Loader2,
   MonitorPlay,
+  Pause,
   PanelRightClose,
   PanelRightOpen,
+  Play,
 } from '@/shared/icons'
 import {
   BrowserChrome,
 } from '@/features/dashboard/home/BrowserChrome'
-import {
-  streamRunEvents,
+import { listRunEventReplay, streamRunEvents } from '@/shared/api/run-console-client'
+import { controlBrowserAiRun, type BrowserAiRunControlAction } from '@/shared/api/browser-run-client'
+import type {
+  BrowserActionApprovalRequiredEvent,
+  RunPausedForApprovalEvent,
 } from '@/shared/api/run-console-client'
+import { getRun } from '@/shared/api/runs-client'
 import {
   CHAT_RUN_SCREENSHOT_NOTES,
   applyBrowserAction,
   applyBrowserObservation,
+  applyDurableRunEvent,
   appendActivity,
   browserSessionFromChatRun,
   chatRunHostname,
@@ -56,6 +65,25 @@ import {
 } from '@/features/chat/lib/chat-run-watch'
 
 const RUN_STREAM_ERROR = 'Kunne ikke lese hendelsesstrømmen for denne kjøringen.'
+
+/** A run that cannot emit more work. Used when opening a chat on an older
+ * completed turn: the run-event endpoint is a live tail when no cursor is
+ * supplied, so it intentionally stays open for active runs and has no reason
+ * to close itself for a terminal run. Read the durable run status first to
+ * avoid presenting a finished run as perpetually "Kjører" after reload. */
+const TERMINAL_RUN_STATUSES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
+  'stopped',
+  'rejected',
+  'expired',
+])
+
+function isTerminalRunStatus(status?: string): boolean {
+  return TERMINAL_RUN_STATUSES.has((status ?? '').trim().toLowerCase())
+}
 
 function screenshotNoteIcon(state: Exclude<ChatRunScreenshotState, 'ready'>) {
   if (state === 'pending') return <Loader2 size={13} class="verevon-run-spin" />
@@ -78,6 +106,7 @@ function stepLabel(step: ChatRunBrowserStep): string {
 function ChatRunEvidenceFallback(props: {
   error: string | null
   live: boolean
+  onReconnect: () => void
   steps: ChatRunBrowserStep[]
   zdr: boolean
 }) {
@@ -93,9 +122,10 @@ function ChatRunEvidenceFallback(props: {
     <div class="verevon-chat-run-fallback">
       <Show when={props.error}>
         {(message) => (
-          <p class="verevon-chat-run-fallback__error" role="alert">
-            <CircleAlert size={14} /> {message()}
-          </p>
+          <div class="verevon-chat-run-fallback__error" role="alert">
+            <p><CircleAlert size={14} /> {message()}</p>
+            <button type="button" onClick={props.onReconnect}>Koble til igjen</button>
+          </div>
         )}
       </Show>
 
@@ -162,58 +192,198 @@ function ChatRunEvidenceFallback(props: {
 
 export function ChatLiveRunPanel(props: {
   collapsed: boolean
+  /** Verified organization used by the existing browser control proxy. */
+  orgId?: string
+  /** Keep the watcher mounted while another contextual canvas owns the rail. */
+  hidden?: boolean
   onToggleCollapsed: () => void
   /** Orchestration run id for the turn being watched; null hides the panel. */
   runId: string | null
   /** Zero Data Retention turn — decides whether a missing shot is "never". */
   zdr: boolean
+  /** Optional Work-tab projection rendered in this same run-owned canvas. */
+  workContent?: JSX.Element
+  /**
+   * Ask the owning chat turn to re-read approvals from the orchestration
+   * authority when a durable run enters or leaves an approval gate. The live
+   * panel only observes the run stream; it never manufactures approval rows.
+   */
+  onRefreshApprovals?: (runId: string) => void
 }) {
   const [watch, setWatch] = createSignal<ChatRunWatchState | null>(null)
   const [expandedStep, setExpandedStep] = createSignal<number | null>(null)
+  const [reconnectVersion, setReconnectVersion] = createSignal(0)
+  const [controlPending, setControlPending] = createSignal<BrowserAiRunControlAction | null>(null)
+  const [controlError, setControlError] = createSignal<string | null>(null)
+  let activeStreamGeneration = 0
 
   // Guarded so late callbacks from an aborted stream can never write into the
   // state of the run that replaced it.
-  const update = (runId: string, apply: (state: ChatRunWatchState) => ChatRunWatchState) => {
-    setWatch((current) => (current && current.runId === runId ? apply(current) : current))
+  const update = (
+    runId: string,
+    apply: (state: ChatRunWatchState) => ChatRunWatchState,
+    generation = activeStreamGeneration,
+  ) => {
+    setWatch((current) => (
+      current && current.runId === runId && generation === activeStreamGeneration
+        ? apply(current)
+        : current
+    ))
   }
 
   createEffect(
-    () => props.runId,
-    (runId) => {
+    () => {
+      // Reading this signal makes the effect restart only when the user asks
+      // for a reconnect, while keeping the already-reduced run state.
+      return {
+        existing: untrack(() => watch()),
+        reconnect: reconnectVersion(),
+        runId: props.runId,
+        zdr: props.zdr,
+      }
+    },
+    ({ existing, runId, zdr }) => {
+      const generation = ++activeStreamGeneration
       setExpandedStep(null)
       if (!runId) {
         setWatch(null)
         return
       }
-      setWatch(emptyChatRunWatch(runId, props.zdr))
+      const resuming = existing?.runId === runId
+      if (resuming && existing) {
+        setWatch({ ...existing, error: null, live: true, zdr })
+      } else {
+        setWatch(emptyChatRunWatch(runId, zdr))
+      }
+      const resumeFrom = resuming ? existing?.lastEventId ?? undefined : undefined
       const controller = new AbortController()
-      void streamRunEvents(runId, {
-        onApproval: (event) => update(runId, (state) => appendActivity(state, {
-          at: event.at ?? new Date().toISOString(),
-          detail: event.approvalKind ?? '',
-          id: `approval-${event.approvalId ?? state.activity.length}`,
-          kind: 'approval',
-          status: event.to,
-          title: 'Godkjenning',
-        })),
+      const connect = async () => {
+        // A fresh mount has no Last-Event-ID, and the live run stream
+        // intentionally starts at the tail in that case. Rehydrate the
+        // allowlisted browser projection first, then resume the live tail from
+        // the canonical cursor returned by the replay page. This closes the
+        // reload gap without opening a second transport or duplicating event
+        // authority in the browser.
+        let durableCursor = resumeFrom
+        if (!resuming && !zdr) {
+          const pageLimit = 500
+          const maxPages = 10
+          for (let pageNumber = 0; pageNumber < maxPages; pageNumber += 1) {
+            if (controller.signal.aborted || generation !== activeStreamGeneration) return
+            const page = await listRunEventReplay(runId, {
+              afterEventId: durableCursor,
+              limit: pageLimit,
+            }).catch(() => null)
+            if (!page || controller.signal.aborted || generation !== activeStreamGeneration) break
+            for (const event of page.events) {
+              update(runId, (state) => applyDurableRunEvent(state, event), generation)
+            }
+            const nextCursor = page.nextEventId?.trim()
+            if (!page.truncated || !nextCursor || nextCursor === durableCursor) break
+            durableCursor = nextCursor
+          }
+          if (durableCursor) {
+            update(runId, (state) => ({ ...state, lastEventId: durableCursor ?? null }), generation)
+          }
+        }
+        const refreshApprovals = (candidateRunId?: string) => {
+          if (!candidateRunId || generation !== activeStreamGeneration || controller.signal.aborted) return
+          props.onRefreshApprovals?.(candidateRunId)
+        }
+        // Start the live tail immediately so an active run can deliver events
+        // without waiting on the read model. A fresh page has no
+        // Last-Event-ID cursor, so the durable status check runs in parallel
+        // and closes the tail only when it proves the run is terminal.
+        void getRun(runId, controller.signal).then((detail) => {
+          if (
+            detail &&
+            isTerminalRunStatus(detail.status) &&
+            generation === activeStreamGeneration &&
+            !controller.signal.aborted
+          ) {
+            update(runId, (state) => closeChatRunWatch(state), generation)
+            controller.abort()
+          }
+        }).catch(() => {
+          // The stream remains the source of live events when the read model
+          // is temporarily unavailable.
+        })
+        if (controller.signal.aborted || generation !== activeStreamGeneration) return
+        await streamRunEvents(runId, {
+        onFrameId: (id) => update(runId, (state) => ({ ...state, lastEventId: id }), generation),
+        onApproval: (event) => {
+          update(runId, (state) => appendActivity(state, {
+            at: event.at ?? new Date().toISOString(),
+            detail: event.approvalKind ?? '',
+            id: `approval-${event.approvalId ?? state.activity.length}`,
+            kind: 'approval',
+            status: event.to,
+            title: 'Godkjenning',
+          }))
+          refreshApprovals(event.runId)
+        },
+        onRunPaused: (event: RunPausedForApprovalEvent) => {
+          update(runId, (state) => appendActivity(state, {
+            at: event.at ?? new Date().toISOString(),
+            detail: event.approvalId ? `Venter på godkjenning · ${event.approvalId}` : 'Venter på godkjenning.',
+            id: `run-paused-${event.approvalId ?? state.activity.length}`,
+            kind: 'pause',
+            status: 'paused',
+            title: 'Pauset for godkjenning',
+          }))
+          refreshApprovals(event.runId)
+        },
+        onRunResumed: (event) => {
+          update(runId, (state) => appendActivity(state, {
+            at: event.at ?? new Date().toISOString(),
+            detail: 'Kjøringen fortsetter etter godkjenning.',
+            id: `run-resumed-${event.approvalId ?? state.activity.length}`,
+            kind: 'resume',
+            status: 'resumed',
+            title: 'Fortsatte',
+          }))
+          refreshApprovals(event.runId)
+        },
+        onBrowserActionApprovalRequired: (event: BrowserActionApprovalRequiredEvent) => {
+          update(runId, (state) => appendActivity(state, {
+            at: event.at ?? new Date().toISOString(),
+            detail: [event.actionType, event.reason].filter(Boolean).join(' · ') || 'En nettleserhandling venter på godkjenning.',
+            id: `browser-approval-${event.approvalId ?? event.actionId ?? state.activity.length}`,
+            kind: 'approval',
+            status: 'pending',
+            title: 'Nettleserhandling krever godkjenning',
+          }))
+          refreshApprovals(event.runId)
+        },
+        onBrowserActionDecided: (event) => {
+          update(runId, (state) => appendActivity(state, {
+            at: event.at ?? new Date().toISOString(),
+            detail: event.decision ? `Beslutning: ${event.decision}.` : 'Godkjenningsbeslutning mottatt.',
+            id: `browser-decision-${event.approvalId ?? event.actionId ?? state.activity.length}`,
+            kind: 'approval',
+            status: event.decision,
+            title: 'Godkjenning behandlet',
+          }))
+          refreshApprovals(event.runId)
+        },
         onBrowserAction: (event) => update(runId, (state) => applyBrowserAction(state, event)),
         onBrowserObservation: (event) => update(runId, (state) => applyBrowserObservation(state, event)),
-        onBrowserRunPaused: (event) => update(runId, (state) => appendActivity(state, {
+        onBrowserRunPaused: (event) => update(runId, (state) => appendActivity({ ...state, controlState: 'paused' }, {
           at: event.at ?? new Date().toISOString(),
           detail: 'Nettleserkjøringen ble satt på pause.',
           id: `paused-${state.activity.length}`,
           kind: 'pause',
           title: 'Pauset',
         })),
-        onBrowserRunResumed: (event) => update(runId, (state) => appendActivity(state, {
+        onBrowserRunResumed: (event) => update(runId, (state) => appendActivity({ ...state, controlState: 'running' }, {
           at: event.at ?? new Date().toISOString(),
           detail: 'Nettleserkjøringen fortsatte.',
           id: `resumed-${state.activity.length}`,
           kind: 'resume',
           title: 'Fortsatte',
         })),
-        onDone: () => update(runId, (state) => closeChatRunWatch(state)),
-        onError: () => update(runId, (state) => closeChatRunWatch(state, RUN_STREAM_ERROR)),
+        onDone: () => update(runId, (state) => closeChatRunWatch(state), generation),
+        onError: () => update(runId, (state) => closeChatRunWatch(state, RUN_STREAM_ERROR), generation),
         onPlan: (event) => update(runId, (state) => appendActivity(state, {
           at: event.at ?? new Date().toISOString(),
           detail: [event.from, event.to].filter(Boolean).join(' → '),
@@ -237,10 +407,30 @@ export function ChatLiveRunPanel(props: {
           kind: 'subagent',
           title: 'Underagent',
         })),
-      }, controller.signal)
+        }, controller.signal, durableCursor)
+      }
+      void connect()
       return () => controller.abort()
     },
   )
+
+  const browserControl = async (action: BrowserAiRunControlAction) => {
+    const orgId = props.orgId?.trim()
+    const currentRunId = props.runId?.trim()
+    if (!orgId || !currentRunId || controlPending()) return
+    setControlPending(action)
+    setControlError(null)
+    try {
+      // The proxy is the authority for browser pause/resume. We keep the
+      // local state unchanged until its durable run event arrives, so a lost
+      // response cannot make the UI claim that a pause took effect.
+      await controlBrowserAiRun(orgId, currentRunId, action)
+    } catch (error) {
+      setControlError(error instanceof Error ? error.message : 'Nettleserkontrollen kunne ikke sendes.')
+    } finally {
+      setControlPending(null)
+    }
+  }
 
   const steps = () => watch()?.steps ?? []
   const activity = () => watch()?.activity ?? []
@@ -274,6 +464,7 @@ export function ChatLiveRunPanel(props: {
         <aside
           class={['verevon-chat-run-panel', { 'verevon-chat-run-panel--collapsed': props.collapsed }]}
           aria-label="Live agentkjøring"
+          style={{ display: props.hidden ? 'none' : undefined }}
         >
           <header class="verevon-chat-run-panel__head">
             <button
@@ -290,21 +481,59 @@ export function ChatLiveRunPanel(props: {
             </button>
             <Show when={!props.collapsed}>
               <div class="verevon-chat-run-panel__title">
-                <strong><MonitorPlay size={13} /> Live agent</strong>
+                <strong><MonitorPlay size={13} /> {props.workContent ? 'Work' : 'Live agent'}</strong>
                 <span>{statusLabel()}</span>
               </div>
               <code class="verevon-chat-run-panel__runid" title={runId()}>{runId()}</code>
+              <Show when={props.orgId && framed() && live()}>
+                <div class="verevon-chat-run-panel__controls" role="group" aria-label="Nettleserkjøring">
+                  <Show
+                    when={watch()?.controlState === 'paused'}
+                    fallback={(
+                      <button
+                        type="button"
+                        class="verevon-chat-run-panel__control"
+                        disabled={controlPending() !== null}
+                        aria-label="Sett nettleserkjøring på pause"
+                        title="Pause etter gjeldende steg"
+                        onClick={() => void browserControl('pause')}
+                      >
+                        <Show when={controlPending() === 'pause'} fallback={<Pause size={12} />}>
+                          <Loader2 size={12} class="verevon-run-spin" />
+                        </Show>
+                      </button>
+                    )}
+                  >
+                    <button
+                      type="button"
+                      class="verevon-chat-run-panel__control"
+                      disabled={controlPending() !== null}
+                      aria-label="Fortsett nettleserkjøring"
+                      title="Fortsett etter pause"
+                      onClick={() => void browserControl('resume')}
+                    >
+                      <Show when={controlPending() === 'resume'} fallback={<Play size={12} />}>
+                        <Loader2 size={12} class="verevon-run-spin" />
+                      </Show>
+                    </button>
+                  </Show>
+                </div>
+              </Show>
             </Show>
           </header>
 
           <Show when={!props.collapsed}>
             <div class="verevon-chat-run-panel__body">
+              <Show when={controlError()}>
+                {(message) => <p class="verevon-chat-run-panel__control-error" role="alert">{message()}</p>}
+              </Show>
               <Show
                 when={framed() && session()}
                 fallback={(
                   <ChatRunEvidenceFallback
                     error={watch()?.error ?? null}
                     live={live()}
+                    onReconnect={() => setReconnectVersion((version) => version + 1)}
                     steps={steps()}
                     zdr={zdr()}
                   />
@@ -401,6 +630,17 @@ export function ChatLiveRunPanel(props: {
                       </div>
                     )}
                   </For>
+                </section>
+              </Show>
+
+              <Show when={props.workContent}>
+                <section
+                  id="verevon-chat-tabpanel-steps"
+                  class="verevon-chat-run-panel__work"
+                  role="tabpanel"
+                  aria-label="Arbeidsdetaljer"
+                >
+                  {props.workContent}
                 </section>
               </Show>
             </div>

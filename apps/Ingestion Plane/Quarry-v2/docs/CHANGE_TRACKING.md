@@ -127,3 +127,15 @@ Still pending:
 - **Diff computation** — dedicated markdown / HTML / JSON-patch
 generators invoked by `compare_snapshot` remain future work; diffs are
 currently stored as raw artifact bytes.
+
+## Update 2026-08-28 (F4 follow-up)
+
+The `/v1/team/*` wire shape is **deliberately a bare JSON object** for
+single-object endpoints and `Page<T>` for list endpoints, NOT the
+`quarrycontracts.RESTEnvelope { data, meta, error }` shape. The
+`cycle24.go:16-25` doc comment in `services/quarry-control/internal/resources/`
+records the contract. The Rust edge's `forward_one::<T>` and
+`forward_list::<T>` deserializers are typed; switching to envelopes
+would be a breaking change to every cycle-24 cross-language test.
+The full contract, the test files that pin it, and the rationale live
+at [`CROSS_LANGUAGE_WIRE_CONTRACT.md`](CROSS_LANGUAGE_WIRE_CONTRACT.md).

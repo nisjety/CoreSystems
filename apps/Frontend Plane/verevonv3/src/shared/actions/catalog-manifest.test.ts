@@ -24,13 +24,24 @@ describe('provisional Action Catalog manifest', () => {
     const manifest = buildActionCatalogManifest()
     expect(manifest.actions).not.toHaveLength(0)
 
-    // tickets.create is the one action whose owner issues a durable operation
-    // receipt, so it is the one action a model may be offered. Everything else
-    // stays human-only until its own owner path is proven the same way.
+    // Each of these is an action whose owner issues a durable, queryable
+    // record of the action, collapses duplicate submissions, and denies a
+    // forged actor on both sides -- see model-eligibility.ts for the full
+    // evidence trail per action. Everything else stays human-only until its
+    // own owner path is proven the same way.
     const modelEligible = manifest.actions
       .filter((action) => action.allowedActorTypes.includes('model'))
       .map((action) => action.id)
-    expect(modelEligible).toEqual(['tickets.create'])
+    expect(modelEligible).toEqual([
+      'chat.save_thread_snapshot',
+      'chat.submit_feedback',
+      'inbox.follow_conversation',
+      'inbox.review_ai_action',
+      'inbox.set_csat_preference',
+      'org.acknowledge_deletion',
+      'org.mark_exported',
+      'tickets.create',
+    ])
 
     // Every action stays available to a human: eligibility widens the actor
     // set, it never narrows it -- the 'anything AI can do, a human can do'

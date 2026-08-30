@@ -24,6 +24,7 @@ use quarry_security::preflight::DefaultEngine;
 use quarry_tls::TlsProfile;
 
 mod agent_routes;
+mod fleet_routes;
 mod answer_routes;
 mod api_error;
 mod audio_routes;
@@ -1208,6 +1209,12 @@ async fn main() -> anyhow::Result<()> {
         http3: http3_driver,
         security: Arc::new(security),
         artifacts,
+        // W1 — surface the operator-configured proxy pool name to
+        // the per-run affinity resolver. Empty means "no operator
+        // pool"; the resolver forces first-party egress in that
+        // case so an unconfigured deployment still gets the safe
+        // default.
+        proxy_pool_name: std::env::var("QUARRY_PROXY_POOL").unwrap_or_default(),
         control_base_url: cfg.control_base_url.clone(),
         redis,
         cache,
@@ -1268,6 +1275,7 @@ async fn main() -> anyhow::Result<()> {
         browser_egress_proxy: Some(browser_egress_proxy),
         #[cfg(feature = "browser-agent")]
         agent_runs,
+        fleets: quarry_edge::fleet_routes::new_fleet_state(),
     };
 
     let app = routes::router(app_state);

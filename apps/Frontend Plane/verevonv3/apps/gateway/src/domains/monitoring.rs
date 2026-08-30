@@ -179,20 +179,20 @@ fn normalize_change_record(value: &Value) -> Value {
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-struct CheckRequest {
+pub(crate) struct CheckRequest {
     #[serde(default)]
-    url: Option<String>,
+    pub(crate) url: Option<String>,
     /// Optional pre-computed fingerprint. When omitted (the normal UI path),
     /// the gateway performs a real scrape to compute one so the comparison
     /// reflects the page's current content.
     #[serde(default)]
-    fingerprint: Option<String>,
+    pub(crate) fingerprint: Option<String>,
 }
 
 /// `POST /api/v1/monitoring/check` — run a fresh fetch of `url`, fingerprint it,
 /// and compare against the org's latest baseline. The returned `ChangeRecord`
 /// status is one of `new` / `unchanged` / `changed`, computed by the edge.
-async fn check_now(
+pub(crate) async fn check_now(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

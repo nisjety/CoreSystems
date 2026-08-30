@@ -165,6 +165,8 @@ export type ApprovalContinuationVerifiedEvent = {
 }
 
 export type RunEventHandlers = {
+  /** Called for every SSE frame id so consumers can reconnect without gaps. */
+  onFrameId?: (id: string) => void
   onPlan?: (event: PlanTransitionedEvent) => void
   onTodo?: (event: TodoTransitionedEvent) => void
   onApproval?: (event: ApprovalStateChangedEvent) => void
@@ -186,6 +188,12 @@ export type RunEventHandlers = {
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function normalizeOptionalIsoTimestamp(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? undefined : new Date(parsed).toISOString()
 }
 
 function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
@@ -363,7 +371,10 @@ export async function streamRunEvents(
   await readSseStream(
     `/api/v1/runs/${encodeURIComponent(runId)}/events`,
     { method: 'GET', signal, lastEventId },
-    (event) => dispatch(event, handlers),
+    (event) => {
+      if (typeof event.id === 'string') handlers.onFrameId?.(event.id)
+      dispatch(event, handlers)
+    },
     (err) => {
       connError = err
     },
@@ -372,6 +383,71 @@ export async function streamRunEvents(
 
   if (connError) {
     handlers.onError?.(connError)
+  }
+}
+
+// ── Durable browser-run replay ─────────────────────────────────────────────
+// The live run stream deliberately starts at the live tail when no cursor is
+// supplied. This read-only projection is the companion used after a reload:
+// Model Gateway has already authorized the run and Session Core has persisted
+// only the allowlisted browser metadata + artifact references.
+
+export type DurableRunEvent = {
+  eventId: string
+  eventType: string
+  at: string
+  payload: Record<string, unknown>
+}
+
+export type DurableRunEventsPage = {
+  runId: string
+  events: DurableRunEvent[]
+  nextEventId?: string
+  truncated: boolean
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
+function normalizeDurableRunEvent(raw: unknown): DurableRunEvent | null {
+  const item = objectRecord(raw)
+  if (!item) return null
+  const eventId = str(item.eventId) ?? str(item.event_id)
+  const eventType = str(item.eventType) ?? str(item.event_type)
+  const atRaw = str(item.at) ?? str(item.ts)
+  const at = atRaw ? normalizeOptionalIsoTimestamp(atRaw) : undefined
+  const payload = objectRecord(item.payload)
+  if (!eventId || !eventType || !at || !payload) return null
+  return { eventId, eventType, at, payload }
+}
+
+/** Fetch one bounded page of the durable browser-event projection. */
+export async function listRunEventReplay(
+  runId: string,
+  options: { afterEventId?: string; limit?: number } = {},
+): Promise<DurableRunEventsPage> {
+  const search = new URLSearchParams()
+  if (options.afterEventId?.trim()) search.set('after_event_id', options.afterEventId.trim())
+  if (options.limit != null && Number.isFinite(options.limit) && options.limit > 0) {
+    search.set('limit', String(Math.floor(options.limit)))
+  }
+  const query = search.toString()
+  const raw = await requestJson<unknown>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/events/replay${query ? `?${query}` : ''}`,
+  )
+  const record = objectRecord(raw)
+  const data = objectRecord(record?.data) ?? record
+  const source = Array.isArray(data?.events) ? data.events : []
+  const nextEventId = str(data?.nextEventId) ?? str(data?.next_event_id)
+  return {
+    runId: str(data?.runId) ?? str(data?.run_id) ?? runId,
+    events: source
+      .map(normalizeDurableRunEvent)
+      .filter((event): event is DurableRunEvent => event !== null),
+    nextEventId,
+    truncated: data?.truncated === true,
   }
 }
 
@@ -461,6 +537,8 @@ export type ProofBundle = {
   bundleVersion?: number
   runId?: string
   orgId?: string
+  /** Server-derived classification from durable approval/receipt evidence. */
+  effectClass?: 'read_only' | 'proposed_effect' | 'effectful' | 'external_receipt' | 'unknown'
   generatedAt?: string
   run: ProofRunSummary | null
   approvals: ProofApproval[]
@@ -558,6 +636,7 @@ function normalizeBundle(raw: unknown): ProofBundle | null {
     bundleVersion: num(value.bundle_version) ?? num(value.bundleVersion),
     runId: str(value.run_id) ?? str(value.runId),
     orgId: str(value.org_id) ?? str(value.orgId),
+    effectClass: normalizeEffectClass(value.effect_class ?? value.effectClass),
     generatedAt: str(value.generated_at) ?? str(value.generatedAt),
     run: normalizeRunSummary(value.run),
     approvals: list(value.approvals)
@@ -567,6 +646,16 @@ function normalizeBundle(raw: unknown): ProofBundle | null {
       .map(normalizeUnavailable)
       .filter((item): item is ProofUnavailableSection => item !== null),
   }
+}
+
+function normalizeEffectClass(value: unknown): ProofBundle['effectClass'] {
+  return value === 'read_only'
+    || value === 'proposed_effect'
+    || value === 'effectful'
+    || value === 'external_receipt'
+    || value === 'unknown'
+    ? value
+    : undefined
 }
 
 /**

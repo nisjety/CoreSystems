@@ -51,17 +51,21 @@ import {
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import {
+  cancelRun,
   decideApproval,
   listApprovals,
   resumeRun,
   type ApprovalDecision,
 } from '@/shared/api/orchestration-client'
+import { listRuns } from '@/shared/api/runs-client'
+import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
   cancelInvocation,
   cheapDefaultModelId,
   deleteChatThread,
   describeFeedbackFailure,
   getChatThreadTranscript,
+  listChatThreadEvents,
   getThreadMessages,
   listChatThreads,
   approvePlan,
@@ -74,7 +78,10 @@ import {
   VEREVON_BALANCE_MODE_ID,
   type AutonomyRung,
   type ChatFeedbackRating,
+  type ChatThreadEvent,
 } from '@/shared/api/chat-client'
+import { blobToDataUrl } from '@/shared/lib/blob-data'
+import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   ApiError,
 } from '@/shared/api/http'
@@ -135,11 +142,26 @@ import type {
   ChatState,
   ChatTab,
   ChatTurn,
+  ChatTurnAttachment,
   Citation,
   QueuedInput,
   SendOptions,
   TaskStepStatus,
 } from './chat-types'
+import type { ChatEffectClass } from '@/shared/chat/effect-class'
+import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
+import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
+
+function safeBranchBoundary(turns: readonly ChatTurn[], requestedIndex: number): number {
+  const requestedTurn = turns[requestedIndex]
+  if (!requestedTurn || requestedTurn.role !== 'assistant' || !isEffectfulChatTurn(requestedTurn.effectClass)) {
+    return requestedIndex
+  }
+  for (let candidate = requestedIndex - 1; candidate >= 0; candidate -= 1) {
+    if (turns[candidate]?.role === 'user') return candidate
+  }
+  return requestedIndex
+}
 
 export function useChatController() {
   /**
@@ -164,10 +186,12 @@ export function useChatController() {
     queuedInputs: [],
   })
 
-  const [activeTab, setActiveTab] = createSignal<ChatTab>('chat')
+  const [activeTab, setActiveTabSignal] = createSignal<ChatTab>('chat')
   const [copiedTurnId, setCopiedTurnId] = createSignal<string | null>(null)
   const [launchMotion, setLaunchMotion] = createSignal(false)
   const [showScrollDown, setShowScrollDown] = createSignal(false)
+  const [uiEvents, setUiEvents] = createSignal<VerevonUiEvent[]>([])
+  const [traceReplayTruncated, setTraceReplayTruncated] = createSignal(false)
   const [imageMode, setImageMode] = createSignal(false)
   const [planMode, setPlanMode] = createSignal(false)
   const [browseWeb, setBrowseWeb] = createSignal(readBrowseWebPreference())
@@ -226,16 +250,30 @@ export function useChatController() {
   const latestScreen = createMemo(() => selectLatestImageArtifact(state.turns))
   const title = () => createChatTitle(state.turns)
   /**
+   * A durable Model run is not automatically a Work surface. The gateway
+   * creates run metadata for ordinary Ask turns too; exposing every one of
+   * those ids here would make the calm chat page look like an IDE after the
+   * first message. Work is reserved for an explicitly planned run or the
+   * multi-step research mode, both of which have a meaningful adjacent
+   * surface (steps, approvals, browser evidence, or a research trace).
+   */
+  const isWorkSurfaceTurn = (turn: ChatTurn | undefined): boolean => Boolean(
+    turn
+    && turn.role === 'assistant'
+    && turn.runId
+    && (turn.planMode === true || turn.tools.includes('research')),
+  )
+  /**
    * The run the live agent panel watches: the most recent assistant turn that
-   * actually has a durable orchestration run id. Plain chat turns have none, so
-   * this stays null and the panel never opens.
+   * has a durable orchestration id AND a Work-worthy mode. Plain Ask turns
+   * still carry their run id for receipts/feedback, but stay on the calm
+   * transcript surface.
    */
   const liveRunId = createMemo(() => {
-    for (let index = state.turns.length - 1; index >= 0; index -= 1) {
-      const turn = state.turns[index]
-      if (turn?.role === 'assistant' && turn.runId) return turn.runId
-    }
-    return null
+    const latestAssistant = [...state.turns]
+      .reverse()
+      .find((turn) => turn.role === 'assistant')
+    return isWorkSurfaceTurn(latestAssistant) ? latestAssistant?.runId ?? null : null
   })
   let serverSnapshotTimer: number | undefined
   let pendingServerSnapshot: {
@@ -310,11 +348,67 @@ export function useChatController() {
   // but it must never be written into Chat's own permanent history/sidebar --
   // that would be exactly the leak this marker exists to prevent. In-memory
   // only, like `temporaryThreadIds`; a reload re-derives it from the listing.
-  const foreignOriginThreadIds = new Set<string>()
+  const [foreignOriginThreadIds, setForeignOriginThreadIds] = createSignal<ReadonlySet<string>>(new Set())
   const isForeignOriginThread = (threadId: string | null | undefined): boolean =>
-    Boolean(threadId) && foreignOriginThreadIds.has(threadId as string)
+    Boolean(threadId) && foreignOriginThreadIds().has(threadId as string)
   const markThreadForeignOrigin = (threadId: string) => {
-    foreignOriginThreadIds.add(threadId)
+    setForeignOriginThreadIds((current) => {
+      if (current.has(threadId)) return current
+      return new Set(current).add(threadId)
+    })
+  }
+
+  // Surface focus is a user preference, not durable agent state. Keep it
+  // thread-scoped so returning to a conversation can reopen the PDF/Work/
+  // Sources canvas the user was inspecting, while temporary and foreign
+  // threads never write a local record of their content or ownership.
+  const surfaceTabStorageKey = (threadId: string) => `verevon-chat-surface-tab:${threadId}`
+  // Tracks only a tab opened automatically by evidence. If a higher-priority
+  // surface arrives before the user chooses a tab, it may replace the earlier
+  // automatic destination; once the user clicks a tab, the automatic focus is
+  // cleared and subsequent evidence never steals it.
+  let autoSummonedTab: ChatTab | null = null
+  const readSurfaceTab = (threadId: string): ChatTab => {
+    try {
+      const value = window.localStorage.getItem(surfaceTabStorageKey(threadId))
+      return isChatTab(value) && CHAT_SURFACE_IDS.includes(value) ? value : 'chat'
+    } catch {
+      return 'chat'
+    }
+  }
+  const setActiveTab = (tab: ChatTab) => {
+    autoSummonedTab = null
+    setActiveTabSignal(tab)
+    const threadId = state.threadId
+    if (!threadId || isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return
+    try {
+      window.localStorage.setItem(surfaceTabStorageKey(threadId), tab)
+    } catch {
+      // Local storage can be disabled or full; the in-memory tab remains valid.
+    }
+  }
+  const summonSurface = (tab: Exclude<ChatTab, 'chat'>) => {
+    const current = activeTab()
+    const currentAuto = autoSummonedTab
+    if (current !== 'chat' && current !== currentAuto) return
+    if (currentAuto && chatSurfaceSpec(tab).priority >= chatSurfaceSpec(currentAuto).priority) return
+    autoSummonedTab = tab
+    setActiveTabSignal(tab)
+    const threadId = state.threadId
+    if (!threadId || isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return
+    try {
+      window.localStorage.setItem(surfaceTabStorageKey(threadId), tab)
+    } catch {
+      // Automatic focus is still valid in memory when local storage is unavailable.
+    }
+  }
+  const restoreSurfaceTab = (threadId: string) => {
+    autoSummonedTab = null
+    if (isTemporaryThread(threadId) || isForeignOriginThread(threadId)) {
+      setActiveTabSignal('chat')
+      return
+    }
+    setActiveTabSignal(readSurfaceTab(threadId))
   }
 
   const writeThreadSnapshot = (
@@ -396,6 +490,29 @@ export function useChatController() {
   }
 
   /**
+   * Publish a small local hint for the personal thread rail while the
+   * authoritative server list catches up. This is presentation-only: the
+   * run id/status remain server-owned and all durable controls still read the
+   * Model Plane. Existing title/preview/timestamp fields are carried intact so
+   * a stream transition cannot rewrite the conversation metadata.
+   */
+  const updateLocalRunHint = (
+    threadId: string,
+    status: string,
+    runId?: string,
+  ) => {
+    if (!threadId || isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return
+    const current = readChatThreadHistory().find((item) => item.threadId === threadId)
+    if (!current) return
+    upsertChatThreadHistory({
+      ...current,
+      latestRunId: runId ?? current.latestRunId,
+      latestRunStatus: status,
+      latestRunUpdatedAt: new Date().toISOString(),
+    })
+  }
+
+  /**
    * Server messages can arrive without timestamps (session-core stores none),
    * and `messageToTurn` keeps those EMPTY so a fetch never fabricates "now"
    * (which made every selection look like fresh activity). The cached-metadata
@@ -415,6 +532,194 @@ export function useChatController() {
       readChatThreadHistory().find((item) => item.threadId === threadId)?.updatedAt ??
       new Date().toISOString()
     return turns.map((turn) => (turn.createdAt ? turn : { ...turn, createdAt: fallback }))
+  }
+
+  /**
+   * Rehydrate the pending approval queue for the newest plan run after a
+   * navigation/reload. Ordinary Ask turns also have run metadata, but they
+   * cannot pause for a plan approval and should not trigger an unnecessary
+   * approval read.
+   */
+  const hydrateRunApprovals = (threadId: string, turns: ChatTurn[], sequence: number) => {
+    if (isTemporaryThread(threadId)) return
+    const runTurn = [...turns].reverse().find((turn) => (
+      turn.role === 'assistant' && turn.runId && turn.planMode === true
+    ))
+    const runId = runTurn?.runId
+    if (!runTurn || !runId) return
+    void listApprovals(runId).then((approvals) => {
+      if (sequence !== threadLoadSequence || state.threadId !== threadId) return
+      setState((current) => {
+        const turn = current.turns.find((candidate) => candidate.id === runTurn.id)
+        if (turn) {
+          turn.pendingApprovals = approvals.filter((approval) => (
+            (approval.status ?? 'PENDING').toUpperCase() === 'PENDING'
+          ))
+        }
+      })
+    }).catch(() => {
+      // A transient approval read failure must not make a durable run look
+      // unapprovable; the live stream or an explicit retry can re-sync it.
+    })
+  }
+
+  /**
+   * The canonical chat transcript deliberately stores messages, not run
+   * metadata. A local snapshot can therefore lose the link between a plan
+   * answer and its durable orchestration run after a reload or on another
+   * device. Recover only a server-declared plan run, and only when its goal
+   * matches the user message immediately preceding the newest assistant turn.
+   *
+   * The goal match is important: `GET /agents/runs?thread_id=…` is a history
+   * list, not a message-to-run join. Attaching its newest row blindly would
+   * make an older plan appear to own a later ordinary answer. If the server
+   * cannot prove that correlation, the transcript stays calm and no Work
+   * surface is invented.
+   */
+  const hydrateLatestPlanRun = async (
+    threadId: string,
+    turns: ChatTurn[],
+    sequence: number,
+  ): Promise<ChatTurn[]> => {
+    if (isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return turns
+    const assistantIndex = [...turns]
+      .map((turn, index) => ({ turn, index }))
+      .reverse()
+      .find(({ turn }) => turn.role === 'assistant' && !turn.runId)
+      ?.index
+    if (assistantIndex == null) return turns
+    const assistant = turns[assistantIndex]
+    if (!assistant || assistant.role !== 'assistant') return turns
+    const precedingUser = [...turns.slice(0, assistantIndex)]
+      .reverse()
+      .find((turn) => turn.role === 'user')
+    if (!precedingUser) return turns
+
+    const normalizeGoal = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+    const userGoal = normalizeGoal(precedingUser.content)
+    if (!userGoal) return turns
+
+    const page = await listRuns({ threadId, limit: 8 }).catch(() => null)
+    if (sequence !== threadLoadSequence || state.threadId !== threadId || !page) return turns
+
+    const planRun = page.runs.find((run) => {
+      if ((run.threadId ?? threadId) !== threadId) return false
+      if ((run.mode ?? '').trim().toLocaleLowerCase() !== 'plan') return false
+      const runGoal = normalizeGoal(run.goal)
+      return runGoal === userGoal
+        || runGoal.startsWith(`${userGoal} [full-goal-blake3:`)
+        || userGoal.startsWith(runGoal)
+    })
+    if (!planRun) return turns
+
+    const hydrated = turns.map((turn, index) => (
+      index === assistantIndex
+        ? { ...turn, runId: planRun.runId, planMode: true }
+        : turn
+    ))
+    setState((current) => { current.turns = hydrated })
+    return hydrated
+  }
+
+  /**
+   * Hydrate server-derived effect evidence for every run-linked assistant
+   * turn. The proof bundle remains the authority; this merely carries its
+   * classification onto the turn so message actions can enforce the same
+   * immutable-effect rule as the Work/Trace canvas. Unknown or unavailable
+   * bundles stay absent and therefore never get treated as read-only.
+   */
+  const hydrateEffectClasses = async (
+    threadId: string,
+    turns: ChatTurn[],
+    sequence: number,
+  ): Promise<ChatTurn[]> => {
+    if (isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return turns
+    const candidates = turns.filter((turn) => turn.role === 'assistant' && Boolean(turn.runId))
+    if (candidates.length === 0) return turns
+    const results = await Promise.all(candidates.map(async (turn) => {
+      const bundle = await getRunProofBundle(turn.runId as string).catch(() => null)
+      return { turnId: turn.id, effectClass: bundle?.effectClass as ChatEffectClass | undefined }
+    }))
+    if (sequence !== threadLoadSequence || state.threadId !== threadId) return turns
+    const byTurn = new Map(results.map((result) => [result.turnId, result.effectClass]))
+    const hydrated = turns.map((turn) => {
+      const effectClass = byTurn.get(turn.id)
+      return effectClass ? { ...turn, effectClass } : turn
+    })
+    setState((current) => { current.turns = hydrated })
+    return hydrated
+  }
+
+  /**
+   * Rehydrate the safe, envelope-only Trace history for a completed Work turn.
+   * Active streams already replay their own bounded SSE buffer, so skipping an
+   * in-flight assistant avoids duplicating those events. Session Core remains
+   * the authority; the browser only stores the resulting display projection.
+   */
+  const hydrateThreadTrace = async (
+    threadId: string,
+    turns: ChatTurn[],
+    sequence: number,
+  ): Promise<void> => {
+    if (isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return
+    const latestAssistant = [...turns].reverse().find((turn) => turn.role === 'assistant')
+    if (!isWorkSurfaceTurn(latestAssistant) || latestAssistant?.status === 'waiting') return
+    // ReplayThread is cursor-based and returns oldest-first events. Walk the
+    // pages so a reload reconstructs the complete bounded audit stream rather
+    // than silently showing only the first page. The cap is a rendering guard;
+    // when it is reached the Trace panel states that the view is incomplete.
+    const pageLimit = 500
+    const maxEvents = 5_000
+    let afterEventId: string | undefined
+    let truncated = false
+    const replayed: ChatThreadEvent[] = []
+    const seen = new Set<string>()
+    for (let pageNumber = 0; pageNumber < Math.ceil(maxEvents / pageLimit); pageNumber += 1) {
+      const page = await listChatThreadEvents(threadId, {
+        afterEventId,
+        limit: pageLimit,
+      }).catch(() => null)
+      if (sequence !== threadLoadSequence || state.threadId !== threadId || !page) return
+      for (const event of page.events) {
+        if (!seen.has(event.eventId)) {
+          seen.add(event.eventId)
+          replayed.push(event)
+        }
+      }
+      const lastEventId = page.events.at(-1)?.eventId
+      if (!page.truncated || !lastEventId || page.events.length === 0) {
+        truncated = false
+        break
+      }
+      afterEventId = lastEventId
+      truncated = true
+      if (replayed.length >= maxEvents) break
+    }
+    setTraceReplayTruncated(truncated)
+    if (replayed.length === 0) return
+    setUiEvents(replayed.map((event) => {
+      // Cancellation receipts are safe to promote from the envelope-only
+      // replay because the event id is the receipt id and Session Core already
+      // proved the run/thread ownership before returning this page. Keep every
+      // other event envelope-only until a typed reducer exists for its payload.
+      if (event.eventType === 'RUN_CANCELLED') {
+        return {
+          type: 'run.cancelled' as const,
+          at: event.at,
+          runId: latestAssistant?.runId,
+          receiptId: event.eventId,
+        }
+      }
+      return {
+        type: 'trace.replayed' as const,
+        at: event.at,
+        eventId: event.eventId,
+        eventType: event.eventType,
+        producer: event.producer,
+        resourceRef: event.resourceRef,
+        schemaVersion: event.schemaVersion,
+      }
+    }))
   }
 
   /**
@@ -455,6 +760,10 @@ export function useChatController() {
       s.status = 'idle'
       s.error = null
     })
+    // Do not leak the previous thread's focused canvas while its transcript is
+    // still hydrating. A durable thread restores its own tab after the read;
+    // temporary/foreign threads remain on the calm chat surface.
+    setActiveTabSignal('chat')
     // Versions are guarded by threadId anyway (chat-versions.ts), but clear
     // eagerly rather than leave stale siblings from the old thread reachable
     // until the next regenerate/edit happens to overwrite them.
@@ -485,7 +794,7 @@ export function useChatController() {
       const mergedTurns = serverTurns.length > 0
         ? mergeServerTurnsWithCachedMetadata(serverTurns, cachedTurns)
         : cachedTurns
-      const turns = fillMissingTurnTimestamps(mergedTurns, threadId, cached?.updatedAt)
+      let turns = fillMissingTurnTimestamps(mergedTurns, threadId, cached?.updatedAt)
       // Clear the guard BEFORE the turns land: setState runs the snapshot
       // effect synchronously, and that very run is the one that must persist
       // this thread's real content (it also self-heals entries the old bug
@@ -495,9 +804,19 @@ export function useChatController() {
         s.turns = turns
         s.taskSteps = cachedTaskSteps
       })
+      setUiEvents([])
+      setTraceReplayTruncated(false)
       if (turns.length > 0) {
         writeThreadSnapshot(threadId, turns, {}, cachedTaskSteps, { persistServer: false })
       }
+      turns = await hydrateLatestPlanRun(threadId, turns, seq)
+      if (seq !== threadLoadSequence || state.threadId !== threadId) return
+      turns = await hydrateEffectClasses(threadId, turns, seq)
+      if (seq !== threadLoadSequence || state.threadId !== threadId) return
+      await hydrateThreadTrace(threadId, turns, seq)
+      if (seq !== threadLoadSequence || state.threadId !== threadId) return
+      restoreSurfaceTab(threadId)
+      hydrateRunApprovals(threadId, turns, seq)
       maybeResumeStream(threadId, turns)
     } catch (error) {
       if (seq !== threadLoadSequence) return
@@ -520,15 +839,25 @@ export function useChatController() {
         }
         return
       }
-      const fallbackTurns = cachedTurns
+      let fallbackTurns = cachedTurns
       hydratingThreadId = null
       setState((s) => {
         s.turns = fallbackTurns
         s.taskSteps = cachedTaskSteps
       })
+      setUiEvents([])
+      setTraceReplayTruncated(false)
       if (fallbackTurns.length > 0) {
         writeThreadSnapshot(threadId, fallbackTurns, {}, cachedTaskSteps, { persistServer: false })
       }
+      fallbackTurns = await hydrateLatestPlanRun(threadId, fallbackTurns, seq)
+      if (seq !== threadLoadSequence || state.threadId !== threadId) return
+      fallbackTurns = await hydrateEffectClasses(threadId, fallbackTurns, seq)
+      if (seq !== threadLoadSequence || state.threadId !== threadId) return
+      await hydrateThreadTrace(threadId, fallbackTurns, seq)
+      if (seq !== threadLoadSequence || state.threadId !== threadId) return
+      restoreSurfaceTab(threadId)
+      hydrateRunApprovals(threadId, fallbackTurns, seq)
       maybeResumeStream(threadId, fallbackTurns)
     }
   }
@@ -549,15 +878,14 @@ export function useChatController() {
   }
 
   /**
-   * The resume endpoint (`model-gateway`'s `stream_buffer.rs`) replays
-   * buffered content deltas from the run's start — this client never tracked
-   * a `Last-Event-Id` cursor, so `resumeStream` is called without one — plus
-   * the final `done` chunk if the run already finished. Nothing else: no
-   * tool/citation/usage/title/follow-up replay, the buffer only ever held
-   * plain text. The turn's content is reset when the FIRST replayed delta
-   * arrives — not upfront — so the full replay does not duplicate onto the
-   * cached partial text, while a resume that never yields a delta (404 past
-   * the buffer TTL, dead connection) settles with that partial text intact.
+   * The resume endpoint (`model-gateway`'s `stream_buffer.rs`) replays the
+   * buffered SSE frames (rich events as well as text) and the final `done`
+   * frame when the stream has already finished. A cursor is tracked while a
+   * tab remains connected; it is deliberately not persisted because it is only
+   * meaningful inside the short server buffer TTL. A reload therefore resumes
+   * from the beginning of that buffer, and the first replayed delta clears the
+   * cached partial text so it is not duplicated. Rich replay frames flow
+   * through the same normalized UI-event handlers as a live stream.
    *
    * Best-effort: a 404 (`stream not resumable` — the run genuinely finished
    * outside the buffer's TTL, or never existed) or any other resume failure
@@ -614,6 +942,10 @@ export function useChatController() {
     await resumeStream(
       turn.requestId,
       {
+        onUiEvent: (event) => {
+          if (!isActiveThread()) return
+          setUiEvents((current) => [...current, event].slice(-160))
+        },
         onMessage: ({ content: delta }) => {
           if (!isActiveThread()) return
           if (!replayStarted) {
@@ -641,7 +973,7 @@ export function useChatController() {
             if (t) t.content = t.content + delta
           })
         },
-        onDone: ({ modelUsed, outputTokens }) => {
+      onDone: ({ modelUsed, outputTokens }) => {
           settled = true
           if (!isActiveThread()) return
           if (modelUsed) {
@@ -658,6 +990,7 @@ export function useChatController() {
           }
           stopStreaming(undefined)
           markOpenSteps('done', 'Completed.', assistantId)
+          updateLocalRunHint(threadId, 'completed', turn.runId)
           setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(threadId, state.turns)
         },
@@ -666,6 +999,7 @@ export function useChatController() {
           if (!isActiveThread()) return
           stopStreaming('stopped')
           markOpenSteps('stopped', 'The connection was lost before this answer finished.', assistantId)
+          updateLocalRunHint(threadId, 'failed', turn.runId)
           setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(threadId, state.turns)
         },
@@ -715,8 +1049,10 @@ export function useChatController() {
       threadId: null,
       activeModel: state.activeModel,
       branchCount: 0,
-        queuedInputs: [],
+      queuedInputs: [],
       }))
+    setUiEvents([])
+    setTraceReplayTruncated(false)
     setInput('')
     setActiveTab('chat')
     setVersionState(null)
@@ -744,7 +1080,6 @@ export function useChatController() {
         // goes through the owner-bound transcript endpoints, and a 404 clears
         // the local selection rather than retaining a cross-user ghost thread.
         const linkedThread = readThreadDeepLink(window.location.search)
-        if (linkedThread) setActiveChatThreadId(linkedThread)
         const storedThread = linkedThread ?? readActiveChatThreadId()
         if (storedThread) {
           if (isTemporaryThread(storedThread)) {
@@ -756,9 +1091,17 @@ export function useChatController() {
             // this page didn't create for itself must prove that before it is
             // resurrected into Chat's own history. `null` means the listing
             // itself was unavailable — a transient outage must not blank the
-            // chat, so the pointer loads (and persists) as before.
+            // chat. Deep links fail closed to read-only until origin can be
+            // proven; an existing Chat pointer can still load from cache.
             const listed = await listChatThreads().catch(() => null)
-            if (!listed || listed.some((thread) => thread.threadId === storedThread)) {
+            if (!listed && linkedThread) {
+              // An outage means origin cannot be proven. Keep the deep-linked
+              // transcript viewable, but fail closed to read-only so a
+              // transient listing failure can never turn a foreign thread
+              // into a Chat-owned write.
+              markThreadForeignOrigin(storedThread)
+              await loadThread(storedThread)
+            } else if (!listed || listed.some((thread) => thread.threadId === storedThread)) {
               await loadThread(storedThread)
             } else if (linkedThread) {
               // A cross-surface "open in chat" link may DISPLAY a thread whose
@@ -874,11 +1217,22 @@ export function useChatController() {
       if (turn) turn.runId = runId
     })
   }
+  // A pause, approval-state transition, and replay reconnect can all request
+  // the same read concurrently. Keep only the newest response so an older
+  // pending list cannot re-introduce an approval the user has already decided.
+  const approvalRefreshVersion = new Map<string, number>()
+  const invalidateApprovalRefresh = (turnId: string) => {
+    const next = (approvalRefreshVersion.get(turnId) ?? 0) + 1
+    approvalRefreshVersion.set(turnId, next)
+    return next
+  }
   const refreshTurnApprovals = async (turnId: string) => {
     const runId = state.turns.find((turn) => turn.id === turnId)?.runId
     if (!runId) return
+    const version = invalidateApprovalRefresh(turnId)
     try {
       const approvals = await listApprovals(runId)
+      if (approvalRefreshVersion.get(turnId) !== version) return
       setState((s) => {
         const turn = s.turns.find((t) => t.id === turnId)
         if (turn) {
@@ -887,6 +1241,24 @@ export function useChatController() {
       })
     } catch {
       // Transient list failure — keep the existing pending state.
+    }
+  }
+
+  /**
+   * Resolve a durable run-stream pause back to the assistant turn that owns
+   * it. The run console can reconnect independently of the chat SSE stream,
+   * so this is the bridge that makes an approval card appear even when the
+   * pause event was recovered from the run replay buffer after a reload.
+   */
+  const refreshApprovalsForRun = async (runId: string) => {
+    const normalizedRunId = runId.trim()
+    if (!normalizedRunId) return
+    for (let index = state.turns.length - 1; index >= 0; index -= 1) {
+      const turn = state.turns[index]
+      if (turn?.role === 'assistant' && turn.runId === normalizedRunId) {
+        await refreshTurnApprovals(turn.id)
+        return
+      }
     }
   }
   /**
@@ -911,6 +1283,10 @@ export function useChatController() {
     rung: AutonomyRung,
     justification: string,
   ) => {
+    // Cross-surface transcripts are continuity views, not writable Chat
+    // sessions. Do not let a plan approval mutate a run owned by another
+    // workspace even if an old transcript still contains its approval card.
+    if (isForeignOriginThread(state.threadId)) return
     const runId = state.turns.find((turn) => turn.id === turnId)?.runId
     if (!runId) {
       setPlanApprovalError((prev) => ({
@@ -956,7 +1332,9 @@ export function useChatController() {
     approvalId: string,
     decision: ApprovalDecision,
   ) => {
+    if (isForeignOriginThread(state.threadId)) return
     const runId = state.turns.find((turn) => turn.id === turnId)?.runId
+    invalidateApprovalRefresh(turnId)
     // Optimistically drop the decided approval so the card resolves instantly.
     setState((s) => {
       const turn = s.turns.find((t) => t.id === turnId)
@@ -1026,6 +1404,11 @@ export function useChatController() {
   const sendContent = async (rawContent: string, modelOverride?: string, options: SendOptions = {}) => {
     const content = rawContent.trim()
     if (!content) return
+    // A deep-linked transcript from Spaces, Support, or another agent surface
+    // can be displayed here for continuity, but Chat must never append a turn
+    // to it or queue input into its run. The banner/composer guard is UX; this
+    // controller guard is the actual authority boundary for every caller.
+    if (isForeignOriginThread(state.threadId)) return
     // Typed while a run is still working. This used to `return` — the message
     // was not queued, not refused, not shown as rejected: gone, and the user
     // had to retype it after the turn ended. Now it is delivered to the running
@@ -1104,6 +1487,8 @@ export function useChatController() {
 
     setActiveTab('chat')
     setState((s) => { s.turns = nextTurns })
+    setUiEvents([])
+    setTraceReplayTruncated(false)
     writeThreadSnapshot(activeThreadId, nextTurns, { preview: content, updatedAt: submittedAt })
     setState((s) => {
       s.taskSteps = [
@@ -1187,13 +1572,20 @@ export function useChatController() {
           minPrivacyTier: options.minPrivacyTier,
         },
         {
+          onUiEvent: (event) => {
+            if (!projection.accepts()) return
+            setUiEvents((current) => [...current, event].slice(-160))
+          },
           onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel, runId }) => {
             captureRequestId(requestId)
             // An agentic / plan-mode turn learns its durable orchestration run
             // id here — this is what lets the live agent panel attach to
             // `GET /api/v1/runs/:run_id/events` from the very first step
             // instead of only once the run pauses for an approval.
-            if (runId) setTurnRunId(assistantId, runId)
+            if (runId) {
+              setTurnRunId(assistantId, runId)
+              updateLocalRunHint(serverThreadId ?? activeThreadId, 'running', runId)
+            }
             if (serverThreadId) {
               const priorThreadId = activeThreadId
               if (serverThreadId !== activeThreadId) {
@@ -1218,6 +1610,7 @@ export function useChatController() {
               setState((s) => { s.threadId = serverThreadId })
               if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
               writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
+              if (runId) updateLocalRunHint(serverThreadId, 'running', runId)
             }
             if (connectedModel) {
               setState((s) => {
@@ -1225,6 +1618,13 @@ export function useChatController() {
                 if (turn) turn.modelUsed = connectedModel
               })
             }
+            // A Do/plan-mode run is durable work as soon as the backend gives
+            // us its orchestration run id. Focus Work at that boundary instead
+            // of waiting for the first step event, which can arrive later (or
+            // only after a human-approval pause). Plain Ask turns remain in
+            // the calm transcript.
+            const connectedTurn = state.turns.find((turn) => turn.id === assistantId)
+            if (isWorkSurfaceTurn(connectedTurn)) summonSurface('steps')
             markStepDone(stepId('connect'), 'Connected to the live agent stream.')
             if (connectedModel) {
               upsertTaskStep(createTurnStep(assistantId, turnTitle, 'model', 'Model selected', prettyModel(connectedModel), 'done'))
@@ -1241,6 +1641,11 @@ export function useChatController() {
           onArtifact: (event) => {
             const artifact = normalizeArtifact(event)
             if (!artifact) return
+            // The first durable output is the Work-space's Output handoff.
+            // Do not steal focus from a tab the user already chose; otherwise
+            // make the artifact discoverable beside the transcript as soon as
+            // the backend has actually emitted it.
+            summonSurface('artifacts')
             // The same artifact id can come back many turns later (the model
             // rewrites a document it produced earlier). Hand the earlier
             // carrier's revisions along so the version history survives the
@@ -1262,6 +1667,11 @@ export function useChatController() {
           onCitation: (event) => {
             const citation = normalizeCitation(event)
             if (!citation) return
+            // Sources are summoned by evidence, not by the Search toggle. A
+            // web-enabled turn that never found a citation therefore remains a
+            // calm chat turn, while the first real source is immediately
+            // inspectable without replacing the conversation.
+            summonSurface('sources')
             addAssistantCitation(assistantId, turnTitle, citation)
           },
           onGrounding: ({ value }) => {
@@ -1284,14 +1694,18 @@ export function useChatController() {
           onStep: (event) => {
             const step = normalizeStep(event, assistantId, turnTitle)
             if (step) upsertTaskStep(step)
+            const isDurableWork = isWorkSurfaceTurn(state.turns.find((turn) => turn.id === assistantId))
+            if (isDurableWork) summonSurface('steps')
             // Agentic HITL: the raw step carries the orchestration status before
             // it is coerced to a task-status. A `paused` run is awaiting human
             // approval; approval/resume steps mean the gate resolved.
             const rawStatus = (event.status ?? '').toLowerCase()
-            if (rawStatus === 'paused' && event.id) {
+            if ((rawStatus === 'paused' || rawStatus === 'waiting_approval' || rawStatus === 'awaiting_approval') && event.id) {
               setTurnRunId(assistantId, event.id)
+              updateLocalRunHint(activeThreadId, 'awaiting_approval', event.id)
               void refreshTurnApprovals(assistantId)
             } else if (event.title === 'Approval' || event.title === 'Resumed') {
+              updateLocalRunHint(activeThreadId, 'running', state.turns.find((turn) => turn.id === assistantId)?.runId)
               void refreshTurnApprovals(assistantId)
             }
           },
@@ -1398,6 +1812,7 @@ export function useChatController() {
             })
             stopStreaming(undefined)
             markOpenSteps('done', reason?.trim() || 'Stopped.', assistantId)
+            updateLocalRunHint(activeThreadId, 'cancelled', state.turns.find((turn) => turn.id === assistantId)?.runId)
           },
           onUnknownEvent: ({ name }) => {
             // The gateway relays upstream SSE verbatim with no allowlist, so a
@@ -1458,7 +1873,22 @@ export function useChatController() {
             }
             stopStreaming(undefined)
             markOpenSteps('done', 'Completed.', assistantId)
+            updateLocalRunHint(activeThreadId, 'completed', state.turns.find((turn) => turn.id === assistantId)?.runId)
             addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
+            // Proof is committed after the run settles. Read the server-owned
+            // bundle once it is available so effectful turns become immutable
+            // in the message action bar as well as in Work/Trace.
+            const completedRunId = state.turns.find((turn) => turn.id === assistantId)?.runId
+            if (completedRunId && !isTemporaryThread(activeThreadId)) {
+              void getRunProofBundle(completedRunId).then((bundle) => {
+                if (!bundle?.effectClass || !projection.accepts()) return
+                setState((s) => {
+                  const turn = s.turns.find((candidate) => candidate.id === assistantId)
+                  if (turn) turn.effectClass = bundle.effectClass
+                })
+                writeThreadSnapshot(activeThreadId, state.turns)
+              }).catch(() => undefined)
+            }
             // Skip the shared machine + snapshot if the user has since opened
             // another thread — state.turns is now that thread's, so a snapshot
             // here would write the wrong turns and the status flip would clobber
@@ -1502,6 +1932,7 @@ export function useChatController() {
             })
             stopStreaming('error')
             markOpenSteps('error', message, assistantId)
+            updateLocalRunHint(activeThreadId, 'failed', state.turns.find((turn) => turn.id === assistantId)?.runId)
             writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
           },
           // Track the cursor on the LIVE stream too, not just on resume: the
@@ -1549,8 +1980,10 @@ export function useChatController() {
   }
 
   const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload) => {
+    if (isForeignOriginThread(state.threadId)) return
     if (!hasMessages()) triggerLaunchMotion()
     const attachments = await toStreamAttachments(payload.attachments)
+    const displayAttachments = await materializeAttachmentPreviews(payload.attachments)
     const model = payload.model ?? state.activeModel
     const actions = withBrregLookupAction(
       payload.actions.map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
@@ -1561,7 +1994,7 @@ export function useChatController() {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: payload.tools.includes('search') || payload.tools.includes('research'),
       deepResearch: payload.tools.includes('research'),
-      displayAttachments: payload.attachments,
+      displayAttachments,
       generateImage: payload.tools.includes('image'),
       tools: payload.tools,
       actions,
@@ -1573,7 +2006,31 @@ export function useChatController() {
     })
   }
 
+  /** Materialize composer blob URLs before DashboardComposer revokes them. */
+  const materializeAttachmentPreviews = async (
+    attachments: DashboardComposerSubmitPayload['attachments'],
+  ): Promise<ChatTurnAttachment[]> => {
+    const maxPreviewBytes = 8 * 1024 * 1024
+    return Promise.all(attachments.map(async (attachment) => {
+      if (!attachment.url) return attachment
+      if (attachment.url.startsWith('data:')) return { ...attachment, previewUrl: attachment.url }
+      try {
+        const response = await fetch(attachment.url)
+        if (!response.ok) return attachment
+        const blob = await response.blob()
+        if (blob.size > maxPreviewBytes) return attachment
+        return { ...attachment, previewUrl: await blobToDataUrl(blob) }
+      } catch {
+        return attachment
+      }
+    }))
+  }
+
   const handleStop = () => {
+    if (isForeignOriginThread(state.threadId)) return
+    const durableRunId = liveRunId()
+    const durableThreadId = state.threadId
+    const canCancelDurableRun = Boolean(durableRunId && !isTemporaryThread(state.threadId))
     abortController?.abort()
     if (state.requestId) {
       void cancelInvocation(state.requestId).catch(() => undefined)
@@ -1591,6 +2048,25 @@ export function useChatController() {
     markOpenSteps('stopped', 'Stopped by the user.')
     setState((s) => { s.status = 'idle' })
     if (state.threadId) writeThreadSnapshot(state.threadId, state.turns)
+    if (canCancelDurableRun && durableRunId) {
+      updateLocalRunHint(durableThreadId ?? '', 'cancelled', durableRunId)
+      void cancelRun(durableRunId)
+        .then((result) => {
+          if (state.threadId !== durableThreadId || isTemporaryThread(state.threadId)) return
+          setUiEvents((current) => [...current, {
+            type: 'run.cancelled' as const,
+            at: new Date().toISOString(),
+            runId: durableRunId,
+            receiptId: result.receiptId,
+            reason: 'user_requested',
+          }].slice(-160))
+        })
+        .catch(() => {
+          // The chat stream is already stopped locally. Keep the failure out of
+          // the answer error surface; Trace will remain honest because no
+          // cancellation receipt is rendered until the authority confirms it.
+        })
+    }
   }
 
   // One place, reactive, so no terminal path can forget it: the moment the
@@ -1739,11 +2215,17 @@ export function useChatController() {
   }
 
   const regenerateLatest = () => {
+    if (isForeignOriginThread(state.threadId)) return
     if (isStreaming()) return
     const anchorIndex = lastUserIndex(state.turns)
     if (anchorIndex < 0) return
     const lastUser = state.turns[anchorIndex]
     if (!lastUser) return
+    const outgoingAssistant = state.turns[anchorIndex + 1]
+    if (isEffectfulChatTurn(outgoingAssistant?.effectClass)) {
+      showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke regenereres på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
+      return
+    }
     // Snapshot the outgoing exchange as a version BEFORE truncating it away —
     // see chat-versions.ts. Must run before the slice below, which is itself
     // the fix for a real bug this uncovered: `sendContent` with
@@ -1771,11 +2253,41 @@ export function useChatController() {
     })
   }
 
+  /**
+   * Re-run an effectful exchange as a fresh turn. The original user/assistant
+   * pair remains immutable and the new turn follows the normal composer path,
+   * including its own approvals, receipts, and transcript entry.
+   */
+  const rerunAsNewTurn = async (turnId: string) => {
+    if (isForeignOriginThread(state.threadId) || isStreaming()) return
+    const assistantIndex = state.turns.findIndex((turn) => turn.id === turnId)
+    const assistant = state.turns[assistantIndex]
+    if (!assistant || assistant.role !== 'assistant' || !isEffectfulChatTurn(assistant.effectClass)) return
+    const user = [...state.turns.slice(0, assistantIndex)].reverse().find((turn) => turn.role === 'user')
+    if (!user) return
+    const attachments = await toStreamAttachments(user.attachments)
+    await sendContent(user.content, user.model ?? assistant.model, {
+      attachments: attachments.length > 0 ? attachments : undefined,
+      browseWeb: user.tools.includes('search') || user.tools.includes('research'),
+      deepResearch: user.tools.includes('research'),
+      displayAttachments: user.attachments,
+      generateImage: user.tools.includes('image'),
+      tools: user.tools,
+      zdr: isTemporaryThread(state.threadId),
+    })
+  }
+
   const editAndResubmit = async (turnId: string, text: string) => {
+    if (isForeignOriginThread(state.threadId)) return
     const index = state.turns.findIndex((turn) => turn.id === turnId)
     const original = state.turns[index]
     const next = text.trim()
     if (!original || original.role !== 'user' || !next) return
+    const outgoingAssistant = state.turns[index + 1]
+    if (isEffectfulChatTurn(outgoingAssistant?.effectClass)) {
+      showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke redigeres på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
+      return
+    }
     abortController?.abort()
     const attachments = await toStreamAttachments(original.attachments)
     if (index === lastUserIndex(state.turns)) {
@@ -1807,12 +2319,18 @@ export function useChatController() {
   }
 
   const branchAt = (turnId: string) => {
-    const index = state.turns.findIndex((turn) => turn.id === turnId)
-    if (index < 0) return
+    const turns = [...state.turns]
+    const requestedIndex = turns.findIndex((turn) => turn.id === turnId)
+    if (requestedIndex < 0) return
+    // A branch from an effectful assistant must start before the effect-bearing
+    // answer. Carrying that answer into the new chat would make the side effect
+    // look like part of the branch's fresh history; the preceding user turn is
+    // the safe, reproducible boundary.
+    const index = safeBranchBoundary(turns, requestedIndex)
     abortController?.abort()
     const sourceWasTemporary = isTemporaryThread(state.threadId)
     const nextThreadId = createId('thread')
-    const branchTurns = state.turns.slice(0, index + 1).map((turn) => ({ ...turn, id: createId(turn.role) }))
+    const branchTurns = turns.slice(0, index + 1).map((turn) => ({ ...turn, id: createId(turn.role) }))
     setState((s) => { s.turns = branchTurns })
     setState((s) => { s.threadId = nextThreadId })
     setState((s) => { s.status = 'idle' })
@@ -1897,6 +2415,7 @@ export function useChatController() {
     handleScroll,
     scrollToBottom,
     handleApprovalDecision,
+    refreshApprovalsForRun,
     handleComposerSubmit,
     handleStop,
     copyTurn,
@@ -1904,6 +2423,7 @@ export function useChatController() {
     feedbackNotice,
     dismissFeedbackNotice,
     regenerateLatest,
+    rerunAsNewTurn,
     editAndResubmit,
     branchAt,
     finalExchangeVersion,
@@ -1913,6 +2433,8 @@ export function useChatController() {
     activeTab,
     setActiveTab,
     copiedTurnId,
+    uiEvents,
+    traceReplayTruncated,
     launchMotion,
     showScrollDown,
     imageMode,
@@ -1928,6 +2450,10 @@ export function useChatController() {
     setTemporaryChat,
     isActiveThreadTemporary: () => isTemporaryThread(state.threadId),
     temporaryChatLocked: () => isTemporaryThread(state.threadId),
+    // A foreign-origin thread may be displayed for continuity, but it is not
+    // part of Chat's writable history. The page uses this reactive guard to
+    // render the ownership banner and disable the composer/actions.
+    isForeignOriginThread: () => isForeignOriginThread(state.threadId),
     input,
     setInput,
     setMessageListRef,

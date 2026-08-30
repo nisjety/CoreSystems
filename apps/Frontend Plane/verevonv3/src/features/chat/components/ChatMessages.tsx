@@ -79,8 +79,9 @@ import {
   type ChatKnowledgeGrounding,
   type ChatToolCall,
   type ChatTurn,
+  type Citation,
   type QueuedInput,
-  type ComposerAttachment,
+  type ChatTurnAttachment,
   type ComposerToolId,
   type GeneratedFile,
   type GeneratedImagePreview,
@@ -92,6 +93,7 @@ import {
   TOOL_LABELS,
 } from './chat-types'
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
+import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 
 export function MessageBlock(props: {
   copied: boolean
@@ -101,14 +103,18 @@ export function MessageBlock(props: {
   onEdit: (text: string) => void
   onFeedback: (rating: 'positive' | 'negative') => Promise<boolean>
   onRegenerate: () => void
+  onRerunAsNewTurn?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
   onApprovePlan: (rung: AutonomyRung, justification: string) => void
   planApproval?: PlanApprovalStatus
   onSelectFollowUp?: (text: string) => void
   onViewSteps: () => void
+  onViewAttachments?: (attachmentId: string) => void
   /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
+  /** Effectful turns cannot be edited or regenerated in place. */
+  editLocked?: boolean
 }) {
   return (
     <Show when={props.message.role === 'assistant'} fallback={<UserMessage {...props} />}>
@@ -135,7 +141,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   answer: {
     kind: 'answer',
     render: (node, ctx) => (
-      <AnswerRegion answer={node.answer} onRegenerate={ctx.onRegenerate} />
+      <AnswerRegion answer={node.answer} onRegenerate={ctx.onRegenerate} citations={ctx.citations} />
     ),
   },
   grounding: {
@@ -162,8 +168,8 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   },
   attachments: {
     kind: 'attachments',
-    render: (node) => (
-      <AttachmentChips attachments={node.attachments} tone="assistant" />
+    render: (node, ctx) => (
+      <AttachmentChips attachments={node.attachments} tone="assistant" onOpen={ctx.onViewAttachments} />
     ),
   },
   steps: {
@@ -237,6 +243,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
 function AnswerRegion(props: {
   answer: AnswerState
   onRegenerate: () => void
+  citations?: readonly Citation[]
 }) {
   return (
     <Switch>
@@ -255,7 +262,7 @@ function AnswerRegion(props: {
         {(content) => (
           <div class={{ 'verevon-chat-streaming': content().streaming }}>
             <Show when={content().content}>
-              {(text) => <ChatMarkdown content={text()} />}
+              {(text) => <ChatMarkdown content={text()} citations={props.citations} />}
             </Show>
             <Show when={content().stopped}>
               <span class="verevon-chat-status-chip">
@@ -276,11 +283,13 @@ export function AssistantMessage(props: {
   onCopy: () => void
   onFeedback: (rating: 'positive' | 'negative') => Promise<boolean>
   onRegenerate: () => void
+  onRerunAsNewTurn?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
   onApprovePlan: (rung: AutonomyRung, justification: string) => void
   planApproval?: PlanApprovalStatus
   onSelectFollowUp?: (text: string) => void
   onViewSteps: () => void
+  onViewAttachments?: (attachmentId: string) => void
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
 }) {
@@ -298,6 +307,7 @@ export function AssistantMessage(props: {
 
   const waiting = () => props.message.status === 'waiting'
   const errored = () => props.message.status === 'error'
+  const effectful = () => isEffectfulChatTurn(props.message.effectClass)
 
   // What this turn renders, as data. The conditions and order that used to live
   // inline as fourteen nested `<Show>` blocks are now one reviewable function
@@ -307,10 +317,12 @@ export function AssistantMessage(props: {
   const nodes = createMemo(() => deriveConversationNodes(props.message, props.planApproval))
   const nodeContext = (): ConversationNodeContext => ({
     onViewSteps: props.onViewSteps,
+    onViewAttachments: props.onViewAttachments,
     onApprovalDecision: props.onApprovalDecision,
     onApprovePlan: props.onApprovePlan,
     onSelectFollowUp: props.onSelectFollowUp,
     onRegenerate: props.onRegenerate,
+    citations: props.message.citations,
   })
 
   return (
@@ -385,9 +397,25 @@ export function AssistantMessage(props: {
                 </div>
               )}
             </Show>
-            <MessageAction label="Regenerate" onClick={props.onRegenerate}>
-              <RefreshCw size={14} />
-            </MessageAction>
+            <Show
+              when={!effectful()}
+              fallback={(
+                <>
+                  <span class="verevon-chat-action-note" role="note">
+                    Effekt registrert — kan ikke endres
+                  </span>
+                  <Show when={props.onRerunAsNewTurn}>
+                    <MessageAction label="Kjør som ny tur" onClick={() => props.onRerunAsNewTurn?.()}>
+                      <RefreshCw size={14} />
+                    </MessageAction>
+                  </Show>
+                </>
+              )}
+            >
+              <MessageAction label="Regenerate" onClick={props.onRegenerate}>
+                <RefreshCw size={14} />
+              </MessageAction>
+            </Show>
             <MessageMenu
               items={[
                 { label: 'Fortsett i ny chat', icon: <MessageSquarePlus size={16} />, onClick: props.onBranch },
@@ -409,6 +437,8 @@ export function UserMessage(props: {
   onBranch: () => void
   onCopy: () => void
   onEdit: (text: string) => void
+  onViewAttachments?: (attachmentId: string) => void
+  editLocked?: boolean
 }) {
   const [editing, setEditing] = createSignal(false)
   const [draft, setDraft] = createSignal('')
@@ -477,12 +507,21 @@ export function UserMessage(props: {
           <div class="verevon-chat-bubble">
             <span class="verevon-chat-bubble__text">{props.message.content}</span>
             <ToolChips tools={props.message.tools} />
-            <AttachmentChips attachments={props.message.attachments} tone="user" />
+            <AttachmentChips attachments={props.message.attachments} tone="user" onOpen={props.onViewAttachments} />
           </div>
           <div class="verevon-chat-message-actions verevon-chat-message-actions--user">
-            <MessageAction label="Rediger" onClick={startEditing}>
-              <Pencil size={14} />
-            </MessageAction>
+            <Show
+              when={!props.editLocked}
+              fallback={(
+                <span class="verevon-chat-action-note" role="note">
+                  Effektiv tur — redigering lager ny tur
+                </span>
+              )}
+            >
+              <MessageAction label="Rediger" onClick={startEditing}>
+                <Pencil size={14} />
+              </MessageAction>
+            </Show>
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
@@ -497,52 +536,52 @@ export function UserMessage(props: {
   )
 }
 
-export function ChatMarkdown(props: { content: string }) {
+export function ChatMarkdown(props: { content: string; citations?: readonly Citation[] }) {
   return (
     <div class="verevon-chat-markdown">
       <For each={parseMarkdownBlocks(props.content)}>
-        {(block) => <MarkdownBlockView block={block} />}
+        {(block) => <MarkdownBlockView block={block} citations={props.citations} />}
       </For>
     </div>
   )
 }
 
-export function MarkdownBlockView(props: { block: MarkdownBlock }) {
+export function MarkdownBlockView(props: { block: MarkdownBlock; citations?: readonly Citation[] }) {
   return (
     <Switch>
       <Match when={props.block.kind === 'heading'}>
-        <DynamicHeading block={props.block as Extract<MarkdownBlock, { kind: 'heading' }>} />
+        <DynamicHeading block={props.block as Extract<MarkdownBlock, { kind: 'heading' }>} citations={props.citations} />
       </Match>
       <Match when={props.block.kind === 'code'}>
         <MarkdownCodeBlock block={props.block as Extract<MarkdownBlock, { kind: 'code' }>} />
       </Match>
       <Match when={props.block.kind === 'table'}>
-        <MarkdownTable block={props.block as Extract<MarkdownBlock, { kind: 'table' }>} />
+        <MarkdownTable block={props.block as Extract<MarkdownBlock, { kind: 'table' }>} citations={props.citations} />
       </Match>
       <Match when={props.block.kind === 'list'}>
-        <MarkdownList block={props.block as Extract<MarkdownBlock, { kind: 'list' }>} />
+        <MarkdownList block={props.block as Extract<MarkdownBlock, { kind: 'list' }>} citations={props.citations} />
       </Match>
       <Match when={props.block.kind === 'quote'}>
-        <blockquote>{parseInline((props.block as Extract<MarkdownBlock, { kind: 'quote' }>).text)}</blockquote>
+        <blockquote>{parseInline((props.block as Extract<MarkdownBlock, { kind: 'quote' }>).text, props.citations)}</blockquote>
       </Match>
       <Match when={props.block.kind === 'hr'}>
         <hr />
       </Match>
       <Match when={props.block.kind === 'paragraph'}>
-        <p>{parseInline((props.block as Extract<MarkdownBlock, { kind: 'paragraph' }>).text)}</p>
+        <p>{parseInline((props.block as Extract<MarkdownBlock, { kind: 'paragraph' }>).text, props.citations)}</p>
       </Match>
     </Switch>
   )
 }
 
-export function DynamicHeading(props: { block: Extract<MarkdownBlock, { kind: 'heading' }> }) {
+export function DynamicHeading(props: { block: Extract<MarkdownBlock, { kind: 'heading' }>; citations?: readonly Citation[] }) {
   return (
-    <Switch fallback={<h3>{parseInline(props.block.text)}</h3>}>
+    <Switch fallback={<h3>{parseInline(props.block.text, props.citations)}</h3>}>
       <Match when={props.block.level === 1}>
-        <h1>{parseInline(props.block.text)}</h1>
+        <h1>{parseInline(props.block.text, props.citations)}</h1>
       </Match>
       <Match when={props.block.level === 2}>
-        <h2>{parseInline(props.block.text)}</h2>
+        <h2>{parseInline(props.block.text, props.citations)}</h2>
       </Match>
     </Switch>
   )
@@ -559,7 +598,7 @@ export function MarkdownCodeBlock(props: { block: Extract<MarkdownBlock, { kind:
   )
 }
 
-export function MarkdownTable(props: { block: Extract<MarkdownBlock, { kind: 'table' }> }) {
+export function MarkdownTable(props: { block: Extract<MarkdownBlock, { kind: 'table' }>; citations?: readonly Citation[] }) {
   const alignStyle = (column: number): JSX.CSSProperties | undefined => {
     const align = props.block.align[column]
     return align ? { 'text-align': align } : undefined
@@ -570,7 +609,7 @@ export function MarkdownTable(props: { block: Extract<MarkdownBlock, { kind: 'ta
         <thead>
           <tr>
             <For each={props.block.header}>
-              {(cell, column) => <th style={alignStyle(column())}>{parseInline(cell)}</th>}
+              {(cell, column) => <th style={alignStyle(column())}>{parseInline(cell, props.citations)}</th>}
             </For>
           </tr>
         </thead>
@@ -579,7 +618,7 @@ export function MarkdownTable(props: { block: Extract<MarkdownBlock, { kind: 'ta
             {(row) => (
               <tr>
                 <For each={row}>
-                  {(cell, column) => <td style={alignStyle(column())}>{parseInline(cell)}</td>}
+                  {(cell, column) => <td style={alignStyle(column())}>{parseInline(cell, props.citations)}</td>}
                 </For>
               </tr>
             )}
@@ -590,8 +629,8 @@ export function MarkdownTable(props: { block: Extract<MarkdownBlock, { kind: 'ta
   )
 }
 
-export function MarkdownList(props: { block: Extract<MarkdownBlock, { kind: 'list' }> }) {
-  return <>{renderMarkdownListLevel(props.block.items, 0, props.block.items.length, props.block.ordered)}</>
+export function MarkdownList(props: { block: Extract<MarkdownBlock, { kind: 'list' }>; citations?: readonly Citation[] }) {
+  return <>{renderMarkdownListLevel(props.block.items, 0, props.block.items.length, props.block.ordered, props.citations)}</>
 }
 
 /**
@@ -600,7 +639,7 @@ export function MarkdownList(props: { block: Extract<MarkdownBlock, { kind: 'lis
  * way GFM renders them. Marker family per level follows the first item of
  * that level, so numbered children under bullets (and vice versa) work.
  */
-function renderMarkdownListLevel(items: MarkdownListItem[], start: number, end: number, ordered: boolean): JSX.Element {
+function renderMarkdownListLevel(items: MarkdownListItem[], start: number, end: number, ordered: boolean, citations?: readonly Citation[]): JSX.Element {
   const levelDepth = items[start]?.depth ?? 0
   const nodes: JSX.Element[] = []
   let index = start
@@ -611,9 +650,9 @@ function renderMarkdownListLevel(items: MarkdownListItem[], start: number, end: 
     while (childEnd < end && (items[childEnd]?.depth ?? 0) > levelDepth) childEnd += 1
     nodes.push(
       <li>
-        {parseInline(item.text)}
+        {parseInline(item.text, citations)}
         {childEnd > index + 1
-          ? renderMarkdownListLevel(items, index + 1, childEnd, items[index + 1]?.ordered ?? false)
+          ? renderMarkdownListLevel(items, index + 1, childEnd, items[index + 1]?.ordered ?? false, citations)
           : null}
       </li>,
     )
@@ -1248,29 +1287,64 @@ export function toolChipIcon(tool: ComposerToolId): IconComponent {
   return Wrench
 }
 
-export function AttachmentChips(props: { attachments: ComposerAttachment[]; tone: 'assistant' | 'user' }) {
+export function AttachmentChips(props: {
+  attachments: ChatTurnAttachment[]
+  tone: 'assistant' | 'user'
+  onOpen?: (attachmentId: string) => void
+}) {
   return (
     <Show when={props.attachments.length > 0}>
       <div class="verevon-chat-attachments">
         <For each={props.attachments}>
-          {(attachment) => <AttachmentItem attachment={attachment} tone={props.tone} />}
+          {(attachment) => <AttachmentItem attachment={attachment} tone={props.tone} onOpen={props.onOpen} />}
         </For>
       </div>
     </Show>
   )
 }
 
-export function AttachmentItem(props: { attachment: ComposerAttachment; tone: 'assistant' | 'user' }) {
+export function AttachmentItem(props: {
+  attachment: ChatTurnAttachment
+  tone: 'assistant' | 'user'
+  onOpen?: (attachmentId: string) => void
+}) {
   const [failed, setFailed] = createSignal(false)
-  const isImage = () => Boolean(props.attachment.url) && props.attachment.type.startsWith('image/') && !failed()
+  const previewUrl = () => props.attachment.previewUrl || props.attachment.url
+  const isImage = () => Boolean(previewUrl()) && props.attachment.type.startsWith('image/') && !failed()
+  const open = () => props.onOpen?.(props.attachment.id)
+  const handleKeyDown = (event: KeyboardEvent) => {
+    if ((event.key === 'Enter' || event.key === ' ') && props.onOpen) {
+      event.preventDefault()
+      open()
+    }
+  }
+  const interaction = () => props.onOpen
 
   return (
     <Show
-      when={isImage() && props.attachment.url}
-      fallback={<span class={`verevon-chat-attachment verevon-chat-attachment--${props.tone}`}>{props.attachment.name}</span>}
+      when={isImage() && previewUrl()}
+      fallback={(
+        <span
+          class={`verevon-chat-attachment verevon-chat-attachment--${props.tone}`}
+          role={interaction() ? 'button' : undefined}
+          tabindex={interaction() ? 0 : undefined}
+          onClick={open}
+          onKeyDown={handleKeyDown}
+          title={interaction() ? 'Åpne i arbeidsflate' : undefined}
+        >
+          {props.attachment.name}
+        </span>
+      )}
     >
       {(url) => (
-        <span class="verevon-chat-attachment-image">
+        <span
+          class="verevon-chat-attachment-image"
+          role={interaction() ? 'button' : undefined}
+          tabindex={interaction() ? 0 : undefined}
+          onClick={open}
+          onKeyDown={handleKeyDown}
+          title={interaction() ? 'Åpne i arbeidsflate' : undefined}
+        >
           <img src={url()} alt={props.attachment.name} onError={() => setFailed(true)} />
         </span>
       )}

@@ -461,7 +461,7 @@ async fn get_lineage(
 /// in-loop poller in `browser_agent.rs` proceed with the exact action that
 /// was gated; a denial/timeout aborts the run without dispatching it).
 /// Body: `{"decision": "approve" | "reject", "reason"?: string}`.
-async fn decide_approval(
+pub(crate) async fn decide_approval(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -529,7 +529,7 @@ async fn update_todo_status(
     .await
 }
 
-async fn resume_run(
+pub(crate) async fn resume_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -544,7 +544,7 @@ async fn resume_run(
     .await
 }
 
-async fn cancel_run(
+pub(crate) async fn cancel_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

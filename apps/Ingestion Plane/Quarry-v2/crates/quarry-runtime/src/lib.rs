@@ -7,6 +7,8 @@
 //! Donor: `internal/driver/`, `internal/scraper/`, `internal/pipeline/`,
 //! parts of `internal/crawl/runner.go`.
 
+pub mod action_cost;
+pub mod fleet;
 pub mod action_runtime;
 pub mod agent_loop;
 pub mod ai_formats;
@@ -57,6 +59,7 @@ pub mod observation;
 pub mod pipeline;
 pub mod planner;
 pub mod policy;
+pub mod proxy_affinity;
 #[cfg(feature = "postgres-queue")]
 pub mod postgres_baseline_store;
 #[cfg(feature = "postgres-queue")]

@@ -178,12 +178,18 @@ func main() {
 		// org-scoped CRUD over `quarry_sources`; team aggregates,
 		// activity, snapshots and request-queues serve their full
 		// quarry_core wire shapes (cycle 24 parity work).
+		//
+		// Schedule trigger/backfill now take a temporal.Client
+		// (F3 follow-up). Until the SDK is wired we pass nil —
+		// the handler returns a typed 501 UNSUPPORTED envelope
+		// rather than the previous 202-stub "accepted" lie.
+		// /v1/benchmarks was removed (F3): no source of truth,
+		// so the empty-page 200 was dishonest.
 		resources.MountSources(r, db)
-		resources.MountBenchmarks(r)
 		resources.MountSnapshotsV2(r, db) // replaces MountSnapshots at GET /v1/snapshots
 		resources.MountRequestQueuesV2(r, db)
 		resources.MountTeam(r, db)
-		resources.MountScheduleAliases(r, db)
+		resources.MountScheduleAliases(r, db, nil)
 		resources.MountJobsByKind(r, db)
 	})
 

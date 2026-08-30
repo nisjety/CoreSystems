@@ -51,6 +51,9 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         http3: None,
         security: Arc::new(DefaultEngine::new().with_allow_private_hosts(true)),
         artifacts: Arc::new(InMemoryStore::new()),
+        // W1: tests run with no operator pool; the per-run
+        // affinity resolver falls back to first-party.
+        proxy_pool_name: String::new(),
         control_base_url: String::new(),
         redis: None,
         cache: None,
@@ -83,6 +86,8 @@ pub fn base_state(driver: Arc<dyn Driver>, event_sink: EventSink) -> AppState {
         browser_egress_proxy: None,
         #[cfg(feature = "browser-agent")]
         agent_runs: quarry_edge::agent_routes::new_runs(),
+        #[cfg(feature = "browser-agent")]
+        fleets: quarry_edge::fleet_routes::new_fleet_state(),
     }
 }
 

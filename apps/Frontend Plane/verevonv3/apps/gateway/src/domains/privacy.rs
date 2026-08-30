@@ -97,7 +97,7 @@ async fn export(
     .into_response()
 }
 
-async fn erase(
+pub(crate) async fn erase(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     body: Option<Json<Value>>,

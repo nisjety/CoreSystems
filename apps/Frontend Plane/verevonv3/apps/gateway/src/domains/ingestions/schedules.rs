@@ -96,7 +96,7 @@ fn normalize_schedule(schedule: &Value) -> Value {
 
 // ── Create ────────────────────────────────────────────────────────────────
 
-pub(super) async fn create_schedule(
+pub(crate) async fn create_schedule(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
@@ -188,7 +188,7 @@ fn build_schedule_config(kind: &str, body: &Value) -> Result<Value, String> {
 
 // ── Schedule lifecycle actions ───────────────────────────────────────────────
 
-pub(super) async fn schedule_actions(
+pub(crate) async fn schedule_actions(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,

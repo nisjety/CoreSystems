@@ -38,7 +38,7 @@ fn deletion_url(org_core_url: &str, id: &str, suffix: &str) -> String {
 /// org-core returns 400 if `confirm` is false or `org_name` does not exactly
 /// match. On success this opens the 30-day grace window (ledger rows +
 /// `verevon.org.deletion.pending`).
-pub(super) async fn soft_delete(
+pub(crate) async fn soft_delete(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
@@ -65,7 +65,7 @@ pub(super) async fn soft_delete(
 /// Reverses a pending soft-delete: clears `deleted_at`, wipes the deletion
 /// ledger, publishes `verevon.org.deletion.cancelled`. 409 if the organization
 /// is not currently pending deletion. Same owner-gated pattern as `soft_delete`.
-pub(super) async fn restore(
+pub(crate) async fn restore(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
@@ -92,7 +92,7 @@ pub(super) async fn restore(
 /// of the org's scheduled purge. Any active member of the org may call this
 /// for themselves — org-core's `authorizeDeletionSelfService` makes the final
 /// self-or-platform-admin decision.
-pub(super) async fn mark_exported(
+pub(crate) async fn mark_exported(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
@@ -117,7 +117,7 @@ pub(super) async fn mark_exported(
 ///
 /// Records that the calling member acknowledged the org's pending-deletion
 /// notice. Same gating as `mark_exported`.
-pub(super) async fn acknowledge(
+pub(crate) async fn acknowledge(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,

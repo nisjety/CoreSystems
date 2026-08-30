@@ -1043,7 +1043,14 @@ impl ExecutionCore for ExecutionService {
             .await?;
         let cancelled = self.state.cancel(&req.run_id, Some(req.reason));
 
-        Ok(Response::new(pb::CancelRunResponse { cancelled }))
+        // Execution Core owns only the in-memory cancellation latch. Session
+        // Core is the receipt authority, so this service deliberately returns
+        // an empty receipt id; model-gateway calls the durable RunService after
+        // authorization rather than treating this latch as audit evidence.
+        Ok(Response::new(pb::CancelRunResponse {
+            cancelled,
+            receipt_id: String::new(),
+        }))
     }
 
     /// Pause an active run (Phase 2 B5). Mirrors `resume_run`/`cancel_run`:

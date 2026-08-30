@@ -2676,7 +2676,10 @@ pub(crate) async fn proxy_artifact_bytes(
             tracing::warn!(error = %err, %url, "artifact relay upstream request failed");
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("artifact_unavailable", "Could not load the artifact.")),
+                Json(error(
+                    "artifact_unavailable",
+                    "Could not load the artifact.",
+                )),
             )
                 .into_response();
         }
@@ -2696,7 +2699,10 @@ pub(crate) async fn proxy_artifact_bytes(
         // may name internal paths. The status is the useful part.
         return (
             status,
-            Json(error("artifact_unavailable", "Could not load the artifact.")),
+            Json(error(
+                "artifact_unavailable",
+                "Could not load the artifact.",
+            )),
         )
             .into_response();
     }
@@ -2707,7 +2713,10 @@ pub(crate) async fn proxy_artifact_bytes(
             tracing::warn!(error = %err, %url, "artifact relay body read failed");
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(error("artifact_unavailable", "Could not load the artifact.")),
+                Json(error(
+                    "artifact_unavailable",
+                    "Could not load the artifact.",
+                )),
             )
                 .into_response();
         }
@@ -2720,7 +2729,10 @@ pub(crate) async fn proxy_artifact_bytes(
         );
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(error("artifact_too_large", "That artifact is too large to display.")),
+            Json(error(
+                "artifact_too_large",
+                "That artifact is too large to display.",
+            )),
         )
             .into_response();
     }
@@ -2746,7 +2758,10 @@ pub(crate) async fn proxy_artifact_bytes(
         .unwrap_or_else(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(error("artifact_unavailable", "Could not load the artifact.")),
+                Json(error(
+                    "artifact_unavailable",
+                    "Could not load the artifact.",
+                )),
             )
                 .into_response()
         })
@@ -2754,14 +2769,19 @@ pub(crate) async fn proxy_artifact_bytes(
 
 #[cfg(test)]
 mod artifact_relay_tests {
-    use super::{RENDERABLE_ARTIFACT_TYPES, ARTIFACT_RELAY_MAX_BYTES};
+    use super::{ARTIFACT_RELAY_MAX_BYTES, RENDERABLE_ARTIFACT_TYPES};
 
     /// The guard that matters: a captured HTML page must never be renderable
     /// from the SPA's own origin, because that is stored XSS with the user's
     /// session attached.
     #[test]
     fn html_and_json_are_never_renderable() {
-        for hostile in ["text/html", "application/xhtml+xml", "image/svg+xml", "application/json"] {
+        for hostile in [
+            "text/html",
+            "application/xhtml+xml",
+            "image/svg+xml",
+            "application/json",
+        ] {
             assert!(
                 !RENDERABLE_ARTIFACT_TYPES.contains(&hostile),
                 "{hostile} must not be served inline from this origin"

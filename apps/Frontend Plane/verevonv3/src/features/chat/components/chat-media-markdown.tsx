@@ -17,6 +17,7 @@ import {
   type AgentTaskStepSection,
   type ArtifactPanelItem,
   type ChatArtifact,
+  type Citation,
   type ChatGroundingFact,
   type ChatGroundingGraph,
   type ChatGroundingGraphNode,
@@ -339,6 +340,9 @@ export function normalizeGrounding(value: unknown): ChatKnowledgeGrounding | und
 export function normalizeGroundingSource(value: unknown): ChatGroundingSource | null {
   const source = objectValue(value)
   if (!source) return null
+  const documentId = (stringValue(source.documentId) ?? stringValue(source.document_id) ?? '').trim()
+  const href = stringValue(source.href)?.trim()
+    || (documentId ? `/knowledge?source=${encodeURIComponent(documentId)}` : '#')
   return {
     id: stringValue(source.id) ?? createId('source'),
     kind: 'knowledge',
@@ -346,8 +350,8 @@ export function normalizeGroundingSource(value: unknown): ChatGroundingSource | 
     snippet: stringValue(source.snippet) ?? '',
     provider: stringValue(source.provider) ?? 'knowledge',
     sourceType: stringValue(source.sourceType) ?? stringValue(source.source_type) ?? 'document',
-    documentId: stringValue(source.documentId) ?? stringValue(source.document_id) ?? '',
-    href: stringValue(source.href) ?? '#',
+    documentId,
+    href,
     score: numberValue(source.score) ?? 0,
   }
 }
@@ -407,9 +411,11 @@ export function numberValue(value: unknown): number | undefined {
 }
 
 export function normalizeTaskStatus(status?: string): TaskStepStatus {
-  if (status === 'done' || status === 'active' || status === 'waiting' || status === 'error' || status === 'stopped') return status
-  if (status === 'running') return 'active'
-  if (status === 'failed') return 'error'
+  const normalized = status?.trim().toLowerCase()
+  if (normalized === 'done' || normalized === 'active' || normalized === 'waiting' || normalized === 'error' || normalized === 'stopped') return normalized
+  if (normalized === 'running') return 'active'
+  if (normalized === 'paused' || normalized === 'waiting_approval' || normalized === 'awaiting_approval' || normalized === 'blocked' || normalized === 'ambiguous') return 'waiting'
+  if (normalized === 'failed') return 'error'
   return 'active'
 }
 
@@ -776,9 +782,49 @@ export function isMarkdownBlockStart(line: string, nextLine?: string) {
     || isTableStart(line, nextLine)
 }
 
-export function parseInline(text: string): Array<string | JSX.Element> {
+/**
+ * A citation marker is only promoted when it is an explicit, in-range
+ * `[n]`/`[n, m]` marker in the answer and the corresponding source payload is
+ * present. Unknown markers stay as ordinary text: the client never guesses
+ * which sentence a source supports. The server-issued claim-anchor contract
+ * described in the chat plan can replace this lightweight marker path later
+ * without changing the source-card surface.
+ */
+export function InlineCitationMarker(props: {
+  citations: Citation[]
+  indexes: number[]
+}) {
+  const first = props.citations[0]
+  if (!first) return null
+  const label = `${hostname(first.url)}${props.citations.length > 1 ? ` +${props.citations.length - 1}` : ''}`
+  return (
+    <details class="verevon-chat-citation-chip">
+      <summary aria-label={`Kilde ${props.indexes.join(', ')}`}>{label}</summary>
+      <div class="verevon-chat-citation-chip__popover" role="group" aria-label="Kildedetaljer">
+        {props.citations.map((citation, index) => (
+          <a
+            href={citation.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="verevon-chat-citation-chip__source"
+          >
+            <span class="verevon-chat-citation-chip__index">{props.indexes[index]}</span>
+            <span class="verevon-chat-citation-chip__body">
+              <strong>{citation.title || hostname(citation.url)}</strong>
+              {citation.snippet ? <span>{citation.snippet}</span> : null}
+            </span>
+          </a>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+export function parseInline(text: string, citations?: readonly Citation[]): Array<string | JSX.Element> {
   const nodes: Array<string | JSX.Element> = []
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g
+  // Keep Markdown links before citation markers: `[3](url)` is a link, not
+  // an evidence marker followed by literal `(url)` text.
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\)|\[(?:\d+(?:\s*,\s*\d+)*)\])/g
   let cursor = 0
   for (const match of text.matchAll(pattern)) {
     if (match.index == null) continue
@@ -790,6 +836,21 @@ export function parseInline(text: string): Array<string | JSX.Element> {
       nodes.push(<strong>{token.slice(2, -2)}</strong>)
     } else if (token.startsWith('*')) {
       nodes.push(<em>{token.slice(1, -1)}</em>)
+    } else if (citations && /^\[\d+(?:\s*,\s*\d+)*\]$/.test(token)) {
+      const indexes = token
+        .slice(1, -1)
+        .split(',')
+        .map((value) => Number(value.trim()))
+      const sources = indexes
+        .map((index) => ({ index, citation: citations[index - 1] }))
+        .filter((entry): entry is { index: number; citation: Citation } => Boolean(entry.citation))
+      // Keep a marker unchanged if even one requested source is absent. A
+      // partial chip would silently rewrite the model's intended evidence set.
+      nodes.push(
+        sources.length === indexes.length
+          ? <InlineCitationMarker citations={sources.map((entry) => entry.citation)} indexes={indexes} />
+          : token,
+      )
     } else {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)
       nodes.push(link ? <a href={link[2]} target="_blank" rel="noopener noreferrer">{link[1]}</a> : token)

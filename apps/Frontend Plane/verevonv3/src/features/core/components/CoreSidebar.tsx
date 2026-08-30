@@ -429,7 +429,17 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
         onClick={() => openThread(item.threadId)}
         aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
       >
-        <span class="verevon-sidebar-row-strong" title={item.title}>{item.title}</span>
+        <div class="core-chat-session__summary">
+          <span class="verevon-sidebar-row-strong" title={item.title}>{item.title}</span>
+          <Show when={chatRunStatusChip(item.latestRunStatus, i18n)}>
+            {(chip) => (
+              <small class="core-chat-session__status" data-tone={chip().tone} role="status">
+                <i aria-hidden="true" />
+                {chip().label}
+              </small>
+            )}
+          </Show>
+        </div>
         <em>{formatChatUpdatedAt(item.updatedAt, i18n)}</em>
       </button>
       <button
@@ -476,6 +486,38 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
       </button>
     </div>
   )
+}
+
+type ChatRunStatusChip = { label: string; tone: 'active' | 'attention' }
+
+/** Keep the personal thread rail calm: only active or attention states show a
+ * hint. Completed/cancelled runs remain discoverable through the transcript
+ * without turning every row into an operator console. */
+function chatRunStatusChip(
+  value: string | undefined,
+  i18n: ReturnType<typeof useI18n>,
+): ChatRunStatusChip | undefined {
+  const status = value?.trim().toLowerCase()
+  if (!status) return undefined
+  if (status === 'queued' || status === 'pending') {
+    return { label: i18n.tr('I kø', 'Queued'), tone: 'active' }
+  }
+  if (status === 'running' || status === 'in_progress') {
+    return { label: i18n.tr('Pågår', 'Running'), tone: 'active' }
+  }
+  if (
+    status === 'awaiting_approval' ||
+    status === 'waiting_approval' ||
+    status === 'paused' ||
+    status === 'blocked' ||
+    status === 'ambiguous'
+  ) {
+    return { label: i18n.tr('Trenger oppmerksomhet', 'Needs attention'), tone: 'attention' }
+  }
+  if (status === 'failed' || status === 'timed_out' || status === 'denied' || status === 'rejected') {
+    return { label: i18n.tr('Mislyktes', 'Failed'), tone: 'attention' }
+  }
+  return undefined
 }
 
 function formatChatUpdatedAt(value: string, i18n: ReturnType<typeof useI18n>) {

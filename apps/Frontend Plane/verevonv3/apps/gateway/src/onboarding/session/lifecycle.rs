@@ -88,10 +88,7 @@ pub(crate) async fn onboarding_lifecycle(
     // default PROFILE_READY — completion is idempotent, so under-reporting is
     // safe while over-reporting is not.
     let context = crate::upstream::resolve_session_context(&state, &user).await;
-    let completed = context
-        .get("onboardingStatus")
-        .and_then(Value::as_str)
-        == Some("COMPLETED");
+    let completed = context.get("onboardingStatus").and_then(Value::as_str) == Some("COMPLETED");
 
     (
         StatusCode::OK,

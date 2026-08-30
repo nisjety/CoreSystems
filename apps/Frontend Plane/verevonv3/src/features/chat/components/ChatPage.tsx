@@ -3,6 +3,9 @@ import {
   Match,
   Show,
   Switch,
+  createMemo,
+  createEffect,
+  createSignal,
 } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
@@ -10,10 +13,14 @@ import {
   EyeOff,
   Square,
 } from '@/shared/icons'
+import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import {
   DashboardComposer,
+  type DashboardComposerAttachment,
 } from '@/features/dashboard/home/DashboardComposer'
 import { getThreadContext } from '@/shared/api/chat-client'
+import { importUpload } from '@/shared/api/knowledge-client'
+import { getSession } from '@/shared/session/session-store'
 import {
   DateDivider,
   EmptyChatState,
@@ -29,24 +36,28 @@ import {
   SourcesPanel,
   ContextWindowPanel,
   StepsPanel,
+  TracePanel,
 } from './ChatPanels'
 import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
+import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
+import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
 import {
   shouldShowDateDivider,
 } from './chat-media-markdown'
 import { useChatController } from './use-chat-controller'
 import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
+import { isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 
 export default function ChatPage() {
+  const session = getSession()
   const {
     hasMessages,
     isStreaming,
     evidenceSources,
     latestGrounding,
     artifactItems,
-    artifacts,
     latestScreen,
     liveRunId,
     runPanelCollapsed,
@@ -55,6 +66,7 @@ export default function ChatPage() {
     handleScroll,
     scrollToBottom,
     handleApprovalDecision,
+    refreshApprovalsForRun,
     handleComposerSubmit,
     handleStop,
     copyTurn,
@@ -62,6 +74,7 @@ export default function ChatPage() {
     feedbackNotice,
     dismissFeedbackNotice,
     regenerateLatest,
+    rerunAsNewTurn,
     editAndResubmit,
     branchAt,
     finalExchangeVersion,
@@ -71,6 +84,8 @@ export default function ChatPage() {
     activeTab,
     setActiveTab,
     copiedTurnId,
+    uiEvents,
+    traceReplayTruncated,
     launchMotion,
     showScrollDown,
     imageMode,
@@ -86,12 +101,53 @@ export default function ChatPage() {
     setTemporaryChat,
     isActiveThreadTemporary,
     temporaryChatLocked,
+    isForeignOriginThread,
     input,
     setInput,
     setMessageListRef,
   } = useChatController()
 
+  // The attachment chip that summoned the canvas stays selected when several
+  // files share the same conversation. The canvas still lets the user switch
+  // files locally after it opens.
+  const [selectedAttachmentId, setSelectedAttachmentId] = createSignal<string | null>(null)
+
+  // Work surfaces belong to the durable run they describe. Looking at the
+  // last transcript turn is subtly wrong when a user opens an older run after
+  // sending a follow-up: the panel would show the newest turn's tool calls
+  // beside the older run's plan and proof. Keep the lookup keyed to the same
+  // run id that drives the live panel and trace tab.
+  const activeRunTurn = createMemo(() => {
+    const runId = liveRunId()
+    if (!runId) return undefined
+    for (let index = state.turns.length - 1; index >= 0; index -= 1) {
+      const turn = state.turns[index]
+      if (turn?.role === 'assistant' && turn.runId === runId) return turn
+    }
+    return undefined
+  })
+
   useChatShortcuts({ startNewChat })
+
+  // Knowledge import is an explicit, durable action — separate from sending a
+  // chat turn. The composer keeps object URLs alive for the current turn; we
+  // read those bytes only when the user clicks the upload affordance and let
+  // imports-core enforce its own file policy and ZDR rejection.
+  const importAttachmentsToKnowledge = async (attachments: DashboardComposerAttachment[]) => {
+    const orgId = session.activeOrg?.id?.trim()
+    if (!orgId) throw new Error('Ingen aktiv organisasjon er tilgjengelig for import.')
+    if (temporaryChat()) throw new Error('Midlertidig chat kan ikke lagre filer i kunnskapsbasen.')
+    const files = await Promise.all(attachments.map(async (attachment) => {
+      const response = await fetch(attachment.url)
+      if (!response.ok) throw new Error(`Kunne ikke lese ${attachment.name}.`)
+      const blob = await response.blob()
+      return new File([blob], attachment.name, {
+        type: attachment.type || blob.type || 'application/octet-stream',
+      })
+    }))
+    if (files.length === 0) throw new Error('Ingen filer er valgt.')
+    await importUpload(orgId, files, { zdr: false })
+  }
 
   const composer = () => (
     <DashboardComposer
@@ -115,6 +171,8 @@ export default function ChatPage() {
       // stream and the queued-input arc had no reachable client.
       temporaryChat={temporaryChat()}
       temporaryChatLocked={temporaryChatLocked()}
+      disabled={isForeignOriginThread()}
+      onKnowledgeImport={importAttachmentsToKnowledge}
     />
   )
 
@@ -134,6 +192,77 @@ export default function ChatPage() {
     async (key) => getThreadContext(key.threadId),
   )
 
+  // Contextual surfaces are siblings of the transcript. Opening one must not
+  // unmount the message list or reset its scroll/streaming state.
+  const conversationAttachments = () => {
+    const seen = new Set<string>()
+    return state.turns
+      .filter((turn) => turn.role === 'user')
+      .flatMap((turn) => turn.attachments)
+      .filter((attachment) => {
+        if (seen.has(attachment.id)) return false
+        seen.add(attachment.id)
+        return true
+      })
+  }
+
+  // A tab restored from an older snapshot may no longer have evidence (for
+  // example after a failed regeneration or a retention boundary). Fail closed
+  // to Chat instead of opening a canvas that only says "nothing here".
+  createEffect(() => {
+    const tab = activeTab()
+    const availability: ChatSurfaceAvailability = {
+      sourceCount: evidenceSources().length,
+      hasGrounding: Boolean(latestGrounding()),
+      artifactCount: artifactItems().length,
+      attachmentCount: conversationAttachments().length,
+      stepCount: state.taskSteps.length,
+      hasRun: Boolean(liveRunId()),
+    }
+    if (!isChatSurfaceAvailable(tab, availability)) setActiveTab('chat')
+  })
+
+  const contextualPanel = () => (
+    <Switch>
+      <Match when={activeTab() === 'sources'}>
+        <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} />
+      </Match>
+      <Match when={activeTab() === 'artifacts'}>
+        <Show when={conversationAttachments().length > 0}>
+          <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
+        </Show>
+        <Show when={artifactItems().length > 0}>
+          <ArtifactsPanel items={artifactItems()} />
+        </Show>
+      </Match>
+      <Match when={activeTab() === 'steps'}>
+        <StepsPanel
+          runId={liveRunId()}
+          steps={state.taskSteps}
+          threadId={state.threadId}
+          toolCalls={activeRunTurn()?.toolCalls}
+          screen={latestScreen()}
+          events={uiEvents()}
+          onStopTask={handleStop}
+        />
+        <ContextWindowPanel
+          context={threadContext()}
+          loading={threadContext.loading}
+          failed={threadContext.error != null}
+        />
+      </Match>
+      <Match when={activeTab() === 'trace'}>
+        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} />
+      </Match>
+    </Switch>
+  )
+
+  const canvasTab = () => {
+    const tab = activeTab()
+    return tab === 'chat' ? 'sources' : tab
+  }
+  const workCanvasActive = () => Boolean(liveRunId()) && activeTab() === 'steps'
+
   return (
     <div
       class={[
@@ -141,6 +270,7 @@ export default function ChatPage() {
         {
           'verevon-chat-page--split': Boolean(liveRunId()) && !runPanelCollapsed(),
           'verevon-chat-page--railed': Boolean(liveRunId()) && runPanelCollapsed(),
+          'verevon-chat-page--canvas': activeTab() !== 'chat',
         },
       ]}
     >
@@ -159,9 +289,11 @@ export default function ChatPage() {
           />
           <ChatTabs
             active={activeTab()}
-            artifactCount={artifacts().length}
-            sourceCount={evidenceSources().length}
+            artifactCount={artifactItems().length + conversationAttachments().length}
+            sourceCount={evidenceSources().length + (latestGrounding() ? 1 : 0)}
+            runAvailable={Boolean(liveRunId())}
             stepCount={state.taskSteps.length}
+            traceAvailable={Boolean(liveRunId())}
             onChange={setActiveTab}
           />
         </Show>
@@ -170,12 +302,25 @@ export default function ChatPage() {
           <Match when={!hasMessages()}>
             <EmptyChatState onSelectPrompt={setInput}>{composer()}</EmptyChatState>
           </Match>
-          <Match when={activeTab() === 'chat'}>
-            <div ref={setMessageListRef} class="verevon-chat-message-list" onScroll={handleScroll}>
+          <Match when={hasMessages()}>
+            <div
+              id="verevon-chat-tabpanel-chat"
+              role="tabpanel"
+              aria-label="Chat"
+              ref={setMessageListRef}
+              class="verevon-chat-message-list"
+              onScroll={handleScroll}
+            >
               <Show when={isActiveThreadTemporary()}>
                 <div class="verevon-chat-temporary-banner" role="status">
                   <EyeOff size={13} />
                   <span>Midlertidig samtale – lagres ikke i historikk eller minne.</span>
+                </div>
+              </Show>
+              <Show when={isForeignOriginThread()}>
+                <div class="verevon-chat-foreign-thread-banner" role="status">
+                  <EyeOff size={13} />
+                  <span>Denne samtalen eies av en annen arbeidsflate og vises skrivebeskyttet.</span>
                 </div>
               </Show>
               <div class="verevon-chat-thread">
@@ -192,6 +337,7 @@ export default function ChatPage() {
                         onCopy={() => void copyTurn(turn)}
                         onEdit={(text) => void editAndResubmit(turn.id, text)}
                         onRegenerate={regenerateLatest}
+                        onRerunAsNewTurn={() => void rerunAsNewTurn(turn.id)}
                         onFeedback={(rating) => submitTurnFeedback(turn.id, rating)}
                         onApprovalDecision={(approvalId, decision) =>
                           void handleApprovalDecision(turn.id, approvalId, decision)
@@ -205,11 +351,16 @@ export default function ChatPage() {
                         }}
                         onSelectFollowUp={setInput}
                         onViewSteps={() => setActiveTab('steps')}
+                        onViewAttachments={(attachmentId) => {
+                          setSelectedAttachmentId(attachmentId)
+                          setActiveTab('artifacts')
+                        }}
                         // The version switcher only ever applies to the trailing
                         // assistant turn — chat-versions.ts guards versioning to
                         // the final exchange, so no other turn can have one.
                         version={index() === state.turns.length - 1 ? finalExchangeVersion() : null}
                         onSelectVersion={selectExchangeVersion}
+                        editLocked={turn.role === 'user' && isEffectfulChatTurn(state.turns[index() + 1]?.effectClass)}
                       />
                     </>
                   )}
@@ -245,35 +396,6 @@ export default function ChatPage() {
                 </Show>
               </div>
             </div>
-          </Match>
-          <Match when={activeTab() === 'sources'}>
-            <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} />
-          </Match>
-          <Match when={activeTab() === 'artifacts'}>
-            <ArtifactsPanel items={artifactItems()} />
-          </Match>
-          <Match when={activeTab() === 'steps'}>
-            {/*
-              The tool calls come from the LAST assistant turn: the pill that
-              routes here belongs to that turn, so its evidence is what the panel
-              should show.
-            */}
-            <StepsPanel
-              steps={state.taskSteps}
-              toolCalls={state.turns.at(-1)?.toolCalls}
-              screen={latestScreen()}
-              onStopTask={handleStop}
-            />
-            {/*
-              Fetched only while this tab is open — the inspector is diagnostic,
-              and assembling a context window is real work on the backend that
-              should not run on every chat turn just in case someone looks.
-            */}
-            <ContextWindowPanel
-              context={threadContext()}
-              loading={threadContext.loading}
-              failed={threadContext.error != null}
-            />
           </Match>
         </Switch>
 
@@ -316,16 +438,27 @@ export default function ChatPage() {
         </Show>
       </section>
 
+      <Show when={hasMessages() && activeTab() !== 'chat' && !workCanvasActive()}>
+        <ChatWorkspaceCanvas active={canvasTab()} onClose={() => setActiveTab('chat')}>
+          {contextualPanel()}
+        </ChatWorkspaceCanvas>
+      </Show>
+
       {/*
-        Watch-the-agent-work split view. Only agentic / plan-mode turns carry a
-        durable run id, so a plain chat turn renders no panel at all rather than
-        an empty frame — see `liveRunId` in the controller.
+        Watch-the-agent-work split view. Ordinary Ask turns also receive a
+        durable run id for receipts/feedback, but `liveRunId` deliberately
+        filters those out so the base chat never becomes a permanent IDE.
+        Planned and deep-research turns alone own this adjacent work canvas.
       */}
       <ChatLiveRunPanel
         collapsed={runPanelCollapsed()}
+        hidden={activeTab() !== 'chat' && !workCanvasActive()}
         onToggleCollapsed={toggleRunPanel}
+        orgId={session.activeOrg?.id}
         runId={liveRunId()}
         zdr={isActiveThreadTemporary()}
+        onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
+        workContent={workCanvasActive() ? contextualPanel() : undefined}
       />
     </div>
   )

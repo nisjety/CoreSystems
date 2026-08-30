@@ -342,14 +342,22 @@ export async function getImportJob(orgId: string, id: string, signal?: AbortSign
   })
 }
 
-export async function importUpload(orgId: string, files: File[], signal?: AbortSignal): Promise<ImportJob> {
+export async function importUpload(
+  orgId: string,
+  files: File[],
+  options?: { signal?: AbortSignal; zdr?: boolean },
+): Promise<ImportJob> {
   const form = new FormData()
   for (const file of files) {
     form.append('files', file, file.name)
   }
+  // Imports create durable Data Plane documents. Sending the explicit ZDR
+  // field makes a temporary-chat attempt fail closed at imports-core instead
+  // of relying on a client-only guard.
+  if (options?.zdr !== undefined) form.append('zdr', String(options.zdr))
   return requestForm<ImportJob>('/api/v1/knowledge/imports/upload', form, {
     headers: orgHeaders(orgId),
-    signal,
+    signal: options?.signal,
   })
 }
 

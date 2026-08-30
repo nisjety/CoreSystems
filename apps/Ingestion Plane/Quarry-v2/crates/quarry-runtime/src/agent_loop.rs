@@ -291,7 +291,38 @@ impl AgentLoop {
                 .execute(&effective_request, session, &mut ctx)
                 .await
             {
-                Ok(obs) => observations.push(obs),
+                Ok(obs) => {
+                    // W4: charge the flat action cost so max_cost_usd
+                    // budgets are enforceable even when no provider-
+                    // billed cost is available. The per-action cost
+                    // is intentionally conservative.
+                    let action_name = match &effective_request.action {
+                        quarry_core::contracts::AgentAction::Navigate { .. } => "navigate",
+                        quarry_core::contracts::AgentAction::Click { .. }
+                        | quarry_core::contracts::AgentAction::ClickRef { .. }
+                        | quarry_core::contracts::AgentAction::FrameClickRef { .. } => "click",
+                        quarry_core::contracts::AgentAction::Type { .. }
+                        | quarry_core::contracts::AgentAction::TypeRef { .. }
+                        | quarry_core::contracts::AgentAction::FrameTypeRef { .. } => "type",
+                        quarry_core::contracts::AgentAction::Press { .. } => "press",
+                        quarry_core::contracts::AgentAction::Scroll { .. } => "scroll",
+                        quarry_core::contracts::AgentAction::Select { .. }
+                        | quarry_core::contracts::AgentAction::SelectRef { .. }
+                        | quarry_core::contracts::AgentAction::FrameSelectRef { .. } => "select",
+                        quarry_core::contracts::AgentAction::Wait { .. }
+                        | quarry_core::contracts::AgentAction::WaitFor { .. }
+                        | quarry_core::contracts::AgentAction::WaitForRef { .. }
+                        | quarry_core::contracts::AgentAction::FrameWaitForRef { .. }
+                        | quarry_core::contracts::AgentAction::WaitForSemantic { .. } => "wait",
+                        quarry_core::contracts::AgentAction::Screenshot { .. } => "screenshot",
+                        quarry_core::contracts::AgentAction::Pdf => "pdf",
+                        quarry_core::contracts::AgentAction::Evaluate { .. } => "evaluate",
+                        _ => "click",
+                    };
+                    let cost = crate::action_cost::estimate_action_cost(action_name, 0);
+                    self.record_cost(cost.total_usd);
+                    observations.push(obs)
+                }
                 Err(e) => {
                     self.emit_event(
                         EventType::ActionFailed,

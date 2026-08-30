@@ -31,7 +31,7 @@ pub(super) async fn list_orgs(State(state): State<AppState>, headers: HeaderMap)
     .await
 }
 
-pub(super) async fn switch_active_org(
+pub(crate) async fn switch_active_org(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

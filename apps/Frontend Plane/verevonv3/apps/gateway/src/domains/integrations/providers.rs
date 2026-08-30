@@ -19,7 +19,7 @@ pub(super) async fn list_providers(
     proxy_for_user(&state, &user, &headers, Method::GET, &url, None).await
 }
 
-pub(super) async fn start_connect_session(
+pub(crate) async fn start_connect_session(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

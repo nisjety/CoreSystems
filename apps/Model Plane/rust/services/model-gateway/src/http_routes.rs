@@ -20,15 +20,16 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use mp_contracts::model_plane::v1::{
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, Approval, ApprovalKind,
     ApprovalProof, ApprovalState, BatchTranslateTextRequest, ContinuationExecution,
-    CreateEmbeddingRequest, CreateRealtimeSessionRequest, CreateVideoGenerationJobRequest,
-    DecideApprovalRequest, DetectTextLanguageRequest, ExtractImageTextRequest,
+    CancelRunRequest, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
+    CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest, Event,
+    EventType, ExtractImageTextRequest,
     GenerateImageRequest, GetApprovalRequest, GetPlanRequest, GetRunProofBundleRequest,
     GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVerificationMetricsRequest,
     GetVideoGenerationJobRequest, ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest,
     ListPlansRequest, ListRunsRequest, ListSpeechVoicesRequest, ListSystemRunsRequest,
     ListTodosRequest, ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep,
     PlanStepState, RegisterMcpServerRequest, ResumeRunRequest, ResumeRunResponse, RunDetail,
-    RunProofBundle, StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole,
+    ReplayThreadRequest, RunProofBundle, StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole,
     SynthesizeSpeechRequest, Todo, TodoPriority, TodoState, TranscribeSpeechRequest,
     TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
     VerificationMetrics, VerificationStatus,
@@ -137,6 +138,10 @@ pub fn build_router_with_readiness(
             post(delete_space_threads_for_deletion_coordinator),
         )
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
+        // Read-only replay of Session Core's canonical event log. The route
+        // exposes envelope metadata only; Any payload bytes remain inside the
+        // owning plane and cannot become an accidental browser data channel.
+        .route("/v1/threads/:thread_id/events", get(replay_thread_events))
         // Memory management ("what do you remember about me") — user-scoped,
         // backed by session-core's MemoryService.ListMemory/DeleteMemory.
         // Named `/v1/memories` (plural) to avoid colliding with the unrelated
@@ -165,6 +170,10 @@ pub fn build_router_with_readiness(
         .route("/v1/runs/:run_id", get(get_run))
         // Approving a plan IS the autonomy grant — see `plan_approval`.
         .route("/v1/runs/:run_id/plan-approval", post(plan_approval))
+        // Read-only durable browser-event projection used when a Work canvas
+        // returns after reload. The live SSE route remains the sole tail
+        // transport; this route only reads Session Core's canonical log.
+        .route("/v1/runs/:run_id/events/replay", get(replay_run_events))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -1076,6 +1085,149 @@ async fn get_run(
     Ok(Json(json!({ "run": run_detail_value(&detail) })))
 }
 
+#[derive(Debug, Deserialize)]
+struct ReplayRunEventsQuery {
+    /// Resume after this canonical event id (exclusive).
+    #[serde(default)]
+    after_event_id: Option<String>,
+    /// Bounded page size. The value applies to the underlying canonical log,
+    /// before the browser-only projection is filtered.
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct DurableRunEventProjection {
+    event_id: String,
+    event_type: String,
+    at: Value,
+    payload: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplayRunEventsResponse {
+    run_id: String,
+    events: Vec<DurableRunEventProjection>,
+    /// Cursor for the underlying canonical page, not merely the last browser
+    /// event. This lets a client make progress through pages containing only
+    /// unrelated thread events.
+    next_event_id: Option<String>,
+    truncated: bool,
+}
+
+/// Read the persisted, safe browser-agent event projection for one run.
+///
+/// The run lookup first proves ownership and gives us the owning thread. The
+/// canonical ReplayThread RPC then supplies envelope + JSON payloads; only the
+/// browser event types persisted by Session Core are selected, and the payload
+/// is required to name the requested run before it can leave this boundary.
+async fn replay_run_events(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+    Query(query): Query<ReplayRunEventsQuery>,
+) -> Result<Json<ReplayRunEventsResponse>, HttpJsonError> {
+    let trimmed = run_id.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "run_id is required" })),
+        ));
+    }
+    const DEFAULT_LIMIT: u32 = 160;
+    const MAX_LIMIT: u32 = 500;
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let after_event_id = query
+        .after_event_id
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+
+    // `GetRun` is the run-level owner check. Do not rely on a caller-supplied
+    // thread id, and do not turn a missing run into an empty successful page.
+    let detail = state
+        .run_client
+        .clone()
+        .get_run(authenticated_session_request(
+            GetRunRequest {
+                run_id: trimmed.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    if detail.thread_id.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "run has no owning thread" })),
+        ));
+    }
+
+    let response = state
+        .session_client
+        .clone()
+        .replay_thread(authenticated_session_request(
+            ReplayThreadRequest {
+                thread_id: detail.thread_id,
+                after_event_id,
+                limit,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_thread_error("session-core replay_thread failed", &e))?;
+
+    let mut stream = response.into_inner();
+    let mut events = Vec::new();
+    let mut raw_count = 0usize;
+    let mut next_event_id = None;
+    while let Some(event) = stream
+        .message()
+        .await
+        .map_err(|e| session_thread_error("session-core replay_thread failed", &e))?
+    {
+        raw_count += 1;
+        next_event_id = Some(event.event_id.clone());
+        let event_type = EventType::try_from(event.event_type)
+            .map(|kind| kind.as_str_name().to_owned())
+            .unwrap_or_else(|_| "EVENT_TYPE_UNSPECIFIED".to_owned());
+        if !matches!(
+            event_type.as_str(),
+            "EVENT_TYPE_BROWSER_ACTION_DISPATCHED"
+                | "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
+                | "EVENT_TYPE_BROWSER_RUN_PAUSED"
+                | "EVENT_TYPE_BROWSER_RUN_RESUMED"
+                | "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED"
+                | "EVENT_TYPE_BROWSER_ACTION_DECIDED"
+                | "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED"
+        ) {
+            continue;
+        }
+        let payload = event
+            .payload
+            .as_ref()
+            .and_then(|value| serde_json::from_slice::<Value>(&value.value).ok());
+        let Some(payload) = payload else { continue };
+        if payload.get("run_id").and_then(Value::as_str) != Some(trimmed) {
+            continue;
+        }
+        events.push(DurableRunEventProjection {
+            at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+            event_id: event.event_id,
+            event_type,
+            payload,
+        });
+    }
+
+    Ok(Json(ReplayRunEventsResponse {
+        run_id: trimmed.to_owned(),
+        events,
+        next_event_id,
+        truncated: raw_count >= limit as usize,
+    }))
+}
+
 // ============================================================================
 // Orchestration mutation handlers
 // ============================================================================
@@ -1272,7 +1424,12 @@ async fn decide_approval(
     Ok(Json(body))
 }
 
-/// Cancel a run — recorded as an event; no gRPC method exists yet.
+/// Cancel a run through Session Core's authoritative RunService.
+///
+/// The gateway still emits the legacy `RUN_CANCEL_REQUESTED` notification for
+/// downstream observers, but that event is no longer the source of truth: the
+/// RunService transaction flips the status and returns the durable
+/// `RUN_CANCELLED` event id as the receipt.
 async fn cancel_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -1281,34 +1438,63 @@ async fn cancel_run(
 ) -> Result<Json<Value>, HttpJsonError> {
     require_non_zdr_durable_mutation(&claims)?;
     require_durable_run_owner(&state, &claims, &run_id, &session_bearer).await?;
-    let envelope = mp_events::envelope::Envelope {
-        event_id: new_ulid(),
-        event_type: "RUN_CANCEL_REQUESTED".to_owned(),
-        schema_version: 1,
-        ts: Utc::now(),
-        producer: "model-gateway".to_owned(),
-        correlation_id: run_id.clone(),
-        causation_id: String::new(),
-        idempotency_key: format!("cancel_{run_id}"),
-        org_id: claims.org_id.clone(),
-        user_id: claims.user_id.clone(),
-        resource_ref: format!("run/{run_id}"),
-        payload: serde_json::json!({ "run_id": run_id }),
-        zdr: claims.zdr,
-    };
-    state
-        .publisher
-        .publish(mp_events::subjects::SUBJECT_RUN, &envelope)
+
+    let cancellation = state
+        .run_client
+        .clone()
+        .cancel_run(authenticated_session_request(
+            CancelRunRequest {
+                run_id: run_id.clone(),
+                reason: "user_requested".to_owned(),
+            },
+            &session_bearer,
+        )?)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": e.to_string() })),
-            )
-        })?;
-    Ok(Json(
-        json!({ "run_id": run_id, "status": "cancel_requested" }),
-    ))
+        .map_err(|error| grpc_status_to_http(&error))?
+        .into_inner();
+
+    // Keep the existing notification for consumers that watch the run subject,
+    // but never turn a successful durable cancellation into a 500 merely
+    // because an optional fan-out is unavailable.
+    if cancellation.cancelled {
+        let envelope = mp_events::envelope::Envelope {
+            event_id: new_ulid(),
+            event_type: "RUN_CANCEL_REQUESTED".to_owned(),
+            schema_version: 1,
+            ts: Utc::now(),
+            producer: "model-gateway".to_owned(),
+            correlation_id: run_id.clone(),
+            causation_id: cancellation.receipt_id.clone(),
+            idempotency_key: format!("cancel_{run_id}"),
+            org_id: claims.org_id.clone(),
+            user_id: claims.user_id.clone(),
+            resource_ref: format!("run/{run_id}"),
+            payload: serde_json::json!({
+                "run_id": run_id,
+                "receipt_id": cancellation.receipt_id,
+            }),
+            zdr: claims.zdr,
+        };
+        if let Err(error) = state
+            .publisher
+            .publish(mp_events::subjects::SUBJECT_RUN, &envelope)
+            .await
+        {
+            warn!(%error, run_id = %run_id, "durable cancellation recorded but notification fan-out failed");
+        }
+    }
+
+    let status = if cancellation.cancelled {
+        "cancelled"
+    } else {
+        "already_terminal"
+    };
+    return Ok(Json(json!({
+        "run_id": run_id,
+        "status": status,
+        "cancelled": cancellation.cancelled,
+        "receipt_id": cancellation.receipt_id,
+    })));
 }
 
 /// Resume a cancelled/paused run — flips execution-core's run state back to
@@ -5311,11 +5497,19 @@ fn approval_value(approval: &Approval) -> Value {
 /// Serialize a Verevon Proof Bundle. Every stage that did not happen stays
 /// `null` rather than becoming an empty object — a reader must never mistake
 /// "no execution recorded" for "executed with blank fields".
+///
+/// `effect_class` is derived only from the durable evidence already contained
+/// in this bundle. It is intentionally not inferred from free-form model text:
+/// an execution receipt proves an attempted effect, a provider receipt proves
+/// an external boundary acknowledged it, an approval without execution proves
+/// only a proposal, and no approval-chain evidence is read-only for this
+/// proof surface.
 fn proof_bundle_value(bundle: &RunProofBundle) -> Value {
     json!({
         "bundle_version": bundle.bundle_version,
         "run_id": bundle.run_id,
         "org_id": bundle.org_id,
+        "effect_class": proof_effect_class(bundle),
         "generated_at": bundle.generated_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         "run": bundle.run.as_ref().map_or(Value::Null, |run| json!({
             "goal": run.goal,
@@ -5329,6 +5523,36 @@ fn proof_bundle_value(bundle: &RunProofBundle) -> Value {
             "reason": section.reason,
         })).collect::<Vec<_>>(),
     })
+}
+
+fn proof_effect_class(bundle: &RunProofBundle) -> &'static str {
+    let mut has_approval = false;
+    let mut has_execution = false;
+    for approval in &bundle.approvals {
+        has_approval = true;
+        let Some(execution) = approval.execution.as_ref() else {
+            continue;
+        };
+        has_execution = true;
+        if execution
+            .outcome
+            .as_ref()
+            .is_some_and(|outcome| !outcome.provider_receipt_id.trim().is_empty())
+        {
+            return "external_receipt";
+        }
+    }
+    if has_execution {
+        return "effectful";
+    }
+    if has_approval {
+        return "proposed_effect";
+    }
+    if bundle.run.is_some() {
+        "read_only"
+    } else {
+        "unknown"
+    }
 }
 
 /// Render `VerificationMetrics` on the wire. Every count is passed through
@@ -7133,6 +7357,156 @@ async fn list_thread_messages(
 }
 
 #[derive(Debug, Deserialize)]
+struct ReplayThreadEventsQuery {
+    /// Resume after this event id (exclusive). Empty means from the beginning.
+    #[serde(default)]
+    after_event_id: Option<String>,
+    /// Server-side bound. Session Core treats zero as unlimited; the HTTP
+    /// surface always supplies a bounded value so a Trace panel cannot pull an
+    /// unbounded tenant history into one response.
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct DurableThreadEventResponse {
+    event_id: String,
+    event_type: String,
+    schema_version: u32,
+    at: Value,
+    producer: String,
+    correlation_id: String,
+    causation_id: String,
+    resource_ref: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplayThreadEventsResponse {
+    thread_id: String,
+    events: Vec<DurableThreadEventResponse>,
+    /// True only when the bounded request was filled. Session Core streams do
+    /// not carry a total count, so clients must use the last event id as a
+    /// cursor and treat this as a continuation hint rather than a count claim.
+    truncated: bool,
+}
+
+/// Replay the canonical, append-only Session Core event log for one thread.
+///
+/// This is deliberately an envelope-only read model. Event payloads are
+/// protobuf `Any` values owned by the Model Plane and may contain prompt,
+/// provider, or connector data that is not suitable for a browser Trace. The
+/// chat UI combines these safe labels with the existing plan/approval/proof
+/// endpoints for detail.
+async fn replay_thread_events(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ReplayThreadEventsQuery>,
+) -> Result<Json<ReplayThreadEventsResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let trimmed = thread_id.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "thread_id is required"})),
+        ));
+    }
+
+    const DEFAULT_LIMIT: u32 = 160;
+    const MAX_LIMIT: u32 = 500;
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let after_event_id = query
+        .after_event_id
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+
+    let response = state
+        .session_client
+        .clone()
+        .replay_thread(authenticated_session_request(
+            ReplayThreadRequest {
+                thread_id: trimmed.to_owned(),
+                after_event_id,
+                limit,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_thread_error("session-core replay_thread failed", &e))?;
+
+    let mut stream = response.into_inner();
+    let mut events = Vec::with_capacity(limit as usize);
+    while let Some(event) = stream
+        .message()
+        .await
+        .map_err(|e| session_thread_error("session-core replay_thread failed", &e))?
+    {
+        events.push(durable_thread_event(event));
+    }
+
+    let truncated = events.len() >= limit as usize;
+    Ok(Json(ReplayThreadEventsResponse {
+        thread_id: trimmed.to_owned(),
+        events,
+        truncated,
+    }))
+}
+
+/// Resolve the public lifecycle label for a replayed event.
+///
+/// Session Core's event table predates the protobuf `EventType` taxonomy for
+/// thread/message records, so those rows carry the correct discriminator in
+/// `Any.type_url` while their legacy string is converted to a numeric value
+/// that collides with plan events.  The type URL is the owning producer's
+/// authoritative discriminator; use it for those records and retain the
+/// envelope enum for the events that are already represented there.  Payload
+/// bytes are never decoded or returned to the browser.
+fn durable_thread_event_type(event: &Event) -> String {
+    let type_url = event
+        .payload
+        .as_ref()
+        .map(|payload| payload.type_url.as_str())
+        .unwrap_or_default();
+
+    let typed_label = match type_url {
+        "type.googleapis.com/model_plane.v1.ThreadCreated" => Some("THREAD_CREATED"),
+        "type.googleapis.com/model_plane.v1.MessageAppended" => Some("MESSAGE_APPENDED"),
+        "type.googleapis.com/model_plane.v1.StepCompleted" => Some("STEP_COMPLETED"),
+        "type.googleapis.com/model_plane.v1.RunStarted" => Some("RUN_STARTED"),
+        "type.googleapis.com/model_plane.v1.RunCancelled" => Some("RUN_CANCELLED"),
+        "type.googleapis.com/model_plane.v1.CheckpointSaved" => Some("CHECKPOINT_SAVED"),
+        "type.googleapis.com/model_plane.v1.ThreadPresentationUpdated" => {
+            Some("THREAD_PRESENTATION_UPDATED")
+        }
+        "type.googleapis.com/model_plane.v1.ThreadArchived" => Some("THREAD_ARCHIVED"),
+        _ => None,
+    };
+
+    typed_label.map_or_else(
+        || {
+            EventType::try_from(event.event_type)
+                .map(|kind| kind.as_str_name().to_owned())
+                .unwrap_or_else(|_| "EVENT_TYPE_UNSPECIFIED".to_owned())
+        },
+        str::to_owned,
+    )
+}
+
+fn durable_thread_event(event: Event) -> DurableThreadEventResponse {
+    let event_type = durable_thread_event_type(&event);
+    DurableThreadEventResponse {
+        event_id: event.event_id,
+        event_type,
+        schema_version: event.schema_version,
+        at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        producer: event.producer,
+        correlation_id: event.correlation_id,
+        causation_id: event.causation_id,
+        resource_ref: event.resource_ref,
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct ListMemoriesQuery {
     limit: Option<u32>,
 }
@@ -8276,9 +8650,25 @@ mod run_owner_publish_tests {
 
         async fn cancel_run(
             &self,
-            _: TonicRequest<CancelRunRequest>,
+            request: TonicRequest<CancelRunRequest>,
         ) -> Result<TonicResponse<CancelRunResponse>, Status> {
-            Err(Status::unimplemented("cancel_run not needed in test"))
+            let bearer = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok());
+            if bearer != Some("Bearer test-session-bearer") {
+                return Err(Status::unauthenticated(
+                    "verified session credential required",
+                ));
+            }
+            let request = request.into_inner();
+            if request.run_id != "run-owned" {
+                return Err(Status::not_found("run not found"));
+            }
+            Ok(TonicResponse::new(CancelRunResponse {
+                cancelled: true,
+                receipt_id: "receipt-cancel-1".to_owned(),
+            }))
         }
 
         async fn resolve_run_owner(
@@ -8870,6 +9260,82 @@ mod session_memory_error_tests {
                 body["error"], "session-core list_memory failed: boom",
                 "code {code:?} keeps the contextual string body",
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod durable_trace_projection_tests {
+    use super::*;
+
+    #[test]
+    fn replay_projection_keeps_envelope_and_omits_any_payload() {
+        let event = Event {
+            event_id: "evt-1".to_owned(),
+            // EVENT_TYPE_RUN_STARTED in the shared proto. Using the numeric
+            // value keeps this fixture resilient to generated Rust variant
+            // naming while still proving the stable wire label.
+            event_type: 90,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_725_000_000,
+                nanos: 0,
+            }),
+            producer: "session-core".to_owned(),
+            correlation_id: "corr-1".to_owned(),
+            causation_id: "cause-1".to_owned(),
+            resource_ref: "run/run-1".to_owned(),
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/private.Payload".to_owned(),
+                value: br#"{"secret":"must-not-cross"}"#.to_vec(),
+            }),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(durable_thread_event(event))
+            .expect("durable trace envelope serializes");
+        assert_eq!(value["event_id"], "evt-1");
+        assert_eq!(value["event_type"], "EVENT_TYPE_RUN_STARTED");
+        assert_eq!(value["producer"], "session-core");
+        assert_eq!(value["resource_ref"], "run/run-1");
+        assert!(value.get("payload").is_none());
+        assert!(value.get("org_id").is_none());
+        assert!(value.get("user_id").is_none());
+    }
+
+    #[test]
+    fn replay_projection_prefers_typed_thread_and_message_discriminators() {
+        for (type_url, expected) in [
+            (
+                "type.googleapis.com/model_plane.v1.ThreadCreated",
+                "THREAD_CREATED",
+            ),
+            (
+                "type.googleapis.com/model_plane.v1.MessageAppended",
+                "MESSAGE_APPENDED",
+            ),
+            (
+                "type.googleapis.com/model_plane.v1.StepCompleted",
+                "STEP_COMPLETED",
+            ),
+            (
+                "type.googleapis.com/model_plane.v1.RunCancelled",
+                "RUN_CANCELLED",
+            ),
+        ] {
+            let event = Event {
+                // 120 is PLAN_CREATED in the shared enum. Legacy thread and
+                // message rows used this value accidentally, so the typed
+                // payload discriminator must win during replay.
+                event_type: 120,
+                payload: Some(prost_types::Any {
+                    type_url: type_url.to_owned(),
+                    value: br#"{"private":"bytes"}"#.to_vec(),
+                }),
+                ..Default::default()
+            };
+
+            assert_eq!(durable_thread_event_type(&event), expected);
         }
     }
 }

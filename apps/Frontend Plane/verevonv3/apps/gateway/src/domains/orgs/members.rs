@@ -199,7 +199,7 @@ pub(super) async fn list_members(
     .await
 }
 
-pub(super) async fn invite_member(
+pub(crate) async fn invite_member(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -360,7 +360,7 @@ async fn canonical_member(
     Ok(None)
 }
 
-pub(super) async fn remove_member(
+pub(crate) async fn remove_member(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -405,7 +405,7 @@ pub(super) async fn remove_member(
     .await
 }
 
-pub(super) async fn update_member_role(
+pub(crate) async fn update_member_role(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

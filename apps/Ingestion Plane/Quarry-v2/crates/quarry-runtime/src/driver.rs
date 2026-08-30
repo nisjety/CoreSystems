@@ -18,12 +18,7 @@ pub struct DriverSelection {
     pub reasons: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct BrowserMeta {
-    pub session_id: Option<String>,
-    pub live_view_url: Option<String>,
-    pub recording_id: Option<String>,
-}
+pub use quarry_core::driver_meta::{BrowserMeta, LiveViewKind, LiveViewRef};
 
 /// Cache validators to send with a fetch so the upstream can return
 /// `304 Not Modified` instead of re-shipping unchanged content.

@@ -88,16 +88,16 @@ struct StudioProject {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StudioBlock {
-    id: String,
-    kind: String,
-    title: String,
-    body: Option<String>,
-    image_url: Option<String>,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+pub(crate) struct StudioBlock {
+    pub(crate) id: String,
+    pub(crate) kind: String,
+    pub(crate) title: String,
+    pub(crate) body: Option<String>,
+    pub(crate) image_url: Option<String>,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,27 +121,27 @@ struct SocialDraftExport {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateProjectBody {
-    title: Option<String>,
-    blocks: Option<Vec<StudioBlock>>,
-    selected_block_id: Option<String>,
+pub(crate) struct CreateProjectBody {
+    pub(crate) title: Option<String>,
+    pub(crate) blocks: Option<Vec<StudioBlock>>,
+    pub(crate) selected_block_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UpdateProjectBody {
-    title: Option<String>,
-    blocks: Option<Vec<StudioBlock>>,
-    selected_block_id: Option<String>,
+pub(crate) struct UpdateProjectBody {
+    pub(crate) title: Option<String>,
+    pub(crate) blocks: Option<Vec<StudioBlock>>,
+    pub(crate) selected_block_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ExportSocialDraftBody {
-    title: Option<String>,
-    body: Option<String>,
-    platforms: Option<Vec<String>>,
-    scheduled_at: Option<String>,
+pub(crate) struct ExportSocialDraftBody {
+    pub(crate) title: Option<String>,
+    pub(crate) body: Option<String>,
+    pub(crate) platforms: Option<Vec<String>>,
+    pub(crate) scheduled_at: Option<String>,
 }
 
 impl StudioStore {
@@ -232,7 +232,7 @@ async fn list_projects(
     .into_response()
 }
 
-async fn create_project(
+pub(crate) async fn create_project(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<CreateProjectBody>,
@@ -275,7 +275,7 @@ async fn get_project(
     Json(ok(ProjectMutation { project })).into_response()
 }
 
-async fn update_project(
+pub(crate) async fn update_project(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,
@@ -330,7 +330,7 @@ async fn update_project(
     Json(ok(ProjectMutation { project })).into_response()
 }
 
-async fn export_social_draft(
+pub(crate) async fn export_social_draft(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,

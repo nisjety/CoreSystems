@@ -506,6 +506,35 @@ impl BrowserDriver for KernelDriver {
         })
     }
 
+    async fn live_view(
+        &self,
+        _session: &BrowserSession,
+    ) -> QuarryResult<Option<quarry_core::driver_meta::LiveViewRef>> {
+        let state = self.state.lock().await;
+        let url = match state.live_view_url.clone() {
+            Some(u) => u,
+            None => return Ok(None),
+        };
+        // Kernel's live_view_url is a deep-link to the hosted player.
+        // No documented expiry in the API; default to 5 minutes so
+        // the App Shell triggers a refresh defensively.
+        Ok(Some(quarry_core::driver_meta::LiveViewRef {
+            url,
+            kind: Some(quarry_core::driver_meta::LiveViewKind::Iframe),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        }))
+    }
+
+    async fn refresh_live_view(
+        &self,
+        session: &BrowserSession,
+    ) -> QuarryResult<Option<quarry_core::driver_meta::LiveViewRef>> {
+        // Re-read the cached URL; if Kernel rotated the underlying
+        // browser id, ensure_browser is the heavier path the App
+        // Shell can take via a UI action — not the periodic refresh.
+        self.live_view(session).await
+    }
+
     async fn release(&self, session: BrowserSession) -> QuarryResult<()> {
         // Best-effort: capture session state from Kernel before deleting,
         // then persist back via ProfileStore so the next acquire can restore.

@@ -207,6 +207,27 @@ impl BrowserbaseDriver {
     }
 }
 
+// W2 — surface the Browserbase live-view URL on the
+// `BrowserDriver` trait so the App Shell can render the cloud
+// session without polling. We return it as an IFRAME-typed
+// `LiveViewRef` because Browserbase's URL is a deep-link to the
+// vendor's hosted player page.
+impl BrowserbaseDriver {
+    async fn build_live_view(&self) -> Option<quarry_core::driver_meta::LiveViewRef> {
+        let state = self.state.lock().await;
+        let url = state.live_view_url.clone()?;
+        Some(quarry_core::driver_meta::LiveViewRef {
+            url,
+            kind: Some(quarry_core::driver_meta::LiveViewKind::Iframe),
+            // Browserbase URLs are short-lived; the App Shell
+            // calls `refresh_live_view` after this expires.
+            // Default 5 minutes matches the documented Browserbase
+            // session token lifetime; safe lower bound.
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateSessionResponse {
@@ -229,6 +250,24 @@ impl BrowserDriver for BrowserbaseDriver {
                 pages_served: 0,
             })),
         })
+    }
+
+    async fn live_view(
+        &self,
+        _session: &BrowserSession,
+    ) -> QuarryResult<Option<quarry_core::driver_meta::LiveViewRef>> {
+        Ok(self.build_live_view().await)
+    }
+
+    async fn refresh_live_view(
+        &self,
+        _session: &BrowserSession,
+    ) -> QuarryResult<Option<quarry_core::driver_meta::LiveViewRef>> {
+        // Browserbase session tokens rotate every 5 minutes; a
+        // refresh is just another read of the cached URL. The
+        // App Shell treats the new `expires_at` as the next
+        // refresh deadline.
+        Ok(self.build_live_view().await)
     }
 
     async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {

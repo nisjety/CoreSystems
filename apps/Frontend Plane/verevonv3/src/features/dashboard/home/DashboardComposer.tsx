@@ -8,6 +8,7 @@ import {
 	AudioWaveform,
 	Blocks,
 	Briefcase,
+	BookOpen,
 	Camera,
 	Calendar,
 	Check,
@@ -34,7 +35,6 @@ import {
 	Square,
 	Telescope,
 	Upload,
-	User,
 	WandSparkles,
 	X,
 	Zap,
@@ -67,7 +67,6 @@ import {
 	loadComposerSettingsItems,
 	type ComposerSettingsItem,
 } from "@/shared/api/composer-settings-client";
-import { searchNavbar } from "@/shared/api/navbar-client";
 import { selectChatThread } from "@/features/chat/lib/chat-thread-history";
 import { writePendingChatLaunch } from "@/features/chat/lib/pending-chat-launch";
 import {
@@ -141,6 +140,8 @@ type HistoryPanelItem = {
 	updatedAt: string;
 	/** Undefined for a live in-composer turn, which has no thread to pin yet. */
 	pinned?: boolean;
+	/** Latest server-owned run state, when this history item is a durable thread. */
+	runStatus?: string;
 };
 
 type ComposerSettings = {
@@ -149,7 +150,7 @@ type ComposerSettings = {
 };
 
 type SettingsView = "main" | "skills" | "connectors";
-type EntityKind = "date" | "file" | "person";
+type EntityKind = "date" | "file";
 
 type EntityToken = {
 	kind: EntityKind;
@@ -175,10 +176,9 @@ type AutocompleteState = {
 
 type TriggerContext =
 	| { type: "date"; dayIndex: number; rawLen: number; start: number }
-	| { type: "person"; query: string; rawLen: number; start: number }
 	| { type: "slash"; query: string; rawLen: number; start: number };
 
-type DashboardComposerAttachment = {
+export type DashboardComposerAttachment = {
 	id: string;
 	name: string;
 	size: number;
@@ -492,6 +492,10 @@ export function DashboardComposer(props: {
 	onTemporaryChatChange?: (value: boolean) => void;
 	/** Once a message has been sent in a temporary thread, the toggle can no longer be turned off mid-conversation. */
 	temporaryChatLocked?: boolean;
+	/** Foreign-origin transcript currently displayed read-only in Chat. */
+	disabled?: boolean;
+	/** Explicitly persist selected files as durable organisation knowledge. */
+	onKnowledgeImport?: (attachments: DashboardComposerAttachment[]) => Promise<void> | void;
 }) {
 	const i18n = useI18n();
 	const navigate = useNavigate();
@@ -500,8 +504,6 @@ export function DashboardComposer(props: {
 	let historyTriggerRef: HTMLSpanElement | undefined;
 	let settingsTriggerRef: HTMLSpanElement | undefined;
 	let textareaRef: HTMLTextAreaElement | undefined;
-	let autocompleteTimer: number | undefined;
-	let autocompleteController: AbortController | undefined;
 	let modeAnnouncementTimer: number | undefined;
 	let mediaRecorder: MediaRecorder | undefined;
 	let audioChunks: Blob[] = [];
@@ -520,6 +522,8 @@ export function DashboardComposer(props: {
 	const [dragActive, setDragActive] = createSignal(false);
 	const [entities, setEntities] = createSignal<EntityToken[]>([]);
 	const [files, setFiles] = createSignal<ComposerFile[]>([]);
+	const [knowledgeImporting, setKnowledgeImporting] = createSignal(false);
+	const [knowledgeImportNotice, setKnowledgeImportNotice] = createSignal<string | null>(null);
 	const [historyPanelPosition, setHistoryPanelPosition] =
 		createSignal<PanelPosition>({ bottom: 0, right: 0, maxHeight: 400 });
 	const [historyThreads, setHistoryThreads] = createSignal<
@@ -532,6 +536,7 @@ export function DashboardComposer(props: {
 		null,
 	);
 	const [modelOpen, setModelOpen] = createSignal(false);
+	const [contextScopeOpen, setContextScopeOpen] = createSignal(false);
 	const [responseMode, setResponseMode] = createSignal<ResponseMode>("auto");
 	// The picker pins three first-class Verevon intent modes (Budget/Balance/Genius)
 	// at the very top; the backend resolves these pseudo-model ids server-side. The
@@ -605,6 +610,12 @@ export function DashboardComposer(props: {
 	const [voiceRecording, setVoiceRecording] = createSignal(false);
 	const hasContent = createMemo(
 		() => props.message.trim().length > 0 || files().length > 0,
+	);
+	const modelAttachmentCount = createMemo(
+		() => files().filter((file) => file.type.startsWith("image/")).length,
+	);
+	const previewOnlyAttachmentCount = createMemo(
+		() => files().filter((file) => !file.type.startsWith("image/")).length,
 	);
 	const imageMode = createMemo(() => props.imageMode ?? false);
 	const planMode = createMemo(() => props.planMode ?? false);
@@ -793,6 +804,7 @@ export function DashboardComposer(props: {
 	createEffect(
 		() => ({
 			modelOpen: modelOpen(),
+			contextScopeOpen: contextScopeOpen(),
 			historyOpen: historyOpen(),
 			settingsOpen: settingsOpen(),
 			suggestionsOpen: suggestionsOpen(),
@@ -801,6 +813,7 @@ export function DashboardComposer(props: {
 		(state) => {
 			if (
 				!state.modelOpen &&
+				!state.contextScopeOpen &&
 				!state.historyOpen &&
 				!state.settingsOpen &&
 				!state.suggestionsOpen &&
@@ -810,6 +823,7 @@ export function DashboardComposer(props: {
 
 			const closePanels = () => {
 				setModelOpen(false);
+				setContextScopeOpen(false);
 				setHistoryOpen(false);
 				setSettingsOpen(false);
 				setSuggestionsOpen(false);
@@ -905,6 +919,41 @@ export function DashboardComposer(props: {
 					),
 		);
 		focusTextareaAt();
+	};
+
+	const importFilesToKnowledge = async () => {
+		if (!props.onKnowledgeImport || files().length === 0 || knowledgeImporting()) return;
+		if (temporaryChat()) {
+			setKnowledgeImportNotice(i18n.tr(
+				"Midlertidig chat kan ikke lagre filer i kunnskapsbasen.",
+				"Temporary chat cannot save files to the knowledge base.",
+			));
+			return;
+		}
+		setKnowledgeImporting(true);
+		setKnowledgeImportNotice(null);
+		try {
+			const importable = files().filter((file) => !file.type.startsWith("image/"));
+			if (importable.length === 0) {
+				setKnowledgeImportNotice(i18n.tr(
+					"Bilder sendes til modellen og kan ikke lagres som kunnskapsdokumenter her.",
+					"Images are sent to the model and cannot be saved as knowledge documents here.",
+				));
+				return;
+			}
+			await props.onKnowledgeImport(importable.map((file) => ({ ...file })));
+			setKnowledgeImportNotice(i18n.tr(
+				"Importjobb startet. Filene blir tilgjengelige i organisasjonskunnskapen når den er ferdig.",
+				"Import job started. The files will be available in organisation knowledge when it finishes.",
+			));
+		} catch (error) {
+			setKnowledgeImportNotice(error instanceof Error ? error.message : i18n.tr(
+				"Kunne ikke starte importen.",
+				"Could not start the import.",
+			));
+		} finally {
+			setKnowledgeImporting(false);
+		}
 	};
 
 	const toggleRecording = async () => {
@@ -1037,6 +1086,7 @@ export function DashboardComposer(props: {
 			setHistoryOpen(false);
 			setSettingsOpen(false);
 			setSuggestionsOpen(false);
+			setContextScopeOpen(false);
 			setAutocomplete(null);
 		});
 	};
@@ -1119,6 +1169,7 @@ export function DashboardComposer(props: {
 		setSettingsOpen(false);
 		setModelOpen(false);
 		setSuggestionsOpen(false);
+		setContextScopeOpen(false);
 		setAutocomplete(null);
 	};
 
@@ -1147,17 +1198,11 @@ export function DashboardComposer(props: {
 		setHistoryOpen(false);
 		setModelOpen(false);
 		setSuggestionsOpen(false);
+		setContextScopeOpen(false);
 		setAutocomplete(null);
 	};
 
 	const updateAutocomplete = (text: string, position: number) => {
-		if (autocompleteTimer) {
-			window.clearTimeout(autocompleteTimer);
-			autocompleteTimer = undefined;
-		}
-		autocompleteController?.abort();
-		autocompleteController = undefined;
-
 		const trigger = detectTrigger(text, position);
 		setAutocompleteIndex(0);
 
@@ -1187,48 +1232,6 @@ export function DashboardComposer(props: {
 			return;
 		}
 
-		if (trigger.query.length === 0) {
-			setAutocomplete(null);
-			return;
-		}
-
-		const controller = new AbortController();
-		autocompleteController = controller;
-		autocompleteTimer = window.setTimeout(() => {
-			searchNavbar(trigger.query, controller.signal)
-				.then((payload) => {
-					const items = payload.results
-						.slice(0, trigger.type === "person" ? 6 : 5)
-						.map((result) => ({
-							id: result.id,
-							icon: trigger.type === "person" ? User : FileText,
-							label: result.label,
-							meta:
-								trigger.type === "person"
-									? ("person" as const)
-									: ("file" as const),
-						}));
-					setAutocomplete(
-						items.length > 0
-							? {
-									category:
-										trigger.type === "person"
-											? i18n.tr("Personer", "People")
-											: i18n.tr(
-													"Dokumenter",
-													"Documents",
-												),
-									items,
-									triggerStart: trigger.start,
-									triggerLen: trigger.rawLen,
-								}
-							: null,
-					);
-				})
-				.catch(() => {
-					if (!controller.signal.aborted) setAutocomplete(null);
-				});
-		}, 180);
 	};
 
 	const handleMessageInput = (value: string, cursorPosition: number) => {
@@ -1294,11 +1297,11 @@ export function DashboardComposer(props: {
 		item: AutocompleteItem,
 	) => {
 		const parts = autocompleteTriggerParts(state);
-		const inserted = item.meta === "person" ? `@${item.label}` : item.label;
+		const inserted = item.label;
 		props.onMessageChange(parts.before + inserted + parts.after);
 
 		const meta = item.meta;
-		if (meta === "date" || meta === "person" || meta === "file") {
+		if (meta === "date" || meta === "file") {
 			setEntities((current) => [
 				...current,
 				{ kind: meta, start: state.triggerStart, text: inserted },
@@ -1415,6 +1418,7 @@ export function DashboardComposer(props: {
 	};
 
 	const submitComposer = async () => {
+		if (props.disabled) return;
 		if (
 			autocomplete() ||
 			!hasContent() ||
@@ -1472,8 +1476,6 @@ export function DashboardComposer(props: {
 
 	onCleanup(() => {
 		mediaRecorder?.stream.getTracks().forEach((track) => track.stop());
-		if (autocompleteTimer) window.clearTimeout(autocompleteTimer);
-		autocompleteController?.abort();
 		if (modeAnnouncementTimer) window.clearTimeout(modeAnnouncementTimer);
 		files().forEach(revokeFilePreviewUrl);
 	});
@@ -1484,6 +1486,8 @@ export function DashboardComposer(props: {
 				composerRootRef = element;
 			}}
 			class={dashboardComposerRootClass({ dragActive: dragActive() })}
+			aria-disabled={props.disabled ? "true" : "false"}
+			inert={props.disabled}
 			onDragOver={(event) => {
 				if (dragEventHasFiles(event)) {
 					event.preventDefault();
@@ -1723,20 +1727,89 @@ export function DashboardComposer(props: {
 				</div>
 
 				<div class="dashboard-composer-controls__right">
-					<Show when={props.onPlanModeChange}>
-						<ComposerIconButton
-							active={planMode()}
-							label={i18n.tr(
-								"Planmodus - agenten planlegger og ber om godkjenning før risikable verktøy",
-								"Plan mode - the agent plans and asks for approval before risky tools",
-							)}
-							onClick={() =>
-								props.onPlanModeChange?.(!planMode())
-							}
+					<span class="dashboard-composer-context-wrap">
+													<ComposerIconButton
+							active={contextScopeOpen()}
+							expanded={contextScopeOpen()}
+													label={i18n.tr(
+														`Kontekst for dette svaret: ${browseWeb() ? "kunnskap og nett" : "kunnskap"}`,
+														`Context for this answer: ${browseWeb() ? "knowledge and web" : "knowledge"}`,
+													)}
+							onClick={() => {
+								setContextScopeOpen((current) => !current);
+								setModelOpen(false);
+								setHistoryOpen(false);
+								setSettingsOpen(false);
+								setSuggestionsOpen(false);
+							}}
 							variant="chip"
-						>
-							<WandSparkles class="size-3.5" />
-						</ComposerIconButton>
+													>
+														<BookOpen class="size-3.5" />
+													</ComposerIconButton>
+													<span class="dashboard-composer-context-label" aria-hidden="true">
+														{browseWeb() ? i18n.tr("Kunnskap + nett", "Knowledge + web") : i18n.tr("Kunnskap", "Knowledge")}
+													</span>
+						<Show when={contextScopeOpen()}>
+							<div class="dashboard-composer-context-panel verevon-popover" role="dialog" aria-label={i18n.tr("Kontekst for svaret", "Answer context")}>
+								<div class="dashboard-composer-context-panel__heading">
+									<BookOpen class="size-4" />
+									<strong>{i18n.tr("Kontekst", "Context")}</strong>
+								</div>
+								<p>{i18n.tr("Dette er hva Verevon kan bruke i denne meldingen.", "This is what Verevon can use for this message.")}</p>
+								<ul class="dashboard-composer-context-panel__list">
+									<li>
+										<span class="dashboard-composer-context-dot dashboard-composer-context-dot--on" />
+										<span><strong>{i18n.tr("Organisasjonskunnskap", "Organisation knowledge")}</strong><small>{i18n.tr("Tillatte kilder brukes når de gir treff.", "Permitted sources are used when they provide a match.")}</small></span>
+									</li>
+									<li>
+										<span class={cn("dashboard-composer-context-dot", browseWeb() ? "dashboard-composer-context-dot--on" : "dashboard-composer-context-dot--off")} />
+										<span><strong>{i18n.tr("Nettkilder", "Web sources")}</strong><small>{browseWeb() ? i18n.tr("Søk er aktivert.", "Search is enabled.") : i18n.tr("Slå på Søk for å hente fra nettet.", "Turn on Search to use the web.")}</small></span>
+									</li>
+									<li>
+										<span class={cn("dashboard-composer-context-dot", files().length > 0 ? "dashboard-composer-context-dot--on" : "dashboard-composer-context-dot--off")} />
+										<span><strong>{i18n.tr("Vedlegg", "Attachments")}</strong><small>{files().length > 0
+											? modelAttachmentCount() > 0
+												? i18n.tr(
+													`${modelAttachmentCount()} bilde${modelAttachmentCount() === 1 ? "" : "r"} sendes til modellen${previewOnlyAttachmentCount() > 0 ? ` · ${previewOnlyAttachmentCount()} fil${previewOnlyAttachmentCount() === 1 ? "" : "er"} vises bare her` : ""}.`,
+													`${modelAttachmentCount()} image${modelAttachmentCount() === 1 ? "" : "s"} will be sent to the model${previewOnlyAttachmentCount() > 0 ? ` · ${previewOnlyAttachmentCount()} file${previewOnlyAttachmentCount() === 1 ? "" : "s"} are preview-only here` : ""}.`,
+												)
+												: i18n.tr(
+													`${previewOnlyAttachmentCount()} fil${previewOnlyAttachmentCount() === 1 ? "" : "er"} vises bare her; last opp til kunnskapsbasen hvis du vil lagre dem.`,
+													`${previewOnlyAttachmentCount()} file${previewOnlyAttachmentCount() === 1 ? " is" : "s are"} preview-only here; upload to knowledge if you want to save them.`,
+												)
+											: i18n.tr("Ingen filer lagt ved.", "No files attached.")}</small></span>
+									</li>
+									<li>
+										<span class={cn("dashboard-composer-context-dot", deepSearch() ? "dashboard-composer-context-dot--on" : "dashboard-composer-context-dot--off")} />
+										<span><strong>{i18n.tr("Dyp research", "Deep research")}</strong><small>{deepSearch() ? i18n.tr("Utvidet research er aktivert.", "Extended research is enabled.") : i18n.tr("Ikke aktivert.", "Not enabled.")}</small></span>
+									</li>
+								</ul>
+							</div>
+						</Show>
+					</span>
+					<Show when={props.onPlanModeChange}>
+						<span class={cn("dashboard-composer-intent-toggle", planMode() ? "dashboard-composer-intent-toggle--active" : "")}>
+							<ComposerIconButton
+								active={planMode()}
+								label={i18n.tr(
+									planMode()
+										? "Do-modus - agenten planlegger og ber om godkjenning før risikable verktøy"
+										: "Ask-modus - les, hent og foreslå uten å utføre risikable handlinger",
+									planMode()
+										? "Do mode - the agent plans and asks for approval before risky tools"
+										: "Ask mode - read, retrieve, and propose without executing risky actions",
+								)}
+								onClick={() =>
+									props.onPlanModeChange?.(!planMode())
+								}
+								variant="chip"
+							>
+								<WandSparkles class="size-3.5" />
+							</ComposerIconButton>
+							<span class="dashboard-composer-intent-toggle__label" aria-live="polite">
+								{planMode() ? "Do" : "Ask"}
+							</span>
+						</span>
 					</Show>
 					<Show when={props.onTemporaryChatChange}>
 						<ComposerIconButton
@@ -1801,7 +1874,7 @@ export function DashboardComposer(props: {
 						fileInputRef = element;
 					}}
 					type="file"
-					accept="*/*"
+					accept="image/*,.pdf,.docx,.txt,.md,.markdown,.csv,.json,.html,.htm"
 					multiple
 					class="sr-only"
 					aria-label={i18n.tr("Legg til filer", "Add files")}
@@ -1890,7 +1963,11 @@ export function DashboardComposer(props: {
 						attachments={files()}
 						i18n={i18n}
 						onEnhance={enhanceAttachments}
+						onKnowledgeImport={props.onKnowledgeImport ? importFilesToKnowledge : undefined}
 						onRemove={removeFile}
+						knowledgeImportDisabled={temporaryChat() || Boolean(props.disabled)}
+						knowledgeImporting={knowledgeImporting()}
+						knowledgeImportNotice={knowledgeImportNotice()}
 					/>
 
 					<Show when={activeActions().length > 0}>
@@ -2038,7 +2115,10 @@ export function DashboardComposer(props: {
 								active={suggestionsOpen()}
 								label={i18n.tr("Forslag", "Suggestions")}
 								onClick={() =>
-									setSuggestionsOpen((current) => !current)
+									{
+										setSuggestionsOpen((current) => !current)
+										setContextScopeOpen(false)
+									}
 								}
 								variant="toolbar"
 							>
@@ -2354,16 +2434,11 @@ function createComposerTurn(input: {
 
 function detectTrigger(text: string, position: number): TriggerContext | null {
 	const before = text.slice(0, position);
-	const personMatch = before.match(/@(\w*)$/);
-	if (personMatch) {
-		const query = personMatch[1] ?? "";
-		return {
-			type: "person",
-			query: query.toLowerCase(),
-			start: position - personMatch[0].length,
-			rawLen: personMatch[0].length,
-		};
-	}
+	// `@` mentions are intentionally not handled in the global composer:
+	// there is no global Control-owned roster or agent-ref contract here.
+	// Space rooms own governed agent mentions, so silently searching the
+	// knowledge endpoint and labelling those results as people would be a
+	// misleading invocation control.
 
 	const slashMatch = before.match(/\/(\w*)$/);
 	if (slashMatch) {
@@ -2843,7 +2918,11 @@ function formatFileSize(size: number) {
 function AttachmentPreview(props: {
 	attachments: ComposerFile[];
 	i18n: ReturnType<typeof useI18n>;
+	knowledgeImportDisabled?: boolean;
+	knowledgeImporting?: boolean;
+	knowledgeImportNotice?: string | null;
 	onEnhance: () => void;
+	onKnowledgeImport?: () => Promise<void> | void;
 	onRemove: (id: string) => void;
 }) {
 	return (
@@ -2905,7 +2984,26 @@ function AttachmentPreview(props: {
 				>
 					<WandSparkles class="size-4" />
 				</button>
+				<Show when={props.onKnowledgeImport && props.attachments.some((file) => !file.type.startsWith("image/"))}>
+					<button
+						type="button"
+						disabled={props.knowledgeImportDisabled || props.knowledgeImporting}
+						onClick={() => void props.onKnowledgeImport?.()}
+						class="dashboard-composer-attachments__knowledge"
+						aria-label={props.i18n.tr("Legg til i kunnskapsbasen", "Add to knowledge base")}
+						title={props.knowledgeImportDisabled
+							? props.i18n.tr("Ikke tilgjengelig i midlertidig chat", "Unavailable in temporary chat")
+							: props.i18n.tr("Lagre filene i organisasjonskunnskapen", "Save files to organisation knowledge")}
+					>
+						<Show when={!props.knowledgeImporting} fallback={<Loader2 class="size-4 animate-spin" />}>
+							<Upload class="size-4" />
+						</Show>
+					</button>
+				</Show>
 			</div>
+			<Show when={props.knowledgeImportNotice}>
+				<p class="dashboard-composer-attachments__notice" role="status">{props.knowledgeImportNotice}</p>
+			</Show>
 		</Show>
 	);
 }
@@ -3115,10 +3213,25 @@ function HistoryPanel(props: {
 																	"Untitled",
 																)}
 														</span>
-														<span class="verevon-menu-meta">
-															{item.meta}
+															<span class="verevon-menu-meta">
+																{item.meta}
+															</span>
+															<Show
+																when={historyRunStatusChip(item.runStatus, props.i18n)}
+															>
+																{(chip) => (
+																	<span
+																	class="dashboard-composer-history-status"
+																	data-tone={chip().tone}
+																	role="status"
+																		aria-label={chip().label}
+																	>
+																		<span aria-hidden="true" />
+																		{chip().label}
+																	</span>
+																)}
+															</Show>
 														</span>
-													</span>
 													<span class="verevon-menu-meta dashboard-composer-history-row__time">
 														{formatHistoryItemTime(
 															item,
@@ -3608,6 +3721,7 @@ function ComposerIconButton(props: {
 	active?: boolean;
 	children: JSX.Element;
 	disabled?: boolean;
+	expanded?: boolean;
 	label: string;
 	onClick: () => void;
 	variant: ComposerIconButtonVariant;
@@ -3622,6 +3736,7 @@ function ComposerIconButton(props: {
 			type="button"
 			aria-label={props.label}
 			aria-pressed={props.active ? "true" : "false"}
+			aria-expanded={props.expanded == null ? undefined : props.expanded ? "true" : "false"}
 			disabled={props.disabled}
 			title={props.label}
 			onClick={() => {
@@ -3656,6 +3771,7 @@ function threadToHistoryItem(
 		title: thread.title || i18n.tr("Uten tittel", "Untitled"),
 		updatedAt: thread.updatedAt,
 		pinned: thread.pinned,
+		runStatus: thread.latestRunStatus,
 	};
 }
 
@@ -3670,6 +3786,45 @@ function turnToHistoryItem(
 		title: turn.body || i18n.tr("Uten tittel", "Untitled"),
 		updatedAt: turn.createdAtIso,
 	};
+}
+
+type HistoryRunStatusTone = "active" | "attention";
+
+type HistoryRunStatusChip = {
+	label: string;
+	tone: HistoryRunStatusTone;
+};
+
+/**
+ * Keep the history rail calm: completed/cancelled runs need no extra chrome,
+ * while active or attention states make a durable thread discoverable without
+ * polling every thread or opening the dense Work canvas.
+ */
+function historyRunStatusChip(
+	value: string | undefined,
+	i18n: ReturnType<typeof useI18n>,
+): HistoryRunStatusChip | undefined {
+	const status = value?.trim().toLowerCase();
+	if (!status) return undefined;
+	if (status === "queued") {
+		return { label: i18n.tr("I kø", "Queued"), tone: "active" };
+	}
+	if (status === "running" || status === "in_progress") {
+		return { label: i18n.tr("Pågår", "Running"), tone: "active" };
+	}
+	if (
+		status === "awaiting_approval" ||
+		status === "waiting_approval" ||
+		status === "paused" ||
+		status === "blocked" ||
+		status === "ambiguous"
+	) {
+		return { label: i18n.tr("Trenger oppmerksomhet", "Needs attention"), tone: "attention" };
+	}
+	if (status === "failed") {
+		return { label: i18n.tr("Mislyktes", "Failed"), tone: "attention" };
+	}
+	return undefined;
 }
 
 function historyGroups(

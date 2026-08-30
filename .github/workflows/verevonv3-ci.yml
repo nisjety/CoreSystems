@@ -158,3 +158,33 @@ jobs:
 
       - name: Verify (lint -> typecheck -> test -> build)
         run: pnpm verify
+
+  docker-image:
+    name: Docker — production SPA image
+    runs-on: ubuntu-latest
+    # Keep the image gate separate from the host SPA gate: Docker must prove
+    # that the frontend context can consume the generated Ingestion Plane SDK,
+    # not merely that a prior workspace install happened to create it.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate and build the Quarry TypeScript SDK
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
+        run: |
+          ./generate.sh
+          cd typescript
+          corepack enable
+          pnpm install --ignore-scripts
+          pnpm run build
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build production image with the named SDK context
+        working-directory: 'apps/Frontend Plane/verevonv3'
+        run: >-
+          docker buildx build
+          --target production
+          --build-context 'quarry-client=../../Ingestion Plane/Quarry-v2/sdks/typescript'
+          --tag verevonv3-ci:${{ github.sha }}
+          --load
+          .

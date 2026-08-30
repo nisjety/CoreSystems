@@ -37,13 +37,7 @@ async fn main() -> Result<()> {
     let grpc_handle = tokio::spawn(execution_core::grpc::serve(state, readiness.clone(), auth));
     let http_handle = tokio::spawn(execution_core::http_health::serve(readiness));
 
-    let shutdown = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-        info!("SIGTERM received, shutting down");
-    };
+    let shutdown = shutdown_signal();
 
     tokio::select! {
         result = grpc_handle => result??,
@@ -53,4 +47,21 @@ async fn main() -> Result<()> {
 
     info!("execution-core stopped");
     Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler")
+        .recv()
+        .await;
+    info!("SIGTERM received, shutting down");
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("install Ctrl-C handler");
+    info!("Ctrl-C received, shutting down");
 }

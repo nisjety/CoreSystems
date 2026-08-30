@@ -58,7 +58,7 @@ async fn get_policy(
     .await
 }
 
-async fn put_policy(
+pub(crate) async fn put_policy(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<Value>,

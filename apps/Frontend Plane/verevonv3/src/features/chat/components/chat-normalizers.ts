@@ -30,6 +30,7 @@ import {
   formatLatency,
   hostname,
   inferArtifactKind,
+  numberValue,
   isValidUrl,
   normalizeTaskStatus,
   objectValue,
@@ -83,11 +84,15 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       model: turn.model,
       modelUsed: turn.modelUsed,
       requestId: turn.requestId,
+      runId: turn.runId,
+      planMode: turn.planMode,
+      grantedRung: turn.grantedRung,
       status: turn.status,
       inputTokens: turn.inputTokens,
       outputTokens: turn.outputTokens,
       latencyMs: turn.latencyMs,
       costUsd: turn.costUsd,
+      effectClass: turn.effectClass,
       confidence: turn.confidence,
       reasoning: turn.reasoning,
       citations: turn.citations,
@@ -99,7 +104,11 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       recalledMemories: turn.recalledMemories,
       stopReason: turn.stopReason,
       tools: turn.tools,
-      attachments: turn.attachments,
+      // `previewUrl` is a live data URL used by the contextual canvas. It can
+      // be large and may contain private file bytes, so it never enters the
+      // durable transcript/cache. The attachment metadata remains available
+      // for the message chip after a reload.
+      attachments: turn.attachments.map(({ previewUrl: _previewUrl, ...attachment }) => attachment),
     }))
 }
 
@@ -127,11 +136,15 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     model: turn.model,
     modelUsed: turn.modelUsed,
     requestId: turn.requestId,
+    runId: turn.runId,
+    planMode: turn.planMode,
+    grantedRung: turn.grantedRung,
     status: turn.status,
     inputTokens: turn.inputTokens,
     outputTokens: turn.outputTokens,
     latencyMs: turn.latencyMs,
     costUsd: turn.costUsd,
+    effectClass: turn.effectClass,
     confidence: turn.confidence,
     reasoning: turn.reasoning,
     citations: (turn.citations ?? []).filter(isCitation),
@@ -211,6 +224,10 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
       model: serverTurn.model ?? cachedTurn.model,
       modelUsed: serverTurn.modelUsed ?? cachedTurn.modelUsed,
       requestId: serverTurn.requestId ?? cachedTurn.requestId,
+      runId: serverTurn.runId ?? cachedTurn.runId,
+      planMode: serverTurn.planMode ?? cachedTurn.planMode,
+      grantedRung: serverTurn.grantedRung ?? cachedTurn.grantedRung,
+      effectClass: serverTurn.effectClass ?? cachedTurn.effectClass,
       // A server-persisted assistant message is by definition COMPLETE
       // (session-core stores it once, at stream end), so a cached in-flight
       // 'waiting' must never leak onto it — it would render a finished
@@ -302,7 +319,8 @@ export function hasCachedTurnMetadata(turn: ChatTurn): boolean {
     (turn.artifacts?.length ?? 0) > 0 ||
     (turn.files?.length ?? 0) > 0 ||
     Boolean(turn.grounding) ||
-    Boolean(turn.reasoning)
+    Boolean(turn.reasoning) ||
+    Boolean(turn.effectClass)
   )
 }
 
@@ -527,13 +545,17 @@ export function normalizeGeneratedFile(event: {
   }
 }
 
-export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string }): Citation | null {
+export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; claimId?: string; sourceGroupId?: string; start?: number; end?: number }): Citation | null {
   if (!event.url) return null
   return {
     id: event.id ?? event.url,
     title: event.title ?? hostname(event.url),
     url: event.url,
     snippet: event.snippet ?? '',
+    ...(event.claimId ? { claimId: event.claimId } : {}),
+    ...(event.sourceGroupId ? { sourceGroupId: event.sourceGroupId } : {}),
+    ...(event.start !== undefined ? { start: event.start } : {}),
+    ...(event.end !== undefined ? { end: event.end } : {}),
   }
 }
 
@@ -761,11 +783,19 @@ export function citationFromUnknown(value: unknown, index: number): Citation | n
   const title = stringValue(item.title) ?? hostname(url)
   const snippet = stringValue(item.snippet) ?? stringValue(item.description) ?? ''
   if (isFailedFetchCitation(item, title, snippet)) return null
+  const claimId = stringValue(item.claim_id) ?? stringValue(item.claimId)
+  const sourceGroupId = stringValue(item.source_group_id) ?? stringValue(item.sourceGroupId)
+  const start = numberValue(item.start) ?? numberValue(item.start_offset) ?? numberValue(item.startOffset)
+  const end = numberValue(item.end) ?? numberValue(item.end_offset) ?? numberValue(item.endOffset)
   return {
     id: stringValue(item.id) ?? `web-${index + 1}-${url}`,
     title,
     url,
     snippet,
+    ...(claimId ? { claimId } : {}),
+    ...(sourceGroupId ? { sourceGroupId } : {}),
+    ...(start !== undefined ? { start } : {}),
+    ...(end !== undefined ? { end } : {}),
   }
 }
 

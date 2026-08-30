@@ -15,6 +15,8 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
+
+	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/controlauth"
 )
 
 // memoOrgKey is the Temporal schedule Memo field that carries the owning org.
@@ -25,11 +27,12 @@ const memoOrgKey = "org_id"
 
 // Config configures the schedule reconciler.
 type Config struct {
-	ControlBaseURL   string
-	ControlAuthToken string
-	TaskQueue        string
-	HTTPClient       *http.Client
-	Interval         time.Duration
+	ControlBaseURL    string
+	ControlAuthToken  string
+	ControlHMACSecret string
+	TaskQueue         string
+	HTTPClient        *http.Client
+	Interval          time.Duration
 }
 
 // Manager reconciles schedules from Control Plane into Temporal.
@@ -208,6 +211,9 @@ func (m *Manager) fetchDesired(ctx context.Context) ([]ScheduleSpec, error) {
 	}
 	if m.cfg.ControlAuthToken != "" {
 		req.Header.Set("Authorization", "Bearer "+m.cfg.ControlAuthToken)
+	}
+	if err := controlauth.Sign(req, nil, m.cfg.ControlHMACSecret); err != nil {
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 

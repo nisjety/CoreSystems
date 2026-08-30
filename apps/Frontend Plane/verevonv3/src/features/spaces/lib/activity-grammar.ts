@@ -134,6 +134,8 @@ const SALIENCE_ORDER: Readonly<Record<ActivitySalience, number>> = {
  */
 export interface ThreadLikeActivitySource {
   readonly thread_id: string
+  /** Owning Space reference. When present, activity must stay in that Space. */
+  readonly space_id?: string
   readonly title?: string
   readonly preview?: string
   readonly updated_at?: string
@@ -160,7 +162,14 @@ function resolveObject(source: ThreadLikeActivitySource): string {
  */
 export function activityFromThread(source: ThreadLikeActivitySource): SpaceActivityItem[] {
   const object = resolveObject(source)
-  const href = `/chat?thread_id=${encodeURIComponent(source.thread_id)}`
+  // Space activity is owned by the Space surface. Keep the legacy Chat
+  // fallback only for older projections that predate `space_id`; current
+  // SpaceThread responses always include it, so a foreign Space thread cannot
+  // be adopted by Chat through a new activity link.
+  const owner = source.space_id?.trim()
+  const href = owner
+    ? `/spaces/${encodeURIComponent(owner)}?thread_id=${encodeURIComponent(source.thread_id)}`
+    : `/chat?thread_id=${encodeURIComponent(source.thread_id)}`
 
   const conversation: SpaceActivityItem = {
     id: `thread:${source.thread_id}`,

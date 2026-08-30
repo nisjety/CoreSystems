@@ -70,13 +70,14 @@ func main() {
 	defer c.Close()
 
 	acts := activities.New(activities.Config{
-		RuntimeBaseURL:   runtimeURL,
-		ControlBaseURL:   controlURL,
-		RuntimeAuthToken: runtimeToken,
-		ControlAuthToken: controlToken,
-		EdgeBaseURL:      edgeURL,
-		EdgeAuthToken:    edgeToken,
-		EdgeRunSecret:    edgeRunSecret,
+		RuntimeBaseURL:    runtimeURL,
+		ControlBaseURL:    controlURL,
+		RuntimeAuthToken:  runtimeToken,
+		ControlAuthToken:  controlToken,
+		ControlHMACSecret: edgeRunSecret,
+		EdgeBaseURL:       edgeURL,
+		EdgeAuthToken:     edgeToken,
+		EdgeRunSecret:     edgeRunSecret,
 	})
 
 	w := worker.New(c, TaskQueue, worker.Options{})
@@ -129,10 +130,11 @@ func main() {
 	defer rootCancel()
 
 	schedMgr := schedules.New(c, schedules.Config{
-		ControlBaseURL:   controlURL,
-		ControlAuthToken: controlToken,
-		TaskQueue:        TaskQueue,
-		Interval:         30 * time.Second,
+		ControlBaseURL:    controlURL,
+		ControlAuthToken:  controlToken,
+		ControlHMACSecret: edgeRunSecret,
+		TaskQueue:         TaskQueue,
+		Interval:          30 * time.Second,
 	})
 	go schedMgr.Run(rootCtx)
 
@@ -141,10 +143,11 @@ func main() {
 	// starts the matching Temporal workflow. Without this, ad-hoc jobs
 	// never execute — only scheduled cron jobs would.
 	jobsMgr := jobs.New(c, jobs.Config{
-		ControlBaseURL:   controlURL,
-		ControlAuthToken: controlToken,
-		TaskQueue:        TaskQueue,
-		Interval:         2 * time.Second,
+		ControlBaseURL:    controlURL,
+		ControlAuthToken:  controlToken,
+		ControlHMACSecret: edgeRunSecret,
+		TaskQueue:         TaskQueue,
+		Interval:          2 * time.Second,
 	})
 	go jobsMgr.Run(rootCtx)
 

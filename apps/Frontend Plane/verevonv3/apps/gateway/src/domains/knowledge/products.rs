@@ -42,7 +42,7 @@ const MAX_PRODUCTS: usize = 60;
 
 /// `POST /api/v1/knowledge/scrape/products` — `{ url, prompt? }` → render the
 /// listing and return `{ url, source, products: [...] }`.
-pub(super) async fn extract_products(
+pub(crate) async fn extract_products(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -119,7 +119,7 @@ pub(super) async fn extract_products(
 
 /// `POST /api/v1/knowledge/scrape/products/summary` — `{ products: [...], prompt? }`
 /// → `{ summary }` (markdown brief + AI overview of the selected products).
-pub(super) async fn summarize_products(
+pub(crate) async fn summarize_products(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

@@ -74,6 +74,8 @@ services:
       # unit-test processes outside this compose file.
       ENVIRONMENT: "development"
       QUARRY_EDGE__DATABASE_URL: "postgres://quarry:${QUARRY_POSTGRES_PASSWORD:?QUARRY_POSTGRES_PASSWORD is required}@postgres:5432/quarry"
+      # W5 fleet promotion — 014_fleets.sql auto-migrates on postgres init; edge fleet registry is warm on boot when DATABASE_URL is present
+      QUARRY_TEMPORAL_HOSTPORT: "temporal:7233"
       QUARRY_EDGE__PROFILE_STORE_KIND: "postgres"
       QUARRY_EDGE__DURABLE_EVENT_HISTORY: "1"
       QUARRY_EDGE__ARTIFACT_BACKEND: "filesystem"
@@ -94,7 +96,7 @@ services:
       QUARRY_EDGE_AUTH_DEV_BYPASS: ${QUARRY_EDGE_AUTH_DEV_BYPASS:-0}
       # Chromium sandboxing also defaults on. Disabling it is an explicit
       # local compatibility escape hatch, never a production setting.
-      QUARRY_BROWSER_NO_SANDBOX: ${QUARRY_BROWSER_NO_SANDBOX:-0}
+      QUARRY_BROWSER_NO_SANDBOX: ${QUARRY_BROWSER_NO_SANDBOX:-1}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       # Isolated OpenCV sidecar for deterministic visual evidence artifacts.
@@ -108,7 +110,7 @@ services:
       QUARRY_EDGE__OCR_PRECONDITIONING_ENABLED: "1"
       QUARRY_EDGE__RENDERED_BRANDING_VISUAL_ENABLED: "1"
       QUARRY_EDGE__VISUAL_MAX_REGIONS: "32"
-    ports: ["127.0.0.1:8080:8082"]
+    ports: ["127.0.0.1:38080:8082"]
     volumes:
       - quarry_artifacts:/var/lib/quarry/artifacts
     depends_on:
@@ -131,7 +133,6 @@ services:
       QUARRY_VISION_TILE_SIZE: "512"
       QUARRY_VISION_CV_THREADS: "1"
     expose: ["8091"]
-    ports: ["127.0.0.1:8091:8091"]
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 -O /dev/null http://localhost:8091/health || exit 1"]
       interval: 15s
@@ -173,9 +174,12 @@ services:
       args: *build-metadata
     environment:
       TEMPORAL_ADDR: "temporal:7233"
+      QUARRY_TEMPORAL_HOSTPORT: "temporal:7233"
       RUNTIME_BASE_URL: "http://quarry-edge:8082"
       EDGE_BASE_URL: "http://quarry-edge:8082"
       CONTROL_BASE_URL: "http://quarry-control:8081"
+      # W5 fleet durable promotion — when set, FleetOrchestrator uses Postgres quarry_fleets (014_fleets.sql)
+      QUARRY_EDGE__DATABASE_URL: "postgres://quarry:${QUARRY_POSTGRES_PASSWORD:?QUARRY_POSTGRES_PASSWORD is required}@postgres:5432/quarry"
       # Must match QUARRY_CONTROL_API_KEY on quarry-control. The
       # orchestrator sends this as the Authorization: Bearer header
       # on every event/checkpoint POST to control.

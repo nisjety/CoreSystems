@@ -160,6 +160,11 @@ message CancelRunRequest {
 message CancelRunResponse {
   // True if the run was successfully cancelled.
   bool cancelled = 1;
+
+  // Identifier of the durable RUN_CANCELLED event when the cancellation was
+  // recorded. Empty is allowed for an idempotent request against a legacy
+  // already-terminal run that predates cancellation receipts.
+  string receipt_id = 2;
 }
 
 message ResolveRunOwnerRequest {

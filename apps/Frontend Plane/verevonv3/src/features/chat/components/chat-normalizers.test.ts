@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn } from './chat-normalizers'
+import { humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn } from './chat-normalizers'
 import type { ChatTurn } from './chat-types'
 
 describe('summarizeToolArgs', () => {
@@ -52,6 +52,32 @@ describe('humanizeToolName', () => {
   it('humanizes snake / dotted tool names', () => {
     expect(humanizeToolName('book_shipment')).toBe('Book shipment')
     expect(humanizeToolName('social.publish_post')).toBe('Social publish post')
+  })
+})
+
+describe('normalizeCitation', () => {
+  it('keeps optional server-issued claim bindings without inferring them', () => {
+    expect(normalizeCitation({
+      id: 'source-1',
+      title: 'Source',
+      url: 'https://example.com/source',
+      snippet: 'Evidence',
+      claimId: 'claim-1',
+      sourceGroupId: 'group-1',
+      start: 12,
+      end: 28,
+    })).toEqual({
+      id: 'source-1',
+      title: 'Source',
+      url: 'https://example.com/source',
+      snippet: 'Evidence',
+      claimId: 'claim-1',
+      sourceGroupId: 'group-1',
+      start: 12,
+      end: 28,
+    })
+
+    expect(normalizeCitation({ url: 'https://example.com/source' })).not.toHaveProperty('claimId')
   })
 })
 

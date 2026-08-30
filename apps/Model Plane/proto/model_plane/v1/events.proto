@@ -121,6 +121,9 @@ enum EventType {
   EVENT_TYPE_RUN_COMPLETED = 91;
   // Run failed.
   EVENT_TYPE_RUN_FAILED = 92;
+  // Run cancelled by an authorized owner; the event id is the cancellation
+  // receipt exposed by the RunService cancel response.
+  EVENT_TYPE_RUN_CANCELLED = 93;
 
   // Action lifecycle events.
   // Action started execution.
@@ -165,6 +168,17 @@ enum EventType {
   // Recovery events (Phase 1).
   // Recovery attempt made.
   EVENT_TYPE_RECOVERY_ATTEMPTED = 130;
+
+  // Browser-agent progress events. These are persisted only as the safe,
+  // reference-based projection emitted by OrchestrationCore; screenshots and
+  // DOM bytes remain artifacts behind their existing ownership-gated route.
+  EVENT_TYPE_BROWSER_ACTION_DISPATCHED = 140;
+  EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED = 141;
+  EVENT_TYPE_BROWSER_RUN_PAUSED = 142;
+  EVENT_TYPE_BROWSER_RUN_RESUMED = 143;
+  EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED = 144;
+  EVENT_TYPE_BROWSER_ACTION_DECIDED = 145;
+  EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED = 146;
 
   // Reserved for future event types.
   reserved 200 to 255;

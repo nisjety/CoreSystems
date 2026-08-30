@@ -32,7 +32,7 @@ pub struct BrowserLease {
     pub org_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProxyAffinity {
     pub pool: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

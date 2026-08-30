@@ -12,10 +12,10 @@
 
 mod evidence;
 mod profiles;
-mod runs;
-mod schedules;
+pub(crate) mod runs;
+pub(crate) mod schedules;
 mod shared;
-mod sources;
+pub(crate) mod sources;
 
 use axum::{
     routing::{delete, get, post},

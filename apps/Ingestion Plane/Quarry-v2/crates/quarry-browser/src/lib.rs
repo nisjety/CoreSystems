@@ -413,6 +413,29 @@ pub trait BrowserDriver: Send + Sync {
     async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession>;
     async fn release(&self, session: BrowserSession) -> QuarryResult<()>;
 
+    /// W2 — return the live-view reference for the given session, if
+    /// the driver has one. Cloud providers (Browserbase, Browserless,
+    /// Kernel) populate this; the local Chromiumoxide driver
+    /// returns `None` and the App Shell falls back to its own
+    /// frame stream. Default: `Ok(None)`.
+    async fn live_view(
+        &self,
+        _session: &BrowserSession,
+    ) -> QuarryResult<Option<quarry_core::driver_meta::LiveViewRef>> {
+        Ok(None)
+    }
+
+    /// W2 — refresh the live-view reference when the previous one
+    /// has expired. Cloud providers rotate the URL with the same
+    /// session id; the local driver returns `Ok(None)` and the App
+    /// Shell keeps the last good URL. Default: `Ok(None)`.
+    async fn refresh_live_view(
+        &self,
+        _session: &BrowserSession,
+    ) -> QuarryResult<Option<quarry_core::driver_meta::LiveViewRef>> {
+        Ok(None)
+    }
+
     /// Set the run-scoped host grants used by the driver's network boundary.
     /// Implementations must consult this policy for every browser-originated
     /// request, including redirects, frames, XHR/fetch, and subresources.

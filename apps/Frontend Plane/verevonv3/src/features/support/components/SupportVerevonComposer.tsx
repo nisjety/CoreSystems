@@ -279,12 +279,12 @@ export function SupportVerevonComposer(props: {
           <strong>Verevon</strong>
           <span>{props.contextLabel}</span>
         </div>
-        <Show when={threadId()}>
-          {(id) => (
-            <a href={`/chat?thread_id=${encodeURIComponent(id())}`} link>
-              {i18n.tr('Åpne i Chat', 'Open in Chat')}<ArrowUpRight class="size-3.5" />
+        <Show when={Boolean(threadId())}>
+          <>
+            <a href={`/support?view=all&conversation_id=${encodeURIComponent(props.conversationId)}`} link>
+              {i18n.tr('Åpne kildesamtale', 'Open source conversation')}<ArrowUpRight class="size-3.5" />
             </a>
-          )}
+          </>
         </Show>
       </div>
 

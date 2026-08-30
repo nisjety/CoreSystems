@@ -79,6 +79,13 @@ internal to the shared network:
 docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --build
 ```
 
+The compose build supplies Quarry-v2's generated TypeScript SDK as a BuildKit
+named context. This is required because the frontend keeps the SDK as a typed
+`file:` dependency owned by the Ingestion Plane; a bare `docker build .` does
+not include that sibling path. Use the compose command above (or pass
+`--build-context quarry-client=../../Ingestion Plane/Quarry-v2/sdks/typescript`
+when invoking `docker build` directly).
+
 ## Live verification — 2026-07-10
 
 The Docker stack had 91 running containers and no unhealthy containers when checked. Representative health/readiness probes returned HTTP 200 for the frontend, gateway, Model, Control, Data, Ingestion, and Application services. The authenticated cross-plane Playwright smoke suite passed 6/6 against `http://localhost:5173` using the seeded local account.

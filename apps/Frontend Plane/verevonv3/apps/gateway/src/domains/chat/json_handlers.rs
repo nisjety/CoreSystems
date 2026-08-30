@@ -84,7 +84,7 @@ pub(super) async fn invoke_chat(
     .await
 }
 
-pub(super) async fn cancel_invocation(
+pub(crate) async fn cancel_invocation(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -107,7 +107,7 @@ pub(super) async fn cancel_invocation(
 /// fresh, content-bound `thread:append` decision from Control for this exact
 /// message — the same rule the ordinary send path follows. A scoped thread that
 /// cannot get a decision is refused here rather than appended without one.
-pub(super) async fn queue_invocation_input(
+pub(crate) async fn queue_invocation_input(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -132,12 +132,18 @@ pub(super) async fn queue_invocation_input(
         state.model_gateway_url,
         urlencoding::encode(&request_id),
     );
-    shared::proxy_model_json(
+    // model-gateway's /v1/invoke/:id/queue (invoke_queue_input) requires the
+    // delegated session bearer (VerifiedModelBearer aliases VerifiedSessionBearer
+    // in model-gateway's http_routes.rs), the same as submit_feedback above —
+    // without it the call 401s before the queue logic ever runs.
+    let session_token = shared::session_token(&state, &user, &headers).await;
+    shared::proxy_model_json_with_session(
         &state,
         Method::POST,
         &url,
         Some(outbound_body),
         token.as_deref(),
+        session_token.as_deref(),
         &user,
     )
     .await
@@ -169,6 +175,61 @@ pub(super) async fn get_thread_messages(
     .await
 }
 
+/// Read-only proxy for the canonical Session Core event replay. The BFF does
+/// not deserialize or reimplement the event log; Model Gateway owns the
+/// authenticated replay and returns its safe envelope-only projection.
+pub(super) async fn get_thread_events(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Query(query): Query<ThreadEventsQuery>,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let session_token = shared::session_token(&state, &user, &headers).await;
+    let mut url = format!(
+        "{}/v1/threads/{}/events",
+        state.model_gateway_url,
+        urlencoding::encode(&thread_id),
+    );
+    let mut params = Vec::new();
+    if let Some(after_event_id) = query
+        .after_event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        params.push(format!(
+            "after_event_id={}",
+            urlencoding::encode(after_event_id)
+        ));
+    }
+    if let Some(limit) = query.limit.filter(|value| *value > 0) {
+        params.push(format!("limit={limit}"));
+    }
+    if !params.is_empty() {
+        url.push('?');
+        url.push_str(&params.join("&"));
+    }
+    shared::proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct ThreadEventsQuery {
+    #[serde(default)]
+    after_event_id: Option<String>,
+    limit: Option<u32>,
+}
+
 /// Itemized context window for a thread — the context inspector's read.
 ///
 /// A pure proxy, like every other handler here: model-gateway owns the shape and
@@ -189,7 +250,12 @@ pub(super) async fn get_thread_context(
         state.model_gateway_url,
         urlencoding::encode(&thread_id),
     );
-    if let Some(run_id) = query.run_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+    if let Some(run_id) = query
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
         url.push_str(&format!("?run_id={}", urlencoding::encode(run_id)));
     }
     shared::proxy_model_json_with_session(
@@ -272,20 +338,28 @@ pub(super) async fn list_models(
     .await
 }
 
-pub(super) async fn submit_feedback(
+pub(crate) async fn submit_feedback(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
     let token = shared::model_token(&state, &user, &headers).await;
+    // model-gateway's /v1/feedback (ingest_feedback) requires the delegated
+    // session bearer (VerifiedModelBearer is a local alias for
+    // VerifiedSessionBearer in model-gateway's http_routes.rs) the same way
+    // get_thread_messages/get_thread_context do — forwarding only the
+    // model-gateway token 401s the call before resolve_feedback_target ever
+    // runs, exactly the gap that left this route unreachable.
+    let session_token = shared::session_token(&state, &user, &headers).await;
     let url = format!("{}/v1/feedback", state.model_gateway_url);
-    shared::proxy_model_json(
+    shared::proxy_model_json_with_session(
         &state,
         Method::POST,
         &url,
         Some(body),
         token.as_deref(),
+        session_token.as_deref(),
         &user,
     )
     .await

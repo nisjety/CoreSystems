@@ -1209,6 +1209,140 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
     Ok(plan_from_row(plan, steps))
 }
 
+/// Persist the safe browser-agent event projection in the canonical event log.
+///
+/// Browser progress historically lived only in the per-run Redis/in-memory
+/// replay ring. That is enough for a reconnecting tab, but not for a reload
+/// after the ring TTL or a process restart. Keep the durable record deliberately
+/// narrow: action metadata, page metadata, and artifact references are useful
+/// to the Work canvas; raw DOM/text/credentials are never copied into this
+/// path. The generic event table supplies the run's tenant/user from `runs`, so
+/// the caller cannot forge ownership through the event payload.
+async fn persist_browser_event(
+    pool: &Pool,
+    event_id: &str,
+    event: &proto::OrchestrationEvent,
+) -> Result<(), sqlx::Error> {
+    let (event_type, run_id, payload, type_url) = match event.event.as_ref() {
+        Some(orchestration_event::Event::BrowserActionDispatched(value)) => (
+            "BROWSER_ACTION_DISPATCHED",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "plan_id": value.plan_id,
+                "action_id": value.action_id,
+                "action_type": value.action_type,
+                "url": value.url,
+                "reason": value.reason,
+            }),
+            "type.googleapis.com/model_plane.v1.BrowserActionDispatched",
+        ),
+        Some(orchestration_event::Event::BrowserObservationReceived(value)) => (
+            "BROWSER_OBSERVATION_RECEIVED",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "plan_id": value.plan_id,
+                "action_id": value.action_id,
+                "status": value.status,
+                "page_url": value.page_url,
+                "page_title": value.page_title,
+                "screenshot_ref": value.screenshot_ref,
+                "dom_snapshot_ref": value.dom_snapshot_ref,
+            }),
+            "type.googleapis.com/model_plane.v1.BrowserObservationReceived",
+        ),
+        Some(orchestration_event::Event::BrowserRunPaused(value)) => (
+            "BROWSER_RUN_PAUSED",
+            value.run_id.as_str(),
+            serde_json::json!({ "run_id": value.run_id, "plan_id": value.plan_id }),
+            "type.googleapis.com/model_plane.v1.BrowserRunPaused",
+        ),
+        Some(orchestration_event::Event::BrowserRunResumed(value)) => (
+            "BROWSER_RUN_RESUMED",
+            value.run_id.as_str(),
+            serde_json::json!({ "run_id": value.run_id, "plan_id": value.plan_id }),
+            "type.googleapis.com/model_plane.v1.BrowserRunResumed",
+        ),
+        Some(orchestration_event::Event::BrowserActionApprovalRequired(value)) => (
+            "BROWSER_ACTION_APPROVAL_REQUIRED",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "plan_id": value.plan_id,
+                "action_id": value.action_id,
+                "action_type": value.action_type,
+                "url": value.url,
+                "selector": value.selector,
+                "reason": value.reason,
+                "risk_category": value.risk_category,
+                "approval_id": value.approval_id,
+            }),
+            "type.googleapis.com/model_plane.v1.BrowserActionApprovalRequired",
+        ),
+        Some(orchestration_event::Event::BrowserActionDecided(value)) => (
+            "BROWSER_ACTION_DECIDED",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "plan_id": value.plan_id,
+                "action_id": value.action_id,
+                "approval_id": value.approval_id,
+                "decision": value.decision,
+                "decided_by": value.decided_by,
+            }),
+            "type.googleapis.com/model_plane.v1.BrowserActionDecided",
+        ),
+        Some(orchestration_event::Event::ApprovalContinuationVerified(value)) => (
+            "APPROVAL_CONTINUATION_VERIFIED",
+            value.run_id.as_str(),
+            {
+                let verification = value.verification.as_ref();
+                serde_json::json!({
+                    "run_id": value.run_id,
+                    "delivery_id": value.delivery_id,
+                    "approval_id": value.approval_id,
+                    "receipt_id": value.receipt_id,
+                    "verification": verification.map(|result| serde_json::json!({
+                        "status": result.status,
+                        "method": result.method,
+                        "reason": result.reason,
+                    })),
+                })
+            },
+            "type.googleapis.com/model_plane.v1.ApprovalContinuationVerified",
+        ),
+        _ => return Ok(()),
+    };
+    if run_id.trim().is_empty() {
+        return Ok(());
+    }
+    let timestamp = event.at.as_ref().and_then(|value| {
+        DateTime::<Utc>::from_timestamp(value.seconds, u32::try_from(value.nanos).ok()?)
+    });
+    let resource_ref = format!("run:{run_id}");
+    let idempotency_key = format!("orchestration:{event_id}");
+    sqlx::query(
+        "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+         SELECT $1, $2, r.id, $3, COALESCE($4, now()), r.org_id, r.user_id, $5, '', $6, $7, $8, 'session-core', 1
+         FROM runs r
+         WHERE r.id = $9
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(event_id)
+    .bind(event_type)
+    .bind(payload)
+    .bind(timestamp)
+    .bind(run_id)
+    .bind(idempotency_key)
+    .bind(resource_ref)
+    .bind(type_url)
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Event broadcast helpers
 // ---------------------------------------------------------------------------
@@ -2429,7 +2563,16 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if ev.at.is_none() {
                 ev.at = Some(now_ts());
             }
-            let event_id = broadcast_event(&self.events_tx, &self.replay, ev);
+            let event_id = broadcast_event(&self.events_tx, &self.replay, ev.clone());
+            // Browser-agent progress is emitted through this additive RPC and
+            // therefore does not pass through the normal NATS event consumer.
+            // Persist its safe projection before the RPC returns so a later
+            // reload can recover the same Work evidence. The browser executor
+            // treats this bridge as best-effort, so a storage outage is logged
+            // while the live event remains visible to already-connected tabs.
+            if let Err(error) = persist_browser_event(&self.pool, &event_id, &ev).await {
+                warn!(%error, %event_id, "failed to persist browser orchestration event");
+            }
             Ok(Response::new(proto::RecordOrchestrationEventResponse {
                 event_id,
             }))

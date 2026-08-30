@@ -18,6 +18,12 @@ USER node
 # instead of the package.json "pnpm" field; without it `--frozen-lockfile` fails
 # with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH against the lockfile's recorded overrides.
 COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# The browser uses the generated Quarry client for typed source/browser
+# contracts.  It is intentionally kept in the Ingestion Plane and is supplied
+# as a BuildKit named context by compose/CI; copying it to the path encoded by
+# the local `file:` dependency keeps the frontend context small without
+# publishing a second, drifting SDK package.
+COPY --from=quarry-client [".", "/Ingestion Plane/Quarry-v2/sdks/typescript/"]
 RUN --mount=type=cache,target=/home/node/.local/share/pnpm/store,uid=1000,gid=1000 \
     pnpm install --frozen-lockfile
 

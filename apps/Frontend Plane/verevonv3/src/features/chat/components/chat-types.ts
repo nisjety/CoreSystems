@@ -24,10 +24,17 @@ import {
   type LucideProps,
 } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
+import type { ChatEffectClass } from '@/shared/chat/effect-class'
 
 export type ComposerToolId = DashboardComposerSubmitPayload['tools'][number]
 export type ComposerAttachment = DashboardComposerSubmitPayload['attachments'][number]
-export type ChatTab = 'chat' | 'sources' | 'artifacts' | 'steps'
+/**
+ * A user attachment as shown in the live transcript. `previewUrl` is an
+ * in-memory data URL materialized before the composer revokes its object URL;
+ * it is intentionally stripped by `turnsToTranscript` and never persisted.
+ */
+export type ChatTurnAttachment = ComposerAttachment & { previewUrl?: string }
+export type ChatTab = 'chat' | 'sources' | 'artifacts' | 'steps' | 'trace'
 export type TaskStepStatus = 'done' | 'active' | 'waiting' | 'error' | 'stopped'
 export type IconComponent = (props: LucideProps) => JSX.Element
 
@@ -72,6 +79,12 @@ export type Citation = {
   title: string
   url: string
   snippet: string
+  /** Optional server-issued claim binding. The current gateway may omit it;
+   * the UI must never infer these values from prose. */
+  claimId?: string
+  sourceGroupId?: string
+  start?: number
+  end?: number
 }
 
 export type GeneratedFile = {
@@ -172,7 +185,7 @@ export type ChatTurn = {
   createdAt: string
   streaming: boolean
   tools: ComposerToolId[]
-  attachments: ComposerAttachment[]
+  attachments: ChatTurnAttachment[]
   status?: 'waiting' | 'stopped' | 'error'
   model?: string
   requestId?: string
@@ -223,10 +236,10 @@ export type ChatTurn = {
    */
   stopReason?: string
   /**
-   * Orchestration run id. Captured from the `connected` SSE event on an
-   * agentic / plan-mode turn (and, as a fallback, from a `paused` step). Drives
-   * both the human-approval cards and the live agent panel's subscription to
-   * `GET /api/v1/runs/:run_id/events`.
+   * Durable Model run id. Captured from the `connected` SSE event (and, as a
+   * fallback, from a `paused` step). Approval cards use it for plan turns;
+   * the live Work panel only subscribes when the turn is plan/research so
+   * ordinary Ask runs do not make the base chat feel like an IDE.
    */
   runId?: string
   /** Pending human-approval requests gating this agentic run's next tool. */
@@ -253,6 +266,8 @@ export type ChatTurn = {
    * than stale suggestions for an answer the user has moved past.
    */
   followUps?: string[]
+  /** Server-derived effect evidence from the durable run proof bundle. */
+  effectClass?: ChatEffectClass
 }
 
 export type AgentTaskStep = {
@@ -331,7 +346,7 @@ export type SendOptions = {
   browseWeb?: boolean
   deepResearch?: boolean
   createdAt?: string
-  displayAttachments?: ComposerAttachment[]
+  displayAttachments?: ChatTurnAttachment[]
   generateImage?: boolean
   appendUser?: boolean
   tools?: ComposerToolId[]

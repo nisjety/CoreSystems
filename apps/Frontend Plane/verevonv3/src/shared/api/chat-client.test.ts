@@ -542,6 +542,9 @@ describe('chat-client server thread history', () => {
               preview: 'Last answer',
               updatedAt: '2026-06-17T10:00:00.000Z',
               spaceRef: 'space_1',
+              latest_run_id: 'run_1',
+              latest_run_status: 'awaiting_approval',
+              latest_run_updated_at: '2026-06-17T10:01:00.000Z',
             },
           ],
         },
@@ -557,6 +560,9 @@ describe('chat-client server thread history', () => {
         // Absent from the payload -> false. A gateway index written before pins
         // existed must decode as unpinned, not fail the whole listing.
         pinned: false,
+        latestRunId: 'run_1',
+        latestRunStatus: 'awaiting_approval',
+        latestRunUpdatedAt: '2026-06-17T10:01:00.000Z',
         spaceRef: 'space_1',
       },
     ])

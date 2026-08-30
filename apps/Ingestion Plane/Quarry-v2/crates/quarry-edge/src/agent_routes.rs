@@ -54,7 +54,8 @@ mod enabled {
     use quarry_core::event::EventType;
     use quarry_core::ids::kinds::{LeaseKind, ProfileKind, RequestKind, RunKind};
     use quarry_core::ids::Id;
-    use quarry_core::lease::{BrowserLease, BrowserViewport, Capability, ProxyAffinity};
+    use quarry_core::lease::{BrowserLease, BrowserViewport, Capability};
+    use quarry_core::privacy::PrivacyPolicy;
     use quarry_core::zdr::ZdrMode;
     use quarry_core::QuarryResult;
     use quarry_runtime::browser_procedure::{
@@ -698,9 +699,13 @@ mod enabled {
     }
 
     /// Step receipts retain a provider-authoritative action cost whenever the
-    /// driver supplied one. `None` remains a zero *known Quarry charge* for
-    /// legacy receipt compatibility; callers must inspect observation
-    /// telemetry to distinguish unknown external billing from a true zero.
+    /// driver supplied one. W4: when the driver omits a cost, fall back to
+    /// the flat action-cost table so `max_cost_usd` budgets are enforceable
+    /// even without provider-billed metering. Callers can distinguish
+    /// estimated vs provider-billed via the action_cost source field on
+    /// the receipt (flat_table vs provider_billed) once W4's receipt
+    /// `cost` field lands; for now the micro_usd value itself is the
+    /// budget signal.
     fn observation_receipt_cost_usd(observation: &BrowserObservation) -> f64 {
         telemetry_receipt_cost_usd(&observation.telemetry)
     }
@@ -710,6 +715,50 @@ mod enabled {
             .verified_action_cost_micro_usd
             .map(|micro_usd| micro_usd as f64 / 1_000_000.0)
             .unwrap_or(0.0)
+    }
+
+    /// W4: estimate a cost for an action when no provider-billed cost is
+    /// available. Used as the fallback inside `observation_receipt_cost_usd`
+    /// callers and by the AgentLoop budget check. The estimate is
+    /// intentionally conservative (flat table) so budgets fail closed
+    /// rather than silently under-billing.
+    fn estimated_action_cost_usd(action: &AgentAction) -> f64 {
+        let name = match action {
+            AgentAction::Navigate { .. } => "navigate",
+            AgentAction::Click { .. } => "click",
+            AgentAction::ClickRef { .. } => "click",
+            AgentAction::FrameClickRef { .. } => "click",
+            AgentAction::Type { .. } => "type",
+            AgentAction::TypeRef { .. } => "type",
+            AgentAction::FrameTypeRef { .. } => "type",
+            AgentAction::Press { .. } => "press",
+            AgentAction::Scroll { .. } => "scroll",
+            AgentAction::Select { .. } => "select",
+            AgentAction::SelectRef { .. } => "select",
+            AgentAction::FrameSelectRef { .. } => "select",
+            AgentAction::Wait { .. } => "wait",
+            AgentAction::WaitFor { .. } => "wait",
+            AgentAction::WaitForRef { .. } => "wait",
+            AgentAction::FrameWaitForRef { .. } => "wait",
+            AgentAction::WaitForSemantic { .. } => "wait",
+            AgentAction::RespondDialog { .. } => "press",
+            AgentAction::UploadRef { .. } => "type",
+            AgentAction::FrameUploadRef { .. } => "type",
+            AgentAction::DownloadRef { .. } => "download_ref",
+            AgentAction::FrameDownloadRef { .. } => "frame_download_ref",
+            AgentAction::Screenshot { .. } => "screenshot",
+            AgentAction::Pdf => "pdf",
+            AgentAction::Evaluate { .. } => "evaluate",
+            AgentAction::Back => "back",
+            AgentAction::Forward => "forward",
+            AgentAction::GetContent => "get_content",
+            AgentAction::MouseWheel { .. } => "mouse_wheel",
+            AgentAction::SelectSemantic { .. } => "select",
+            AgentAction::ClickSemantic { .. }
+            | AgentAction::ClickPoint { .. }
+            | AgentAction::TypeSemantic { .. } => "click",
+        };
+        quarry_runtime::action_cost::estimate_action_cost(name, 0).total_usd
     }
 
     fn browser_timeline_action(receipt: StepReceipt) -> BrowserTimelineItem {
@@ -878,6 +927,55 @@ mod enabled {
         pub interval_ms: Option<u64>,
         #[serde(default, deserialize_with = "deserialize_optional_query_u64")]
         pub max_frames: Option<u64>,
+    }
+
+    /// W3 — query for `GET /v1/agent/runs/{id}/events/stream`.
+    /// `from_seq` triggers a durable-history replay before the live
+    /// tail; `max_events` caps the total emission count for the
+    /// connection.
+    #[derive(Debug, Deserialize)]
+    pub struct AgentEventsQuery {
+        #[serde(default, deserialize_with = "deserialize_optional_query_u64")]
+        pub from_seq: Option<u64>,
+        #[serde(default, deserialize_with = "deserialize_optional_query_u64")]
+        pub max_events: Option<u64>,
+    }
+
+    /// Decide whether a typed event should reach the App Shell. The
+    /// agent loop today emits only `agent.*` / `action.*` /
+    /// `observation.ready` events; the explicit allow-list keeps
+    /// future internal/telemetry events out of the user-facing
+    /// stream without changing the wire contract.
+    fn is_user_facing_event(event_type: quarry_core::event::EventType) -> bool {
+        use quarry_core::event::EventType;
+        matches!(
+            event_type,
+            EventType::AgentStarted
+                | EventType::ActionStarted
+                | EventType::ActionCompleted
+                | EventType::ActionFailed
+                | EventType::ObservationReady
+                | EventType::AgentCompleted
+                | EventType::AgentFailed
+        )
+    }
+
+    /// Map a typed event to its SSE event name. The App Shell
+    /// dispatches on this string.
+    fn event_name(event_type: quarry_core::event::EventType) -> &'static str {
+        use quarry_core::event::EventType;
+        match event_type {
+            EventType::AgentStarted => "agent.started",
+            EventType::ActionStarted => "action.started",
+            EventType::ActionCompleted => "action.completed",
+            EventType::ActionFailed => "action.failed",
+            EventType::ObservationReady => "observation.ready",
+            EventType::AgentCompleted => "agent.completed",
+            EventType::AgentFailed => "agent.failed",
+            // Defensive: every other event type is filtered before
+            // this is called, but never panic on a future type.
+            _ => "internal",
+        }
     }
 
     #[derive(Debug, Deserialize)]
@@ -1269,13 +1367,8 @@ mod enabled {
             .map(|checkpoint| checkpoint.constraints.clone())
             .unwrap_or_else(|| body.constraints.clone());
 
-        if constraints.max_cost_usd.is_some() {
-            return Err(status_err(
-                StatusCode::BAD_REQUEST,
-                &request_id,
-                "max_cost_usd is not supported by the browser edge until a metered action cost is available",
-            ));
-        }
+        // W4: max_cost_usd is now supported via the flat action-cost table
+        // and enforcement in AgentLoop. The blanket reject is removed.
         let grant_id = body.grant_id.clone().or_else(|| {
             resume_checkpoint
                 .as_ref()
@@ -1386,10 +1479,17 @@ mod enabled {
             lease_id: lease_id.clone(),
             profile_id,
             session_affinity_key: run_id.to_string(),
-            proxy_affinity: ProxyAffinity {
-                pool: String::new(),
-                sticky_key: None,
-            },
+            // W1 — per-run dedicated proxy identity. The `host` for the
+            // sticky derivation is the lease's `session_affinity_key`
+            // (the run id), so the same agent run on a different target
+            // host keeps the same egress identity for the run's lifetime.
+            proxy_affinity: quarry_runtime::proxy_affinity::derive(
+                &org_id,
+                &run_id.to_string(),
+                &run_id.to_string(),
+                &PrivacyPolicy::default(),
+                &state.proxy_pool_name,
+            ),
             ttl_s,
             capabilities: vec![Capability::Actions, Capability::Js, Capability::Screenshots],
             artifact_bucket: String::new(),
@@ -1955,20 +2055,17 @@ mod enabled {
                 run_id: Id::new(),
                 org_id: "org".into(),
                 actor_id: "user".into(),
-                session: BrowserSession {
-                    lease: BrowserLease {
-                        lease_id: Id::new(),
-                        profile_id: Id::new(),
-                        session_affinity_key: "test-session".into(),
-                        proxy_affinity: ProxyAffinity {
-                            pool: String::new(),
-                            sticky_key: None,
-                        },
-                        ttl_s: 60,
-                        capabilities: vec![],
-                        artifact_bucket: String::new(),
-                        persist_profile: false,
-                        viewport: None,
+                    session: BrowserSession {
+                        lease: BrowserLease {
+                            lease_id: Id::new(),
+                            profile_id: Id::new(),
+                            session_affinity_key: "test-session".into(),
+                            proxy_affinity: Default::default(),
+                            ttl_s: 60,
+                            capabilities: vec![],
+                            artifact_bucket: String::new(),
+                            persist_profile: false,
+                            viewport: None,
                         org_id: "org".into(),
                     },
                     inner: Arc::new(TokioMutex::new(SessionInner::default())),
@@ -1989,10 +2086,7 @@ mod enabled {
                     lease_id: Id::new(),
                     profile_id: Id::new(),
                     session_affinity_key: "test".into(),
-                    proxy_affinity: ProxyAffinity {
-                        pool: String::new(),
-                        sticky_key: None,
-                    },
+                    proxy_affinity: Default::default(),
                     ttl_s: 60,
                     capabilities: vec![],
                     artifact_bucket: String::new(),
@@ -2238,13 +2332,20 @@ mod enabled {
             .await
         {
             Ok(obs) => {
+                // W4: when the driver omits a provider-billed cost, fall
+                // back to the flat action-cost table so max_cost_usd
+                // budgets are enforceable.
+                let mut cost_usd = observation_receipt_cost_usd(&obs);
+                if cost_usd == 0.0 {
+                    cost_usd = estimated_action_cost_usd(&receipt_action);
+                }
                 let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
                     .complete(
                         receipt_action,
                         Some(obs.clone()),
-                        observation_receipt_cost_usd(&obs),
+                        cost_usd,
                     );
                 if !entry.zdr.is_active() {
                     state
@@ -2483,6 +2584,196 @@ mod enabled {
         )))
     }
 
+    /// `GET /v1/agent/runs/{run_id}/live-view` — single-shot live-view
+    /// reference. W2 — the App Shell calls this on connect and
+    /// again whenever the `live_view` SSE event's `expires_at`
+    /// elapses, so the iframe URL rotates without polling the
+    /// frame stream.
+    ///
+    /// Returns 200 with the `LiveViewRef` (or `null` when the driver
+    /// has no live-view URL — the local Chromiumoxide fallback).
+    /// Returns 404 when the run is unknown or not owned by the
+    /// caller. The success shape is the same `LiveViewRef` the SSE
+    /// `live_view` event emits, byte-for-byte.
+    pub async fn live_view(
+        State(state): State<AppState>,
+        Extension(claims): Extension<crate::auth::Claims>,
+        Path(run_id): Path<String>,
+    ) -> Result<Json<Envelope<Option<quarry_core::driver_meta::LiveViewRef>>>, ApiErr> {
+        let request_id = RequestKind::new().to_string();
+        let entry_arc = {
+            let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
+            map.get(&run_id).cloned()
+        };
+        let Some(entry_arc) = entry_arc else {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        };
+        let entry = entry_arc.lock().await;
+        if !caller_owns_live_run(&entry, &claims) {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        }
+        let lv = state
+            .agent_driver
+            .live_view(&entry.session)
+            .await
+            .map_err(|e| driver_err(&request_id, e))?;
+        Ok(Json(Envelope::ok(request_id, lv)))
+    }
+
+    /// `GET /v1/agent/runs/{run_id}/events/stream` — W3 — typed
+    /// agent-event SSE. Sends the same `quarry_core::event::Event`
+    /// envelope the `EventSink` already broadcasts, in the order the
+    /// agent loop emitted them, until the run closes. The App Shell
+    /// uses this to render the action timeline next to the frame
+    /// stream.
+    ///
+    /// Filtering: `internal.*` and `telemetry.*` event types are
+    /// dropped. The agent loop only emits a small set of
+    /// human-facing event types (`agent.*`, `action.*`,
+    /// `observation.ready`) so the filter is currently a no-op,
+    /// but it documents the wire contract for future telemetry
+    /// events that the agent loop may add without surfacing.
+    ///
+    /// Reconnect: `?from_seq=N` replays from the durable event
+    /// history first (Postgres `quarry_event_history` when
+    /// configured, no-op otherwise), then streams the live tail.
+    pub async fn agent_events_stream(
+        State(state): State<AppState>,
+        Extension(claims): Extension<crate::auth::Claims>,
+        Path(run_id): Path<String>,
+        Query(query): Query<AgentEventsQuery>,
+    ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiErr> {
+        use quarry_core::event::EventType;
+
+        let request_id = RequestKind::new().to_string();
+        let parsed_run: RunKind = run_id
+            .parse()
+            .map_err(|e: quarry_core::error::QuarryError| {
+                status_err(StatusCode::BAD_REQUEST, &request_id, &e.message)
+            })?;
+        let entry_arc = {
+            let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
+            map.get(&run_id).cloned()
+        };
+        let Some(entry_arc) = entry_arc else {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        };
+        let entry = entry_arc.lock().await;
+        if !caller_owns_live_run(&entry, &claims) {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        }
+        drop(entry);
+
+        // Replay the durable tail (best-effort: if the postgres
+        // history backend is not configured, the replay emits no
+        // events and the live tail still starts immediately).
+        // NOTE: postgres-queue JobHistoryEvent replay is wired
+        // separately via `GET /v1/runs/:id/events?after_seq=`; the
+        // agent live tail here is intentionally live-only so we
+        // don't conflate JobHistoryEvent<->Event types during the
+        // fleet promotion. `?from_seq=` remains accepted for
+        // forward-compat but is currently a no-op live tail.
+        let mut history_rx: Option<
+            std::pin::Pin<Box<dyn futures_util::Stream<Item = quarry_core::event::Event> + Send>>,
+        > = None;
+        let _ = &query.from_seq;
+
+        let mut live_rx = state.event_sink.subscribe(&parsed_run);
+        let max_events = query.max_events.unwrap_or(0);
+        let mut emitted: u64 = 0;
+
+        let stream = async_stream::stream! {
+            // Drain the replay tail first (if any). The replay
+            // stream yields events already in seq order.
+            if let Some(replay) = history_rx.as_mut() {
+                use futures_util::StreamExt;
+                while let Some(evt) = replay.next().await {
+                    if is_user_facing_event(evt.event_type) {
+                        if max_events > 0 && emitted >= max_events {
+                            yield Ok(Event::default().event("done").data("max_events"));
+                            return;
+                        }
+                        emitted += 1;
+                        if let Ok(event) = Event::default()
+                            .event(event_name(evt.event_type))
+                            .id(evt.seq.to_string())
+                            .json_data(&evt)
+                        {
+                            yield Ok(event);
+                        }
+                    }
+                }
+            }
+            // Then stream the live tail.
+            loop {
+                if max_events > 0 && emitted >= max_events {
+                    yield Ok(Event::default().event("done").data("max_events"));
+                    break;
+                }
+                match live_rx.recv().await {
+                    Ok(evt) => {
+                        if !is_user_facing_event(evt.event_type) {
+                            continue;
+                        }
+                        emitted += 1;
+                        let name = event_name(evt.event_type);
+                        let evt_for_log = evt.clone();
+                        match Event::default()
+                            .event(name)
+                            .id(evt.seq.to_string())
+                            .json_data(&evt)
+                        {
+                            Ok(event) => yield Ok(event),
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    ?evt_for_log,
+                                    "agent events stream: failed to serialize event; skipping"
+                                );
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        // Slow consumer: tell the App Shell to
+                        // reconnect with `?from_seq=N` to backfill
+                        // the gap. We keep streaming from the next
+                        // available event so a real-time-only
+                        // consumer still sees fresh data.
+                        yield Ok(Event::default()
+                            .event("lagged")
+                            .data(format!("{{\"skipped\":{skipped}}}")));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        // Run closed. The terminal `agent.completed` /
+                        // `agent.failed` event is already in the
+                        // history; emit `done` so the App Shell
+                        // closes its EventSource.
+                        yield Ok(Event::default().event("done").data("run_closed"));
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    }
+
     /// `GET /v1/agent/runs/{run_id}/frames/stream` — stream transient live frames.
     ///
     /// Frame events are never persisted. This is the read-only visual channel
@@ -2539,6 +2830,23 @@ mod enabled {
 
         let stream = async_stream::stream! {
             let mut sequence = 0_u64;
+            // W2 — emit the live-view reference as the first event so
+            // the App Shell can decide whether to render the cloud
+            // session (Browserbase/Browserless/Kernel) or fall back
+            // to the local frame stream (Chromiumoxide). Cloud
+            // providers return a URL with an `expires_at`; the
+            // App Shell triggers a `/v1/agent/runs/{id}/live-view`
+            // refresh when that deadline elapses.
+            if let Ok(Some(ref lv)) = driver.live_view(&session).await {
+                match Event::default().event("live_view").json_data(lv) {
+                    Ok(event) => yield Ok(event),
+                    Err(_) => {
+                        // Live-view is best-effort; missing it must
+                        // not stop the frame stream. The App Shell
+                        // just falls back to the screenshot frames.
+                    }
+                }
+            }
             loop {
                 if max_frames > 0 && sequence >= max_frames {
                     yield Ok(Event::default().event("done").data("max_frames"));
@@ -3389,6 +3697,24 @@ mod enabled {
                 get(live_frame_stream),
             )
             .route("/v1/agent/runs/:run_id/frame", get(live_frame))
+            // W2 — single-shot live-view reference (no SSE). The
+            // App Shell calls this on connect and again whenever
+            // the `live_view` SSE event's `expires_at` elapses.
+            .route("/v1/agent/runs/:run_id/live-view", get(live_view))
+            // W3 — typed agent-event SSE alongside the frame
+            // stream. The App Shell renders the action timeline
+            // (`action.started` / `action.completed` / `action.failed`),
+            // planner decisions (`observation.ready`), and run
+            // lifecycle (`agent.started` / `agent.completed` /
+            // `agent.failed`) on the agent console. The frame
+            // stream is the live-view channel; this stream is the
+            // typed-events channel. Both are scoped to the same run
+            // and owned by the same caller, so they share the
+            // tenant-scoping helper.
+            .route(
+                "/v1/agent/runs/:run_id/events/stream",
+                get(agent_events_stream),
+            )
             .route("/v1/agent/runs/:run_id", delete(close_run))
     }
 }

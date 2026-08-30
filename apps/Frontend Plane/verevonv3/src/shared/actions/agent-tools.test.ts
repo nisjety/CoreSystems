@@ -16,7 +16,16 @@ describe('agent tool surface', () => {
     // gap between the two numbers is the point of this test, so assert the
     // exact eligible set rather than a count that drifts as the registry grows.
     expect(actionRegistry.length).toBeGreaterThan(1)
-    expect(specs.map((tool) => tool.name)).toEqual(['tickets.create'])
+    expect(specs.map((tool) => tool.name)).toEqual([
+      'inbox.follow_conversation',
+      'inbox.set_csat_preference',
+      'inbox.review_ai_action',
+      'tickets.create',
+      'org.mark_exported',
+      'org.acknowledge_deletion',
+      'chat.save_thread_snapshot',
+      'chat.submit_feedback',
+    ])
   })
 
   it('describes an eligible action with its risk and approval posture', () => {
@@ -39,7 +48,16 @@ describe('agent tool surface', () => {
   it('carries the owner and approval metadata into tool definitions', () => {
     const definitions = createVerevonActionToolDefinitions()
 
-    expect(definitions.map((tool) => tool.name)).toEqual(['tickets.create'])
+    expect(definitions.map((tool) => tool.name)).toEqual([
+      'inbox.follow_conversation',
+      'inbox.set_csat_preference',
+      'inbox.review_ai_action',
+      'tickets.create',
+      'org.mark_exported',
+      'org.acknowledge_deletion',
+      'chat.save_thread_snapshot',
+      'chat.submit_feedback',
+    ])
     const definition = definitions.find((tool) => tool.name === 'tickets.create')
     expect(definition).toBeDefined()
     if (!definition) return

@@ -17,6 +17,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, 
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::privacy::PrivacyPolicy;
 use quarry_core::zdr::ZdrMode;
 use quarry_runtime::ai_formats::AiFormatRunner;
@@ -30,6 +31,9 @@ use crate::state::AppState;
 const DEFAULT_MAX_URLS: usize = 10;
 const MAX_MAX_URLS: usize = 25;
 const MARKDOWN_CAP: usize = 20_000;
+/// Default back-off window advertised on a 429 so callers can retry without
+/// guessing. Mirrors the 60s hint the map/search/scrape paths use.
+const RATE_LIMITED_RETRY_AFTER_S: u64 = 60;
 
 #[derive(Debug, Deserialize)]
 pub struct ExtractRequest {
@@ -114,7 +118,7 @@ async fn fetch_markdown(
     org_id: &str,
     privacy: PrivacyPolicy,
     signals: DriverSignals,
-) -> Result<String, String> {
+) -> Result<String, QuarryError> {
     let plan = plan_from_signals(signals);
     let driver = state.drivers.build_driver(&plan);
     let hints = FetchHints {
@@ -131,8 +135,11 @@ async fn fetch_markdown(
             }
             Ok(md)
         }
-        Ok(resp) => Err(format!("upstream status {}", resp.status)),
-        Err(e) => Err(format!("fetch failed: {e}")),
+        Ok(resp) => Err(QuarryError::new(
+            ErrorCode::UpstreamBlocked,
+            format!("upstream status {}", resp.status),
+        )),
+        Err(e) => Err(e),
     }
 }
 
@@ -189,6 +196,7 @@ pub async fn extract(
     let privacy = req.privacy.unwrap_or_default().with_zdr(zdr);
     let signals = req.signals.unwrap_or_default();
     let mut results = Vec::with_capacity(targets.len());
+    let mut rate_limited: Option<QuarryError> = None;
     for raw in &targets {
         let url = match Url::parse(raw) {
             Ok(u) => u,
@@ -203,13 +211,27 @@ pub async fn extract(
         )
         .await
         {
-            Err(e) => ExtractItem {
-                url: raw.clone(),
-                status: "error".into(),
-                data: None,
-                markdown: None,
-                error: Some(e),
-            },
+            Err(e) => {
+                // A driver-side 429 short-circuits the whole batch the
+                // same way `/v1/search` and `/v1/scrape` do: return a
+                // single typed envelope and stop fanning out. Sinking
+                // it into a per-item "error" string would tell a
+                // caller their entire extract succeeded with one bad
+                // source — they would then auto-retry the rest and
+                // hammer the throttled host. The 429 surface this up
+                // unambiguously.
+                if e.code == ErrorCode::RateLimited {
+                    rate_limited.get_or_insert(e);
+                    break;
+                }
+                ExtractItem {
+                    url: raw.clone(),
+                    status: "error".into(),
+                    data: None,
+                    markdown: None,
+                    error: Some(e.message),
+                }
+            }
             Ok(md) => match (&req.schema, &runner) {
                 (Some(schema), Some(r)) => match r
                     .json_for_org(&claims.org_id, &md, schema.clone(), ZdrMode::Off)
@@ -222,13 +244,25 @@ pub async fn extract(
                         markdown: None,
                         error: None,
                     },
-                    Err(e) => ExtractItem {
-                        url: raw.clone(),
-                        status: "error".into(),
-                        data: None,
-                        markdown: None,
-                        error: Some(e.message),
-                    },
+                    Err(e) => {
+                        // A Model-Plane 429 hits the same fail-closed
+                        // envelope shape so the caller can act on a
+                        // single consistent signal across the route.
+                        if e.code == ErrorCode::RateLimited {
+                            rate_limited.get_or_insert(QuarryError::new(
+                                ErrorCode::RateLimited,
+                                e.message,
+                            ));
+                            break;
+                        }
+                        ExtractItem {
+                            url: raw.clone(),
+                            status: "error".into(),
+                            data: None,
+                            markdown: None,
+                            error: Some(e.message),
+                        }
+                    }
                 },
                 _ => ExtractItem {
                     url: raw.clone(),
@@ -240,6 +274,14 @@ pub async fn extract(
             },
         };
         results.push(item);
+    }
+
+    if let Some(e) = rate_limited {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ApiError::rate_limited(e.message, RATE_LIMITED_RETRY_AFTER_S)),
+        )
+            .into_response();
     }
 
     // Usage metering — one unit per source attempted.
@@ -326,5 +368,55 @@ mod tests {
             vec!["code", "error"]
         );
         assert_eq!(body["code"], "BAD_REQUEST");
+    }
+
+    /// A transport-side 429 must short-circuit the whole batch with the
+    /// same structured envelope the map/search/scrape paths emit, NOT
+    /// degenerate into a per-item "error" string that a caller would
+    /// mistake for a one-off failure.
+    #[tokio::test]
+    async fn rate_limited_short_circuits_to_structured_429() {
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::err(
+            ErrorCode::RateLimited,
+        ));
+        let response = extract(
+            State(state),
+            Extension(crate::test_support::claims_for_org("org_alpha")),
+            Json(ExtractRequest {
+                urls: vec![
+                    "https://a.example/1".into(),
+                    "https://a.example/2".into(),
+                    "https://a.example/3".into(),
+                ],
+                schema: None,
+                prompt: None,
+                max_urls: None,
+                zdr: None,
+                privacy: None,
+                signals: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = crate::test_support::response_json(response).await;
+        // Typed envelope with retry guidance.
+        assert_eq!(body["code"], "RATE_LIMITED");
+        assert_eq!(body["retry_after_seconds"], 60);
+        assert_eq!(body["window"], "1m");
+        let keys = crate::test_support::json_keys(&body);
+        for required in [
+            "code",
+            "error",
+            "hint",
+            "next_actions",
+            "retry_after_seconds",
+            "window",
+        ] {
+            assert!(keys.contains(&required), "missing {required} in {keys:?}");
+        }
+        // The whole batch must NOT be returned as a 200 with per-item errors.
+        assert!(body.get("results").is_none());
     }
 }

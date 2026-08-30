@@ -5962,6 +5962,13 @@ fn event_type_to_i32(s: &str) -> i32 {
         "CHECKPOINT_SAVED" => 110,
         "THREAD_CREATED" => 120,
         "MESSAGE_APPENDED" => 121,
+        "BROWSER_ACTION_DISPATCHED" => 140,
+        "BROWSER_OBSERVATION_RECEIVED" => 141,
+        "BROWSER_RUN_PAUSED" => 142,
+        "BROWSER_RUN_RESUMED" => 143,
+        "BROWSER_ACTION_APPROVAL_REQUIRED" => 144,
+        "BROWSER_ACTION_DECIDED" => 145,
+        "APPROVAL_CONTINUATION_VERIFIED" => 146,
         _ => 0,
     }
 }

@@ -3,6 +3,7 @@ import {
   CHAT_RUN_PANEL_COLLAPSED_KEY,
   applyBrowserAction,
   applyBrowserObservation,
+  applyDurableRunEvent,
   browserSessionFromChatRun,
   closeChatRunWatch,
   emptyChatRunWatch,
@@ -74,6 +75,40 @@ describe('chat run reduction', () => {
     })
     expect(state.steps).toHaveLength(1)
     expect(state.steps[0]).toMatchObject({ observed: true, step: 1 })
+  })
+
+  it('rehydrates persisted browser action and observation projections identically to live events', () => {
+    let state = applyDurableRunEvent(watched(), {
+      eventId: 'evt_1',
+      eventType: 'EVENT_TYPE_BROWSER_ACTION_DISPATCHED',
+      at: '2026-08-30T10:00:00.000Z',
+      payload: {
+        run_id: 'run_abc123',
+        action_id: 'act_0001',
+        action_type: 'goto',
+        url: 'https://example.com',
+      },
+    })
+    state = applyDurableRunEvent(state, {
+      eventId: 'evt_2',
+      eventType: 'EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED',
+      at: '2026-08-30T10:00:01.000Z',
+      payload: {
+        run_id: 'run_abc123',
+        action_id: 'act_0001',
+        page_url: 'https://example.com/',
+        page_title: 'Example Domain',
+        screenshot_ref: 'art_shot_1',
+        status: 'success',
+      },
+    })
+    expect(state.steps[0]).toMatchObject({
+      actionId: 'act_0001',
+      observed: true,
+      pageTitle: 'Example Domain',
+      screenshotUrl: '/api/v1/browser/sessions/run_abc123/artifacts/art_shot_1',
+      url: 'https://example.com/',
+    })
   })
 })
 

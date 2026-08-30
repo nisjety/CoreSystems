@@ -94,6 +94,11 @@ struct NavState {
     session_id: Option<String>,
     /// Proxy server URL (full https:// or socks5:// URL) bound to this lease.
     proxy_server: Option<String>,
+    /// W2 — Browserless live-playback URL. The driver computes this
+    /// from the session id when the lease is first acquired; the URL
+    /// shape is the canonical
+    /// `https://live.browserless.io/<sessionId>?token=...` form.
+    live_view_url: Option<String>,
 }
 
 pub struct BrowserlessDriver {
@@ -201,7 +206,17 @@ impl BrowserDriver for BrowserlessDriver {
         // the lease's pool name forward; the driver maps it to a real URL
         // at request time. For now we only seed the session_id.
         let mut nav = self.nav.lock().await;
-        nav.session_id = session_id;
+        nav.session_id = session_id.clone();
+        // W2 — derive a live-view URL whenever we have a session id.
+        // The token is optional; Browserless public endpoints accept
+        // unauthenticated live-view tokens for short windows.
+        if let Some(sid) = session_id.as_ref() {
+            let mut url = format!("{}/live/{}", self.base_url.trim_end_matches('/'), sid);
+            if let Some(tok) = self.token.as_deref() {
+                url.push_str(&format!("?token={tok}"));
+            }
+            nav.live_view_url = Some(url);
+        }
         nav.proxy_server = None;
         drop(nav);
 
@@ -212,6 +227,38 @@ impl BrowserDriver for BrowserlessDriver {
                 pages_served: 0,
             })),
         })
+    }
+
+    async fn live_view(
+        &self,
+        _session: &BrowserSession,
+    ) -> QuarryResult<Option<quarry_core::driver_meta::LiveViewRef>> {
+        let nav = self.nav.lock().await;
+        let url = match nav.live_view_url.clone() {
+            Some(u) => u,
+            None => return Ok(None),
+        };
+        // Browserless live-view URLs are not formally time-limited
+        // but the session token (when present) expires with the
+        // lease TTL. Default 10 minutes; the App Shell triggers
+        // a refresh on expiry.
+        Ok(Some(quarry_core::driver_meta::LiveViewRef {
+            url,
+            kind: Some(quarry_core::driver_meta::LiveViewKind::Iframe),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
+        }))
+    }
+
+    async fn refresh_live_view(
+        &self,
+        session: &BrowserSession,
+    ) -> QuarryResult<Option<quarry_core::driver_meta::LiveViewRef>> {
+        // Browserless live-view URLs are derived from the cached
+        // session id; a re-read is sufficient unless the operator
+        // rotated the session, in which case the lease's
+        // `refresh_live_view` API call returns the same URL until
+        // the next acquire.
+        self.live_view(session).await
     }
 
     async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {

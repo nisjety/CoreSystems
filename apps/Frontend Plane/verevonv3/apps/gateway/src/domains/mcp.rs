@@ -160,7 +160,7 @@ async fn register_server(
 /// forwarded verbatim to model-gateway, which enforces OWNER-ONLY authorization
 /// (403 otherwise) — the gateway re-derives owner/org from the verified token,
 /// so no ownership identifiers are injected here.
-async fn share_server(
+pub(crate) async fn share_server(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -190,7 +190,7 @@ async fn share_server(
     (status, body).into_response()
 }
 
-async fn delete_server(
+pub(crate) async fn delete_server(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

@@ -177,13 +177,7 @@ async fn main() -> Result<()> {
         },
     ));
 
-    let shutdown = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-        info!("SIGTERM received, shutting down");
-    };
+    let shutdown = shutdown_signal();
 
     tokio::select! {
         result = grpc_handle => result??,
@@ -202,6 +196,23 @@ async fn main() -> Result<()> {
     pool.close().await;
     info!("session-core stopped");
     Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler")
+        .recv()
+        .await;
+    info!("SIGTERM received, shutting down");
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("install Ctrl-C handler");
+    info!("Ctrl-C received, shutting down");
 }
 
 async fn supervise_background<F, Fut>(name: &'static str, mut run: F) -> Result<()>

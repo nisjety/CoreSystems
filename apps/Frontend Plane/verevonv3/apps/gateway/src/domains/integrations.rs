@@ -1,7 +1,7 @@
 mod connect_sessions;
-mod connections;
+pub(crate) mod connections;
 mod profile;
-mod providers;
+pub(crate) mod providers;
 mod shared;
 mod sync_jobs;
 

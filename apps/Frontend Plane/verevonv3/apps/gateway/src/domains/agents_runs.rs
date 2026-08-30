@@ -218,7 +218,7 @@ async fn get_run(
 /// re-checking them here would be a second copy of a rule that must not drift.
 /// What this layer owns is the session — `require_session` has already resolved
 /// the caller, and the Model Plane checks that they own the run.
-async fn approve_plan(
+pub(crate) async fn approve_plan(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

@@ -47,8 +47,10 @@ owns planning and synthesis; Data Plane owns promoted knowledge.
   for quarantine/review rather than replayed automatically.
 - BrowserBroker grants are accepted on run start and revalidated before every
   action through the configured validator. Production forces the validator
-  URL and rejects missing grants; `max_cost_usd` is rejected until the edge
-  has a real action-cost meter rather than silently ignored.
+  URL and rejects missing grants. `max_cost_usd` is enforced via the flat
+  action-cost table (`crates/quarry-runtime/src/action_cost.rs`) and the
+  `AgentLoop` budget tracker; receipts carry `cost_micro_usd` and the fleet
+  budget tracker aggregates across member runs.
 - Observations include conservative challenge signals (captcha/login/consent/
   access-denied/rate-limit), ordered escalation evidence, and a proof bundle
   linking the action outcome, content fingerprint, and captured artifacts.
@@ -64,6 +66,14 @@ owns planning and synthesis; Data Plane owns promoted knowledge.
   the bridge is not configured.
 - The standalone compose stack enables the durable Postgres profile/history
   path and a filesystem artifact volume by default.
+- Fleet orchestration: `crates/quarry-runtime/src/fleet.rs` (`FleetTask`,
+  `FleetBudgetTracker`, `FleetRegistry`, NATS `quarry.fleet.<id>.>` subjects)
+  and `services/quarry-orchestrator/internal/fleet` (Go durable envelope +
+  budget tracker) provide the batch-level budget and fan-out/fan-in shape.
+  The edge exposes `POST /v1/fleets`, `GET /v1/fleets/:id`,
+  `POST /v1/fleets/:id/members`, `GET /v1/fleets/:id/budget` (all org-scoped)
+  and the agent events SSE reuses `?fleet_id=` for a single fleet-level
+  live view.
 
 ## Deliberate gates still required before claiming full production closure
 

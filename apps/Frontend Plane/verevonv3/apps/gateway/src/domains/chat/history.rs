@@ -42,6 +42,15 @@ struct ChatThreadSummary {
     /// nothing on the client reads it, only `chat_history_sessions` below does.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     origin: String,
+    /// Session Core's newest run projection. The Chat surface uses this only
+    /// for a quiet history-rail status hint; the run endpoint remains the
+    /// authority for detailed state and actions.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    latest_run_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    latest_run_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_run_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,17 +65,17 @@ struct ChatThreadTranscript {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct SaveThreadRequest {
+pub(crate) struct SaveThreadRequest {
     #[serde(default)]
-    title: Option<String>,
+    pub(crate) title: Option<String>,
     /// Absent means "leave the pin as it is", which is why this is an Option
     /// rather than a bool: the SPA saves a thread on every turn to refresh the
     /// title and preview, and a bare `false` default would silently unpin on
     /// the next message.
     #[serde(default)]
-    pinned: Option<bool>,
+    pub(crate) pinned: Option<bool>,
     #[serde(default)]
-    preview: Option<String>,
+    pub(crate) preview: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +122,12 @@ struct DurableThreadSummary {
     space_id: String,
     #[serde(default)]
     origin: String,
+    #[serde(default, alias = "latestRunId")]
+    latest_run_id: String,
+    #[serde(default, alias = "latestRunStatus")]
+    latest_run_status: String,
+    #[serde(default, alias = "latestRunUpdatedAt")]
+    latest_run_updated_at: Option<String>,
 }
 
 pub(super) async fn list_threads(
@@ -189,7 +204,7 @@ pub(super) async fn get_thread_transcript(
     Json(ok(TranscriptResponse { transcript })).into_response()
 }
 
-pub(super) async fn save_thread(
+pub(crate) async fn save_thread(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -241,7 +256,7 @@ pub(super) async fn save_thread(
     .into_response()
 }
 
-pub(super) async fn delete_thread(
+pub(crate) async fn delete_thread(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -264,7 +279,7 @@ pub(super) async fn delete_thread(
     Json(ok(ThreadsResponse { sessions })).into_response()
 }
 
-pub(super) async fn clear_threads(
+pub(crate) async fn clear_threads(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -363,6 +378,9 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         pinned: item.pinned,
         space_ref: item.space_id.trim().to_owned(),
         origin: item.origin.trim().to_owned(),
+        latest_run_id: item.latest_run_id,
+        latest_run_status: item.latest_run_status,
+        latest_run_updated_at: item.latest_run_updated_at,
     })
 }
 
@@ -583,7 +601,7 @@ fn canonical_messages_to_transcript(
 /// Makes Support-derived threads durably read-only at the same-origin trust
 /// boundary. Classification is encoded in an immutable thread namespace, so
 /// enforcement cannot fail open across replicas, restarts, or cache outages.
-pub(super) fn enforce_support_thread_policy(body: &mut Value) -> Result<(), &'static str> {
+pub(crate) fn enforce_support_thread_policy(body: &mut Value) -> Result<(), &'static str> {
     let Some(object) = body.as_object_mut() else {
         return Ok(());
     };
@@ -683,6 +701,9 @@ mod tests {
                 pinned: false,
                 space_id: "space_room_1".to_owned(),
                 origin: "space".to_owned(),
+                latest_run_id: String::new(),
+                latest_run_status: String::new(),
+                latest_run_updated_at: None,
             },
             now,
         )
@@ -697,6 +718,9 @@ mod tests {
                 pinned: false,
                 space_id: String::new(),
                 origin: "chat".to_owned(),
+                latest_run_id: String::new(),
+                latest_run_status: String::new(),
+                latest_run_updated_at: None,
             },
             now,
         )
@@ -730,6 +754,9 @@ mod tests {
                     pinned: false,
                     space_id: String::new(),
                     origin: origin.to_owned(),
+                    latest_run_id: String::new(),
+                    latest_run_status: String::new(),
+                    latest_run_updated_at: None,
                 },
                 now,
             )
@@ -768,6 +795,9 @@ mod tests {
                 pinned: false,
                 space_id: String::new(),
                 origin: String::new(),
+                latest_run_id: String::new(),
+                latest_run_status: String::new(),
+                latest_run_updated_at: None,
             },
             now,
         )
@@ -788,6 +818,9 @@ mod tests {
                 pinned: true,
                 space_id: "space_1".to_owned(),
                 origin: "space".to_owned(),
+                latest_run_id: "run_1".to_owned(),
+                latest_run_status: "awaiting_approval".to_owned(),
+                latest_run_updated_at: Some("2026-08-11T11:00:00Z".to_owned()),
             },
             "2026-08-11T12:00:00Z",
         )
@@ -798,6 +831,12 @@ mod tests {
         assert!(summary.pinned);
         assert_eq!(summary.space_ref, "space_1");
         assert_eq!(summary.origin, "space");
+        assert_eq!(summary.latest_run_id, "run_1");
+        assert_eq!(summary.latest_run_status, "awaiting_approval");
+        assert_eq!(
+            summary.latest_run_updated_at.as_deref(),
+            Some("2026-08-11T11:00:00Z")
+        );
     }
 
     #[test]

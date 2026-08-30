@@ -6,11 +6,3 @@
 # way across every plane's entrypoint scripts. Force LF regardless of local
 # autocrlf settings so this cannot recur on a fresh Windows checkout.
 *.sh text eol=lf
-
-# The service principal policy is the reviewable half of the credential
-# registry, so its diffs have to stay readable. On a Windows checkout it would
-# otherwise flip to CRLF and re-flip on the next write, turning a one-line
-# policy change into a whole-file diff that a reviewer cannot skim. Pinned
-# narrowly rather than as a repo-wide *.json rule, which would rewrite every
-# lockfile and fixture in the tree.
-apps/Control?Plane/config/plane-service-principals.json text eol=lf

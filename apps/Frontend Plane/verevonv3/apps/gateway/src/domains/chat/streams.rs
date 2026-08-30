@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::HeaderMap,
     response::{IntoResponse, Response},
     Json,
 };
 use reqwest::Method;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
@@ -188,4 +189,60 @@ pub(super) async fn run_events_stream(
         false,
     )
     .await
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct RunEventsReplayQuery {
+    #[serde(default)]
+    after_event_id: Option<String>,
+    limit: Option<u32>,
+}
+
+/// Read-only durable browser-event projection for a run. The live SSE route
+/// above remains the only tail transport; this proxy simply carries the
+/// caller's verified model/session audiences to Model Gateway.
+pub(super) async fn run_events_replay(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Query(query): Query<RunEventsReplayQuery>,
+) -> Response {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let session_token = match shared::required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let mut url = format!(
+        "{}/v1/runs/{}/events/replay",
+        state.model_gateway_url,
+        urlencoding::encode(&run_id),
+    );
+    let mut params = Vec::new();
+    if let Some(cursor) = query
+        .after_event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        params.push(format!("after_event_id={}", urlencoding::encode(cursor)));
+    }
+    if let Some(limit) = query.limit {
+        params.push(format!("limit={limit}"));
+    }
+    if !params.is_empty() {
+        url.push('?');
+        url.push_str(&params.join("&"));
+    }
+    let (status, body) = shared::proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&session_token),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
 }

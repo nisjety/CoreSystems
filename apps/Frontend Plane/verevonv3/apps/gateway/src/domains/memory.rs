@@ -77,7 +77,7 @@ async fn list_memory(
     (status, body).into_response()
 }
 
-async fn delete_memory(
+pub(crate) async fn delete_memory(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

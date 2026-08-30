@@ -912,11 +912,11 @@ struct SpaceThreadsQuery {
 }
 
 #[derive(Debug, Deserialize)]
-struct DeleteSpaceRequest {
-    idempotency_key: String,
+pub(crate) struct DeleteSpaceRequest {
+    pub(crate) idempotency_key: String,
 }
 
-async fn request_personal_space_deletion(
+pub(crate) async fn request_personal_space_deletion(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -1270,7 +1270,7 @@ async fn list_personal_spaces(
 /// The body is ignored beyond an optional name; owner and org come from the
 /// verified session and the caller's active organization, never from the
 /// browser.
-async fn create_personal_space(
+pub(crate) async fn create_personal_space(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     body: Option<Json<Value>>,
@@ -1339,7 +1339,7 @@ async fn create_personal_space(
 /// `pending_registration` until Control registers it, and the org roster is
 /// converged onto it afterwards by the membership sync — a fresh room listing
 /// only its registrar is a real intermediate state, not a failure.
-async fn ensure_organization_room(
+pub(crate) async fn ensure_organization_room(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     body: Option<Json<Value>>,
@@ -1651,7 +1651,7 @@ const MAX_CREATE_AGENT_INSTRUCTIONS_CHARS: usize = 4000;
 /// creating human's room role is the authorizing decision (QM: authority for
 /// future agent behavior comes from outside the agent) — resolved from
 /// Control under the caller's own signed delegation, never from the body.
-async fn create_space_agent(
+pub(crate) async fn create_space_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -1911,9 +1911,9 @@ async fn get_space_instructions(
 }
 
 #[derive(Deserialize)]
-struct UpdateSpaceInstructionsRequest {
+pub(crate) struct UpdateSpaceInstructionsRequest {
     #[serde(default)]
-    instructions: Option<String>,
+    pub(crate) instructions: Option<String>,
 }
 
 const MAX_SPACE_INSTRUCTIONS_LENGTH: usize = 4000;
@@ -1921,7 +1921,7 @@ const MAX_SPACE_INSTRUCTIONS_LENGTH: usize = 4000;
 /// PATCH `/api/v1/spaces/{space_ref}/instructions` — ADR-0003's Space-layer
 /// authoring write, gated to `editor`/`manager`/`owner` (see
 /// [`SPACE_INSTRUCTIONS_WRITE_ROLES`]).
-async fn update_space_instructions(
+pub(crate) async fn update_space_instructions(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -2083,7 +2083,7 @@ async fn list_installable_space_agents(
 /// §UI-3: bind an EXISTING agent definition to this room. Distinct from
 /// `create_space_agent` (§UI-3b) only in step 1 — an `agent_ref` the caller
 /// picked from `list_installable_space_agents`, not a freshly authored name.
-async fn bind_existing_space_agent(
+pub(crate) async fn bind_existing_space_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,

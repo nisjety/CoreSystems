@@ -33,7 +33,7 @@ pub(super) async fn get_connection(
     proxy_for_user(&state, &user, &headers, Method::GET, &url, None).await
 }
 
-pub(super) async fn disconnect(
+pub(crate) async fn disconnect(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -47,7 +47,7 @@ pub(super) async fn disconnect(
     proxy_for_user(&state, &user, &headers, Method::DELETE, &url, None).await
 }
 
-pub(super) async fn trigger_sync(
+pub(crate) async fn trigger_sync(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -61,7 +61,7 @@ pub(super) async fn trigger_sync(
     proxy_for_user(&state, &user, &headers, Method::POST, &url, None).await
 }
 
-pub(super) async fn trigger_inbox_sync(
+pub(crate) async fn trigger_inbox_sync(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -76,7 +76,7 @@ pub(super) async fn trigger_inbox_sync(
     proxy_for_user(&state, &user, &headers, Method::POST, &url, Some(body)).await
 }
 
-pub(super) async fn extend_inbox_history(
+pub(crate) async fn extend_inbox_history(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

@@ -2410,6 +2410,52 @@ textarea:focus-visible {
   line-height: 18px;
 }
 
+.core-chat-session__summary {
+  min-width: 0;
+}
+
+/* A compact server-owned run hint. It stays subordinate to the conversation
+   title and only appears for active/attention states. */
+.core-chat-session__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--sidebar-muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.core-chat-session__status > i {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: var(--sidebar-muted);
+}
+
+.core-chat-session__status[data-tone='active'] {
+  color: var(--verevon-a-earth);
+}
+
+.core-chat-session__status[data-tone='active'] > i {
+  background: var(--verevon-a-earth);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--verevon-a-earth) 15%, transparent);
+}
+
+.core-chat-session__status[data-tone='attention'] {
+  color: var(--danger);
+}
+
+.core-chat-session__status[data-tone='attention'] > i {
+  background: var(--danger);
+}
+
 .core-chat-session--active span {
   font-weight: 600;
 }
@@ -7866,6 +7912,44 @@ textarea:focus-visible {
   display: block;
 }
 
+/* Server-owned run hint for the calm history rail. This is intentionally
+   smaller than a Work badge: it tells the user which thread needs attention
+   without turning the conversation switcher into an operator console. */
+.dashboard-composer-history-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  color: var(--verevon-text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.dashboard-composer-history-status > span {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--verevon-text-muted);
+}
+
+.dashboard-composer-history-status[data-tone='active'] {
+  color: var(--verevon-a-earth);
+}
+
+.dashboard-composer-history-status[data-tone='active'] > span {
+  background: var(--verevon-a-earth);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--verevon-a-earth) 15%, transparent);
+}
+
+.dashboard-composer-history-status[data-tone='attention'] {
+  color: var(--danger);
+}
+
+.dashboard-composer-history-status[data-tone='attention'] > span {
+  background: var(--danger);
+}
+
 .dashboard-composer-history-row__time {
   flex-shrink: 0;
   color: var(--border-strong);
@@ -8227,6 +8311,41 @@ textarea:focus-visible {
   transform: translateY(-1px);
 }
 
+.dashboard-composer-attachments__knowledge {
+  position: absolute;
+  top: 16px;
+  right: 54px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--verevon-accent-secondary, var(--verevon-accent));
+  cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    transform 150ms ease;
+}
+
+.dashboard-composer-attachments__knowledge:hover:not(:disabled) {
+  background: var(--verevon-surface-soft);
+  transform: translateY(-1px);
+}
+
+.dashboard-composer-attachments__knowledge:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.dashboard-composer-attachments__notice {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .dashboard-composer-actions-bar {
   display: flex;
   flex-wrap: wrap;
@@ -8464,6 +8583,142 @@ textarea:focus-visible {
 
 .dashboard-composer-toolbar__right {
   justify-content: flex-end;
+}
+
+.dashboard-composer-context-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.dashboard-composer-context-label {
+  max-width: 13ch;
+  overflow: hidden;
+  color: var(--verevon-text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .dashboard-composer-context-label {
+    display: none;
+  }
+}
+
+.dashboard-composer-intent-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dashboard-composer-intent-toggle__label {
+  min-width: 24px;
+  color: var(--verevon-text-muted);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dashboard-composer-intent-toggle--active .dashboard-composer-intent-toggle__label {
+  color: var(--verevon-accent-strong, #a76314);
+}
+
+.dark .dashboard-composer-intent-toggle__label {
+  color: var(--verevon-text-subtle);
+}
+
+.dark .dashboard-composer-intent-toggle--active .dashboard-composer-intent-toggle__label {
+  color: var(--verevon-accent);
+}
+
+.dashboard-composer-context-panel {
+  position: absolute;
+  z-index: 30;
+  right: 0;
+  bottom: calc(100% + 10px);
+  width: min(320px, calc(100vw - 32px));
+  padding: 14px;
+  color: var(--verevon-text-soft);
+}
+
+.dashboard-composer-context-panel__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--verevon-teal-deep);
+}
+
+.dashboard-composer-context-panel > p {
+  margin: 8px 0 12px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.dashboard-composer-context-panel__list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dashboard-composer-context-panel__list li {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+}
+
+.dashboard-composer-context-panel__list strong,
+.dashboard-composer-context-panel__list small {
+  display: block;
+}
+
+.dashboard-composer-context-panel__list strong {
+  color: var(--verevon-text-soft);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.dashboard-composer-context-panel__list small {
+  margin-top: 2px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.dashboard-composer-context-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--verevon-border-subtle, #b9c4c4);
+}
+
+.dashboard-composer-context-dot--on {
+  background: var(--verevon-teal, #2e8b89);
+  box-shadow: 0 0 0 3px rgb(46 139 137 / 13%);
+}
+
+.dashboard-composer-context-dot--off {
+  opacity: 0.6;
+}
+
+.dark .dashboard-composer-context-panel__heading {
+  color: var(--verevon-accent);
+}
+
+.dark .dashboard-composer-context-panel__list strong {
+  color: var(--verevon-text-soft);
+}
+
+.dark .dashboard-composer-context-dot--on {
+  background: var(--verevon-accent);
+  box-shadow: 0 0 0 3px rgb(245 158 11 / 15%);
 }
 
 .dashboard-composer-attach {
@@ -22037,6 +22292,839 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
+/* Contextual workspace canvas. The chat transcript remains the primary
+   surface; this rail is a calm, bounded place for evidence, files, and run
+   detail (the same interaction model as opening a document beside a chat).
+   It intentionally uses the existing Verevon tokens so the base web-chat
+   aesthetic stays warmer and lighter than a permanent developer IDE. */
+.verevon-chat-workspace-canvas {
+  position: relative;
+  z-index: 11;
+  display: flex;
+  flex: 0 0 clamp(320px, 30vw, 440px);
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--verevon-border);
+  background: var(--verevon-i-surface);
+}
+
+.verevon-chat-page--canvas .verevon-chat-run-panel {
+  flex-basis: clamp(260px, 25vw, 380px);
+}
+
+.verevon-chat-page--canvas .verevon-chat-thread {
+  max-width: 680px;
+}
+
+.verevon-chat-workspace-canvas__head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 14px 12px;
+  border-bottom: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-chat-workspace-canvas__title {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.verevon-chat-workspace-canvas__icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--verevon-a-earth) 26%, var(--verevon-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 10%, transparent);
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-workspace-canvas__title h2 {
+  margin: 0;
+  color: var(--verevon-e-strong);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.verevon-chat-workspace-canvas__title p {
+  max-width: 28ch;
+  margin: 2px 0 0;
+  color: var(--verevon-e-muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.verevon-chat-workspace-canvas__close {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--verevon-e-muted);
+  cursor: pointer;
+}
+
+.verevon-chat-workspace-canvas__close:hover,
+.verevon-chat-workspace-canvas__close:focus-visible {
+  border-color: var(--verevon-border);
+  background: color-mix(in srgb, var(--verevon-e-subtle) 9%, transparent);
+  color: var(--verevon-e-strong);
+}
+
+.verevon-chat-workspace-canvas__body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  scrollbar-width: thin;
+}
+
+.verevon-chat-workspace-canvas__body:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--verevon-a-earth) 72%, transparent);
+  outline-offset: -2px;
+}
+
+.verevon-chat-workspace-canvas__body > .verevon-chat-panel,
+.verevon-chat-workspace-canvas__body > .verevon-chat-empty-panel {
+  min-height: 100%;
+  padding: 0;
+}
+
+.verevon-chat-workspace-canvas__body > .verevon-chat-panel > .verevon-chat-panel__inner {
+  padding: 0;
+}
+
+.verevon-chat-attachment-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.verevon-chat-attachment-workspace__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.verevon-chat-attachment-workspace__item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-e-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-chat-attachment-workspace__item:hover,
+.verevon-chat-attachment-workspace__item--active {
+  border-color: var(--verevon-border);
+  background: color-mix(in srgb, var(--verevon-e-subtle) 8%, transparent);
+  color: var(--verevon-e-strong);
+}
+
+.verevon-chat-attachment-workspace__item-icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 10%, transparent);
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-attachment-workspace__item > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.verevon-chat-attachment-workspace__item strong,
+.verevon-chat-attachment-workspace__item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-attachment-workspace__item strong {
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.verevon-chat-attachment-workspace__item small,
+.verevon-chat-attachment-workspace__viewer small {
+  color: var(--verevon-e-subtle);
+  font-size: 0.64rem;
+}
+
+.verevon-chat-attachment-workspace__provenance {
+  color: var(--verevon-a-earth) !important;
+  font-size: 0.6rem !important;
+}
+
+.verevon-chat-attachment-workspace__viewer {
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--verevon-border-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--verevon-i-surface) 86%, var(--verevon-e-subtle));
+}
+
+.verevon-chat-attachment-workspace__viewer > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-chat-attachment-workspace__viewer > header > div:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.verevon-chat-attachment-workspace__viewer > header strong {
+  overflow: hidden;
+  color: var(--verevon-e-strong);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-attachment-workspace__actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.verevon-chat-attachment-workspace__actions a {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-chat-attachment-workspace__actions a:hover,
+.verevon-chat-attachment-workspace__actions a:focus-visible {
+  background: color-mix(in srgb, var(--verevon-e-subtle) 10%, transparent);
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-attachment-workspace__image {
+  display: block;
+  width: 100%;
+  max-height: 52vh;
+  object-fit: contain;
+  background: #101217;
+}
+
+.verevon-chat-attachment-workspace__frame {
+  display: block;
+  width: 100%;
+  height: min(62vh, 720px);
+  border: 0;
+  background: #fff;
+}
+
+.verevon-chat-attachment-workspace__text {
+  max-height: min(62vh, 720px);
+  overflow: auto;
+  margin: 0;
+  padding: 14px;
+  background: #101217;
+  color: #e6e8ed;
+  font: 0.68rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-attachment-workspace__table-wrap {
+  max-height: min(62vh, 720px);
+  overflow: auto;
+  background: #101217;
+}
+
+.verevon-chat-attachment-workspace__table-wrap .verevon-chat-table {
+  min-width: max-content;
+  font-size: 0.68rem;
+}
+
+.verevon-chat-attachment-workspace__table-wrap .verevon-chat-table caption {
+  padding: 8px 14px;
+  color: var(--verevon-e-subtle);
+  font-size: 0.62rem;
+  text-align: left;
+}
+
+.verevon-chat-attachment-workspace__table-wrap .verevon-chat-table th,
+.verevon-chat-attachment-workspace__table-wrap .verevon-chat-table td {
+  max-width: 30ch;
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-attachment-workspace__unavailable {
+  display: grid;
+  min-height: 130px;
+  place-items: center;
+  gap: 8px;
+  padding: 18px;
+  color: var(--verevon-e-muted);
+  text-align: center;
+}
+
+.verevon-chat-attachment-workspace__unavailable p {
+  max-width: 28ch;
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.verevon-chat-event-log {
+  margin-top: 10px;
+  border-top: 1px solid var(--verevon-border-soft);
+  color: var(--verevon-e-muted);
+  font-size: 0.66rem;
+}
+
+.verevon-chat-telemetry {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 8px;
+  border: 1px solid var(--verevon-border-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--verevon-e-subtle) 5%, transparent);
+}
+
+.verevon-chat-telemetry .verevon-chat-metric {
+  min-width: 0;
+  padding: 0;
+}
+
+.verevon-chat-telemetry .verevon-chat-metric span {
+  font-size: 0.58rem;
+}
+
+.verevon-chat-telemetry .verevon-chat-metric strong {
+  overflow: hidden;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-run-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-bottom: 14px;
+  padding-bottom: 13px;
+  border-bottom: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-chat-run-plan__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.verevon-chat-run-plan__header h3,
+.verevon-chat-run-plan__todos h4 {
+  margin: 0;
+  color: var(--verevon-e-strong);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.verevon-chat-run-plan__header p {
+  margin: 2px 0 0;
+  color: var(--verevon-e-muted);
+  font-size: 0.64rem;
+  line-height: 1.35;
+}
+
+.verevon-chat-run-plan__count {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--verevon-a-earth) 30%, var(--verevon-border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 10%, transparent);
+  color: var(--verevon-a-earth);
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+
+.verevon-chat-run-plan__note,
+.verevon-chat-run-plan__partial {
+  margin: 0;
+  color: var(--verevon-e-muted);
+  font-size: 0.66rem;
+  line-height: 1.45;
+}
+
+.verevon-chat-run-plan__partial {
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-run-plan__card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid var(--verevon-border-soft);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--verevon-e-subtle) 5%, transparent);
+}
+
+.verevon-chat-run-plan__card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.verevon-chat-run-plan__card-head strong {
+  min-width: 0;
+  color: var(--verevon-e-strong);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.verevon-chat-run-plan__card-head > span,
+.verevon-chat-run-plan__step-state {
+  flex: 0 0 auto;
+  color: var(--verevon-e-subtle);
+  font-size: 0.58rem;
+  letter-spacing: 0.02em;
+  text-transform: capitalize;
+}
+
+.verevon-chat-run-plan__card-head > span[data-state='PLAN_STATE_ACTIVE'],
+.verevon-chat-run-plan__card-head > span[data-state='ACTIVE'],
+.verevon-chat-run-plan__step-state[data-state='ACTIVE'],
+.verevon-chat-run-plan__step-state[data-state='PLAN_STEP_STATE_ACTIVE'],
+.verevon-chat-run-plan__todo[data-state='ACTIVE'] .verevon-chat-run-plan__step-state {
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-run-plan__meta {
+  margin: -1px 0 0;
+  color: var(--verevon-e-subtle);
+  font-size: 0.59rem;
+}
+
+.verevon-chat-run-plan__steps,
+.verevon-chat-run-plan__todos {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-chat-run-plan__steps {
+  counter-reset: plan-step;
+}
+
+.verevon-chat-run-plan__steps li,
+.verevon-chat-run-plan__todo {
+  display: grid;
+  grid-template-columns: minmax(44px, auto) minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  padding: 5px 0;
+  border-top: 1px solid color-mix(in srgb, var(--verevon-border-soft) 72%, transparent);
+}
+
+.verevon-chat-run-plan__steps li::before {
+  counter-increment: plan-step;
+  content: counter(plan-step, decimal-leading-zero);
+  color: var(--verevon-e-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.58rem;
+}
+
+.verevon-chat-run-plan__steps li > .verevon-chat-run-plan__step-state {
+  display: none;
+}
+
+.verevon-chat-run-plan__steps li > span:last-child,
+.verevon-chat-run-plan__todo > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.verevon-chat-run-plan__steps li strong,
+.verevon-chat-run-plan__todo strong {
+  overflow: hidden;
+  color: var(--verevon-e-muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+.verevon-chat-run-plan__steps li[data-state='ACTIVE'] strong,
+.verevon-chat-run-plan__steps li[data-state='PLAN_STEP_STATE_ACTIVE'] strong,
+.verevon-chat-run-plan__todo[data-state='ACTIVE'] strong {
+  color: var(--verevon-e-strong);
+}
+
+.verevon-chat-run-plan__steps small,
+.verevon-chat-run-plan__todo small {
+  overflow: hidden;
+  color: var(--verevon-e-subtle);
+  font-size: 0.59rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+.verevon-chat-run-plan__todos {
+  gap: 0;
+  padding-top: 4px;
+}
+
+.verevon-chat-run-plan__todos h4 {
+  margin-bottom: 2px;
+}
+
+.verevon-chat-run-plan__todo {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.verevon-chat-run-plan__lineage {
+  border-top: 1px solid color-mix(in srgb, var(--verevon-border-soft) 72%, transparent);
+  color: var(--verevon-e-muted);
+  font-size: 0.62rem;
+}
+
+.verevon-chat-run-plan__lineage summary {
+  padding: 7px 0 3px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.verevon-chat-run-plan__lineage ul {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 2px 0 2px 4px;
+  list-style: none;
+}
+
+.verevon-chat-run-plan__lineage li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.verevon-chat-run-plan__lineage code {
+  overflow: hidden;
+  color: var(--verevon-e-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.57rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-run-plan__lineage li > span {
+  margin-left: auto;
+  color: var(--verevon-e-subtle);
+  font-size: 0.57rem;
+  text-transform: capitalize;
+}
+
+.verevon-chat-run-proof {
+  margin-bottom: 14px;
+  padding: 10px;
+  border-color: var(--verevon-border-soft);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--verevon-e-subtle) 4%, transparent);
+  box-shadow: none;
+}
+
+.verevon-chat-run-proof .verevon-run-panel__head {
+  margin-bottom: 8px;
+}
+
+.verevon-chat-run-proof__refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: var(--verevon-e-subtle);
+  font: inherit;
+  font-size: 0.59rem;
+  cursor: pointer;
+}
+
+.verevon-chat-run-proof__refresh:hover:not(:disabled) {
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-run-proof__refresh:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.verevon-chat-run-proof__stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.verevon-chat-run-proof__stats .verevon-chat-metric {
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--verevon-border-soft);
+  border-radius: 7px;
+}
+
+.verevon-chat-run-proof__stats .verevon-chat-metric span {
+  font-size: 0.55rem;
+}
+
+.verevon-chat-run-proof__stats .verevon-chat-metric strong {
+  overflow: hidden;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-run-proof__approvals {
+  gap: 6px;
+  margin: 10px 0 0;
+}
+
+.verevon-chat-run-proof__approval {
+  padding: 8px 9px;
+}
+
+.verevon-chat-run-proof__approval .verevon-run-proof__approval-head {
+  margin-bottom: 0;
+}
+
+.verevon-chat-run-proof__approval .verevon-run-proof__receipt {
+  margin-top: 6px;
+}
+
+.verevon-chat-run-proof__approval .verevon-run-proof__receipt-row {
+  font-size: 0.61rem;
+  line-height: 14px;
+}
+
+.verevon-chat-run-proof__approval .verevon-run-proof__receipt-row dt {
+  min-width: 76px;
+}
+
+.verevon-chat-trace-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.verevon-chat-trace-log {
+  padding: 12px;
+  border: 1px solid var(--verevon-border-soft);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--verevon-e-subtle) 3%, transparent);
+}
+
+.verevon-chat-trace-log > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.verevon-chat-trace-log h2 {
+  margin: 0;
+  color: var(--verevon-e-strong);
+  font-size: 0.78rem;
+}
+
+.verevon-chat-trace-log p {
+  margin: 3px 0 0;
+  color: var(--verevon-e-muted);
+  font-size: 0.66rem;
+  line-height: 1.4;
+}
+
+.verevon-chat-trace-log__notice {
+  margin: 0 0 10px !important;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--verevon-border-soft) 70%, var(--verevon-a-earth));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 7%, transparent);
+}
+
+.verevon-chat-trace-log > header > span {
+  flex: 0 0 auto;
+  color: var(--verevon-e-subtle);
+  font-size: 0.6rem;
+}
+
+.verevon-chat-trace-log ol {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-chat-trace-log li {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.verevon-chat-trace-log__marker {
+  width: 6px;
+  height: 6px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--verevon-a-earth);
+}
+
+.verevon-chat-trace-log li > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.verevon-chat-trace-log__event-copy {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.verevon-chat-trace-log strong {
+  overflow: hidden;
+  color: var(--verevon-e-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-trace-log code {
+  overflow: hidden;
+  max-width: 220px;
+  color: var(--verevon-e-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.56rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-trace-log time {
+  flex: 0 0 auto;
+  color: var(--verevon-e-subtle);
+  font-size: 0.58rem;
+}
+
+.verevon-chat-trace-log__empty {
+  margin: 0;
+}
+
+@media (max-width: 720px) {
+  .verevon-chat-telemetry {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.verevon-chat-event-log summary {
+  padding: 9px 2px;
+  color: var(--verevon-e-subtle);
+  cursor: pointer;
+  user-select: none;
+}
+
+.verevon-chat-event-log ol {
+  display: flex;
+  max-height: 180px;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0 2px 8px 18px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.verevon-chat-event-log li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.verevon-chat-event-log li span {
+  color: var(--verevon-e-muted);
+}
+
+.verevon-chat-event-log li time {
+  flex: 0 0 auto;
+  color: var(--verevon-e-subtle);
+  font-size: 0.58rem;
+}
+
+@media (max-width: 980px) {
+  .verevon-chat-workspace-canvas {
+    flex-basis: clamp(290px, 38vw, 360px);
+  }
+}
+
+@media (max-width: 720px) {
+  .verevon-chat-workspace-canvas {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    width: 100%;
+    flex: 1 1 auto;
+    border-left: 0;
+  }
+
+  .verevon-chat-workspace-canvas__head {
+    padding-top: max(14px, env(safe-area-inset-top));
+  }
+}
+
 .verevon-chat-section {
   position: relative;
   z-index: 10;
@@ -22163,6 +23251,47 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.verevon-chat-run-panel__controls {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.verevon-chat-run-panel__control {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid var(--verevon-border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--verevon-e-muted);
+  cursor: pointer;
+}
+
+.verevon-chat-run-panel__control:hover:not(:disabled),
+.verevon-chat-run-panel__control:focus-visible {
+  border-color: color-mix(in srgb, var(--verevon-a-earth) 55%, var(--verevon-border));
+  background: color-mix(in srgb, var(--verevon-a-earth) 10%, transparent);
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-run-panel__control:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.verevon-chat-run-panel__control-error {
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--verevon-a-danger, #ef4444) 30%, var(--verevon-border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--verevon-a-danger, #ef4444) 8%, transparent);
+  color: var(--verevon-e-muted);
+  font-size: 0.66rem;
+}
+
 .verevon-chat-run-panel__body {
   display: flex;
   min-height: 0;
@@ -22171,6 +23300,23 @@ textarea:focus-visible {
   gap: 10px;
   overflow-y: auto;
   padding: 10px;
+}
+
+.verevon-chat-run-panel__work {
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-chat-run-panel__work > .verevon-chat-panel {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.verevon-chat-run-panel__work > .verevon-chat-panel > .verevon-chat-panel__inner {
+  padding: 0;
 }
 
 /* ── Honest no-frame states ────────────────────────────────────────────────── */
@@ -22192,6 +23338,33 @@ textarea:focus-visible {
   margin: 0;
   font-size: 12px;
   color: var(--verevon-e-muted);
+}
+
+.verevon-chat-run-fallback__error {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.verevon-chat-run-fallback__error p {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.verevon-chat-run-fallback__error button {
+  border: 1px solid var(--verevon-border-strong, var(--verevon-border));
+  border-radius: 7px;
+  padding: 4px 8px;
+  background: var(--verevon-surface);
+  color: var(--verevon-j-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.verevon-chat-run-fallback__error button:hover {
+  border-color: var(--verevon-a-earth);
 }
 
 .verevon-chat-run-fallback__idle {
@@ -23356,6 +24529,119 @@ textarea:focus-visible {
   color: #a2483b;
 }
 
+/* Explicit answer markers (`[1]`, `[1, 3]`) become compact Perplexity-style
+ * source chips only when the matching, validated citation payload exists.
+ * `details` supplies keyboard/touch disclosure without a hover-only control. */
+.verevon-chat-citation-chip {
+  position: relative;
+  display: inline-block;
+  margin: 0 2px;
+  vertical-align: baseline;
+}
+
+.verevon-chat-citation-chip > summary {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--verevon-accent) 42%, var(--verevon-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--verevon-bg-apricot) 74%, var(--verevon-i-surface));
+  padding: 1px 6px;
+  color: var(--verevon-a-earth);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.35;
+  list-style: none;
+  white-space: nowrap;
+}
+
+.verevon-chat-citation-chip > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verevon-chat-citation-chip > summary:hover,
+.verevon-chat-citation-chip > summary:focus-visible {
+  border-color: var(--verevon-accent);
+  outline: 2px solid color-mix(in srgb, var(--verevon-accent) 28%, transparent);
+  outline-offset: 1px;
+}
+
+.verevon-chat-citation-chip__popover {
+  position: absolute;
+  z-index: 12;
+  top: calc(100% + 6px);
+  left: 0;
+  display: grid;
+  min-width: 250px;
+  max-width: min(360px, calc(100vw - 32px));
+  gap: 4px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-i-surface);
+  box-shadow: 0 12px 32px rgb(31 30 27 / 16%);
+  padding: 6px;
+}
+
+.verevon-chat-citation-chip__source {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  border-radius: 7px;
+  padding: 6px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.verevon-chat-citation-chip__source:hover,
+.verevon-chat-citation-chip__source:focus-visible {
+  background: var(--verevon-surface-soft);
+  outline: none;
+}
+
+.verevon-chat-citation-chip__index {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--verevon-bg-apricot);
+  color: var(--verevon-a-earth);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.verevon-chat-citation-chip__body {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.verevon-chat-citation-chip__body strong,
+.verevon-chat-citation-chip__body span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-citation-chip__body strong {
+  color: var(--verevon-e-strong);
+  font-size: 11px;
+}
+
+.verevon-chat-citation-chip__body span {
+  color: var(--verevon-e-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.dark .verevon-chat-citation-chip > summary {
+  background: color-mix(in srgb, var(--verevon-bg-apricot) 26%, var(--verevon-i-surface));
+}
+
+.dark .verevon-chat-citation-chip__popover {
+  box-shadow: 0 12px 32px rgb(0 0 0 / 34%);
+}
+
 .verevon-chat-attachment {
   border: 1px solid var(--verevon-border);
   border-radius: 999px;
@@ -23368,6 +24654,20 @@ textarea:focus-visible {
 
 .verevon-chat-attachment--user {
   background: rgb(255 255 255 / 70%);
+}
+
+.verevon-chat-attachment[role="button"],
+.verevon-chat-attachment-image[role="button"] {
+  cursor: pointer;
+}
+
+.verevon-chat-attachment[role="button"]:hover,
+.verevon-chat-attachment[role="button"]:focus-visible,
+.verevon-chat-attachment-image[role="button"]:hover,
+.verevon-chat-attachment-image[role="button"]:focus-visible {
+  border-color: color-mix(in srgb, var(--verevon-accent) 48%, var(--verevon-border));
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--verevon-accent) 18%, transparent);
 }
 
 .verevon-chat-attachment-image {
@@ -23729,6 +25029,17 @@ textarea:focus-visible {
 
 .verevon-chat-action-button--active {
   color: var(--verevon-a-earth);
+}
+
+.verevon-chat-action-note {
+  align-self: center;
+  max-width: 240px;
+  padding: 4px 7px;
+  border: 1px solid color-mix(in srgb, var(--verevon-a-earth) 30%, transparent);
+  border-radius: 7px;
+  color: var(--verevon-text-subtle);
+  font-size: 11px;
+  line-height: 1.25;
 }
 
 .verevon-chat-version-switcher {
@@ -25232,6 +26543,25 @@ textarea:focus-visible {
 .verevon-chat-stop-btn:hover {
   color: var(--verevon-j-text);
   background: var(--verevon-surface-soft);
+}
+
+.verevon-chat-foreign-thread-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(100%, 840px);
+  margin: 0 auto 12px;
+  border: 1px solid color-mix(in srgb, var(--verevon-a-earth) 32%, var(--verevon-d-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 8%, var(--verevon-i-surface));
+  padding: 9px 12px;
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+}
+
+.verevon-chat-foreign-thread-banner svg {
+  flex: 0 0 auto;
+  color: var(--verevon-a-earth);
 }
 
 .verevon-chat-empty__heading {

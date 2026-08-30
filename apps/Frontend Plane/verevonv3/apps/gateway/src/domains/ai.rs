@@ -25,7 +25,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 /// Verevon Flow dictation: STT + LLM cleanup in one round trip. Proxies to
 /// model-gateway /v1/ai/dictate, which chains inference-core TranscribeSpeech
 /// and a cleanup Infer pass; both hops need the delegated inference credential.
-async fn proxy_dictate(
+pub(crate) async fn proxy_dictate(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -49,7 +49,7 @@ async fn proxy_dictate(
     .await
 }
 
-async fn proxy_speech(
+pub(crate) async fn proxy_speech(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

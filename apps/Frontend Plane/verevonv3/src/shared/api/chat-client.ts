@@ -7,6 +7,7 @@ import {
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
+import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   applyServerRetention,
   forgetThreadLocally,
@@ -113,7 +114,7 @@ export type ChatConnectedEvent = {
   requestId?: string
   threadId?: string
   model?: string
-  /** Present on agentic runs — the orchestration run id to stream console events for. */
+  /** Durable run id. Work surfaces only use it when the turn is plan/research. */
   runId?: string
 }
 export type ChatMessageEvent = { content: string; requestId?: string }
@@ -175,6 +176,9 @@ export type ChatErrorEvent = {
   code: string
   message: string
   retryable?: boolean
+  /** Correlation preserved when an error belongs to a durable run. */
+  runId?: string
+  requestId?: string
 }
 export type ChatArtifactEvent = {
   id?: string
@@ -196,6 +200,10 @@ export type ChatCitationEvent = {
   title?: string
   url?: string
   snippet?: string
+  claimId?: string
+  sourceGroupId?: string
+  start?: number
+  end?: number
 }
 export type ChatGroundingEvent = { value: unknown }
 export type ChatStepEvent = {
@@ -218,6 +226,8 @@ export type ChatUsageEvent = {
   costUsd?: number
   latencyMs?: number
   confidence?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
 }
 /**
  * AI-generated thread title, emitted once by model-gateway after a thread's
@@ -272,6 +282,8 @@ function normalizeRecalledMemories(raw: unknown): RecalledMemory[] {
 }
 
 export type ChatStreamHandlers = {
+  /** Stable Verevon UI projection; focused callbacks remain below for compatibility. */
+  onUiEvent?: (event: VerevonUiEvent) => void
   onConnected?: (event: ChatConnectedEvent) => void
   onMessage?: (event: ChatMessageEvent) => void
   onDone?: (event: ChatDoneEvent) => void
@@ -335,6 +347,10 @@ export type ChatThreadSession = {
    * existed.
    */
   pinned: boolean
+  /** Newest run projection from Session Core, when the thread has one. */
+  latestRunId?: string
+  latestRunStatus?: string
+  latestRunUpdatedAt?: string
   /** Non-secret Space routing reference for a scoped thread. The BFF still
    * resolves fresh Control authority before an append. */
   spaceRef?: string
@@ -345,6 +361,25 @@ export type ChatThreadTranscriptSnapshot = {
   threadId: string
   turns: unknown[]
   updatedAt: string
+}
+
+/** Safe envelope metadata recovered from Session Core's durable event log. */
+export type ChatThreadEvent = {
+  eventId: string
+  eventType: string
+  schemaVersion: number
+  at: string
+  producer?: string
+  correlationId?: string
+  causationId?: string
+  resourceRef?: string
+}
+
+export type ChatThreadEventsPage = {
+  threadId: string
+  events: ChatThreadEvent[]
+  /** The server filled its bounded replay request; use the last event id to continue. */
+  truncated: boolean
 }
 
 export type SaveChatThreadSnapshotRequest = {
@@ -484,6 +519,10 @@ function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
     title: str(payload.title),
     url: str(payload.url) ?? str(payload.href),
     snippet: str(payload.snippet) ?? str(payload.description),
+    claimId: str(payload.claim_id) ?? str(payload.claimId),
+    sourceGroupId: str(payload.source_group_id) ?? str(payload.sourceGroupId),
+    start: num(payload.start) ?? num(payload.start_offset) ?? num(payload.startOffset),
+    end: num(payload.end) ?? num(payload.end_offset) ?? num(payload.endOffset),
   })
 }
 
@@ -598,12 +637,300 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   }
 }
 
+/**
+ * Project the AG-UI standard event vocabulary onto the existing focused chat
+ * callbacks. Verevon remains the internal authority: this is an ingress
+ * adapter only, and unsupported AG-UI events still reach `onUiEvent`/the
+ * unknown-event hook instead of being silently discarded.
+ */
+function dispatchAgUiEvent(
+  name: string,
+  payload: Record<string, unknown>,
+  handlers: ChatStreamHandlers,
+): boolean {
+  const upper = name.toUpperCase()
+  const metadata = objectValue(payload.metadata) ?? {}
+  const field = (...keys: string[]): unknown => {
+    for (const key of keys) {
+      if (payload[key] !== undefined) return payload[key]
+      if (metadata[key] !== undefined) return metadata[key]
+    }
+    return undefined
+  }
+  const runId = str(payload.runId) ?? str(payload.run_id)
+  // AG-UI names the durable execution identity `runId`; Verevon's focused
+  // chat callbacks historically called the same correlation slot
+  // `requestId`. Use the run id as the compatibility fallback so an AG-UI
+  // stream cannot lose its identity simply because the provider did not emit
+  // a provider-specific request id.
+  const requestId = str(field('requestId', 'request_id')) ?? runId
+  switch (upper) {
+    case 'RUN_STARTED':
+      handlers.onConnected?.({
+        ok: true,
+        requestId,
+        threadId: str(payload.threadId) ?? str(payload.thread_id),
+        runId,
+        model: str(field('model', 'modelUsed', 'model_used')),
+      })
+      return true
+    case 'RUN_FINISHED':
+      {
+        const outcome = objectValue(field('outcome'))
+        const outcomeType = str(outcome?.type)?.toLowerCase()
+        const terminal = {
+          requestId,
+          modelUsed: str(field('modelUsed', 'model_used', 'model')),
+          outputTokens: num(field('outputTokens', 'output_tokens')),
+          stopReason: str(field('finishReason', 'finish_reason')),
+        }
+        // AG-UI interrupts are resumable pauses represented by RUN_FINISHED;
+        // the canonical `onUiEvent` projection emitted above has already
+        // carried the pause and approval details. Calling onDone here would
+        // incorrectly settle the turn and hide its Work controls.
+        if (outcomeType === 'interrupt') return true
+        const status = str(outcome?.status)?.toLowerCase()
+        if ((status === 'stopped' || status === 'cancelled' || status === 'canceled') && handlers.onStopped) {
+          handlers.onStopped({ requestId, reason: status })
+        } else {
+          handlers.onDone?.(terminal)
+        }
+      }
+      return true
+    case 'RUN_ERROR':
+      handlers.onError?.({
+        code: str(payload.code) ?? 'run_error',
+        message: str(payload.message) ?? 'Agent run failed',
+        retryable: payload.retryable === true,
+        runId,
+        requestId,
+      })
+      return true
+    case 'TEXT_MESSAGE_CONTENT':
+    case 'TEXT_MESSAGE_CHUNK': {
+      const delta = str(payload.delta) ?? str(payload.content) ?? ''
+      if (delta) handlers.onMessage?.({ content: delta, requestId })
+      return true
+    }
+    case 'TEXT_MESSAGE_END':
+      // `TEXT_MESSAGE_END` closes one assistant message, not the invocation.
+      // RUN_FINISHED is the sole terminal callback; emitting `onDone` here
+      // would settle the same run twice and discard the final run metadata.
+      return true
+    case 'TOOL_CALL_START':
+      handlers.onToolCall?.({
+        id: str(payload.toolCallId) ?? str(payload.tool_call_id),
+        name: str(payload.toolCallName) ?? str(payload.tool_call_name),
+      })
+      return true
+    case 'TOOL_CALL_RESULT':
+      handlers.onToolResult?.({
+        id: str(payload.toolCallId) ?? str(payload.tool_call_id),
+        output: strOrJson(payload.content) ?? strOrJson(payload.output) ?? strOrJson(payload.result),
+        status: 'completed',
+      })
+      return true
+    case 'STEP_STARTED':
+    case 'STEP_FINISHED':
+      handlers.onStep?.({
+        id: str(payload.stepName) ?? str(payload.step_name),
+        title: str(payload.stepName) ?? str(payload.step_name),
+        status: upper === 'STEP_STARTED' ? 'started' : 'finished',
+      })
+      return true
+    case 'REASONING_MESSAGE_CONTENT':
+    case 'REASONING_MESSAGE_CHUNK': {
+      const delta = str(payload.delta) ?? str(payload.content) ?? ''
+      if (delta) handlers.onReasoning?.({ delta })
+      return true
+    }
+    case 'REASONING_START':
+    case 'REASONING_MESSAGE_START':
+    case 'REASONING_MESSAGE_END':
+    case 'REASONING_END':
+      // Lifecycle-only reasoning events are represented by the canonical UI
+      // projection; no raw hidden reasoning is sent to focused renderers.
+      return true
+    case 'TOOL_CALL_ARGS':
+    case 'TOOL_CALL_END':
+    case 'TOOL_CALL_CHUNK':
+    case 'STATE_SNAPSHOT':
+    case 'STATE_DELTA':
+    case 'MESSAGES_SNAPSHOT':
+    case 'ACTIVITY_SNAPSHOT':
+    case 'ACTIVITY_DELTA':
+      // These are intentionally UI-projection-only for now. Their typed
+      // payload remains available through `onUiEvent`, while the existing
+      // message store is not mutated without a Verevon-specific reducer.
+      return true
+    case 'SUBAGENT_STARTED':
+    case 'SUBAGENT_FINISHED':
+    case 'SUBAGENT_ERROR':
+      handlers.onStep?.({
+        id: runId,
+        title: 'Underagent',
+        detail: str(payload.message) ?? str(payload.agentId) ?? str(payload.agent_id),
+        status: upper === 'SUBAGENT_STARTED' ? 'started' : upper === 'SUBAGENT_ERROR' ? 'error' : 'finished',
+      })
+      return true
+    case 'CUSTOM': {
+      // The gateway carries Verevon-specific governance/evidence events in an
+      // AG-UI CUSTOM envelope. Keep the envelope non-executable, but project
+      // its allowlisted names into the same focused callbacks as native SSE so
+      // approvals, citations, and artifacts remain functional for AG-UI
+      // clients too.
+      const customName = str(payload.name)
+      const value = objectValue(payload.value) ?? {}
+      switch (customName) {
+        case 'artifact':
+          handlers.onArtifact?.({
+            id: str(value.id),
+            kind: str(value.kind),
+            title: str(value.title),
+            content: str(value.content),
+            version: num(value.version),
+          })
+          break
+        case 'attachment':
+          handlers.onAttachment?.({
+            id: str(value.id),
+            name: str(value.name),
+            mime: str(value.mime) ?? str(value.type),
+            type: str(value.type),
+            url: str(value.url),
+            size: num(value.size),
+          })
+          break
+        case 'reasoning_delta':
+          handlers.onReasoning?.({ delta: str(value.delta) ?? '' })
+          break
+        case 'citation':
+          handlers.onCitation?.({
+            id: str(value.id),
+            title: str(value.title),
+            url: str(value.url) ?? str(value.href),
+            snippet: str(value.snippet) ?? str(value.description),
+            claimId: str(value.claim_id) ?? str(value.claimId),
+            sourceGroupId: str(value.source_group_id) ?? str(value.sourceGroupId),
+            start: num(value.start) ?? num(value.start_offset) ?? num(value.startOffset),
+            end: num(value.end) ?? num(value.end_offset) ?? num(value.endOffset),
+          })
+          break
+        case 'grounding':
+          handlers.onGrounding?.({ value: value.grounding ?? value })
+          break
+        case 'step_update':
+          handlers.onStep?.({
+            id: str(value.id) ?? str(value.step_id),
+            title: str(value.title) ?? str(value.name),
+            detail: str(value.detail) ?? str(value.message),
+            status: str(value.status),
+          })
+          break
+        case 'tool_result':
+          handlers.onToolResult?.({
+            id: str(value.id) ?? str(value.tool_call_id),
+            output: strOrJson(value.output) ?? strOrJson(value.result),
+            error: str(value.error),
+            status: str(value.status),
+          })
+          break
+        case 'usage':
+          handlers.onUsage?.({
+            inputTokens: num(value.input_tokens),
+            outputTokens: num(value.output_tokens),
+            costUsd: num(value.cost_usd),
+            latencyMs: num(value.latency_ms),
+            confidence: num(value.confidence),
+            cacheReadTokens: num(value.cache_read_tokens) ?? num(value.cacheReadTokens),
+            cacheWriteTokens: num(value.cache_write_tokens) ?? num(value.cacheWriteTokens),
+          })
+          break
+        case 'awaiting_approval':
+        case 'run_paused_for_approval':
+          handlers.onStep?.({
+            id: str(value.run_id) ?? str(value.runId),
+            title: 'Paused',
+            detail: str(value.approval_id) ?? 'Awaiting approval',
+            status: 'paused',
+          })
+          break
+        case 'run_resumed_after_approval':
+          handlers.onStep?.({
+            id: str(value.run_id) ?? str(value.runId),
+            title: 'Resumed',
+            detail: str(value.approval_id) ?? 'Approval resolved',
+            status: 'running',
+          })
+          break
+        case 'approval_state_changed':
+          handlers.onStep?.({
+            id: str(value.approval_id) ?? str(value.approvalId),
+            title: 'Approval',
+            detail: str(value.approval_kind) ?? str(value.approvalKind),
+            status: str(value.to) ?? str(value.state) ?? str(value.status),
+          })
+          break
+        case 'browser_action_approval_required':
+          handlers.onStep?.({
+            id: str(value.run_id) ?? str(value.runId),
+            title: 'Approval required',
+            detail: [str(value.action_type) ?? str(value.actionType), str(value.reason)]
+              .filter(Boolean)
+              .join(' · '),
+            status: 'waiting_approval',
+          })
+          break
+        case 'browser_action_decided':
+          handlers.onStep?.({
+            id: str(value.run_id) ?? str(value.runId),
+            title: 'Approval decided',
+            detail: str(value.decision),
+            status: str(value.decision),
+          })
+          break
+        case 'approval_continuation_verified':
+          handlers.onStep?.({
+            id: str(value.receipt_id) ?? str(value.receiptId),
+            title: 'Verified',
+            detail: str(value.verification_status) ?? str(value.verificationStatus),
+            status: 'done',
+          })
+          break
+      }
+      return true
+    }
+    case 'RAW':
+      return true
+    default:
+      return false
+  }
+}
+
 function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
   if (!event.data) return
   let payload: Record<string, unknown>
   try {
     payload = JSON.parse(event.data) as Record<string, unknown>
   } catch {
+    return
+  }
+
+  const eventName = event.event ?? str(payload.type) ?? 'unknown'
+
+  // Emit the product-owned projection before compatibility callbacks. This
+  // lets append-only surfaces subscribe once without learning provider event
+  // names, while existing focused handlers continue to drive their features.
+  handlers.onUiEvent?.(toVerevonUiEvent(eventName, payload))
+
+  // AG-UI events arrive through the same SSE transport but use a distinct
+  // uppercase type vocabulary. Adapt them before the native switch; keeping
+  // this branch explicit prevents an AG-UI `RAW`/`CUSTOM` payload from being
+  // interpreted as a native Verevon mutation by accident.
+  if (isAgUiEventName(eventName)) {
+    if (!dispatchAgUiEvent(eventName, payload, handlers)) {
+      handlers.onUnknownEvent?.({ name: eventName, payload })
+    }
     return
   }
 
@@ -650,6 +977,8 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         code: str(payload.code) ?? 'error',
         message: str(payload.message) ?? 'Stream error',
         retryable: typeof payload.retryable === 'boolean' ? payload.retryable : undefined,
+        runId: str(payload.run_id) ?? str(payload.runId),
+        requestId: str(payload.request_id) ?? str(payload.requestId),
       })
       break
     case 'artifact':
@@ -713,6 +1042,17 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         status: str(payload.status),
       })
       break
+    case 'awaiting_approval':
+      // Agentic runs can pause at the run boundary before a derived
+      // `step_update` is available. Keep the same compatibility callback so
+      // the controller rehydrates the authoritative approval queue.
+      handlers.onStep?.({
+        id: str(payload.run_id) ?? str(payload.runId),
+        title: 'Approval',
+        detail: 'Awaiting approval',
+        status: 'awaiting_approval',
+      })
+      break
     case 'usage':
       handlers.onUsage?.({
         inputTokens: num(payload.input_tokens),
@@ -720,6 +1060,8 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         costUsd: num(payload.cost_usd),
         latencyMs: num(payload.latency_ms),
         confidence: num(payload.confidence),
+        cacheReadTokens: num(payload.cache_read_tokens) ?? num(payload.cacheReadTokens),
+        cacheWriteTokens: num(payload.cache_write_tokens) ?? num(payload.cacheWriteTokens),
       })
       break
     case 'title': {
@@ -1116,6 +1458,30 @@ export async function getChatThreadTranscript(threadId: string): Promise<ChatThr
   return normalizeChatThreadTranscript(record?.transcript)
 }
 
+/** Read the canonical, envelope-only event history for one durable Chat thread. */
+export async function listChatThreadEvents(
+  threadId: string,
+  options: { afterEventId?: string; limit?: number } = {},
+): Promise<ChatThreadEventsPage> {
+  const search = new URLSearchParams()
+  if (options.afterEventId?.trim()) search.set('after_event_id', options.afterEventId.trim())
+  if (options.limit != null && Number.isFinite(options.limit) && options.limit > 0) {
+    search.set('limit', String(Math.floor(options.limit)))
+  }
+  const query = search.toString()
+  const raw = await requestJson<unknown>(
+    `/api/v1/chat/threads/${encodeURIComponent(threadId)}/events${query ? `?${query}` : ''}`,
+  )
+  const record = objectValue(raw)
+  const data = objectValue(record?.data) ?? record
+  const source = Array.isArray(data?.events) ? data.events : []
+  return {
+    threadId: str(data?.threadId) ?? str(data?.thread_id) ?? threadId,
+    events: source.map(normalizeChatThreadEvent).filter((event): event is ChatThreadEvent => event !== null),
+    truncated: data?.truncated === true,
+  }
+}
+
 export async function deleteChatThread(threadId: string): Promise<ChatThreadSession[]> {
   const raw = await requestJson<unknown>(
     `/api/v1/chat/threads/${encodeURIComponent(threadId)}`,
@@ -1165,12 +1531,20 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
   const threadId = str(item.threadId) ?? str(item.thread_id)
   const title = str(item.title)
   if (!threadId || !title) return null
+  const latestRunId = str(item.latestRunId) ?? str(item.latest_run_id)
+  const latestRunStatus = str(item.latestRunStatus) ?? str(item.latest_run_status)
+  const latestRunUpdatedAt = normalizeOptionalIsoTimestamp(
+    str(item.latestRunUpdatedAt) ?? str(item.latest_run_updated_at),
+  )
   return {
     threadId,
     title,
     preview: str(item.preview) ?? '',
     updatedAt: normalizeIsoTimestamp(str(item.updatedAt) ?? str(item.updated_at)),
     pinned: item.pinned === true,
+    ...(latestRunId ? { latestRunId } : {}),
+    ...(latestRunStatus ? { latestRunStatus } : {}),
+    ...(latestRunUpdatedAt ? { latestRunUpdatedAt } : {}),
     spaceRef: str(item.spaceRef) ?? str(item.space_ref),
   }
 }
@@ -1194,10 +1568,46 @@ function normalizeChatThreadTranscript(raw: unknown): ChatThreadTranscriptSnapsh
   }
 }
 
+function normalizeChatThreadEvent(raw: unknown): ChatThreadEvent | null {
+  const item = objectValue(raw)
+  if (!item) return null
+  const eventId = str(item.eventId) ?? str(item.event_id)
+  const eventType = str(item.eventType) ?? str(item.event_type)
+  if (!eventId || !eventType) return null
+  const schemaValue = item.schemaVersion ?? item.schema_version
+  const schemaVersion = typeof schemaValue === 'number' && Number.isFinite(schemaValue)
+    ? schemaValue
+    : typeof schemaValue === 'string' && Number.isFinite(Number(schemaValue))
+      ? Number(schemaValue)
+      : 0
+  const atRaw = str(item.at) ?? str(item.ts)
+  const at = atRaw ? normalizeOptionalIsoTimestamp(atRaw) : undefined
+  // ReplayThread is an authoritative event stream. Do not fabricate an epoch
+  // timestamp for malformed records; dropping the record keeps Trace honest
+  // and prevents an invalid event from sorting to the beginning of history.
+  if (!at) return null
+  return {
+    eventId,
+    eventType,
+    schemaVersion,
+    at,
+    producer: str(item.producer),
+    correlationId: str(item.correlationId) ?? str(item.correlation_id),
+    causationId: str(item.causationId) ?? str(item.causation_id),
+    resourceRef: str(item.resourceRef) ?? str(item.resource_ref),
+  }
+}
+
 function normalizeIsoTimestamp(value: string | undefined): string {
   if (!value) return new Date().toISOString()
   const parsed = Date.parse(value)
   return Number.isNaN(parsed) ? new Date().toISOString() : new Date(parsed).toISOString()
+}
+
+function normalizeOptionalIsoTimestamp(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? undefined : new Date(parsed).toISOString()
 }
 
 // ── Model catalog normalization ──────────────────────────────────────────────

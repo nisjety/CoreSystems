@@ -37,6 +37,7 @@ import type {
   ComposerToolId,
   GeneratedFile,
   GeneratedImagePreview,
+  Citation,
 } from '@/features/chat/components/chat-types'
 import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
 import type { RecalledMemory } from '@/shared/api/chat-client'
@@ -87,11 +88,16 @@ export type ConversationNodeKind = ConversationNode['kind']
 /** Callbacks a node's renderer may need. Supplied once, never inside a node. */
 export type ConversationNodeContext = {
   onViewSteps: () => void
+  /** Open the contextual attachment canvas without replacing the transcript. */
+  onViewAttachments?: (attachmentId: string) => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
   /** Grant this turn's run the authority to execute its plan. */
   onApprovePlan: (rung: AutonomyRung, justification: string) => void
   onSelectFollowUp?: (text: string) => void
   onRegenerate: () => void
+  /** Explicit `[n]` answer markers can resolve only against this turn's
+   * validated citation list; absent entries stay as plain text. */
+  citations?: readonly Citation[]
 }
 
 /** One node kind's renderer. */

@@ -21,11 +21,21 @@ describe('action registry', () => {
     })
 
     expect(pack.currentView).toBe('knowledge')
-    // Model eligibility is earned per action (see model-eligibility.ts):
-    // tickets.create is exposed because its owner issues a durable operation
-    // receipt and denies a forged decision. Asserted as an exact set, so a
-    // second action cannot be admitted without this test being revisited.
-    expect(pack.availableActions).toEqual(['tickets.create'])
+    // Model eligibility is earned per action (see model-eligibility.ts): each
+    // of these is exposed because its owner issues a durable, queryable
+    // record of the action, collapses duplicate submissions, and denies a
+    // forged actor on both sides. Asserted as an exact set, so a further
+    // action cannot be admitted without this test being revisited.
+    expect(pack.availableActions).toEqual([
+      'inbox.follow_conversation',
+      'inbox.set_csat_preference',
+      'inbox.review_ai_action',
+      'tickets.create',
+      'org.mark_exported',
+      'org.acknowledge_deletion',
+      'chat.save_thread_snapshot',
+      'chat.submit_feedback',
+    ])
     // Kept explicit so loosening the allowlist cannot silently expose either a
     // side-effecting crawl or an irreversible, approval-gated publish.
     expect(pack.availableActions).not.toContain('knowledge.recrawl_source')

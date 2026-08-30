@@ -19,7 +19,7 @@ use super::shared::{actor_for, require_org_admin, GatewayJsonResponse};
 /// enforcement remains with auth-core's managed, attested retention policy.
 /// This route deliberately never becomes a per-request ZDR override: it only
 /// records the org's chosen posture, gated to org owners/admins.
-pub(super) async fn update_org_settings(
+pub(crate) async fn update_org_settings(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<String>,

@@ -1,7 +1,7 @@
 import { createRoot } from 'solid-js'
 import { describe, expect, it } from 'vitest'
 import { parseInline, parseMarkdownBlocks } from './chat-media-markdown'
-import { type MarkdownBlock } from './chat-types'
+import { type Citation, type MarkdownBlock } from './chat-types'
 
 function tableBlock(blocks: MarkdownBlock[], at = 0): Extract<MarkdownBlock, { kind: 'table' }> {
   const block = blocks[at]
@@ -12,6 +12,14 @@ function tableBlock(blocks: MarkdownBlock[], at = 0): Extract<MarkdownBlock, { k
 function renderInline(text: string): Array<string | Element> {
   return createRoot((dispose) => {
     const nodes = parseInline(text) as Array<string | Element>
+    dispose()
+    return nodes
+  })
+}
+
+function renderInlineWithCitations(text: string, citations: readonly Citation[]): Array<string | Element> {
+  return createRoot((dispose) => {
+    const nodes = parseInline(text, citations) as Array<string | Element>
     dispose()
     return nodes
   })
@@ -124,6 +132,25 @@ describe('parseMarkdownBlocks — GFM pipe tables', () => {
     const tags = proseCell.filter((node): node is Element => node instanceof Element).map((node) => node.tagName)
     expect(tags).toContain('STRONG')
     expect(tags).toContain('A')
+  })
+
+  it('promotes only in-range explicit citation markers and preserves unknown markers', () => {
+    const citations: Citation[] = [
+      { id: 'c1', title: 'Example', url: 'https://example.com/a', snippet: 'A source' },
+      { id: 'c2', title: 'Second', url: 'https://example.com/b', snippet: 'B source' },
+    ]
+    const nodes = renderInlineWithCitations('Supported [1, 2], unknown [3], and [Source](https://example.com).', citations)
+    // The component node is intentionally left as a Solid component value in
+    // this pure parser test; the mounted ChatMarkdown path renders it as
+    // `<details>`. What matters here is that the validated marker is no longer
+    // the literal token while an out-of-range marker remains untouched.
+    expect(nodes[1]).not.toBe('[1, 2]')
+    expect(nodes).toContain('[3]')
+    const links = nodes.filter((node): node is Element => node instanceof Element)
+    expect(links.some((node) => node.tagName === 'A' && node.textContent === 'Source')).toBe(true)
+
+    const numericLink = renderInlineWithCitations('[3](https://example.com/three)', citations)
+    expect(numericLink.some((node): node is Element => node instanceof Element && node.tagName === 'A')).toBe(true)
   })
 })
 

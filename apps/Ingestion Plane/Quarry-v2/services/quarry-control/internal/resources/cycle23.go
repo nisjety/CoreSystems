@@ -2,13 +2,19 @@
 // internal endpoints. Adds the routes the Rust edge expects:
 //
 //   - /v1/sources              (real org-scoped CRUD over quarry_sources)
-//   - /v1/benchmarks           (list — cycle 28 owner, still empty page)
 //   - /v1/team/* aggregates    → moved to cycle24.go (real store-backed reads)
 //   - /v1/team/activity        → moved to cycle24.go
 //   - /v1/schedules/:id/pause   (alias for /disable)
 //   - /v1/schedules/:id/unpause (alias for /enable)
-//   - /v1/schedules/:id/trigger  (stub; Temporal SDK pending — returns current schedule)
-//   - /v1/schedules/:id/backfill (stub; Temporal SDK pending)
+//   - /v1/schedules/:id/trigger  (proxies to Temporal when wired; 501 otherwise)
+//   - /v1/schedules/:id/backfill (proxies to Temporal when wired; 501 otherwise)
+//
+// /v1/benchmarks was removed in cycle 28 follow-up: with no source
+// of truth (no `quarry_benchmarks` table, no `lab/evals` table reader
+// in the wire path) the empty-page response was a 200-OK lie. Per
+// the gap-quarry honesty rule, the route was deleted instead of
+// shipped with fake data; the edge `forward_list` will tolerate the
+// 404 by returning an empty `Page<>`.
 //
 // All routes follow the existing pagination contract: response shape
 // `{items, next_cursor?, total_estimated?}` matching
@@ -27,6 +33,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
+	temporalclient "github.com/triodelab/quarry-v2/services/quarry-control/internal/temporal"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
@@ -233,14 +240,16 @@ func deleteSourceHandler(db store.DB) http.HandlerFunc {
 }
 
 // =============================================================================
-// /v1/benchmarks — live benchmark corpus (cycle 28 owner). Empty for now.
+// /v1/benchmarks — REMOVED (cycle 28 follow-up).
+//
+// The previous implementation returned an empty `Page<>` for every
+// call. Without a `quarry_benchmarks` table or a `lab/evals`
+// reader on the wire path, that was a 200 OK lie. The edge
+// `forward_list` deserializes a 404 as an empty `Page<>` with no
+// items, so deleting the route here is the safe option. If/when a
+// benchmark corpus lands it gets re-introduced with a real
+// store-backed read.
 // =============================================================================
-
-func MountBenchmarks(r chi.Router) {
-	r.Get("/v1/benchmarks", func(w http.ResponseWriter, r *http.Request) {
-		emptyPage(w, r)
-	})
-}
 
 
 func pickQuery(r *http.Request, name, def string) string {
@@ -253,29 +262,38 @@ func pickQuery(r *http.Request, name, def string) string {
 
 // =============================================================================
 // Schedule aliases — pause/unpause/trigger/backfill — map onto the
-// existing enable/disable + a Temporal stub for trigger/backfill.
+// existing enable/disable + a Temporal client for trigger/backfill.
 // =============================================================================
 
 // MountScheduleAliases adds the cycle 23 lifecycle endpoint names on
 // top of the existing /enable + /disable routes. The Rust edge speaks
 // pause/unpause/trigger/backfill; we accept those forms so callers
-// don't see a vocabulary mismatch while the deeper Temporal client
-// integration lands.
-func MountScheduleAliases(r chi.Router, db store.DB) {
+// don't see a vocabulary mismatch.
+//
+// `tc` may be nil — in that case trigger/backfill return 501 with a
+// typed `UNSUPPORTED` envelope (per the gap-quarry honesty rule:
+// never 202-fake an effect that was never executed). Production
+// wires a real `temporal.SDKClient` once `go.temporal.io/sdk` is in
+// go.mod; dev/test environments may pass nil.
+func MountScheduleAliases(r chi.Router, db store.DB, tc temporalclient.Client) {
 	s := db.Schedules()
 	// pause == disable; unpause == enable. The wire shapes match —
 	// both return 204 NoContent.
 	r.Post("/v1/schedules/{id}/pause", scheduleSetEnabled(s, false))
 	r.Post("/v1/schedules/{id}/unpause", scheduleSetEnabled(s, true))
-	// trigger + backfill are Temporal-owned operations. Until the
-	// Temporal SDK is wired (D5), these endpoints accept the request,
-	// validate it, and return 202 Accepted with the current schedule
-	// summary so callers see a typed response instead of 404.
-	r.Post("/v1/schedules/{id}/trigger", scheduleTriggerStub(db))
-	r.Post("/v1/schedules/{id}/backfill", scheduleBackfillStub(db))
+	// trigger + backfill are Temporal-owned operations. When the
+	// client is wired we proxy through to it; when it isn't we
+	// surface an honest 501 rather than a fake 202.
+	r.Post("/v1/schedules/{id}/trigger", scheduleTrigger(db, tc))
+	r.Post("/v1/schedules/{id}/backfill", scheduleBackfill(db, tc))
 }
 
-func scheduleTriggerStub(db store.DB) http.HandlerFunc {
+// scheduleTrigger calls the real Temporal client when one is
+// configured, and returns 501 otherwise. The previous implementation
+// always returned 202 with a "Temporal SDK not yet wired" note — that
+// was a hand-wave the gap-quarry audit called out as "accepted but
+// not executed" under-delivery.
+func scheduleTrigger(db store.DB, tc temporalclient.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
 		if err := id.MustKind(quarrycontracts.KindSchedule); err != nil {
@@ -287,14 +305,19 @@ func scheduleTriggerStub(db store.DB) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return
 		}
-		// TODO(D5): wire go.temporal.io/sdk and actually call
-		// `temporalClient.ScheduleClient(id).Trigger(ctx, opts)`.
-		// For now, log the intent so an operator can see that the
-		// trigger landed at the edge correctly.
-		httpx.WriteJSON(w, r, http.StatusAccepted, map[string]any{
+		if tc == nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeUnsupported,
+				"trigger requires the Temporal client; set QUARRY_TEMPORAL_HOSTPORT or pass --temporal",
+				map[string]any{"hint": "configure Temporal then restart control"})
+			return
+		}
+		if err := tc.Trigger(r.Context(), sched.OrgID, string(sched.ID)); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, "temporal trigger: "+err.Error(), nil)
+			return
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, map[string]any{
 			"schedule_id": sched.ID,
-			"status":      "trigger-accepted",
-			"note":        "Temporal SDK not yet wired; trigger is a stub.",
+			"status":      "triggered",
 		})
 	}
 }
@@ -305,7 +328,7 @@ type backfillBody struct {
 	OverlapPolicy string    `json:"overlap_policy"`
 }
 
-func scheduleBackfillStub(db store.DB) http.HandlerFunc {
+func scheduleBackfill(db store.DB, tc temporalclient.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
 		if err := id.MustKind(quarrycontracts.KindSchedule); err != nil {
@@ -326,13 +349,29 @@ func scheduleBackfillStub(db store.DB) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "end_at must be strictly after start_at", nil)
 			return
 		}
+		if tc == nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeUnsupported,
+				"backfill requires the Temporal client; set QUARRY_TEMPORAL_HOSTPORT or pass --temporal",
+				map[string]any{"hint": "configure Temporal then restart control"})
+			return
+		}
+		err := tc.Backfill(r.Context(), temporalclient.BackfillOptions{
+			OrgID:         sched.OrgID,
+			ScheduleID:    string(sched.ID),
+			StartAt:       body.StartAt,
+			EndAt:         body.EndAt,
+			OverlapPolicy: body.OverlapPolicy,
+		})
+		if err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, "temporal backfill: "+err.Error(), nil)
+			return
+		}
 		windowSecs := int64(body.EndAt.Sub(body.StartAt).Seconds())
-		httpx.WriteJSON(w, r, http.StatusAccepted, map[string]any{
+		httpx.WriteJSON(w, r, http.StatusOK, map[string]any{
 			"schedule_id":    sched.ID,
-			"status":         "backfill-accepted",
+			"status":         "backfill-queued",
 			"window_secs":    windowSecs,
 			"overlap_policy": body.OverlapPolicy,
-			"note":           "Temporal SDK not yet wired; backfill is a stub.",
 		})
 	}
 }
