@@ -319,6 +319,22 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		conversationRetentionConsumer.Config.MaxDeliver != 20 {
 		t.Fatalf("unexpected conversation-core interactive-retention consumer: %+v", conversationRetentionConsumer.Config)
 	}
+	wantedSupportRecurrenceZDRPurge := conversationSupportRecurrenceZDRPurgeConsumerConfig()
+	if wantedSupportRecurrenceZDRPurge.Durable != ConversationSupportRecurrenceZDRPurgeConsumerName {
+		t.Fatalf("support-recurrence zdr-purge durable = %q, want %q (must match conversation-core-go's supportRecurrenceZDRPurgeDurable)",
+			wantedSupportRecurrenceZDRPurge.Durable, ConversationSupportRecurrenceZDRPurgeConsumerName)
+	}
+	supportRecurrenceZDRPurgeConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedSupportRecurrenceZDRPurge.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if supportRecurrenceZDRPurgeConsumer.Config.DeliverSubject != wantedSupportRecurrenceZDRPurge.DeliverSubject ||
+		supportRecurrenceZDRPurgeConsumer.Config.DeliverGroup != wantedSupportRecurrenceZDRPurge.DeliverGroup ||
+		supportRecurrenceZDRPurgeConsumer.Config.FilterSubject != InteractiveRetentionEnabledSubject ||
+		supportRecurrenceZDRPurgeConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
+		supportRecurrenceZDRPurgeConsumer.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected conversation-core support-recurrence zdr-purge consumer: %+v", supportRecurrenceZDRPurgeConsumer.Config)
+	}
 
 	wantedDocumentsOrgErasure := documentsOrgErasureConsumerConfig()
 	documentsOrgErasureConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedDocumentsOrgErasure.Durable)

@@ -14,79 +14,81 @@ import (
 )
 
 const (
-	StreamName                                   = "VEREVON_CONTROL_OBSERVABILITY"
-	DLQSubject                                   = "verevon.dlq.audit-core.>"
-	AuthEventsStreamName                         = "AUTH_EVENTS"
-	ControlEventsStreamName                      = "CONTROL_PLANE_EVENTS"
-	BillingPlanConsumerName                      = "billing-core-organization-plan-changed"
-	BillingPlanSubject                           = "organization.plan.changed"
-	BillingPlanDeliverySubject                   = "_VEREVON.CONTROL.DELIVER.billing.organization-plan-changed"
-	ControlSharedStreamName                      = "AQENCIA_CONTROLPLANE"
-	LegacyBridgeConsumerName                     = "control-shared-legacy-bridge"
-	LegacyBridgeDelivery                         = "_VEREVON.CONTROL.SHARED.DELIVER.legacy"
-	ConvexControlDLQSubject                      = "verevon.application.dlq.convex.controlplane"
-	GDPRErasureRequestedSubject                  = "verevon.gdpr.erasure.requested"
-	GDPRErasureDLQSubject                        = "verevon.gdpr.erasure.dlq.documents-api"
-	GDPROwnershipTransferredSubject              = "verevon.gdpr.ownership.transferred"
-	DocumentsGDPRConsumerName                    = "documents-api-gdpr-erasure-v1"
-	DocumentsGDPRDeliverySubject                 = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
-	DocumentsOrgErasureConsumerName              = "documents-api-org-erasure"
-	DocumentsOrgErasureDelivery                  = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.org-erasure"
-	DocumentsOrgPurgeDLQSubject                  = "verevon.gdpr.erasure.dlq.documents-api-org-purge"
-	ConversationOrgErasureConsumerName           = "conversation-core-org-erasure"
-	ConversationOrgErasureDelivery               = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.gdpr-erasure"
-	ConversationInteractiveRetentionConsumerName = "conversation-core-interactive-retention"
-	ConversationInteractiveRetentionDelivery     = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.interactive-retention"
-	InteractiveRetentionEnabledSubject           = "aqencia.controlplane.org.interactive_retention.enabled"
-	SessionGDPRErasureConsumerName               = "session-core-gdpr-erasure-v1"
-	QuarryControlOrgErasureConsumerName          = "quarry-control-org-erasure"
-	QuarryControlOrgErasureDelivery              = "_VEREVON.CONTROL.SHARED.DELIVER.ingestion.quarry-control.org-erasure"
-	OrgDeletionSubjectWildcard                   = "verevon.org.deletion.>"
-	OrgDeletionPendingSubject                    = "verevon.org.deletion.pending"
-	OrgDeletionReminderSubject                   = "verevon.org.deletion.reminder"
-	OrgDeletionCancelledSubject                  = "verevon.org.deletion.cancelled"
-	NotificationOrgDeletionPendingConsumerName   = "notification-core-org-deletion-pending"
-	NotificationOrgDeletionReminderConsumerName  = "notification-core-org-deletion-reminder"
-	NotificationOrgDeletionCancelledConsumerName = "notification-core-org-deletion-cancelled"
-	NotificationOrgDeletionPendingDelivery       = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-pending"
-	NotificationOrgDeletionReminderDelivery      = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-reminder"
-	NotificationOrgDeletionCancelledDelivery     = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-cancelled"
-	ModelToolsStreamName                         = "TOOLS_COMPLETIONS"
-	ModelOrchestrationStreamName                 = "MP_ORCHESTRATION_EVENTS"
-	ModelRunEventsStreamName                     = "MODEL_PLANE_RUN_EVENTS"
-	SessionToolsConsumerName                     = "session-core-tools"
-	SessionOrchestrationConsumerName             = "session-core-orchestration"
-	InsightRunConsumerName                       = "insight-core-agent-run-subscriber"
-	InsightApprovalConsumerName                  = "insight-core-agent-approval-subscriber"
-	InsightRunDeliverySubject                    = "_VEREVON.MODEL.DELIVER.application.insight.run"
-	InsightApprovalDeliverySubject               = "_VEREVON.MODEL.DELIVER.application.insight.approval"
-	ApplicationEventsStreamName                  = "VEREVON_APPLICATION"
-	ApplicationModelStreamName                   = "VEREVON_MODEL"
-	ApplicationIngestionStreamName               = "VEREVON_INGESTION"
-	ConversationAIActionConsumerName             = "conversation-core-ai-action-executor"
-	ConversationModelActionConsumerName          = "conversation-core-model-action-proposed"
-	ConversationWebhookConsumerName              = "conversation-core-webhook-received"
-	InsightMetricConsumerName                    = "insight-core-metric-subscriber"
-	NotificationConversationFollowConsumerName   = "notification-core-conversation-followed-message"
-	ConversationAIActionDelivery                 = "_VEREVON.APPLICATION.DELIVER.conversation.ai-action-reviewed"
-	ConversationModelActionDelivery              = "_VEREVON.APPLICATION.DELIVER.conversation.model-action-proposed"
-	ConversationWebhookDelivery                  = "_VEREVON.APPLICATION.DELIVER.conversation.webhook-received"
-	InsightMetricDelivery                        = "_VEREVON.APPLICATION.DELIVER.insight.metrics"
-	NotificationConversationFollowDelivery       = "_VEREVON.APPLICATION.DELIVER.notification.conversation-followed-message"
-	IndexEngineOrgErasureConsumerName            = "index-engine-org-erasure"
-	GraphIndexOrgErasureConsumerName             = "graph-index-gdpr-erasure-v1"
-	WikiStoreOrgErasureConsumerName              = "wiki-store-org-erasure"
-	WikiStoreOrgErasureDelivery                  = "_VEREVON.CONTROL.SHARED.DELIVER.data.wiki-store.org-erasure"
-	RetrievalEngineOrgErasureConsumerName        = "retrieval-engine-gdpr-erasure-v1"
-	DataQualityOrgErasureConsumerName            = "data-quality-org-erasure"
-	DataQualityOrgErasureDelivery                = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-quality.org-erasure"
-	DataOrchestratorOrgErasureConsumerName       = "data-orchestrator-org-erasure"
-	DataOrchestratorOrgErasureDelivery           = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-orchestrator.org-erasure"
-	QuickwitAdapterOrgErasureConsumerName        = "quickwit-adapter-gdpr-erasure-v1"
-	CostCoreOrgErasureConsumerName               = "cost-core-org-erasure"
-	CostCoreOrgErasureDelivery                   = "_VEREVON.CONTROL.SHARED.DELIVER.model.cost-core.org-erasure"
-	EmbeddingEngineOrgErasureConsumerName        = "embedding-engine-org-erasure"
-	VerevonGatewayOrgErasureConsumerName         = "verevon-gateway-gdpr-erasure-v1"
+	StreamName                                        = "VEREVON_CONTROL_OBSERVABILITY"
+	DLQSubject                                        = "verevon.dlq.audit-core.>"
+	AuthEventsStreamName                              = "AUTH_EVENTS"
+	ControlEventsStreamName                           = "CONTROL_PLANE_EVENTS"
+	BillingPlanConsumerName                           = "billing-core-organization-plan-changed"
+	BillingPlanSubject                                = "organization.plan.changed"
+	BillingPlanDeliverySubject                        = "_VEREVON.CONTROL.DELIVER.billing.organization-plan-changed"
+	ControlSharedStreamName                           = "AQENCIA_CONTROLPLANE"
+	LegacyBridgeConsumerName                          = "control-shared-legacy-bridge"
+	LegacyBridgeDelivery                              = "_VEREVON.CONTROL.SHARED.DELIVER.legacy"
+	ConvexControlDLQSubject                           = "verevon.application.dlq.convex.controlplane"
+	GDPRErasureRequestedSubject                       = "verevon.gdpr.erasure.requested"
+	GDPRErasureDLQSubject                             = "verevon.gdpr.erasure.dlq.documents-api"
+	GDPROwnershipTransferredSubject                   = "verevon.gdpr.ownership.transferred"
+	DocumentsGDPRConsumerName                         = "documents-api-gdpr-erasure-v1"
+	DocumentsGDPRDeliverySubject                      = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
+	DocumentsOrgErasureConsumerName                   = "documents-api-org-erasure"
+	DocumentsOrgErasureDelivery                       = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.org-erasure"
+	DocumentsOrgPurgeDLQSubject                       = "verevon.gdpr.erasure.dlq.documents-api-org-purge"
+	ConversationOrgErasureConsumerName                = "conversation-core-org-erasure"
+	ConversationOrgErasureDelivery                    = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.gdpr-erasure"
+	ConversationInteractiveRetentionConsumerName      = "conversation-core-interactive-retention"
+	ConversationInteractiveRetentionDelivery          = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.interactive-retention"
+	ConversationSupportRecurrenceZDRPurgeConsumerName = "conversation-core-support-recurrence-zdr-purge"
+	ConversationSupportRecurrenceZDRPurgeDelivery     = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.support-recurrence-zdr-purge"
+	InteractiveRetentionEnabledSubject                = "aqencia.controlplane.org.interactive_retention.enabled"
+	SessionGDPRErasureConsumerName                    = "session-core-gdpr-erasure-v1"
+	QuarryControlOrgErasureConsumerName               = "quarry-control-org-erasure"
+	QuarryControlOrgErasureDelivery                   = "_VEREVON.CONTROL.SHARED.DELIVER.ingestion.quarry-control.org-erasure"
+	OrgDeletionSubjectWildcard                        = "verevon.org.deletion.>"
+	OrgDeletionPendingSubject                         = "verevon.org.deletion.pending"
+	OrgDeletionReminderSubject                        = "verevon.org.deletion.reminder"
+	OrgDeletionCancelledSubject                       = "verevon.org.deletion.cancelled"
+	NotificationOrgDeletionPendingConsumerName        = "notification-core-org-deletion-pending"
+	NotificationOrgDeletionReminderConsumerName       = "notification-core-org-deletion-reminder"
+	NotificationOrgDeletionCancelledConsumerName      = "notification-core-org-deletion-cancelled"
+	NotificationOrgDeletionPendingDelivery            = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-pending"
+	NotificationOrgDeletionReminderDelivery           = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-reminder"
+	NotificationOrgDeletionCancelledDelivery          = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-cancelled"
+	ModelToolsStreamName                              = "TOOLS_COMPLETIONS"
+	ModelOrchestrationStreamName                      = "MP_ORCHESTRATION_EVENTS"
+	ModelRunEventsStreamName                          = "MODEL_PLANE_RUN_EVENTS"
+	SessionToolsConsumerName                          = "session-core-tools"
+	SessionOrchestrationConsumerName                  = "session-core-orchestration"
+	InsightRunConsumerName                            = "insight-core-agent-run-subscriber"
+	InsightApprovalConsumerName                       = "insight-core-agent-approval-subscriber"
+	InsightRunDeliverySubject                         = "_VEREVON.MODEL.DELIVER.application.insight.run"
+	InsightApprovalDeliverySubject                    = "_VEREVON.MODEL.DELIVER.application.insight.approval"
+	ApplicationEventsStreamName                       = "VEREVON_APPLICATION"
+	ApplicationModelStreamName                        = "VEREVON_MODEL"
+	ApplicationIngestionStreamName                    = "VEREVON_INGESTION"
+	ConversationAIActionConsumerName                  = "conversation-core-ai-action-executor"
+	ConversationModelActionConsumerName               = "conversation-core-model-action-proposed"
+	ConversationWebhookConsumerName                   = "conversation-core-webhook-received"
+	InsightMetricConsumerName                         = "insight-core-metric-subscriber"
+	NotificationConversationFollowConsumerName        = "notification-core-conversation-followed-message"
+	ConversationAIActionDelivery                      = "_VEREVON.APPLICATION.DELIVER.conversation.ai-action-reviewed"
+	ConversationModelActionDelivery                   = "_VEREVON.APPLICATION.DELIVER.conversation.model-action-proposed"
+	ConversationWebhookDelivery                       = "_VEREVON.APPLICATION.DELIVER.conversation.webhook-received"
+	InsightMetricDelivery                             = "_VEREVON.APPLICATION.DELIVER.insight.metrics"
+	NotificationConversationFollowDelivery            = "_VEREVON.APPLICATION.DELIVER.notification.conversation-followed-message"
+	IndexEngineOrgErasureConsumerName                 = "index-engine-org-erasure"
+	GraphIndexOrgErasureConsumerName                  = "graph-index-gdpr-erasure-v1"
+	WikiStoreOrgErasureConsumerName                   = "wiki-store-org-erasure"
+	WikiStoreOrgErasureDelivery                       = "_VEREVON.CONTROL.SHARED.DELIVER.data.wiki-store.org-erasure"
+	RetrievalEngineOrgErasureConsumerName             = "retrieval-engine-gdpr-erasure-v1"
+	DataQualityOrgErasureConsumerName                 = "data-quality-org-erasure"
+	DataQualityOrgErasureDelivery                     = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-quality.org-erasure"
+	DataOrchestratorOrgErasureConsumerName            = "data-orchestrator-org-erasure"
+	DataOrchestratorOrgErasureDelivery                = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-orchestrator.org-erasure"
+	QuickwitAdapterOrgErasureConsumerName             = "quickwit-adapter-gdpr-erasure-v1"
+	CostCoreOrgErasureConsumerName                    = "cost-core-org-erasure"
+	CostCoreOrgErasureDelivery                        = "_VEREVON.CONTROL.SHARED.DELIVER.model.cost-core.org-erasure"
+	EmbeddingEngineOrgErasureConsumerName             = "embedding-engine-org-erasure"
+	VerevonGatewayOrgErasureConsumerName              = "verevon-gateway-gdpr-erasure-v1"
 
 	// TEMPORARY rename-migration compatibility (added 2026-08-05, remove once
 	// every publisher AND every consumer on this bus is confirmed running
@@ -503,6 +505,9 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, conversationInteractiveRetentionConsumerConfig()); err != nil {
 		return err
 	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, conversationSupportRecurrenceZDRPurgeConsumerConfig()); err != nil {
+		return err
+	}
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, sessionGDPRErasureConsumerConfig()); err != nil {
 		return err
 	}
@@ -784,6 +789,23 @@ func conversationInteractiveRetentionConsumerConfig() *nats.ConsumerConfig {
 	return &nats.ConsumerConfig{
 		Durable: ConversationInteractiveRetentionConsumerName, DeliverSubject: ConversationInteractiveRetentionDelivery,
 		DeliverGroup: ConversationInteractiveRetentionConsumerName, FilterSubject: InteractiveRetentionEnabledSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
+// conversationSupportRecurrenceZDRPurgeConsumerConfig provisions Conversation
+// Core's reactive backstop for the support-recurrence corpus builder: an
+// independent durable on the same interactive-retention subject (own
+// DeliverSubject/DeliverGroup, own JetStream delivery cursor) that purges an
+// org's support-recurrence corpus immediately on a false-to-true ZDR
+// transition, closing the window before the corpus builder's next scheduled
+// sweep. Its durable must match supportRecurrenceZDRPurgeDurable in
+// conversation-core-go.
+func conversationSupportRecurrenceZDRPurgeConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: ConversationSupportRecurrenceZDRPurgeConsumerName, DeliverSubject: ConversationSupportRecurrenceZDRPurgeDelivery,
+		DeliverGroup: ConversationSupportRecurrenceZDRPurgeConsumerName, FilterSubject: InteractiveRetentionEnabledSubject,
 		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
 		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
 	}
