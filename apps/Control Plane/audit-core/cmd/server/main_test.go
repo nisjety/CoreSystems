@@ -1066,6 +1066,24 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 		t.Fatalf("bind scoped conversation-core interactive-retention consumer: %v", err)
 	}
 	t.Cleanup(func() { _ = conversationRetentionSubscription.Unsubscribe() })
+	// Independent durable on the SAME subject as the interactive-retention
+	// consumer above (its own JetStream delivery cursor), so the one publish
+	// below must fan out to both.
+	supportRecurrenceZDRPurgeReceived := make(chan struct{}, 1)
+	supportRecurrenceZDRPurgeSubscription, err := conversationJS.QueueSubscribe(
+		provisioner.InteractiveRetentionEnabledSubject,
+		provisioner.ConversationSupportRecurrenceZDRPurgeConsumerName,
+		func(message *nats.Msg) {
+			_ = message.Ack()
+			supportRecurrenceZDRPurgeReceived <- struct{}{}
+		},
+		nats.Bind(provisioner.ControlSharedStreamName, provisioner.ConversationSupportRecurrenceZDRPurgeConsumerName),
+		nats.ManualAck(),
+	)
+	if err != nil {
+		t.Fatalf("bind scoped conversation-core support-recurrence zdr-purge consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = supportRecurrenceZDRPurgeSubscription.Unsubscribe() })
 	if err := orgProducer.Publish(provisioner.InteractiveRetentionEnabledSubject, []byte(`{"org_id":"org-1","zdr":true}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -1076,6 +1094,11 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 	case <-conversationRetentionReceived:
 	case <-time.After(2 * time.Second):
 		t.Fatal("scoped conversation-core interactive-retention consumer did not receive the durable Control event")
+	}
+	select {
+	case <-supportRecurrenceZDRPurgeReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scoped conversation-core support-recurrence zdr-purge consumer did not receive the durable Control event")
 	}
 	assertMainPermissionDenied(t, conversationGDPR, conversationPermissionErrors, "conversation GDPR request forgery", func() error {
 		return conversationGDPR.Publish(provisioner.GDPRErasureRequestedSubject, []byte(`{"forged":true}`))
