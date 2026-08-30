@@ -762,19 +762,16 @@ verify_oneshot_declarations() {
 verify_unique_migration_versions() {
   local duplicates
 
-  duplicates="$( (
-    for plane_dir in "$CORE_ROOT"/apps/*/; do
-      [[ -d "$plane_dir" ]] || continue
-      # Worktree metadata and generated frontend artifacts can contain complete
-      # nested checkouts or hundreds of thousands of cached files. Traversing
-      # them turns this small validation into an unbounded scan of duplicate
-      # source trees. Migration ownership belongs to the real plane checkout.
-      find "$plane_dir" \
-        \( -path '*/.git' -o -path '*/.claude' -o -path '*/node_modules' -o -path '*/target' -o -path '*/dist' \
-          -o -path '*/.next' -o -path '*/.pnpm-store' -o -path '*/.playwright-cli' -o -path '*/work' \) -prune -o \
-        -type f -path '*/migrations/*.sql' -print
-    done
-  ) | awk -F/ '
+  # `find` must still visit every directory to prove a path is not a
+  # migration. In this monorepo that includes generated nested worktrees and
+  # caches even after pruning. rg applies the include/exclude patterns while
+  # walking and keeps this preflight bounded to the SQL files it needs.
+  duplicates="$( { rg --files --hidden "$CORE_ROOT/apps" \
+      -g '**/migrations/*.sql' \
+      -g '!**/.git/**' -g '!**/.claude/**' -g '!**/node_modules/**' \
+      -g '!**/target/**' -g '!**/dist/**' -g '!**/.next/**' \
+      -g '!**/.pnpm-store/**' -g '!**/.playwright-cli/**' -g '!**/work/**' \
+      || true; } | awk -F/ '
         {
           file=$NF
           # Paired migration systems intentionally use the same version for
@@ -936,6 +933,26 @@ compose() {
       [[ -n "$plane_env" ]] || continue
       env_args+=("--env-file" "$plane_env")
     done < <(plane_env_files "$plane_dir")
+  fi
+
+  # Space-decision verification is owned by Control Plane.  Model Plane's
+  # local environment also contains compatibility copies of these values, and
+  # Docker Compose gives later --env-file entries precedence.  If those copies
+  # become stale, Model and Application can start with a keypair that no longer
+  # matches user-core's signer.  Export only these owner-controlled values from
+  # Control's generated store: process environment has the highest Compose
+  # interpolation precedence, while Model's own NATS credentials still resolve
+  # from deploy/.env as intended.
+  local control_secrets control_line
+  control_secrets="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
+  if [[ -f "$control_secrets" ]]; then
+    while IFS= read -r control_line; do
+      case "$control_line" in
+        CONTROL_SPACE_DECISION_KEY_ID=*|CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64=*)
+          export "$control_line"
+          ;;
+      esac
+    done < "$control_secrets"
   fi
 
   if (( ${#env_args[@]} > 0 )); then
@@ -2082,7 +2099,8 @@ verify_internal_api_key_consistency() {
       -g '.env' -g '.env.*' -g '*.env' \
       -g '!*.example' -g '!*.sample' -g '!*.bak*' -g '!*.env.production' \
       -g '!**/node_modules/**' -g '!**/.next/**' -g '!**/dist/**' \
-      -g '!**/target/**' -g '!**/.git/**' 2>/dev/null)
+      -g '!**/target/**' -g '!**/.git/**' -g '!**/.claude/**' \
+      -g '!**/.pnpm-store/**' -g '!**/.playwright-cli/**' -g '!**/work/**' 2>/dev/null)
 
   # -n (not -l) so we can filter out comment-only mentions before collapsing
   # back to a file list — a source comment EXPLAINING why a placeholder is
@@ -2093,14 +2111,15 @@ verify_internal_api_key_consistency() {
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
       placeholder_files+=("$f")
-    done < <(grep -rnE 'change-me-internal-service-secret|dev-super-secret-internal-api-key' \
+    done < <(rg -l -e 'change-me-internal-service-secret' -e 'dev-super-secret-internal-api-key' \
         "$CORE_ROOT/apps" \
-        --include='*.yml' --include='*.yaml' --include='*.ts' --include='*.go' --include='*.rs' \
-        --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=target --exclude-dir=.next \
+        -g '*.yml' -g '*.yaml' -g '*.ts' -g '*.go' -g '*.rs' \
+        -g '!**/node_modules/**' -g '!**/dist/**' -g '!**/target/**' \
+        -g '!**/.next/**' -g '!**/.git/**' -g '!**/.claude/**' \
+        -g '!**/.pnpm-store/**' -g '!**/.playwright-cli/**' -g '!**/work/**' \
         2>/dev/null \
       | grep -vE '_test\.|\.test\.' \
-      | grep -vE ':[[:space:]]*//' \
-      | cut -d: -f1 | sort -u || true)
+      | sort -u || true)
   fi
 
   if (( ${#drifted[@]} == 0 )) && (( ${#placeholder_files[@]} == 0 )); then
