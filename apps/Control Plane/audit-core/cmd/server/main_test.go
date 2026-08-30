@@ -1483,6 +1483,7 @@ func TestFreshControlBrokerSupportsScopedDomainAndRequestReplyContracts(t *testi
 }
 
 func natsUserConfigBlock(config, user string) (string, error) {
+	config = strings.ReplaceAll(config, "\r\n", "\n")
 	marker := `user: "` + user + `"`
 	start := strings.Index(config, marker)
 	if start < 0 {
@@ -1507,7 +1508,7 @@ func composeServiceIndent(compose string) (string, error) {
 	lines := strings.Split(compose, "\n")
 	servicesLine := -1
 	for index, line := range lines {
-		if strings.TrimRight(line, " \t") == "services:" {
+		if strings.TrimRight(line, " \t\r") == "services:" {
 			servicesLine = index
 			break
 		}
@@ -1535,6 +1536,7 @@ func composeServiceIndent(compose string) (string, error) {
 }
 
 func composeServiceBlock(compose, service string) (string, error) {
+	compose = strings.ReplaceAll(compose, "\r\n", "\n")
 	indent, err := composeServiceIndent(compose)
 	if err != nil {
 		return "", err
