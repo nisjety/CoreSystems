@@ -28,6 +28,25 @@ services:
   execution-core:
     environment:
       RUST_LOG: debug
+      # Ticket-action support (ticket_tools.rs::AgentTicketActionClient::from_env)
+      # requires all four of CONTROL_PLANE_USER_CORE_URL,
+      # EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN, CONVERSATION_CORE_AGENT_ACTION_URL,
+      # and CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN together, by design ("a
+      # caller must not confuse bad wiring with a deliberate disabled state").
+      # Control Plane's bootstrap auto-publishes the two token values into
+      # .env.generated-secrets regardless of whether Application Plane's
+      # conversation-core (which the two URL values point at) is running — so
+      # a dev stack with Model Plane + Control Plane but no Application Plane
+      # lands on exactly 2-of-4, the hard-error case, and execution-core
+      # crash-loops. Force both tokens back to unset here so the dev profile
+      # resolves to the clean 0-of-4 disabled state until the URLs are also
+      # wired for this environment — not a code fix, a config fix.
+      EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN: ""
+      CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN: ""
+      # Same auto-publish issue, for the fifth, separately-gated token: alone
+      # (without the four above) it is ALSO a hard error, not a smaller
+      # partial-enable.
+      EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN: ""
 
   orchestrator-core:
     environment:
