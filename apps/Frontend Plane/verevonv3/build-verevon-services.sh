@@ -514,6 +514,22 @@ plane_env_files() {
       # CONVEX_INTERNAL_SERVICE_KEY, which is exactly what a second copy invites.
       owner="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
       [[ -f "$owner" ]] && printf '%s\n' "$owner"
+      # APPLICATION_CONVEX_MODEL_NATS_PASSWORD and APPLICATION_INSIGHT_MODEL_NATS_PASSWORD
+      # are NOT Control-owned despite the family resemblance to the credential
+      # above: Model Plane's own NATS broker (model-plane-nats-1) authorizes
+      # against apps/Model Plane/deploy/.env's copy of these two values,
+      # confirmed 2026-08-30 directly against the running container's
+      # baked-in env. run-control-plane.sh separately mints a value under
+      # these same two names for its own release-credential preflight
+      # (validate-release-credentials.sh), but no broker ever authorizes
+      # against that copy — it is an orphan. Loading only Control's file
+      # above would hand convex-subscriber/insight-core a password Model
+      # Plane's NATS rejects. Load Model Plane's real owner file here too,
+      # after Control's, so it wins for just these two overlapping keys; a
+      # per-core override (convex-core/.env, insight-core/.env) still wins
+      # last via the per-core loop below.
+      owner="$CORE_ROOT/apps/Model Plane/deploy/.env"
+      [[ -f "$owner" ]] && printf '%s\n' "$owner"
       ;;
     "Ingestion Plane")
       for owner in "$CORE_ROOT/apps/Control Plane/.env.generated-secrets" \
@@ -525,6 +541,14 @@ plane_env_files() {
       # Model Gateway's org-limit lookup uses a Control-issued org-core
       # credential. Keep one canonical local value in Control's persisted
       # development store instead of copying secrets between planes.
+      #
+      # This same Control file also carries an orphaned mint of
+      # APPLICATION_CONVEX_MODEL_NATS_PASSWORD / APPLICATION_INSIGHT_MODEL_NATS_PASSWORD
+      # (see the "Application Plane" case above) — harmless here only because
+      # step 3 below loads this plane's own $plane_dir/.env AFTER this case
+      # block runs, so deploy/.env's real value (what model-plane-nats-1
+      # actually authorizes against) always wins for a Model-Plane-only
+      # build. Do not reorder steps 1-4 without re-checking this.
       owner="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
       [[ -f "$owner" ]] && printf '%s\n' "$owner"
       ;;
