@@ -765,8 +765,14 @@ verify_unique_migration_versions() {
   duplicates="$( (
     for plane_dir in "$CORE_ROOT"/apps/*/; do
       [[ -d "$plane_dir" ]] || continue
-      find "$plane_dir" -type f -path '*/migrations/*.sql' \
-        ! -path '*/node_modules/*' ! -path '*/target/*' ! -path '*/dist/*' -print
+      # Worktree metadata and generated frontend artifacts can contain complete
+      # nested checkouts or hundreds of thousands of cached files. Traversing
+      # them turns this small validation into an unbounded scan of duplicate
+      # source trees. Migration ownership belongs to the real plane checkout.
+      find "$plane_dir" \
+        \( -path '*/.git' -o -path '*/.claude' -o -path '*/node_modules' -o -path '*/target' -o -path '*/dist' \
+          -o -path '*/.next' -o -path '*/.pnpm-store' -o -path '*/.playwright-cli' -o -path '*/work' \) -prune -o \
+        -type f -path '*/migrations/*.sql' -print
     done
   ) | awk -F/ '
         {
