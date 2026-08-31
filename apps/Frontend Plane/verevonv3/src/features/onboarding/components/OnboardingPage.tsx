@@ -74,10 +74,13 @@ export default function OnboardingPage() {
   // Identity comes from the validated session (RequireOnboarding guarantees an
   // authenticated user before this mounts). The dev actor fallback only keeps
   // local gateway actions usable; the graph itself remains session-gated.
-  const sessionUser = getSession().user
-  const actor = sessionUser
-    ? { userId: sessionUser.id, userEmail: sessionUser.email, userName: sessionUser.name }
-    : getBrowserActor()
+  const sessionUser = createMemo(() => getSession().user)
+  const actor = untrack(() => {
+    const user = sessionUser()
+    return user
+      ? { userId: user.id, userEmail: user.email, userName: user.name }
+      : getBrowserActor()
+  })
   const navigate = useNavigate()
   const actions = createOnboardingGatewayActions(actor)
   const i18n = useI18n()
@@ -148,7 +151,7 @@ export default function OnboardingPage() {
           const paymentId = checkoutParams.get('payment_id') || undefined
           const clientSecret = checkoutParams.get('payment_intent_client_secret') || undefined
           const providerStatus = checkoutParams.get('status') || 'processing'
-          const planFromSnapshot = snapshot?.state?.plan || state.plan || recommendedPlan()
+          const planFromSnapshot = snapshot?.state?.plan || untrack(() => state.plan || recommendedPlan())
 
           if (paymentId || clientSecret) {
             void finalizePaidCheckout({
@@ -392,10 +395,10 @@ export default function OnboardingPage() {
   )
 
   createEffect(
-    () => ({ reason: recommendationQuery.error, step: state.step }),
-    ({ reason, step }) => {
+    () => ({ reason: recommendationQuery.error, step: state.step, tr: i18n.tr }),
+    ({ reason, step, tr }) => {
       if (step !== 'paywall' || !reason) return
-      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke beregne en anbefaling.', en: 'Could not compute a recommendation.' }))
+      setError(translateApiError(reason, tr, { no: 'Kunne ikke beregne en anbefaling.', en: 'Could not compute a recommendation.' }))
     },
   )
 
@@ -833,7 +836,7 @@ export default function OnboardingPage() {
         // a minimal default org so "skip everything" still completes.
         let orgId = completionSnapshot.organization.id
         if (!orgId) {
-          const sessionUser = getSession().user
+          const sessionUser = untrack(() => getSession().user)
           const fallbackName =
             completionSnapshot.organization.name?.trim() ||
             sessionUser?.name?.trim() ||
@@ -867,21 +870,21 @@ export default function OnboardingPage() {
           return
         }
         window.localStorage.removeItem(storageKey)
-        const currentSession = getSession()
-        const completedOrg =
-          currentSession.activeOrg ??
+        const completedOrg = untrack(() =>
+          getSession().activeOrg ??
           (orgId
             ? {
                 id: orgId,
                 name: completionSnapshot.organization.name?.trim() || 'Min organisasjon',
                 role: 'owner',
               }
-            : null)
+            : null),
+        )
         markSessionOnboardingComplete(completedOrg)
         // Refresh the session so onboardingStatus flips to COMPLETED, then
         // SPA-navigate — no full reload, and the guards now allow /dashboard.
         await loadSession()
-        if (getSession().onboardingStatus !== 'COMPLETED') {
+        if (untrack(() => getSession().onboardingStatus) !== 'COMPLETED') {
           markSessionOnboardingComplete(completedOrg)
         }
         navigate('/dashboard', { replace: true })
@@ -1013,8 +1016,8 @@ export default function OnboardingPage() {
           <ConnectStepVisual
             connectedSources={state.connectors}
             organizationName={state.organization.name}
-            currentUserId={sessionUser?.id ?? ''}
-            currentUserName={sessionUser?.name?.trim() ?? ''}
+            currentUserId={sessionUser()?.id ?? ''}
+            currentUserName={sessionUser()?.name?.trim() ?? ''}
           />
         )
       case 'social-proof':

@@ -1,5 +1,5 @@
 import { Minus, Plus, RotateCcw } from '@/shared/icons'
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js'
 import { OnboardingLinkButton } from '@/features/onboarding/components/shared/OnboardingLinkButton'
 import {
   type ConnectorCategory,
@@ -194,7 +194,7 @@ export function ConnectStepVisual(props: ConnectStepVisualProps) {
         setGraphReady(Boolean(sceneController))
         if (!sceneController) return
 
-        const model = graphModel()
+        const model = untrack(() => graphModel())
         sceneController.setData(model.nodes, model.edges)
         setZoomPercent(sceneController.zoomPercent())
       }
@@ -232,14 +232,16 @@ export function ConnectStepVisual(props: ConnectStepVisualProps) {
   // `on(graphModel, ...)` combined tracking + side effects into one function under
   // the old single-arg createEffect; the two-phase form separates them naturally,
   // with graphModel itself serving as the tracked-read compute function.
-  createEffect(graphModel, (model) => {
-    sceneController?.setData(model.nodes, model.edges)
-    const activeNode = selectedNode()
-    if (activeNode && !model.nodes.some((node) => node.id === activeNode.id)) {
-      setSelectedNode(undefined)
-      sceneController?.setActiveNode(undefined)
-    }
-  })
+  createEffect(
+    () => ({ model: graphModel(), activeNode: selectedNode() }),
+    ({ model, activeNode }) => {
+      sceneController?.setData(model.nodes, model.edges)
+      if (activeNode && !model.nodes.some((node) => node.id === activeNode.id)) {
+        setSelectedNode(undefined)
+        sceneController?.setActiveNode(undefined)
+      }
+    },
+  )
 
   const zoom = (direction: 1 | -1) => {
     const nextZoom = sceneController?.zoom(direction)

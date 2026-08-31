@@ -163,7 +163,11 @@ export function createConnectGraphScene(
     .linkOpacity(0.64)
     .linkWidth(0)
     .linkDirectionalParticles(0)
-    .enableNodeDrag(true)
+    // 3d-force-graph 1.80 can dispatch a pointerup without a pointerId
+    // after DragControls receives pointercancel; OrbitControls then
+    // dereferences a missing touch position. Node dragging is not part of
+    // this surface's interaction contract (rotation/pan/zoom + selection).
+    .enableNodeDrag(false)
     .enablePointerInteraction(true)
     .showPointerCursor(() => false)
     .warmupTicks(options.reducedMotion ? 70 : 120)
