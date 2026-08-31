@@ -1275,24 +1275,23 @@ pub async fn invoke_stream_sse(
             "thread_id": &session_thread_id,
             "model": &model_clone,
         });
-        if tx
+        // A disconnect during the first thread handoff is not a cancellation.
+        // The browser can reload while its active-thread projection is being
+        // reconciled, after Session Core has already accepted the user message
+        // and durable run but before this first frame reaches it. Finishing the
+        // run lets the normal resume/history paths recover the answer instead
+        // of leaving a newly-created thread queued with no assistant message.
+        let mut client_connected = tx
             .send(Ok(Event::default()
                 .event("connected")
                 .data(connected.to_string())))
             .await
-            .is_err()
-        {
-            if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
-                &session_state,
-                &session_run_for_terminal,
-                &session_bearer,
-            )
-            .await
-            {
-                tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to cancel disconnected direct inference stream");
-            }
-            finish_stream_registrations(&cancels, &queued_inputs, &req_id);
-            return;
+            .is_ok();
+        if !client_connected {
+            tracing::info!(
+                request_id = %req_id,
+                "client disconnected before connected frame; detaching and finishing for resume"
+            );
         }
 
         if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
@@ -1788,7 +1787,6 @@ pub async fn invoke_stream_sse(
         // so `invoke_resume` can replay the finished answer on reconnect. A
         // deliberate cancel arrives via `cancel_flag` (the cancel registry)
         // and is checked every iteration, so cancel keeps working mid-drain.
-        let mut client_connected = true;
         let mut failure_code = "inference_stream_ended_without_terminal";
         let mut heartbeat =
             tokio::time::interval(crate::session_flow::MANAGED_RUN_HEARTBEAT_INTERVAL);

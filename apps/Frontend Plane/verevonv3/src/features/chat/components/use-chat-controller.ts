@@ -761,6 +761,17 @@ export function useChatController() {
    */
   let hydratingThreadId: string | null = null
   let threadLoadSequence = 0
+  // A first message has a short handoff window: Session Core has accepted the
+  // durable run, but the browser can still receive an active-thread event from
+  // the just-created id. Hydrating that same id would abort the live stream and
+  // replace its optimistic user/assistant pair with a transient 404 response.
+  // Keep this lifecycle marker outside reactive state: it only protects an
+  // imperative event race and must never make streaming renders depend on it.
+  const startingThreadIds = new Set<string>()
+  const isStartingThread = (threadId: string): boolean =>
+    startingThreadIds.has(threadId) &&
+    state.threadId === threadId &&
+    state.status === 'streaming'
   // Mount-time restoration performs async authority/listing reads. A user can
   // start a fresh chat (or choose another thread) while those reads are in
   // flight; without a separate selection revision, the stale bootstrap then
@@ -770,6 +781,11 @@ export function useChatController() {
   let threadSelectionRevision = 0
 
   const loadThread = async (threadId: string) => {
+    // The active-thread event for a newly-created conversation is a
+    // confirmation, not a request to replace the optimistic live transcript.
+    // In particular, do this before aborting `abortController`: session-core
+    // may still be indexing the new thread's messages for a few milliseconds.
+    if (isStartingThread(threadId)) return
     // Switching threads must tear down the previously-selected thread's
     // in-flight stream/resume and reset the shared view machine. Left running,
     // that stream's terminal handlers keep mutating the store after
@@ -864,6 +880,14 @@ export function useChatController() {
       // refetching it on every mount. Any other failure (502/timeout/offline)
       // is treated as transient: keep rendering the cached transcript.
       if (error instanceof ApiError && error.status === 404) {
+        // A loader that began just before the first-turn marker was installed
+        // must receive the same protection as the event path above. Do not
+        // clear the active pointer or discard the optimistic assistant turn;
+        // the live stream (or its resumable buffer) remains authoritative.
+        if (isStartingThread(threadId)) {
+          hydratingThreadId = null
+          return
+        }
         hydratingThreadId = null
         removeChatThreadHistoryItem(threadId)
         if (readActiveChatThreadId() === threadId) {
@@ -1126,6 +1150,7 @@ export function useChatController() {
           resetChatState()
           return
         }
+        if (isStartingThread(threadId)) return
         // This is an event callback, not a reactive derivation. Read the
         // current thread intentionally without subscribing the lifecycle
         // effect to a store field it cannot rerun from.
@@ -1491,6 +1516,7 @@ export function useChatController() {
     if (state.queuedInputs.length > 0) setState((s) => { s.queuedInputs = [] })
 
     let activeThreadId = state.threadId ?? createId('thread')
+    const provisionalThreadId = activeThreadId
     // Temporary chat locks in at the first send of a thread: once ANY
     // message has gone out under this thread id it is marked temporary for
     // the rest of the session (see `isTemporaryThread`), independent of
@@ -1505,6 +1531,7 @@ export function useChatController() {
     const requestedSpaceRef = selectedNewSpaceRef ?? scopedThreadRefs.get(activeThreadId)
     if (isNewThread) {
       setState((s) => { s.threadId = activeThreadId })
+      startingThreadIds.add(activeThreadId)
       if (options.zdr) markThreadTemporary(activeThreadId)
       // Keep the provisional id in the in-memory chat state only. Publishing
       // it as the active-thread pointer dispatches the selection event, which
@@ -1666,6 +1693,10 @@ export function useChatController() {
               updateLocalRunHint(serverThreadId ?? activeThreadId, 'running', runId)
             }
             if (serverThreadId) {
+              // Session Core commonly preserves the client session key, but it
+              // is allowed to mint a different durable id. Protect either form
+              // until this first stream reaches a terminal state.
+              if (isNewThread) startingThreadIds.add(serverThreadId)
               const priorThreadId = activeThreadId
               if (serverThreadId !== activeThreadId) {
                 const provisionalThreadId = activeThreadId
@@ -2064,6 +2095,11 @@ export function useChatController() {
       setState((s) => { s.error = 'Stream interrupted' })
       markOpenSteps('error', 'Stream interrupted', assistantId)
       writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
+    } finally {
+      if (isNewThread) {
+        startingThreadIds.delete(provisionalThreadId)
+        startingThreadIds.delete(activeThreadId)
+      }
     }
   }
 
