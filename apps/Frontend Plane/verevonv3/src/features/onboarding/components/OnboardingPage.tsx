@@ -356,26 +356,34 @@ export default function OnboardingPage() {
   )
 
   createEffect(
-    () => ({
-      recommendation: activeRecommendation(),
-      targetLanguage: currentRecommendationLocale(),
-    }),
-    ({ recommendation, targetLanguage }) => {
-      if (!recommendation || hasRecommendationLocale(recommendation, targetLanguage)) return
+    () => {
+      const recommendation = activeRecommendation()
+      const targetLanguage = currentRecommendationLocale()
+      if (!recommendation || hasRecommendationLocale(recommendation, targetLanguage)) return undefined
 
-      const key = `${recommendation.contextHash ?? 'current'}:${recommendation.generatedAt}:${targetLanguage}`
+      return {
+        recommendation: recommendationText(recommendation),
+        sourceLanguage: recommendation.locale,
+        targetLanguage,
+        contextHash: recommendation.contextHash,
+        key: `${recommendation.contextHash ?? 'current'}:${recommendation.generatedAt}:${targetLanguage}`,
+      }
+    },
+    (computed) => {
+      if (!computed) return
+      const { recommendation, sourceLanguage, targetLanguage, contextHash, key } = computed
       if (untrack(() => translatingRecommendationKey()) === key) return
       setTranslatingRecommendationKey(key)
 
       void actions
         .translatePlanRecommendation({
-          recommendation: recommendationText(recommendation),
-          sourceLanguage: recommendation.locale,
+          recommendation,
+          sourceLanguage,
           targetLanguage,
         })
         .then((translation) => {
           setState((s) => { s.recommendation = ((current) => {
-            if (!current || current.contextHash !== recommendation.contextHash) return current
+            if (!current || current.contextHash !== contextHash) return current
             return withRecommendationTranslation(current, targetLanguage, translation)
           })(s.recommendation) })
         })
@@ -384,15 +392,19 @@ export default function OnboardingPage() {
   )
 
   createEffect(
-    () => ({
-      recommendation: state.recommendation,
-      contextHash: recommendationContextHash(),
-    }),
-    ({ recommendation, contextHash }) => {
-      if (!recommendation || recommendation.contextHash === contextHash) return
+    () => {
+      const recommendation = state.recommendation
+      return {
+        recommendationContextHash: recommendation?.contextHash,
+        recommendationPlanId: recommendation?.planId,
+        contextHash: recommendationContextHash(),
+      }
+    },
+    ({ recommendationContextHash, recommendationPlanId, contextHash }) => {
+      if (!recommendationContextHash || recommendationContextHash === contextHash) return
 
       flush(() => {
-        if (untrack(() => state.plan) === recommendation.planId) setState((s) => { s.plan = undefined })
+        if (untrack(() => state.plan) === recommendationPlanId) setState((s) => { s.plan = undefined })
         setState((s) => { s.recommendation = undefined })
       })
     },

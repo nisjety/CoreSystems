@@ -86,14 +86,14 @@ describe('mid-run input is never dropped', () => {
   it('flushes deferred sends from one reactive place, clearing before it sends', async () => {
     const text = await source(CONTROLLER)
     const start = text.indexOf(
-      "createEffect(() => {\n    if (state.status === 'streaming') return",
+      "createEffect(\n    () => ({\n      status: state.status,\n      deferred: deferredSends(),",
     )
     expect(start, 'the deferred-send flush effect is gone').toBeGreaterThan(-1)
-    const effect = text.slice(start, text.indexOf('})', start))
+    const effect = text.slice(start, text.indexOf('  const addAssistantCitation', start))
     expect(effect.indexOf('setDeferredSends([])')).toBeGreaterThan(-1)
     expect(
       effect.indexOf('setDeferredSends([])') <
-        effect.indexOf('void sendContent'),
+        effect.indexOf('sendContent(content)'),
       'clearing after sending re-runs this effect over the same text and sends it twice',
     ).toBe(true)
   })

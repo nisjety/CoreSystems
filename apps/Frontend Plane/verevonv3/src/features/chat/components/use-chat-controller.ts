@@ -3,6 +3,7 @@ import {
   createMemo,
   createSignal,
   onCleanup,
+  untrack,
 } from 'solid-js'
 import {
   createStore,
@@ -2073,15 +2074,22 @@ export function useChatController() {
   // machine is free, anything a run ended too early to receive goes out as an
   // ordinary turn. Placed after `sendContent` so the effect's first run cannot
   // read it before it is assigned.
-  createEffect(() => {
-    if (state.status === 'streaming') return
-    const deferred = deferredSends()
-    if (deferred.length === 0) return
-    // Cleared BEFORE sending: `sendContent` flips the status, which re-runs this
-    // effect, and a queue still holding the same text would send it twice.
-    setDeferredSends([])
-    void sendContent(deferred.join('\n\n'))
-  })
+  createEffect(
+    () => ({
+      status: state.status,
+      deferred: deferredSends(),
+    }),
+    ({ status, deferred }) => {
+      if (status === 'streaming' || deferred.length === 0) return
+      // Cleared BEFORE sending: `sendContent` flips the status, which re-runs
+      // this effect, and a queue still holding the same text would send it
+      // twice. The send itself is an event-style operation, so keep its
+      // internal reactive reads untracked.
+      const content = deferred.join('\n\n')
+      setDeferredSends([])
+      untrack(() => { void sendContent(content) })
+    },
+  )
 
   const addAssistantCitation = (turnId: string, turnTitle: string, citation: Citation) => {
     setState((s) => {
