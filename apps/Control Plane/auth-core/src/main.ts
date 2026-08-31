@@ -18,6 +18,7 @@ import { selectNatsCredentials } from './nats/nats-credentials';
 import type { Server } from '@grpc/grpc-js';
 import type { PackageDefinition } from '@grpc/proto-loader';
 import type { Express, Request, Response } from 'express';
+import type { Server as HttpServer } from 'http';
 import { disconnectRedis } from './db/redis';
 
 /** Positive-integer env parse; falls back on absent, malformed, or <= 0 values. */
@@ -230,7 +231,7 @@ async function bootstrap() {
     process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS,
     65_000,
   );
-  const httpServer = app.getHttpServer();
+  const httpServer = app.getHttpServer() as HttpServer;
   httpServer.keepAliveTimeout = keepAliveTimeoutMs;
   httpServer.headersTimeout = keepAliveTimeoutMs + 5_000;
   console.log(
@@ -288,6 +289,5 @@ async function bootstrap() {
 
   process.once('SIGTERM', (signal) => void shutdown(signal));
   process.once('SIGINT', (signal) => void shutdown(signal));
-
 }
 void bootstrap();

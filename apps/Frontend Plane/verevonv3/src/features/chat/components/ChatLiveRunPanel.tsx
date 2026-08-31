@@ -203,6 +203,10 @@ export function ChatLiveRunPanel(props: {
   zdr: boolean
   /** Optional Work-tab projection rendered in this same run-owned canvas. */
   workContent?: JSX.Element
+  /** Local workspace tabs shown when Work owns the contextual canvas. */
+  navigation?: JSX.Element
+  /** Close Work without collapsing the background run watcher. */
+  onCloseWork?: () => void
   /**
    * Ask the owning chat turn to re-read approvals from the orchestration
    * authority when a durable run enters or leaves an approval gate. The live
@@ -471,20 +475,30 @@ export function ChatLiveRunPanel(props: {
               type="button"
               class="verevon-chat-run-panel__toggle"
               aria-expanded={!props.collapsed ? 'true' : 'false'}
-              aria-label={props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
-              title={props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
-              onClick={() => props.onToggleCollapsed()}
+              aria-label={props.workContent ? 'Lukk arbeidsflaten' : props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
+              title={props.workContent ? 'Lukk arbeidsflaten' : props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
+              onClick={() => props.workContent ? props.onCloseWork?.() : props.onToggleCollapsed()}
             >
               <Show when={props.collapsed} fallback={<PanelRightClose size={15} />}>
                 <PanelRightOpen size={15} />
               </Show>
             </button>
             <Show when={!props.collapsed}>
-              <div class="verevon-chat-run-panel__title">
-                <strong><MonitorPlay size={13} /> {props.workContent ? 'Work' : 'Live agent'}</strong>
-                <span>{statusLabel()}</span>
-              </div>
-              <code class="verevon-chat-run-panel__runid" title={runId()}>{runId()}</code>
+              <Show
+                when={props.workContent}
+                fallback={(
+                  <>
+                    <div class="verevon-chat-run-panel__title">
+                      <strong><MonitorPlay size={13} /> Live agent</strong>
+                      <span>{statusLabel()}</span>
+                    </div>
+                    <code class="verevon-chat-run-panel__runid" title={runId()}>{runId()}</code>
+                  </>
+                )}
+              >
+                <div class="verevon-chat-run-panel__workspace-navigation">{props.navigation}</div>
+                <span class="verevon-chat-run-panel__workspace-status">{statusLabel()}</span>
+              </Show>
               <Show when={props.orgId && framed() && live()}>
                 <div class="verevon-chat-run-panel__controls" role="group" aria-label="Nettleserkjøring">
                   <Show
@@ -524,6 +538,16 @@ export function ChatLiveRunPanel(props: {
 
           <Show when={!props.collapsed}>
             <div class="verevon-chat-run-panel__body">
+              <Show when={props.workContent}>
+                <section
+                  id="verevon-chat-tabpanel-steps"
+                  class="verevon-chat-run-panel__work"
+                  role="tabpanel"
+                  aria-label="Arbeidsdetaljer"
+                >
+                  {props.workContent}
+                </section>
+              </Show>
               <Show when={controlError()}>
                 {(message) => <p class="verevon-chat-run-panel__control-error" role="alert">{message()}</p>}
               </Show>
@@ -621,27 +645,22 @@ export function ChatLiveRunPanel(props: {
               </Show>
 
               <Show when={activity().length > 0}>
-                <section class="verevon-chat-run-activity" aria-label="Kjøringshendelser">
-                  <For each={activity().slice(-12)}>
-                    {(entry) => (
-                      <div class="verevon-chat-run-activity__row" data-status={entry.status ?? ''}>
-                        <strong>{entry.title}</strong>
-                        <Show when={entry.detail}><span>{entry.detail}</span></Show>
-                      </div>
-                    )}
-                  </For>
-                </section>
-              </Show>
-
-              <Show when={props.workContent}>
-                <section
-                  id="verevon-chat-tabpanel-steps"
-                  class="verevon-chat-run-panel__work"
-                  role="tabpanel"
-                  aria-label="Arbeidsdetaljer"
-                >
-                  {props.workContent}
-                </section>
+                <details class="verevon-chat-run-activity-disclosure">
+                  <summary>
+                    <span>Teknisk aktivitet</span>
+                    <em>{activity().length}</em>
+                  </summary>
+                  <section class="verevon-chat-run-activity" aria-label="Kjøringshendelser">
+                    <For each={activity().slice(-12)}>
+                      {(entry) => (
+                        <div class="verevon-chat-run-activity__row" data-status={entry.status ?? ''}>
+                          <strong>{entry.title}</strong>
+                          <Show when={entry.detail}><span>{entry.detail}</span></Show>
+                        </div>
+                      )}
+                    </For>
+                  </section>
+                </details>
               </Show>
             </div>
           </Show>

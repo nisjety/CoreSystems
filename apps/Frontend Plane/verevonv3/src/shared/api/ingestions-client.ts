@@ -140,14 +140,16 @@ export type RunCreateResult = {
 
 export type RunCreateRequest =
   | {
-      kind: 'batch'
-      urls: string[]
-    }
+       kind: 'batch'
+       urls: string[]
+     }
   | {
-      kind: string
-      url: string
-      prompt?: string
-    }
+       kind: string
+       url: string
+       prompt?: string
+       schema?: Record<string, unknown> | string
+       extractMode?: 'product' | 'article' | 'general'
+     }
 
 export type ScheduleCreateRequest = {
   name: string

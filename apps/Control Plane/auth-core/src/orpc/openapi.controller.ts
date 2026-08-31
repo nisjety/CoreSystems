@@ -2,7 +2,7 @@ import { Controller, Get, Header, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { OpenAPIGenerator } from '@orpc/openapi';
 import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4';
-import type { AnyContractRouter } from '@orpc/contract';
+import type { AnyContractRouter, OpenAPI } from '@orpc/contract';
 import { orpcRouter } from '../auth/orpc-router';
 
 // Simple Swagger UI HTML using CDN
@@ -38,7 +38,7 @@ export class OpenApiController {
 
   @Get('openapi.json')
   @Header('Content-Type', 'application/json')
-  async getSpec(): Promise<any> {
+  async getSpec(): Promise<OpenAPI.Document> {
     const spec = await this.generator.generate(
       orpcRouter as unknown as AnyContractRouter,
       {

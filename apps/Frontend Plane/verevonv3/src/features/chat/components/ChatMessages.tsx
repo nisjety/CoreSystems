@@ -88,12 +88,11 @@ import {
   type IconComponent,
   type MarkdownBlock,
   type MarkdownListItem,
-  OVERFLOW_PROMPTS,
-  PRIMARY_PROMPTS,
   TOOL_LABELS,
 } from './chat-types'
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
+import { useI18n } from '@/shared/i18n'
 
 export function MessageBlock(props: {
   copied: boolean
@@ -116,8 +115,12 @@ export function MessageBlock(props: {
   /** Effectful turns cannot be edited or regenerated in place. */
   editLocked?: boolean
 }) {
+  // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
+  // role through a memo so the conditional branch is established in a tracked
+  // scope before `<Show>` receives its plain boolean value.
+  const isAssistant = createMemo(() => props.message.role === 'assistant')
   return (
-    <Show when={props.message.role === 'assistant'} fallback={<UserMessage {...props} />}>
+    <Show when={isAssistant()} fallback={<UserMessage {...props} />}>
       <AssistantMessage {...props} />
     </Show>
   )
@@ -305,9 +308,9 @@ export function AssistantMessage(props: {
     if (!(await props.onFeedback(wire))) setReaction(previous)
   }
 
-  const waiting = () => props.message.status === 'waiting'
-  const errored = () => props.message.status === 'error'
-  const effectful = () => isEffectfulChatTurn(props.message.effectClass)
+  const waiting = createMemo(() => props.message.status === 'waiting')
+  const errored = createMemo(() => props.message.status === 'error')
+  const effectful = createMemo(() => isEffectfulChatTurn(props.message.effectClass))
 
   // What this turn renders, as data. The conditions and order that used to live
   // inline as fourteen nested `<Show>` blocks are now one reviewable function
@@ -315,20 +318,26 @@ export function AssistantMessage(props: {
   // equivalence gate, which caught `stopReason`/`memoryRecallCount` being
   // dropped on reload.
   const nodes = createMemo(() => deriveConversationNodes(props.message, props.planApproval))
-  const nodeContext = (): ConversationNodeContext => ({
-    onViewSteps: props.onViewSteps,
-    onViewAttachments: props.onViewAttachments,
-    onApprovalDecision: props.onApprovalDecision,
-    onApprovePlan: props.onApprovePlan,
-    onSelectFollowUp: props.onSelectFollowUp,
-    onRegenerate: props.onRegenerate,
-    citations: props.message.citations,
+  // `<For>` executes its mapper untracked in Solid 2. Build each render entry
+  // in a memo so the mapper receives plain node/context data and never reads a
+  // live prop (notably `message.citations`) outside a tracking scope.
+  const nodeEntries = createMemo(() => {
+    const context: ConversationNodeContext = {
+      onViewSteps: props.onViewSteps,
+      onViewAttachments: props.onViewAttachments,
+      onApprovalDecision: props.onApprovalDecision,
+      onApprovePlan: props.onApprovePlan,
+      onSelectFollowUp: props.onSelectFollowUp,
+      onRegenerate: props.onRegenerate,
+      citations: props.message.citations,
+    }
+    return nodes().map((node) => ({ node, context }))
   })
 
   return (
     <article class="verevon-chat-message verevon-chat-message--assistant">
       <div class="verevon-chat-message__avatar">
-        <Sparkles size={14} strokeWidth={1.8} />
+        <span class="verevon-chat-message__logo" aria-hidden="true" />
       </div>
       <div class="verevon-chat-message__body">
         <div class="verevon-chat-message__heading">
@@ -342,8 +351,8 @@ export function AssistantMessage(props: {
           deliberately: nodes are recreated each derivation, and keying on
           identity would remount every node on every token during streaming.
         */}
-        <For each={nodes()}>
-          {(node) => CHAT_NODE_REGISTRY.render(node, nodeContext())}
+        <For each={nodeEntries()}>
+          {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
         </For>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
@@ -685,8 +694,8 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
   const [open, setOpen] = createSignal(false)
   const [tab, setTab] = createSignal('general')
   let ref!: HTMLDivElement
-  const model = () => props.message.modelUsed ?? props.message.model
-  const hasMetrics = () => Boolean(
+  const model = createMemo(() => props.message.modelUsed ?? props.message.model)
+  const hasMetrics = createMemo(() => Boolean(
     model()
     || props.message.inputTokens != null
     || props.message.outputTokens != null
@@ -697,13 +706,13 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
     || props.message.grounding
     || (props.message.citations?.length ?? 0) > 0
     || (props.message.toolCalls?.length ?? 0) > 0,
-  )
-  const tabs = () => [
+  ))
+  const tabs = createMemo(() => [
     { id: 'general', label: 'Oversikt' },
     ...(props.message.reasoning ? [{ id: 'insight', label: 'Innsikt' }] : []),
     ...((props.message.toolCalls?.length ?? 0) > 0 ? [{ id: 'tools', label: 'Verktøy' }] : []),
     ...(props.message.grounding || (props.message.citations?.length ?? 0) > 0 ? [{ id: 'sources', label: 'Kilder' }] : []),
-  ]
+  ])
 
   createEffect(
     () => open(),
@@ -813,21 +822,21 @@ export function MessageMetricsBadge(props: { message: ChatTurn }) {
   const [open, setOpen] = createSignal(false)
   let ref!: HTMLDivElement
 
-  const hasAnyMetric = () => (
+  const hasAnyMetric = createMemo(() => (
     props.message.inputTokens != null
     || props.message.outputTokens != null
     || props.message.latencyMs != null
     || props.message.costUsd != null
-  )
+  ))
 
-  const summary = () => {
+  const summary = createMemo(() => {
     const parts: string[] = []
     if (props.message.inputTokens != null) parts.push(`${props.message.inputTokens} in`)
     if (props.message.outputTokens != null) parts.push(`${props.message.outputTokens} out`)
     if (props.message.latencyMs != null) parts.push(formatLatency(props.message.latencyMs))
     if (props.message.costUsd != null) parts.push(formatUsd(props.message.costUsd))
     return parts.join(' · ')
-  }
+  })
 
   createEffect(
     () => open(),
@@ -1771,75 +1780,58 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
 // ── Empty state ───────────────────────────────────────────────────────────────
 
 export function EmptyChatState(props: { children: JSX.Element; onSelectPrompt: (prompt: string) => void }) {
-  const [moreOpen, setMoreOpen] = createSignal(false)
-  let moreRef!: HTMLDivElement
-
-  createEffect(
-    () => moreOpen(),
-    (isMoreOpen) => {
-      if (!isMoreOpen) return
-      const onPointer = (e: PointerEvent) => { if (!moreRef?.contains(e.target as Node)) setMoreOpen(false) }
-      const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMoreOpen(false) }
-      document.addEventListener('pointerdown', onPointer)
-      document.addEventListener('keydown', onKey)
-      return () => {
-        document.removeEventListener('pointerdown', onPointer)
-        document.removeEventListener('keydown', onKey)
-      }
+  const i18n = useI18n()
+  const starterPrompts = () => [
+    {
+      description: i18n.tr('Trekk ut beslutninger, risiko og neste steg.', 'Extract decisions, risks, and next steps.'),
+      icon: FileText,
+      label: i18n.tr('Oppsummer et dokument', 'Summarize a document'),
+      prompt: i18n.tr('Oppsummer dokumentet jeg legger ved. Fremhev beslutninger, risiko og neste steg.', 'Summarize the document I attach. Highlight decisions, risks, and next steps.'),
     },
-  )
-
-  const select = (prompt: string) => {
-    props.onSelectPrompt(prompt)
-    setMoreOpen(false)
-  }
+    {
+      description: i18n.tr('Finn et pålitelig svar med sporbare kilder.', 'Find a reliable answer with traceable sources.'),
+      icon: Search,
+      label: i18n.tr('Undersøk med kilder', 'Research with sources'),
+      prompt: i18n.tr('Undersøk dette spørsmålet grundig og vis hvilke kilder som støtter konklusjonen.', 'Research this question thoroughly and show which sources support the conclusion.'),
+    },
+    {
+      description: i18n.tr('Gå fra idé til et nyttig førsteutkast.', 'Turn an idea into a useful first draft.'),
+      icon: Pencil,
+      label: i18n.tr('Lag et førsteutkast', 'Create a first draft'),
+      prompt: i18n.tr('Lag et tydelig førsteutkast som jeg kan gjennomgå og forbedre.', 'Create a clear first draft that I can review and improve.'),
+    },
+  ]
 
   return (
     <div class="verevon-chat-empty">
       <div class="verevon-chat-empty__inner">
         <div class="verevon-chat-empty__heading">
-          <Sparkles size={28} strokeWidth={1.75} />
-          <h1>Hva kan jeg hjelpe med?</h1>
+          <div class="verevon-chat-empty__brand" aria-hidden="true">
+            <span class="verevon-chat-empty__mark"><span /></span>
+            <span>Verevon</span>
+          </div>
+          <h1>{i18n.tr('Hva vil du få gjort?', 'What would you like to get done?')}</h1>
+          <p>{i18n.tr('Start med et spørsmål. Arbeidsflaten åpnes først når du har noe å undersøke, følge eller gjennomgå.', 'Start with a question. The workspace opens only when there is something to research, follow, or review.')}</p>
         </div>
         <div class="verevon-chat-empty__composer">{props.children}</div>
         <div class="verevon-chat-empty__prompts">
-          <For each={PRIMARY_PROMPTS}>
-            {({ label, prompt, icon: Icon }) => (
+          <span class="verevon-chat-empty__prompt-label">{i18n.tr('Prøv for eksempel', 'Try one of these')}</span>
+          <For each={starterPrompts()}>
+            {({ label, description, prompt, icon: Icon }) => (
               <button
                 type="button"
-                class="verevon-quick-chip"
-                aria-label={`Use quick prompt: ${label}`}
-                onClick={() => select(prompt)}
+                class="verevon-chat-starter"
+                aria-label={label}
+                onClick={() => props.onSelectPrompt(prompt)}
               >
-                <Icon size={16} strokeWidth={1.9} />
-                <span>{label}</span>
+                <span class="verevon-chat-starter__icon"><Icon size={15} strokeWidth={1.9} /></span>
+                <span class="verevon-chat-starter__copy"><strong>{label}</strong><small>{description}</small></span>
+                <ChevronRight size={15} aria-hidden="true" />
               </button>
             )}
           </For>
-          <div ref={moreRef} class="verevon-quick-chip-more">
-            <button
-              type="button"
-              class="verevon-quick-chip"
-              aria-expanded={moreOpen() ? 'true' : 'false'}
-              onClick={() => setMoreOpen((o) => !o)}
-            >
-              <MoreHorizontal size={16} strokeWidth={1.9} />
-              <span>More</span>
-            </button>
-            <Show when={moreOpen()}>
-              <div class="verevon-popover verevon-quick-chip-menu" role="menu">
-                <For each={OVERFLOW_PROMPTS}>
-                  {({ label, prompt, icon: Icon }) => (
-                    <button type="button" role="menuitem" class="verevon-menu-item" onClick={() => select(prompt)}>
-                      <Icon size={16} strokeWidth={1.9} />
-                      <span>{label}</span>
-                    </button>
-                  )}
-                </For>
-              </div>
-            </Show>
-          </div>
         </div>
+        <p class="verevon-chat-empty__trust">{i18n.tr('Organisasjonens kunnskap er standard. Nettbruk er alltid synlig og valgfri.', 'Organisation knowledge is the default. Web access is always visible and optional.')}</p>
       </div>
     </div>
   )

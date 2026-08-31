@@ -59,7 +59,7 @@ This is not in billing-core's own files, but it directly breaks a billing-core i
   ```
 - `billing-core-service`'s actual container port mapping is `"3014:3014"` (HTTP), `"50013:50013"` (gRPC), `"6062:6062"` (metrics) — there is no `3017` anywhere on billing-core. Port `3017` belongs to **session-core-service** (`"3017:3017"`), a few blocks down in the same compose file. This reads as a copy/paste slip.
 - `apps/Control Plane/auth-core/src/auth/organization-events.plugin.ts` (also part of this WIP) added `deactivateOrganizationBilling()`, which does:
-  ```ts
+  ```
   const url = (process.env.BILLING_CORE_URL || '').replace(/\/$/, '');
   ...
   const response = await fetch(`${url}/api/v1/billing/orgs/${orgId}/deactivate`, { method: 'POST', ... });
@@ -73,7 +73,7 @@ This is not in billing-core's own files, but it directly breaks a billing-core i
 
 ### 2. VERIFIED GOOD — `CanUseFeature` canceled-subscription gate (the +3 lines in `service.go`) is a real, correct fix
 
-```go
+```
 if account.SubscriptionState == SubscriptionStateCanceled {
     return false, account, nil
 }

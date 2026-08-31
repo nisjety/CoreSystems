@@ -1432,19 +1432,10 @@ export function DashboardComposer(props: {
 			return;
 
 		const snapshot = createSubmissionSnapshot();
-		// A multi-link product comparison needs more than a single SERP result:
-		// use the existing bounded multi-source research pipeline when Search is
-		// already explicitly on. The user still sees Search as the opt-in control;
-		// this only chooses the appropriate depth for the work they supplied.
-		const productResearch = shouldResearchLinkedProducts({
-			browseWeb: browseWeb(),
-			message: snapshot.body,
-		});
-		const effectiveDeepSearch = deepSearch() || productResearch;
 		const payload = createComposerSubmitPayload({
 			actions: snapshot.actions,
 			browseWeb: browseWeb(),
-			deepSearch: effectiveDeepSearch,
+			deepSearch: deepSearch(),
 			files: snapshot.files,
 			imageMode: imageMode(),
 			minPrivacyTier: selectedPrivacyTier(),
@@ -1460,7 +1451,7 @@ export function DashboardComposer(props: {
 				createComposerTurn({
 					body: snapshot.submittedText,
 					browseWeb: browseWeb(),
-					deepSearch: effectiveDeepSearch,
+					deepSearch: deepSearch(),
 					files: snapshot.files,
 					model: selectedModelLabel(),
 					now: snapshot.now,
@@ -1497,7 +1488,7 @@ export function DashboardComposer(props: {
 			ref={(element) => {
 				composerRootRef = element;
 			}}
-			class={dashboardComposerRootClass({ dragActive: dragActive(), appearance: props.appearance })}
+			class={dashboardComposerRootClass({ appearance: props.appearance, dragActive: dragActive() })}
 			aria-disabled={props.disabled ? "true" : "false"}
 			inert={props.disabled}
 			onDragOver={(event) => {
@@ -1537,15 +1528,7 @@ export function DashboardComposer(props: {
 				</div>
 			</Show>
 
-			<Show when={props.appearance === "chat" && shouldResearchLinkedProducts({ browseWeb: browseWeb(), message: props.message }) && !deepSearch()}>
-				<div class="dashboard-composer-research-notice" role="status">
-					<Telescope class="size-3.5" />
-					<span>{i18n.tr("Produktlenker oppdaget — Verevon vil undersøke flere kilder per produkt.", "Product links detected — Verevon will research multiple sources per product.")}</span>
-				</div>
-			</Show>
-
-			<Show when={props.appearance !== "chat"}>
-				<div class="dashboard-composer-controls">
+			<div class="dashboard-composer-controls">
 				<div class="dashboard-composer-controls__left">
 					<div class="dashboard-composer-model-wrap">
 						<button
@@ -1808,28 +1791,50 @@ export function DashboardComposer(props: {
 						</Show>
 					</span>
 					<Show when={props.onPlanModeChange}>
-						<span class={cn("dashboard-composer-intent-toggle", planMode() ? "dashboard-composer-intent-toggle--active" : "")}>
-							<ComposerIconButton
-								active={planMode()}
-								label={i18n.tr(
-									planMode()
-										? "Do-modus - agenten planlegger og ber om godkjenning før risikable verktøy"
-										: "Ask-modus - les, hent og foreslå uten å utføre risikable handlinger",
-									planMode()
-										? "Do mode - the agent plans and asks for approval before risky tools"
-										: "Ask mode - read, retrieve, and propose without executing risky actions",
-								)}
-								onClick={() =>
-									props.onPlanModeChange?.(!planMode())
-								}
-								variant="chip"
-							>
-								<WandSparkles class="size-3.5" />
-							</ComposerIconButton>
-							<span class="dashboard-composer-intent-toggle__label" aria-live="polite">
-								{planMode() ? "Do" : "Ask"}
-							</span>
-						</span>
+						<Show
+							when={props.appearance === "chat"}
+							fallback={
+								<span class={cn("dashboard-composer-intent-toggle", planMode() ? "dashboard-composer-intent-toggle--active" : "")}>
+									<ComposerIconButton
+										active={planMode()}
+										label={i18n.tr(
+											planMode()
+												? "Do-modus - agenten planlegger og ber om godkjenning før risikable verktøy"
+												: "Ask-modus - les, hent og foreslå uten å utføre risikable handlinger",
+											planMode()
+												? "Do mode - the agent plans and asks for approval before risky tools"
+												: "Ask mode - read, retrieve, and propose without executing risky actions",
+										)}
+										onClick={() => props.onPlanModeChange?.(!planMode())}
+										variant="chip"
+									>
+										<WandSparkles class="size-3.5" />
+									</ComposerIconButton>
+									<span class="dashboard-composer-intent-toggle__label" aria-live="polite">
+										{planMode() ? "Do" : "Ask"}
+									</span>
+								</span>
+							}
+						>
+							<div class="dashboard-composer-intent-segment" role="group" aria-label={i18n.tr("Arbeidsmodus", "Work mode")}>
+								<button
+									type="button"
+									aria-pressed={!planMode() ? "true" : "false"}
+									class={{ "is-active": !planMode() }}
+									onClick={() => props.onPlanModeChange?.(false)}
+								>
+									{i18n.tr("Spør", "Ask")}
+								</button>
+								<button
+									type="button"
+									aria-pressed={planMode() ? "true" : "false"}
+									class={{ "is-active": planMode() }}
+									onClick={() => props.onPlanModeChange?.(true)}
+								>
+									{i18n.tr("Utfør", "Do")}
+								</button>
+							</div>
+						</Show>
 					</Show>
 					<Show when={props.onTemporaryChatChange}>
 						<ComposerIconButton
@@ -1887,7 +1892,6 @@ export function DashboardComposer(props: {
 					</span>
 				</div>
 			</div>
-			</Show>
 
 			<div class="dashboard-composer-field-wrap">
 				<input
@@ -2197,29 +2201,39 @@ export function DashboardComposer(props: {
 						</div>
 
 						<div class="dashboard-composer-toolbar__right">
-							<Show when={props.appearance !== "chat"}>
-							<div class="dashboard-composer-response-group">
-								<For each={responseModes}>
-									{(mode) => (
-										<ComposerIconButton
-											active={responseMode() === mode.id}
-											label={i18n.tr(
-												mode.label.no,
-												mode.label.en,
+							<Show
+								when={props.appearance === "chat"}
+								fallback={
+									<div class="dashboard-composer-response-group">
+										<For each={responseModes}>
+											{(mode) => (
+												<ComposerIconButton
+													active={responseMode() === mode.id}
+													label={i18n.tr(mode.label.no, mode.label.en)}
+													onClick={() => handleResponseMode(mode.id)}
+													variant="toolbar"
+												>
+													<Dynamic component={mode.icon} class="size-4" />
+												</ComposerIconButton>
 											)}
-											onClick={() =>
-												handleResponseMode(mode.id)
-											}
-											variant="toolbar"
-										>
-											<Dynamic
-												component={mode.icon}
-												class="size-4"
-											/>
-										</ComposerIconButton>
-									)}
-								</For>
-							</div>
+										</For>
+									</div>
+								}
+							>
+								<label class="dashboard-composer-effort-select">
+									<SlidersHorizontal class="size-3.5" aria-hidden="true" />
+									<span class="sr-only">{i18n.tr("Svarinnsats", "Response effort")}</span>
+									<select
+										aria-label={i18n.tr("Svarinnsats", "Response effort")}
+										value={responseMode()}
+										onChange={(event) => handleResponseMode(event.currentTarget.value as ResponseMode)}
+									>
+										<option value="quick">{i18n.tr("Rask", "Quick")}</option>
+										<option value="auto">{i18n.tr("Standard", "Standard")}</option>
+										<option value="deep">{i18n.tr("Grundig", "Deep")}</option>
+									</select>
+								</label>
+							</Show>
 							<ComposerIconButton
 								active={voiceMode()}
 								label={i18n.tr("Stemmemodus", "Voice mode")}
@@ -2236,7 +2250,6 @@ export function DashboardComposer(props: {
 							>
 								<Mic class="size-4" />
 							</ComposerIconButton>
-							</Show>
 							<Show
 								when={stopButtonVisible()}
 								fallback={
@@ -2386,32 +2399,6 @@ function getComposerTools(input: {
 	)
 		tools.push("image");
 	return [...new Set(tools)];
-}
-
-const PRODUCT_COMPARISON_WORDS = [
-	"best",
-	"better",
-	"compare",
-	"comparison",
-	"recommend",
-	"versus",
-	" vs ",
-	"hvilken",
-	"sammenlign",
-	"sammenlikn",
-	"anbefal",
-];
-
-function shouldResearchLinkedProducts(input: { browseWeb: boolean; message: string }): boolean {
-	if (!input.browseWeb) return false;
-	const urls = input.message.match(/https?:\/\/[^\s<>()]+/giu) ?? [];
-	const distinctLinks = new Set(urls.map((url) => url.replace(/[?#].*$/u, "").toLowerCase()));
-	if (distinctLinks.size < 2) return false;
-	// Intent has to come from the user's prose, not an accidental word in a
-	// product slug or tracking parameter.
-	const prose = input.message.replace(/https?:\/\/[^\s<>()]+/giu, " ");
-	const normalized = ` ${prose.toLocaleLowerCase()} `;
-	return PRODUCT_COMPARISON_WORDS.some((word) => normalized.includes(word));
 }
 
 function createComposerSubmitPayload(input: {

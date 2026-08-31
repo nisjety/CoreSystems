@@ -347,7 +347,7 @@ docker logs -f backend-auth-service-1 | grep -i sso
 Modify role assignment in [auth.ts](auth/src/auth/auth.ts#L720-L740):
 
 ```typescript
-getRole: async ({ userInfo }) => {
+const getRole = async ({ userInfo }) => {
   const department = userInfo.attributes?.department;
   const jobTitle = userInfo.attributes?.jobTitle;
   const email = userInfo.email;
@@ -370,13 +370,13 @@ getRole: async ({ userInfo }) => {
   }
 
   return 'member';
-}
+};
 ```
 
 ### Custom Organization Provisioning
 
 ```typescript
-organizationProvisioning: {
+const organizationProvisioning = {
   disabled: false,
   defaultRole: 'member',
   getOrganizationInfo: async ({ userInfo }) => {
@@ -391,7 +391,7 @@ organizationProvisioning: {
       }
     };
   }
-}
+};
 ```
 
 ---

@@ -53,8 +53,13 @@ interface GrantRequestBody {
   actorUserId?: string;
 }
 
-function parseGrantRequest(body: unknown): Required<
-  Pick<GrantRequestBody, 'organizationId' | 'hostOrganizationId' | 'actorUserId'>
+function parseGrantRequest(
+  body: unknown,
+): Required<
+  Pick<
+    GrantRequestBody,
+    'organizationId' | 'hostOrganizationId' | 'actorUserId'
+  >
 > & { groupName: string; dataAccess: boolean; billingConsolidation: boolean } {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     throw new BadRequestException('a grant request object is required');
@@ -206,7 +211,9 @@ export class OrgGroupGrantController {
       this.logger.error(
         `org group grant failed: ${error instanceof Error ? error.message : 'unknown'}`,
       );
-      throw new ServiceUnavailableException('Grant administration is unavailable');
+      throw new ServiceUnavailableException(
+        'Grant administration is unavailable',
+      );
     }
 
     await this.announce(state, request.actorUserId);
@@ -241,7 +248,9 @@ export class OrgGroupGrantController {
       this.logger.error(
         `org group revoke failed: ${error instanceof Error ? error.message : 'unknown'}`,
       );
-      throw new ServiceUnavailableException('Grant administration is unavailable');
+      throw new ServiceUnavailableException(
+        'Grant administration is unavailable',
+      );
     }
 
     // Null host: consumers must fall back to the org's own plan.

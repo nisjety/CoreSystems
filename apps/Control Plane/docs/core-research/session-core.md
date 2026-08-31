@@ -45,7 +45,7 @@ Target: `http://localhost:3017` (host-exposed port of `session-core-service`, co
 
 Relevant code — `internal/http/server.go`, `authContextMiddleware()`:
 
-```go
+```
 func authContextMiddleware() gin.HandlerFunc {
 	configuredKeys := []string{
 		strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),

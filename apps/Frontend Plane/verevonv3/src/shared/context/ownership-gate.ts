@@ -10,13 +10,16 @@
 // reads it. FAIL CLOSED: while loading, on error, or anything other than an
 // explicit server `gate_open === true`, the gate is CLOSED.
 
+import { createRoot } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 
 import { getOwnershipStatus, type OwnershipStatus } from '@/shared/api/ownership-client'
 
-// Module-singleton: fetched once, shared by every affordance. createResource
-// gives loading/error states; both resolve to a CLOSED gate below.
-const [status] = createResource<OwnershipStatus>(getOwnershipStatus)
+// Module-singleton: fetched once, shared by every affordance. The singleton
+// has an explicit root because this module is evaluated before the component
+// tree exists; creating the resource at module scope without an owner causes
+// Solid 2 to report NO_OWNER_EFFECT and prevents deterministic disposal.
+const [status] = createRoot(() => createResource<OwnershipStatus>(getOwnershipStatus))
 
 /** The raw status accessor (undefined while loading / on error). */
 export function ownershipStatus(): OwnershipStatus | undefined {

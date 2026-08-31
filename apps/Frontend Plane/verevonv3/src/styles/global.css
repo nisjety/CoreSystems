@@ -22310,6 +22310,71 @@ textarea:focus-visible {
   background: var(--verevon-i-surface);
 }
 
+/* The workspace is a reading canvas, so let people give a rendered page or
+   document the width it needs. The narrow hit target stays on its outer edge
+   until hover/focus, keeping chat visually calm while still discoverable. */
+.verevon-chat-workspace-canvas__resize-handle {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  display: grid;
+  width: 12px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--verevon-a-earth);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.verevon-chat-workspace-canvas__resize-handle::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 1px;
+  background: var(--verevon-border);
+  content: '';
+  transition: width 140ms ease, background-color 140ms ease;
+}
+
+.verevon-chat-workspace-canvas__resize-handle > span {
+  position: relative;
+  z-index: 1;
+  width: 3px;
+  height: 36px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 0%, transparent);
+  transition: background-color 140ms ease;
+}
+
+.verevon-chat-workspace-canvas__resize-handle:hover::before,
+.verevon-chat-workspace-canvas__resize-handle:focus-visible::before,
+.verevon-chat-workspace-canvas--resizing .verevon-chat-workspace-canvas__resize-handle::before {
+  width: 2px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 78%, var(--verevon-border));
+}
+
+.verevon-chat-workspace-canvas__resize-handle:hover > span,
+.verevon-chat-workspace-canvas__resize-handle:focus-visible > span,
+.verevon-chat-workspace-canvas--resizing .verevon-chat-workspace-canvas__resize-handle > span {
+  background: color-mix(in srgb, var(--verevon-a-earth) 78%, transparent);
+}
+
+.verevon-chat-workspace-canvas__resize-handle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--verevon-a-earth) 70%, transparent);
+  outline-offset: -2px;
+}
+
+body.verevon-chat-canvas-resizing,
+body.verevon-chat-canvas-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 .verevon-chat-page--canvas .verevon-chat-run-panel {
   flex-basis: clamp(260px, 25vw, 380px);
 }
@@ -22384,6 +22449,8 @@ textarea:focus-visible {
 }
 
 .verevon-chat-workspace-canvas__body {
+  container-name: verevon-chat-workspace;
+  container-type: inline-size;
   min-height: 0;
   overflow-y: auto;
   padding: 12px;
@@ -23120,6 +23187,10 @@ textarea:focus-visible {
     border-left: 0;
   }
 
+  .verevon-chat-workspace-canvas__resize-handle {
+    display: none;
+  }
+
   .verevon-chat-workspace-canvas__head {
     padding-top: max(14px, env(safe-area-inset-top));
   }
@@ -23628,87 +23699,7 @@ textarea:focus-visible {
 }
 
 .verevon-chat-bubble__text {
-  display: grid;
-  gap: 8px;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.verevon-chat-bubble__copy {
-  min-width: 0;
   white-space: pre-wrap;
-}
-
-.verevon-chat-bubble__source {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-width: min(100%, 320px);
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--verevon-border) 88%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--verevon-bg-white) 66%, transparent);
-  color: var(--verevon-j-text-soft);
-  text-decoration: none;
-}
-
-.verevon-chat-bubble__source:hover {
-  border-color: color-mix(in srgb, var(--verevon-a-earth) 45%, var(--verevon-border));
-  background: var(--verevon-bg-white);
-}
-
-.verevon-chat-bubble__source > svg {
-  color: var(--verevon-a-earth);
-}
-
-.verevon-chat-bubble__source-copy {
-  display: grid;
-  min-width: 0;
-  gap: 1px;
-}
-
-.verevon-chat-bubble__source-title,
-.verevon-chat-bubble__source-domain {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.verevon-chat-bubble__source-title {
-  font-size: 12.5px;
-  font-weight: 650;
-}
-
-.verevon-chat-bubble__source-domain {
-  color: var(--verevon-e-muted);
-  font-size: 11px;
-}
-
-.dashboard-composer-research-notice {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 0 14px 8px;
-  color: var(--verevon-e-muted);
-  font-size: 11.5px;
-  line-height: 1.4;
-}
-
-.dashboard-composer-research-notice svg {
-  flex: 0 0 auto;
-  color: var(--verevon-a-earth);
-}
-
-.verevon-chat-bubble {
-  min-width: 0;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
-
-.verevon-chat-markdown a {
-  overflow-wrap: anywhere;
-  word-break: break-word;
 }
 
 .verevon-chat-message__avatar {
@@ -24108,6 +24099,7 @@ textarea:focus-visible {
 }
 
 .verevon-chat-header__copy {
+  flex: 0 1 34rem;
   min-width: 0;
 }
 
@@ -24134,8 +24126,131 @@ textarea:focus-visible {
 
 .verevon-chat-header__actions {
   display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.verevon-chat-header__surface-actions {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  justify-content: flex-start;
+  scrollbar-width: none;
+}
+
+.verevon-chat-header__surface-actions::-webkit-scrollbar {
+  display: none;
+}
+
+.verevon-chat-header__utility-actions {
+  display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
+}
+
+.verevon-chat-header-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.verevon-chat-surface-action {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  padding: 0 10px;
+  color: var(--verevon-e-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.verevon-chat-surface-action:hover,
+.verevon-chat-surface-action:focus-visible,
+.verevon-chat-surface-action--active {
+  border-color: var(--verevon-border);
+  background: color-mix(in srgb, var(--verevon-e-subtle) 8%, transparent);
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-surface-action--active {
+  border-color: color-mix(in srgb, var(--verevon-a-earth) 42%, var(--verevon-border));
+  background: color-mix(in srgb, var(--verevon-a-earth) 10%, transparent);
+}
+
+.verevon-chat-surface-action em,
+.verevon-chat-header-menu__popover em {
+  display: inline-flex;
+  min-width: 17px;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  padding: 1px 5px;
+  color: var(--verevon-e-muted);
+  font-size: 10px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-chat-header-menu__popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: grid;
+  min-width: 196px;
+  gap: 2px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 11px;
+  background: var(--verevon-i-surface);
+  padding: 5px;
+  box-shadow: 0 14px 32px rgb(23 23 23 / 13%);
+}
+
+.verevon-chat-header-menu__popover button {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  padding: 0 9px;
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-chat-header-menu__popover button:hover,
+.verevon-chat-header-menu__popover button:focus-visible,
+.verevon-chat-header-menu__popover button.is-selected {
+  background: color-mix(in srgb, var(--verevon-e-subtle) 9%, transparent);
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-header-menu__popover button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.verevon-chat-header-menu__popover button span {
+  flex: 1;
 }
 
 .verevon-chat-header-button {
@@ -24311,6 +24426,15 @@ textarea:focus-visible {
   color: var(--verevon-a-earth);
 }
 
+.verevon-chat-message__logo {
+  display: block;
+  width: 16px;
+  height: 16px;
+  background: currentColor;
+  -webkit-mask: url('/verevon-mark.svg') center / contain no-repeat;
+  mask: url('/verevon-mark.svg') center / contain no-repeat;
+}
+
 .verevon-chat-content,
 .verevon-chat-markdown {
   color: var(--verevon-j-text-soft);
@@ -24481,11 +24605,7 @@ textarea:focus-visible {
 /* Wide tables scroll inside this container — the chat column itself never
    scrolls horizontally. */
 .verevon-chat-table-wrap {
-  position: relative;
-  min-width: 0;
-  max-width: 100%;
   overflow-x: auto;
-  overscroll-behavior-inline: contain;
   border: 1px solid var(--verevon-border);
   border-radius: 10px;
   margin: 4px 0 14px;
@@ -24497,8 +24617,7 @@ textarea:focus-visible {
 }
 
 .verevon-chat-table {
-  width: max(100%, 620px);
-  table-layout: fixed;
+  width: 100%;
   border-collapse: collapse;
   font-size: 13.5px;
   line-height: 1.5;
@@ -24513,8 +24632,7 @@ textarea:focus-visible {
   font-weight: 600;
   letter-spacing: 0.01em;
   text-align: left;
-  overflow-wrap: anywhere;
-  white-space: normal;
+  white-space: nowrap;
 }
 
 .verevon-chat-table td {
@@ -24522,23 +24640,6 @@ textarea:focus-visible {
   color: var(--verevon-j-text-soft);
   vertical-align: top;
   overflow-wrap: break-word;
-}
-
-.verevon-chat-table th:first-child,
-.verevon-chat-table td:first-child {
-  width: min(28%, 168px);
-  color: var(--verevon-j-text);
-  font-weight: 600;
-}
-
-@media (max-width: 640px) {
-  .verevon-chat-bubble__source {
-    min-width: 0;
-  }
-
-  .verevon-chat-table {
-    width: 620px;
-  }
 }
 
 /* Hairline row separation — no vertical grid lines, no zebra. */
@@ -25837,8 +25938,8 @@ textarea:focus-visible {
 
 /* ── Artefakter panel (artifact / canvas renderer) ─────────────────────────── */
 
-/* Artifact list beside the viewer. Stacks into a horizontally scrolling strip
-   on narrow viewports; the panel body itself never scrolls sideways. */
+/* Artifact list beside the viewer. The breakpoint follows the resizable canvas
+   width, so a narrow Output panel keeps the rendered page usable. */
 .verevon-chat-artifact-workspace {
   display: grid;
   min-height: 0;
@@ -25848,7 +25949,7 @@ textarea:focus-visible {
   padding: 20px 16px;
 }
 
-@media (min-width: 1024px) {
+@container verevon-chat-workspace (min-width: 720px) {
   .verevon-chat-artifact-workspace {
     grid-template-columns: 252px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
@@ -25863,7 +25964,7 @@ textarea:focus-visible {
   padding-bottom: 4px;
 }
 
-@media (min-width: 1024px) {
+@container verevon-chat-workspace (min-width: 720px) {
   .verevon-chat-artifact-list {
     overflow-x: hidden;
     overflow-y: auto;
@@ -26794,6 +26895,10 @@ textarea:focus-visible {
 
 /* 5 · General — subtle scrollbar for the message list (was the crude default). */
 .verevon-chat-message-list {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--verevon-e-subtle) 40%, transparent) transparent;
 }
@@ -44106,4 +44211,652 @@ textarea:focus-visible {
   gap: 10px;
   flex-wrap: wrap;
   margin: 6px 0;
+}
+
+/* ── Verevon chat workspace · conversation-first premium pass ───────────────
+   The first impression stays as calm as a high-quality web chat. Work, source,
+   output and trace chrome only appears after the conversation has evidence to
+   inspect. T3 Code informs the spacing and restraint; Verevon's warmer tokens,
+   trust language and contextual workspace remain product-specific. */
+
+.verevon-chat-page {
+  background: var(--verevon-i-surface);
+}
+
+.verevon-chat-header {
+  min-height: 52px;
+  padding-inline: clamp(14px, 2vw, 24px);
+  background: color-mix(in srgb, var(--verevon-i-surface) 94%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--verevon-d-border) 28%, transparent);
+}
+
+.verevon-chat-header__copy {
+  flex-basis: min(44vw, 38rem);
+}
+
+.verevon-chat-header__copy h1 {
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.verevon-chat-header__copy p {
+  font-size: 10.5px;
+  line-height: 14px;
+}
+
+.verevon-chat-workspace-trigger {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 9px;
+  background: transparent;
+  padding: 0 9px;
+  color: var(--verevon-e-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-workspace-trigger:hover,
+.verevon-chat-workspace-trigger:focus-visible,
+.verevon-chat-workspace-trigger--active {
+  border-color: color-mix(in srgb, var(--verevon-a-earth) 34%, var(--verevon-border));
+  background: color-mix(in srgb, var(--verevon-a-earth) 7%, transparent);
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-workspace-trigger__chevron {
+  color: var(--verevon-e-subtle);
+  transform: rotate(90deg);
+}
+
+.verevon-chat-header-menu__popover--workspace {
+  min-width: 214px;
+}
+
+.verevon-chat-header-button {
+  width: 32px;
+  height: 32px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.verevon-chat-header-button--primary {
+  display: inline-flex;
+  width: auto;
+  gap: 6px;
+  padding: 0 10px;
+  border-color: var(--verevon-j-text);
+  background: var(--verevon-j-text);
+}
+
+.verevon-chat-header-button--primary span {
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.verevon-chat-message-list {
+  padding-top: clamp(26px, 4vh, 44px);
+  padding-bottom: 20px;
+}
+
+.verevon-chat-thread {
+  max-width: 720px;
+  gap: 36px;
+  padding-bottom: 28px;
+}
+
+.verevon-chat-page--canvas .verevon-chat-thread,
+.verevon-chat-page--split .verevon-chat-thread {
+  max-width: 640px;
+}
+
+.verevon-chat-bubble {
+  max-width: min(78%, 34rem);
+  border: 0;
+  border-radius: 17px 17px 6px 17px;
+  background: color-mix(in srgb, var(--verevon-e-subtle) 8%, var(--verevon-i-surface));
+  box-shadow: none;
+}
+
+.verevon-chat-composer-dock {
+  z-index: 14;
+  padding: 8px clamp(12px, 2vw, 22px) 16px;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--verevon-i-surface) 72%, transparent), var(--verevon-i-surface) 26%);
+}
+
+.verevon-chat-composer-dock__inner,
+.verevon-chat-empty__composer {
+  max-width: 720px;
+}
+
+.dashboard-composer-root--chat .dashboard-composer-controls {
+  gap: 8px;
+  margin-bottom: 7px;
+  padding-inline: 2px;
+}
+
+.dashboard-composer-root--chat .dashboard-composer-agent-button {
+  display: none;
+}
+
+.dashboard-composer-root--chat .dashboard-composer-model-button {
+  height: 32px;
+  max-width: 164px;
+  border-color: transparent;
+  border-radius: 9px;
+  background: transparent;
+  padding-inline: 7px;
+  box-shadow: none;
+  font-size: 11.5px;
+}
+
+.dashboard-composer-root--chat .dashboard-composer-model-button:hover,
+.dashboard-composer-root--chat .dashboard-composer-model-button:focus-visible {
+  border-color: var(--verevon-border);
+  background: var(--verevon-surface-soft);
+}
+
+.dashboard-composer-root--chat .dashboard-composer-controls__right {
+  gap: 4px;
+}
+
+.dashboard-composer-intent-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--verevon-e-subtle) 5%, transparent);
+}
+
+.dashboard-composer-intent-segment button {
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 0 8px;
+  color: var(--verevon-e-subtle);
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.dashboard-composer-intent-segment button.is-active {
+  background: var(--verevon-i-surface);
+  color: var(--verevon-j-text);
+  box-shadow: 0 1px 3px rgb(23 23 23 / 10%);
+}
+
+.dashboard-composer-root--chat .verevon-composer-shell {
+  border-color: color-mix(in srgb, var(--verevon-d-border) 82%, transparent);
+  border-radius: 17px;
+  background: var(--verevon-i-surface);
+  padding: 10px 11px 9px;
+  box-shadow: 0 1px 2px rgb(23 23 23 / 4%), 0 10px 28px rgb(23 23 23 / 6%);
+}
+
+.dashboard-composer-root--chat .verevon-composer-shell:focus-within {
+  border-color: color-mix(in srgb, var(--verevon-a-earth) 38%, var(--verevon-d-border));
+  box-shadow: 0 1px 2px rgb(23 23 23 / 4%), 0 0 0 3px color-mix(in srgb, var(--verevon-a-earth) 10%, transparent), 0 14px 34px rgb(23 23 23 / 7%);
+}
+
+.dashboard-composer-root--chat .dashboard-composer-textarea-wrap {
+  padding-inline: 7px;
+}
+
+.dashboard-composer-root--chat .verevon-dashboard-textarea {
+  min-height: 64px;
+  padding: 4px 2px 8px;
+  font-size: 14px;
+  font-weight: 430;
+  line-height: 1.5;
+}
+
+.dashboard-composer-root--chat .dashboard-composer-toolbar {
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 8px;
+  padding: 0;
+}
+
+.dashboard-composer-root--chat .dashboard-composer-toolbar__left,
+.dashboard-composer-root--chat .dashboard-composer-toolbar__right {
+  flex-wrap: nowrap;
+  gap: 3px;
+}
+
+.dashboard-composer-root--chat .dashboard-composer-toolbar__left {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.dashboard-composer-root--chat .dashboard-composer-toolbar__right {
+  flex: 0 0 auto;
+}
+
+.dashboard-composer-root--chat :is(.dashboard-composer-attach, .dashboard-composer-web-button, .dashboard-composer-image-button) {
+  min-height: 30px;
+  border-radius: 8px;
+  font-size: 10.5px;
+}
+
+.dashboard-composer-effort-select {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0 5px 0 7px;
+  color: var(--verevon-e-muted);
+}
+
+.dashboard-composer-effort-select:hover,
+.dashboard-composer-effort-select:focus-within {
+  border-color: var(--verevon-border);
+  background: var(--verevon-surface-soft);
+}
+
+.dashboard-composer-effort-select select {
+  max-width: 78px;
+  border: 0;
+  background: transparent;
+  color: var(--verevon-e-muted);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  outline: 0;
+  cursor: pointer;
+}
+
+/* Cold start: brand and useful suggestions establish confidence without
+   pre-opening an IDE-like control surface. */
+.verevon-chat-empty {
+  align-items: center;
+  padding: 40px 20px 56px;
+}
+
+.verevon-chat-empty__inner {
+  max-width: 720px;
+  transform: translateY(-1.5vh);
+}
+
+.verevon-chat-empty__heading {
+  display: block;
+  margin-bottom: 24px;
+  color: var(--verevon-j-text);
+  text-align: left;
+}
+
+.verevon-chat-empty__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 13px;
+  color: var(--verevon-a-earth);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.verevon-chat-empty__mark {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--verevon-a-earth) 24%, var(--verevon-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 8%, transparent);
+}
+
+.verevon-chat-empty__mark > span {
+  display: block;
+  width: 14px;
+  height: 14px;
+  background: currentcolor;
+  -webkit-mask: url('/verevon-mark.svg') center / contain no-repeat;
+  mask: url('/verevon-mark.svg') center / contain no-repeat;
+}
+
+.verevon-chat-empty__heading h1 {
+  max-width: 18ch;
+  font-family: var(--chat-font-display);
+  font-size: clamp(31px, 4.2vw, 43px);
+  font-weight: 430;
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+}
+
+.verevon-chat-empty__heading > p {
+  max-width: 61ch;
+  margin: 12px 0 0;
+  color: var(--verevon-e-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.verevon-chat-empty__prompts {
+  display: grid;
+  max-width: 720px;
+  gap: 0;
+  margin-top: 20px;
+}
+
+.verevon-chat-empty__prompt-label {
+  margin-bottom: 5px;
+  color: var(--verevon-e-subtle);
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.verevon-chat-empty__prompts .verevon-chat-starter {
+  display: grid;
+  width: 100%;
+  min-height: 56px;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-top: 1px solid var(--verevon-border-soft);
+  border-radius: 0;
+  background: transparent;
+  padding: 9px 4px;
+  color: var(--verevon-e-muted);
+  text-align: left;
+  box-shadow: none;
+  white-space: normal;
+}
+
+.verevon-chat-empty__prompts .verevon-chat-starter:last-child {
+  border-bottom: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-chat-empty__prompts .verevon-chat-starter:hover,
+.verevon-chat-empty__prompts .verevon-chat-starter:focus-visible {
+  border-color: var(--verevon-border-soft);
+  background: color-mix(in srgb, var(--verevon-a-earth) 5%, transparent);
+  color: var(--verevon-j-text);
+  transform: none;
+}
+
+.verevon-chat-starter__icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-starter__copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.verevon-chat-starter__copy strong {
+  color: var(--verevon-j-text);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.verevon-chat-starter__copy small {
+  overflow: hidden;
+  color: var(--verevon-e-subtle);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-empty__trust {
+  margin: 11px 0 0;
+  color: var(--verevon-e-subtle);
+  font-size: 10px !important;
+  line-height: 1.45 !important;
+  text-align: center;
+}
+
+/* Workspace tabs are local to the material being inspected. The conversation
+   header now exposes one calm launcher instead of five competing destinations. */
+.verevon-chat-workspace-canvas__head {
+  min-height: 48px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 7px 14px;
+}
+
+.verevon-chat-workspace-canvas__navigation {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.verevon-chat-workspace-canvas__navigation .verevon-chat-tabs,
+.verevon-chat-run-panel__workspace-navigation .verevon-chat-tabs {
+  overflow-x: auto;
+  gap: 1px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  backdrop-filter: none;
+  scrollbar-width: none;
+}
+
+.verevon-chat-workspace-canvas__navigation .verevon-chat-tab,
+.verevon-chat-run-panel__workspace-navigation .verevon-chat-tab {
+  min-height: 32px;
+  flex-shrink: 0;
+  gap: 5px;
+  border: 0;
+  border-radius: 8px;
+  margin: 0;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.verevon-chat-workspace-canvas__navigation .verevon-chat-tab--active,
+.verevon-chat-run-panel__workspace-navigation .verevon-chat-tab--active {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-workspace-canvas__navigation .verevon-chat-tab em,
+.verevon-chat-run-panel__workspace-navigation .verevon-chat-tab em {
+  min-width: 15px;
+  padding-inline: 4px;
+  font-size: 9px;
+}
+
+.verevon-chat-run-panel__workspace-navigation {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.verevon-chat-run-panel__workspace-status {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--verevon-a-earth) 9%, transparent);
+  padding: 3px 7px;
+  color: var(--verevon-a-earth);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+
+.verevon-chat-run-panel__work {
+  order: -2;
+  margin: 0;
+  padding: 0 0 10px;
+  border-top: 0;
+  border-bottom: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-chat-run-activity-disclosure {
+  border-top: 1px solid var(--verevon-border-soft);
+  padding-top: 5px;
+}
+
+.verevon-chat-run-activity-disclosure > summary {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 7px;
+  padding: 0 7px;
+  color: var(--verevon-e-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.verevon-chat-run-activity-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verevon-chat-run-activity-disclosure > summary:hover {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-chat-run-activity-disclosure > summary em {
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  padding: 1px 6px;
+  font-size: 9px;
+  font-style: normal;
+}
+
+.verevon-chat-run-activity-disclosure .verevon-chat-run-activity {
+  margin-top: 4px;
+  padding: 8px 7px 0;
+}
+
+@media (max-width: 1180px) {
+  .verevon-chat-page--canvas .dashboard-composer-root--chat .dashboard-composer-toolbar__left > :is(.dashboard-composer-toolbar__divider, .dashboard-composer-toolbar-icon:nth-of-type(1)) {
+    display: none;
+  }
+
+  .verevon-chat-page--canvas .dashboard-composer-root--chat :is(.dashboard-composer-attach, .dashboard-composer-web-button, .dashboard-composer-image-button) {
+    width: 30px;
+    justify-content: center;
+    overflow: hidden;
+    padding-inline: 0;
+    font-size: 0;
+  }
+
+  .verevon-chat-page--canvas .dashboard-composer-root--chat .dashboard-composer-attach > span:last-child {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .verevon-chat-header {
+    min-height: 48px;
+    padding-inline: 12px;
+  }
+
+  .verevon-chat-header__copy p,
+  .verevon-chat-header-button--primary span,
+  .verevon-chat-workspace-trigger span {
+    display: none;
+  }
+
+  .verevon-chat-header__copy {
+    flex-basis: auto;
+  }
+
+  .verevon-chat-header__actions {
+    flex: 0 0 auto;
+  }
+
+  .verevon-chat-header-button--primary,
+  .verevon-chat-workspace-trigger {
+    width: 32px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .verevon-chat-workspace-trigger__chevron {
+    display: none;
+  }
+
+  .verevon-chat-empty {
+    align-items: flex-start;
+    overflow-y: auto;
+    padding: max(9vh, 54px) 16px 32px;
+  }
+
+  .verevon-chat-empty__inner {
+    transform: none;
+  }
+
+  .verevon-chat-empty__heading h1 {
+    font-size: 31px;
+  }
+
+  .verevon-chat-empty__heading > p {
+    font-size: 11.5px;
+  }
+
+  .verevon-chat-starter__copy small {
+    white-space: normal;
+  }
+
+  .dashboard-composer-root--chat .dashboard-composer-controls {
+    align-items: flex-start;
+  }
+
+  .dashboard-composer-root--chat .dashboard-composer-context-label,
+  .dashboard-composer-root--chat .dashboard-composer-controls__right > span:not(.dashboard-composer-context-wrap),
+  .dashboard-composer-root--chat .dashboard-composer-controls__right > button {
+    display: none;
+  }
+
+  .dashboard-composer-root--chat .dashboard-composer-model-button {
+    max-width: 130px;
+  }
+
+  .dashboard-composer-root--chat .dashboard-composer-toolbar__left > :not(.dashboard-composer-attach):not(.dashboard-composer-web-button) {
+    display: none;
+  }
+
+  .dashboard-composer-root--chat :is(.dashboard-composer-attach, .dashboard-composer-web-button) {
+    width: 30px;
+    justify-content: center;
+    overflow: hidden;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .dashboard-composer-root--chat .dashboard-composer-attach > span:last-child {
+    display: none;
+  }
+
+  .dashboard-composer-effort-select select {
+    max-width: 64px;
+  }
+
+  .verevon-chat-page--canvas .verevon-chat-run-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    width: 100%;
+    flex-basis: auto;
+    border-left: 0;
+  }
+
+  .verevon-chat-run-panel__runid,
+  .verevon-chat-run-panel__workspace-status {
+    display: none;
+  }
 }

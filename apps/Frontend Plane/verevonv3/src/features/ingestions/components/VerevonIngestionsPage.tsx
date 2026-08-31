@@ -1,6 +1,11 @@
 import {
+  Activity,
+  AlertTriangle,
   ArrowUpRight,
+  BarChart3,
   CalendarClock,
+  CheckCircle2,
+  Clock,
   Database,
   FileSearch,
   Globe,
@@ -13,6 +18,7 @@ import {
   Telescope,
   TimerReset,
   Trash2,
+  Zap,
   type LucideProps,
 } from '@/shared/icons'
 import {
@@ -65,6 +71,8 @@ type RunFormState = {
   url: string
   urls: string
   prompt: string
+  schema: string
+  extractMode: 'product' | 'article' | 'general'
 }
 
 type ScheduleFormState = {
@@ -124,6 +132,8 @@ export default function VerevonIngestionsPage() {
     url: '',
     urls: '',
     prompt: '',
+    schema: '',
+    extractMode: 'general',
   })
   const [scheduleForm, setScheduleForm] = createSignal<ScheduleFormState>({
     name: '',
@@ -141,6 +151,14 @@ export default function VerevonIngestionsPage() {
   const [deletingSourceId, setDeletingSourceId] = createSignal<string | null>(null)
 
   const selectedRun = createMemo(() => runs().find((run) => run.id === selectedRunId()) ?? null)
+  const activeRuns = createMemo(() => runs().filter((r) => ['running', 'queued', 'pending', 'active', 'in_progress'].includes(r.status.toLowerCase())))
+  const completedRuns = createMemo(() => runs().filter((r) => ['completed', 'success', 'done'].includes(r.status.toLowerCase())))
+  const failedRuns = createMemo(() => runs().filter((r) => ['failed', 'error', 'timeout'].includes(r.status.toLowerCase())))
+  const successRate = createMemo(() => {
+    const total = runs().length
+    if (total === 0) return 100
+    return Math.round((completedRuns().length / total) * 100)
+  })
 
   async function loadWorkspace(signal?: AbortSignal) {
     setLoading(true)
@@ -175,6 +193,18 @@ export default function VerevonIngestionsPage() {
       const controller = new AbortController()
       void loadWorkspace(controller.signal)
       return () => controller.abort()
+    },
+  )
+
+  // Live polling: refresh every 3s when there are active runs (Firecrawl parity: live tracking)
+  createEffect(
+    () => activeRuns().length > 0,
+    (hasActive) => {
+      if (!hasActive) return
+      const id = setInterval(() => {
+        void loadWorkspace()
+      }, 3000)
+      return () => clearInterval(id)
     },
   )
 
@@ -220,6 +250,8 @@ export default function VerevonIngestionsPage() {
               kind: form.kind,
               url: form.url.trim(),
               prompt: form.prompt.trim() || undefined,
+              schema: form.kind === 'extract' && form.schema.trim() ? (() => { try { return JSON.parse(form.schema) } catch { return form.schema } })() : undefined,
+              extractMode: form.kind === 'extract' ? form.extractMode : undefined,
             }
       const created = await createIngestionRun(payload)
       if (created.evidence) {
@@ -415,6 +447,95 @@ export default function VerevonIngestionsPage() {
           )}
         </Show>
 
+        {/* Live Scraping Overview — Firecrawl parity + ahead: real-time stats, progress, health */}
+        <section class="verevon-panel ingestions-card" style="margin-bottom: 16px; border-left: 3px solid var(--verevon-accent, #ee7a50);">
+          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
+            <Activity class="size-4" strokeWidth={2} style="color: var(--verevon-accent, #ee7a50);" />
+            <h2 style="font-size: 14px; font-weight: 600; margin: 0;">{i18n.tr('Live Scraping Oversikt', 'Live Scraping Overview')}</h2>
+            <Show when={activeRuns().length > 0}>
+              <span style="margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #16a34a; background: #f0fdf4; border: 1px solid #bbf7d0; padding: 2px 8px; border-radius: 9999px;">
+                <span style="width: 8px; height: 8px; background: #16a34a; border-radius: 50%; display: inline-block; animation: ingestions-spin 1s linear infinite; opacity: 0.9;" />
+                {i18n.tr('Live', 'Live')} • {activeRuns().length} {i18n.tr('aktive', 'active')}
+              </span>
+            </Show>
+            <Show when={activeRuns().length === 0 && runs().length > 0}>
+              <span style="margin-left: auto; font-size: 12px; color: #6b7280; background: #f9fafb; border: 1px solid #e5e7eb; padding: 2px 8px; border-radius: 9999px;">{i18n.tr('Ingen aktive', 'No active')} • {i18n.tr('auto-oppdaterer ved aktivitet', 'auto-refresh on activity')}</span>
+            </Show>
+          </div>
+
+          {/* Stats grid */}
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px;">
+            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px;">
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 6px;"><Zap class="size-3.5" />{i18n.tr('Aktive', 'Active')}</div>
+              <div style="font-size: 22px; font-weight: 700; line-height: 1;">{activeRuns().length}</div>
+              <div style="font-size: 11px; color: #64748b; margin-top: 4px;">{runs().length} {i18n.tr('totalt', 'total')}</div>
+            </div>
+            <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 12px;">
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #15803d; margin-bottom: 6px;"><CheckCircle2 class="size-3.5" />{i18n.tr('Fullført', 'Completed')}</div>
+              <div style="font-size: 22px; font-weight: 700; line-height: 1; color: #15803d;">{completedRuns().length}</div>
+              <div style="font-size: 11px; color: #15803d; margin-top: 4px;">{successRate()}% {i18n.tr('suksess', 'success')}</div>
+            </div>
+            <div style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 12px;">
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #92400e; margin-bottom: 6px;"><AlertTriangle class="size-3.5" />{i18n.tr('Feilet', 'Failed')}</div>
+              <div style="font-size: 22px; font-weight: 700; line-height: 1; color: #b45309;">{failedRuns().length}</div>
+              <div style="font-size: 11px; color: #92400e; margin-top: 4px;">{i18n.tr('krever oppmerksomhet', 'needs attention')}</div>
+            </div>
+            <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 10px; padding: 12px;">
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #1d4ed8; margin-bottom: 6px;"><BarChart3 class="size-3.5" />{i18n.tr('Kilder', 'Sources')}</div>
+              <div style="font-size: 22px; font-weight: 700; line-height: 1; color: #1d4ed8;">{(sources()?.quarrySources?.length ?? 0) + (sources()?.integrations?.length ?? 0)}</div>
+              <div style="font-size: 11px; color: #1d4ed8; margin-top: 4px;">{schedules().length} {i18n.tr('tidsplaner', 'schedules')}</div>
+            </div>
+          </div>
+
+          {/* Live progress bars */}
+          <Show when={activeRuns().length > 0}>
+            <div style="border-top: 1px solid #e2e8f0; padding-top: 12px;">
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: #334155; margin-bottom: 8px;"><Clock class="size-3.5" />{i18n.tr('Pågående kjøringer', 'In-flight runs')}</div>
+              <For each={activeRuns().slice(0, 3)}>
+                {(run) => {
+                  const pct = () => {
+                    const t = run.progress.total ?? 0
+                    const c = run.progress.completed ?? 0
+                    if (!t || t === 0) return run.status === 'running' ? 45 : 15
+                    return Math.min(99, Math.round((c / t) * 100))
+                  }
+                  return (
+                    <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 6px;">
+                      <Loader class="size-3.5 ingestions-spin" style="color: #0ea5e9; flex-shrink: 0;" />
+                      <div style="min-width: 0; flex: 1;">
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                          <span style="font-size: 12px; font-weight: 600; text-transform: capitalize;">{run.kind}</span>
+                          <span style="font-size: 11px; color: #64748b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{run.target}</span>
+                        </div>
+                        <div style="height: 6px; background: #e2e8f0; border-radius: 9999px; overflow: hidden; margin-top: 6px;">
+                          <div style={`height: 100%; width: ${pct()}%; background: linear-gradient(90deg, #0ea5e9, #8b5cf6); border-radius: 9999px; transition: width 0.5s ease;`} />
+                        </div>
+                      </div>
+                      <span style="font-size: 11px; font-weight: 600; color: #0ea5e9; flex-shrink: 0;">{pct()}%</span>
+                    </div>
+                  )
+                }}
+              </For>
+            </div>
+          </Show>
+
+          {/* Recent evidence quick strip */}
+          <Show when={runs().length > 0 && activeRuns().length === 0}>
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #64748b; border-top: 1px solid #f1f5f9; padding-top: 12px; margin-top: 4px; flex-wrap: wrap;">
+              <span style="font-weight: 600; color: #334155;">{i18n.tr('Siste:', 'Latest:')}</span>
+              <For each={runs().slice(0, 3)}>
+                {(run) => (
+                  <span style="display: inline-flex; align-items: center; gap: 4px; background: #f8fafc; border: 1px solid #e2e8f0; padding: 2px 8px; border-radius: 9999px; font-size: 11px;">
+                    <span style={`width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: ${run.status === 'completed' ? '#16a34a' : run.status === 'failed' ? '#dc2626' : '#64748b'};`} />
+                    {run.kind} • {run.target.slice(0, 32)}
+                  </span>
+                )}
+              </For>
+              <span style="margin-left: auto; font-size: 11px;">{schedules().length} {i18n.tr('tidsplaner aktive', 'schedules active')} • {profiles()?.profiles?.length ?? 0} {i18n.tr('profiler', 'profiles')}</span>
+            </div>
+          </Show>
+        </section>
+
         <Show when={activeView() === 'runs'}>
           <section class="ingestions-two-column ingestions-two-column--runs">
             <RunComposer
@@ -532,18 +653,62 @@ function RunComposer(props: {
         </label>
       </Show>
       <Show when={props.form.kind === 'extract'}>
-        <label class="ingestions-field">
-          {i18n.tr('Uttrekksprompt', 'Extraction prompt')}
-          <VerevonTextarea
-            rows={4}
-            value={props.form.prompt}
-            onInput={(event) => props.onFormChange({ prompt: event.currentTarget.value })}
-            placeholder={i18n.tr(
-              'Trekk ut sentrale supporttemaer, kontaktkanaler og prissignaler.',
-              'Extract key support topics, contact channels, and pricing signals.',
-            )}
-          />
-        </label>
+        <div style="display: flex; flex-direction: column; gap: 10px; padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;">
+          <label class="ingestions-field" style="margin: 0;">
+            {i18n.tr('Uttrekksmodus', 'Extraction mode')}
+            <VerevonSelect value={props.form.extractMode} onChange={(e) => props.onFormChange({ extractMode: e.currentTarget.value as any })}>
+              <option value="general">{i18n.tr('Generell', 'General')}</option>
+              <option value="product">{i18n.tr('Produkt (pris, lager, bilder)', 'Product (price, stock, images)')}</option>
+              <option value="article">{i18n.tr('Artikkel (forfatter, dato, innhold)', 'Article (author, date, content)')}</option>
+            </VerevonSelect>
+          </label>
+          <label class="ingestions-field" style="margin: 0;">
+            {i18n.tr('Uttrekksprompt', 'Extraction prompt')}
+            <VerevonTextarea
+              rows={3}
+              value={props.form.prompt}
+              onInput={(event) => props.onFormChange({ prompt: event.currentTarget.value })}
+              placeholder={props.form.extractMode === 'product' ? i18n.tr('Trekk ut produktnavn, pris, tilgjengelighet, bilder, rating for hvert produkt på siden.', 'Extract product name, price, availability, images, rating for each product on page.') : props.form.extractMode === 'article' ? i18n.tr('Trekk ut tittel, forfatter, publiseringsdato, hovedinnhold og nøkkelord.', 'Extract title, author, publish date, main content and keywords.') : i18n.tr('Trekk ut sentrale supporttemaer, kontaktkanaler og prissignaler.', 'Extract key support topics, contact channels, and pricing signals.')}
+            />
+          </label>
+          <label class="ingestions-field" style="margin: 0;">
+            <span style="display: flex; align-items: center; justify-content: space-between;">
+              {i18n.tr('JSON schema (valgfritt)', 'JSON schema (optional)')}
+              <button type="button" style="font-size: 11px; color: #0ea5e9; background: none; border: none; cursor: pointer;" onClick={() => {
+                const presets: Record<string, string> = {
+                  product: '{\n  "type": "object",\n  "properties": {\n    "products": {\n      "type": "array",\n      "items": {\n        "type": "object",\n        "properties": {\n          "name": { "type": "string" },\n          "price": { "type": "string" },\n          "currency": { "type": "string" },\n          "availability": { "type": "string" },\n          "image": { "type": "string" },\n          "rating": { "type": "string" }\n        }\n      }\n    }\n  }\n}',
+                  article: '{\n  "type": "object",\n  "properties": {\n    "title": { "type": "string" },\n    "author": { "type": "string" },\n    "published_at": { "type": "string" },\n    "content": { "type": "string" },\n    "keywords": { "type": "array", "items": { "type": "string" } }\n  }\n}',
+                  general: '{\n  "type": "object",\n  "properties": {\n    "summary": { "type": "string" },\n    "topics": { "type": "array", "items": { "type": "string" } }\n  }\n}'
+                }
+                const preset = presets[props.form.extractMode] ?? presets.general
+                props.onFormChange({ schema: preset })
+              }}>{i18n.tr('Last preset', 'Load preset')}</button>
+            </span>
+            <VerevonTextarea
+              rows={4}
+              value={props.form.schema}
+              onInput={(event) => props.onFormChange({ schema: event.currentTarget.value })}
+              placeholder={'{"type":"object","properties":{"name":{"type":"string"}}}'}
+              style="font-family: ui-monospace, monospace; font-size: 12px;"
+            />
+          </label>
+          <div style="font-size: 11px; color: #64748b; display: flex; align-items: center; gap: 4px;"><Zap class="size-3" />{i18n.tr('Firecrawl-paritet: strukturert uttrekk med LLM + source-tracing. Agentic modus bruker browser-actions + LLM-loop.', 'Firecrawl parity: structured extract with LLM + source-tracing. Agentic mode uses browser-actions + LLM loop.')}</div>
+        </div>
+      </Show>
+      <Show when={props.form.kind === 'agent'}>
+        <div style="display: flex; flex-direction: column; gap: 10px; padding: 12px; background: #fefce8; border: 1px solid #fde68a; border-radius: 10px;">
+          <div style="display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: #92400e;"><Telescope class="size-3.5" />{i18n.tr('Agentic Scraping (autonom)', 'Agentic Scraping (autonomous)')}</div>
+          <label class="ingestions-field" style="margin: 0;">
+            {i18n.tr('Oppgave', 'Task')}
+            <VerevonTextarea
+              rows={3}
+              value={props.form.prompt}
+              onInput={(event) => props.onFormChange({ prompt: event.currentTarget.value })}
+              placeholder={i18n.tr('Finn alle produkter under 500 kr, legg til i handlekurv og ta screenshot.', 'Find all products under 500 NOK, add to cart and take screenshot.')}
+            />
+          </label>
+          <div style="font-size: 11px; color: #92400e;">{i18n.tr('Quarry kjører browser-actions (click/type/scroll) i loop med LLM-beslutninger (max 25 steg) — Paritet med Firecrawl browser-agent.', 'Quarry runs browser-actions (click/type/scroll) in loop with LLM decisions (max 25 steps) — parity with Firecrawl browser-agent.')}</div>
+        </div>
       </Show>
       <Button variant="primary" fullWidth type="submit">
         <Play class="size-4" strokeWidth={1.9} />
@@ -1131,7 +1296,9 @@ function EvidencePanel(props: {
                 when={props.selectedRun}
                 fallback={i18n.tr('Siste manuelle scrape- eller uttrekksresultat.', 'Most recent manual scrape or extract output.')}
               >
-                {(run) => i18n.tr(`Tidslinje og advarsler for ${run().target}.`, `Timeline and warnings for ${run().target}.`)}
+                {(run) => (
+                  <>{i18n.tr(`Tidslinje og advarsler for ${run().target}.`, `Timeline and warnings for ${run().target}.`)}</>
+                )}
               </Show>
             </p>
           </div>

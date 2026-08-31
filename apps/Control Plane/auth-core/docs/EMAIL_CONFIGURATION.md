@@ -95,12 +95,12 @@ Value: resend-domain-verify=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 Each email includes security headers for better deliverability:
 
 ```typescript
-headers: {
+const headers = {
   'X-Entity-Ref-ID': `verification-${Date.now()}`,
   'X-Priority': '1',
   'X-MSMail-Priority': 'High',
   Importance: 'high',
-}
+};
 ```
 
 ### Template Security Features

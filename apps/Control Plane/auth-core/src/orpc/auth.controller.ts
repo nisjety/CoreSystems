@@ -30,6 +30,33 @@ interface ErrorWithStatus extends Error {
 }
 
 /**
+ * `orpcRouter` is a plain object of oRPC procedure builders whose exact
+ * shape (including the internal `~orpc` key) is an implementation detail of
+ * `@orpc/server`, not part of its public contract types. `getProcedure`
+ * below resolves a dotted procedure path (e.g. `auth.signIn`) by walking
+ * this structure at runtime, so it is typed narrowly against only the
+ * shape it actually touches rather than against `any`.
+ */
+type OrpcHandler = (args: {
+  input: unknown;
+  context: unknown;
+}) => Promise<unknown>;
+
+interface OrpcProcedureLike {
+  handler?: OrpcHandler;
+  ['~orpc']?: unknown;
+  [key: string]: unknown;
+}
+
+/** Shape of the Better Auth user object read off oRPC signIn/signUp/session results. */
+interface BetterAuthUser {
+  id: string;
+  email: string;
+  name?: string;
+  emailVerified?: boolean;
+}
+
+/**
  * Enhanced Authentication Controller
  *
  * This provides enhanced oRPC-powered authentication endpoints that will eventually
@@ -112,7 +139,7 @@ export class ConsolidatedAuthController {
     @Body() body: { email: string; password: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('auth.signIn', body, request, response);
   }
 
@@ -130,7 +157,7 @@ export class ConsolidatedAuthController {
     @Body() body: { name: string; email: string; password: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     try {
       try {
         assertNotDisposableEmail(body.email);
@@ -153,13 +180,17 @@ export class ConsolidatedAuthController {
       );
 
       // If signup was successful and we have user data, sync to user-service
-      if (result && result.user && result.user.id) {
+      const signUpResult = result as
+        | { user?: BetterAuthUser }
+        | null
+        | undefined;
+      if (signUpResult?.user?.id) {
         this.logger.log(
           '✅ Successful signup detected, syncing user to user-service',
         );
 
         try {
-          const user = result.user;
+          const user = signUpResult.user;
           await this.authIntegrationService.handleUserRegistration({
             id: user.id,
             email: user.email,
@@ -196,10 +227,10 @@ export class ConsolidatedAuthController {
     description: 'Successfully signed out',
   })
   async signOut(
-    @Body() body: Record<string, any>,
+    @Body() body: Record<string, unknown>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('auth.signOut', body, request, response);
   }
 
@@ -214,10 +245,10 @@ export class ConsolidatedAuthController {
     description: 'Session information',
   })
   async getSession(
-    @Body() body: Record<string, any>,
+    @Body() body: Record<string, unknown>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     this.logger.debug(
       `getSession hit: cookies=${request.get('cookie') ?? 'none'}`,
     );
@@ -228,8 +259,12 @@ export class ConsolidatedAuthController {
       response,
     );
     // Don't stringify result as it may contain circular references
+    const sessionResult = result as
+      | { authenticated?: boolean }
+      | null
+      | undefined;
     this.logger.debug(
-      `getSession result: ${result?.authenticated ? 'authenticated' : 'not authenticated'}`,
+      `getSession result: ${sessionResult?.authenticated ? 'authenticated' : 'not authenticated'}`,
     );
     return result;
   }
@@ -241,10 +276,10 @@ export class ConsolidatedAuthController {
     description: 'Retrieve current user profile information',
   })
   async getProfile(
-    @Body() body: Record<string, any>,
+    @Body() body: Record<string, unknown>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('profile.getProfile', body, request, response);
   }
 
@@ -258,7 +293,7 @@ export class ConsolidatedAuthController {
     @Body() body: { name?: string; image?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'profile.updateProfile',
       body,
@@ -274,10 +309,10 @@ export class ConsolidatedAuthController {
     description: 'Retrieve current user consent preferences',
   })
   async getConsent(
-    @Body() body: Record<string, any>,
+    @Body() body: Record<string, unknown>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('consent.get', body, request, response);
   }
 
@@ -292,7 +327,7 @@ export class ConsolidatedAuthController {
     body: { analytics: boolean; marketing: boolean; necessary: boolean },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('consent.update', body, request, response);
   }
 
@@ -303,10 +338,10 @@ export class ConsolidatedAuthController {
     description: 'Withdraw all user consent',
   })
   async withdrawConsent(
-    @Body() body: Record<string, any>,
+    @Body() body: Record<string, unknown>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('consent.withdraw', body, request, response);
   }
 
@@ -336,7 +371,7 @@ export class ConsolidatedAuthController {
     @Body() body: { email: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'auth.sendEmailVerification',
       body,
@@ -373,7 +408,7 @@ export class ConsolidatedAuthController {
     @Body() body: { token: string; callbackURL?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('auth.verifyEmail', body, request, response);
   }
 
@@ -399,7 +434,7 @@ export class ConsolidatedAuthController {
     @Body() body: { email: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'auth.sendPasswordReset',
       body,
@@ -435,7 +470,7 @@ export class ConsolidatedAuthController {
     @Body() body: { token: string; password: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('auth.resetPassword', body, request, response);
   }
 
@@ -462,7 +497,7 @@ export class ConsolidatedAuthController {
     @Body() body: { provider: string; redirectTo?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('auth.initiateOAuth', body, request, response);
   }
 
@@ -490,7 +525,7 @@ export class ConsolidatedAuthController {
     @Body() body: { password: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'auth.checkPasswordStrength',
       body,
@@ -523,7 +558,7 @@ export class ConsolidatedAuthController {
     @Body() body: { password: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('twoFactor.enable', body, request, response);
   }
 
@@ -537,7 +572,7 @@ export class ConsolidatedAuthController {
     @Body() body: { password: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('twoFactor.disable', body, request, response);
   }
 
@@ -551,7 +586,7 @@ export class ConsolidatedAuthController {
     @Body() body: { code: string; type?: 'totp' | 'backup-code' },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('twoFactor.verify', body, request, response);
   }
 
@@ -570,7 +605,7 @@ export class ConsolidatedAuthController {
     },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('emailOtp.send', body, request, response);
   }
 
@@ -584,7 +619,7 @@ export class ConsolidatedAuthController {
     @Body() body: { email: string; otp: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('emailOtp.verify', body, request, response);
   }
 
@@ -599,7 +634,7 @@ export class ConsolidatedAuthController {
     @Body() body: { phoneNumber: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('phoneOtp.send', body, request, response);
   }
 
@@ -613,7 +648,7 @@ export class ConsolidatedAuthController {
     @Body() body: { phoneNumber: string; otp: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('phoneOtp.verify', body, request, response);
   }
 
@@ -628,7 +663,7 @@ export class ConsolidatedAuthController {
     @Body() body: { email?: string; name?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('passkey.create', body, request, response);
   }
 
@@ -665,11 +700,11 @@ export class ConsolidatedAuthController {
       name: string;
       slug?: string;
       logo?: string;
-      metadata?: Record<string, any>;
+      metadata?: Record<string, unknown>;
     },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('organization.create', body, request, response);
   }
 
@@ -705,10 +740,10 @@ export class ConsolidatedAuthController {
     },
   })
   async listOrganizations(
-    @Body() body: Record<string, any>,
+    @Body() body: Record<string, unknown>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('organization.list', body, request, response);
   }
 
@@ -746,7 +781,7 @@ export class ConsolidatedAuthController {
     },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'organization.inviteMember',
       body,
@@ -784,7 +819,7 @@ export class ConsolidatedAuthController {
     @Body() body: { organizationId: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'organization.switchActive',
       body,
@@ -826,7 +861,7 @@ export class ConsolidatedAuthController {
     @Body() body: { name: string; expiresIn?: number },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('apiKeys.create', body, request, response);
   }
 
@@ -864,7 +899,7 @@ export class ConsolidatedAuthController {
     @Body() body: Record<string, never>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('apiKeys.list', body, request, response);
   }
 
@@ -889,7 +924,7 @@ export class ConsolidatedAuthController {
     @Body() body: { id: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('apiKeys.delete', body, request, response);
   }
 
@@ -922,7 +957,7 @@ export class ConsolidatedAuthController {
     @Body() body: { id: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('apiKeys.rotate', body, request, response);
   }
 
@@ -956,7 +991,7 @@ export class ConsolidatedAuthController {
     @Body() body: { key: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('apiKeys.validate', body, request, response);
   }
 
@@ -994,7 +1029,7 @@ export class ConsolidatedAuthController {
     @Body() body: { token: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('bearer.validate', body, request, response);
   }
 
@@ -1027,7 +1062,7 @@ export class ConsolidatedAuthController {
     @Body() body: { expiresIn?: number; scopes?: string[] },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('bearer.create', body, request, response);
   }
 
@@ -1052,7 +1087,7 @@ export class ConsolidatedAuthController {
     @Body() body: { tokenId: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('bearer.revoke', body, request, response);
   }
 
@@ -1090,7 +1125,7 @@ export class ConsolidatedAuthController {
     @Body() body: Record<string, never>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('bearer.list', body, request, response);
   }
 
@@ -1144,7 +1179,7 @@ export class ConsolidatedAuthController {
     @Body() body: { page?: number; limit?: number; search?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('admin.listUsers', body, request, response);
   }
 
@@ -1183,7 +1218,7 @@ export class ConsolidatedAuthController {
     @Body() body: { userId: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('admin.getUser', body, request, response);
   }
 
@@ -1215,7 +1250,7 @@ export class ConsolidatedAuthController {
     @Body() body: { userId: string; reason?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('admin.suspendUser', body, request, response);
   }
 
@@ -1251,7 +1286,7 @@ export class ConsolidatedAuthController {
     body: { email: string; password: string; name: string; role?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('admin.createUser', body, request, response);
   }
 
@@ -1282,7 +1317,7 @@ export class ConsolidatedAuthController {
     @Body() body: { userId: string; role: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('admin.setRole', body, request, response);
   }
 
@@ -1313,7 +1348,7 @@ export class ConsolidatedAuthController {
     @Body() body: { userId: string; reason?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('admin.banUser', body, request, response);
   }
 
@@ -1352,7 +1387,7 @@ export class ConsolidatedAuthController {
     @Body() body: { userId: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'admin.listUserSessions',
       body,
@@ -1382,7 +1417,7 @@ export class ConsolidatedAuthController {
     @Body() body: { userId: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure('admin.removeUser', body, request, response);
   }
 
@@ -1429,7 +1464,7 @@ export class ConsolidatedAuthController {
     @Body() body: { page?: number; limit?: number; search?: string },
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'admin.listOrganizations',
       body,
@@ -1470,7 +1505,7 @@ export class ConsolidatedAuthController {
     @Body() body: Record<string, never>,
     @Req() request: Request,
     @Res() response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return this.handleProcedure(
       'admin.getSystemStats',
       body,
@@ -1484,7 +1519,7 @@ export class ConsolidatedAuthController {
     summary: 'Debug router structure',
     description: 'Inspect the oRPC router structure for debugging',
   })
-  debugRouter(@Res() response: Response): any {
+  debugRouter(@Res() response: Response): Response {
     const routerInfo = {
       keys: Object.keys(orpcRouter),
       auth: orpcRouter.auth ? Object.keys(orpcRouter.auth) : 'missing',
@@ -1511,10 +1546,10 @@ export class ConsolidatedAuthController {
    */
   private async handleProcedure(
     procedurePath: string,
-    input: any,
+    input: unknown,
     request: Request,
     response: Response,
-  ): Promise<any> {
+  ): Promise<unknown> {
     const requestId = Math.random().toString(36).substring(7);
     const startTime = Date.now();
     const clientIP = this.getClientIP(request);
@@ -1537,8 +1572,7 @@ export class ConsolidatedAuthController {
       const context = this.createContext(request, response);
 
       // Get the actual oRPC procedure
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const procedure: any = this.getProcedure(orpcRouter, procedurePath);
+      const procedure = this.getProcedure(orpcRouter, procedurePath);
 
       if (!procedure) {
         const duration = Date.now() - startTime;
@@ -1554,10 +1588,16 @@ export class ConsolidatedAuthController {
         });
       }
 
-      // Call the actual oRPC procedure
+      // Call the actual oRPC procedure. `getProcedure` may resolve to either
+      // a callable handler directly or an object exposing a `.handler`
+      // method (see its comments), so normalize to a callable here.
       console.log(`🔧 [${requestId}] Calling procedure: ${procedurePath}`);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const result: any = await procedure.handler({ input, context });
+      const handlerFn =
+        typeof procedure === 'function' ? procedure : procedure.handler;
+      if (typeof handlerFn !== 'function') {
+        throw new Error(`Procedure ${procedurePath} has no callable handler`);
+      }
+      const result: unknown = await handlerFn({ input, context });
 
       // Log successful completion
       const duration = Date.now() - startTime;
@@ -1702,7 +1742,10 @@ export class ConsolidatedAuthController {
     };
   }
 
-  private getProcedure(router: any, path: string): any {
+  private getProcedure(
+    router: Record<string, unknown>,
+    path: string,
+  ): OrpcProcedureLike | OrpcHandler | null {
     console.log(`🔍 Looking for procedure: ${path}`);
 
     // Try to get the procedure using the full path directly
@@ -1713,8 +1756,9 @@ export class ConsolidatedAuthController {
         `🔍 Trying direct access: router.${namespace}.${procedureName}`,
       );
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-      const namespaceObj = router[namespace];
+      const namespaceObj = router[namespace] as
+        | Record<string, unknown>
+        | undefined;
       if (namespaceObj) {
         console.log(`🔍 Found namespace ${namespace}`);
         console.log(
@@ -1722,7 +1766,6 @@ export class ConsolidatedAuthController {
           Object.getOwnPropertyNames(namespaceObj),
         );
 
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
         const procedure = namespaceObj[procedureName];
         if (procedure) {
           console.log(
@@ -1737,28 +1780,26 @@ export class ConsolidatedAuthController {
           // Check if it's a function
           if (typeof procedure === 'function') {
             console.log(`🔍 Using function directly`);
-            return procedure;
+            return procedure as OrpcHandler;
           }
 
+          const procedureLike = procedure as OrpcProcedureLike;
+
           // Check if it has ~orpc property
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          if (procedure && procedure['~orpc']) {
+          if (procedureLike['~orpc']) {
             console.log(`🔍 Using ~orpc property`);
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            return procedure['~orpc'];
+            return procedureLike['~orpc'] as OrpcProcedureLike;
           }
 
           // Check if it has handler
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          if (procedure && typeof procedure.handler === 'function') {
+          if (typeof procedureLike.handler === 'function') {
             console.log(`🔍 Using handler property`);
-            // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-            return procedure.handler;
+            return procedureLike.handler;
           }
 
           // Try to call it as an oRPC procedure
           console.log(`🔍 Trying to use as oRPC procedure object`);
-          return procedure;
+          return procedureLike;
         }
       }
     }
@@ -1793,7 +1834,7 @@ export class ConsolidatedAuthController {
     error: ErrorWithStatus,
     response: Response,
     requestId: string,
-  ): any {
+  ): Response {
     const status = error.status || 500;
     const message = error.message || 'Internal Server Error';
     const code = error.code || 'INTERNAL_ERROR';

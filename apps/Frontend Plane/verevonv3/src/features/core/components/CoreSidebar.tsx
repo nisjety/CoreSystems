@@ -75,9 +75,7 @@ export function CoreSidebar(props: {
     .filter((section) => section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session))
     .map((section) => localizeSidebarSection(section, i18n))
   const activeSection = () => getSidebarSectionForPath(location.pathname, props.activeRoute, visibleSections())
-  // Ingestions remains directly routable, but the compact rail is intentionally
-  // limited to the operator-facing workspaces shown in the product shell.
-  const mainSections = () => visibleSections().filter((section) => !section.pinnedBottom && section.id !== 'ingestions')
+  const mainSections = () => visibleSections().filter((section) => !section.pinnedBottom)
   const pinnedSections = () => visibleSections().filter((section) => section.pinnedBottom)
   const accountActive = () => location.pathname === '/account' || location.pathname.startsWith('/account/')
   const width = () => `${props.expanded ? (props.expandedWidth ?? SIDEBAR_EXPANDED_WIDTH) : SIDEBAR_MINIMIZED_WIDTH}px`

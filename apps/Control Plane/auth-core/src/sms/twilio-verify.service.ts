@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import * as dotenv from 'dotenv';
+import type { Twilio } from 'twilio';
 
 // Load environment variables
 dotenv.config();
@@ -20,7 +21,7 @@ export interface SmsService {
 
 @Injectable()
 export class TwilioVerifyService implements SmsService {
-  private twilio: any;
+  private twilio: Twilio | undefined;
   private config: TwilioVerifyConfig;
 
   constructor() {
@@ -85,18 +86,14 @@ export class TwilioVerifyService implements SmsService {
       const formattedPhone = this.formatPhoneNumber(phoneNumber);
 
       // Create verification using Twilio Verify API
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const verification = await this.twilio.verify.v2
         .services(this.config.verifyServiceSid)
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         .verifications.create({
           to: formattedPhone,
           channel: 'sms',
         });
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       console.log('✅ Verification SMS sent successfully:', verification.sid);
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       console.log('📱 Verification status:', verification.status);
     } catch (error) {
       console.error('❌ Failed to send verification SMS:', error);
@@ -120,23 +117,18 @@ export class TwilioVerifyService implements SmsService {
       const formattedPhone = this.formatPhoneNumber(phoneNumber);
 
       // Check verification using Twilio Verify API
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
       const verificationCheck = await this.twilio.verify.v2
         .services(this.config.verifyServiceSid)
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         .verificationChecks.create({
           to: formattedPhone,
           code: otp,
         });
 
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       const isApproved = verificationCheck.status === 'approved';
 
       if (isApproved) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         console.log('✅ OTP verification successful:', verificationCheck.sid);
       } else {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         console.log('❌ OTP verification failed:', verificationCheck.status);
       }
 
@@ -186,44 +178,5 @@ export class TwilioVerifyService implements SmsService {
 
     // Default: add the default country code
     return defaultCountryCode + cleaned;
-  }
-
-  /**
-   * Cancel a pending verification (useful for cleanup)
-   */
-  async cancelVerification(phoneNumber: string): Promise<void> {
-    if (!this.twilio) {
-      console.log(`📱 [MOCK CANCEL] Phone: ${phoneNumber}`);
-      return;
-    }
-
-    try {
-      const formattedPhone = this.formatPhoneNumber(phoneNumber);
-
-      // Get pending verifications and cancel them
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-      const verifications = await this.twilio.verify.v2
-        .services(this.config.verifyServiceSid)
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        .verifications.list({
-          to: formattedPhone,
-          status: 'pending',
-        });
-
-      for (const verification of verifications) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-        await this.twilio.verify.v2
-          .services(this.config.verifyServiceSid)
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          .verifications(verification.sid)
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-          .update({ status: 'canceled' });
-
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        console.log('🚫 Canceled verification:', verification.sid);
-      }
-    } catch (error) {
-      console.error('❌ Failed to cancel verifications:', error);
-    }
   }
 }

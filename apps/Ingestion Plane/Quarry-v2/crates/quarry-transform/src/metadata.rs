@@ -69,6 +69,19 @@ pub fn extract(html: &str, content_type: Option<String>) -> PageMetadata {
         .or_else(|| meta_prop(&meta_props, "og:locale"))
         .filter(|s| !s.trim().is_empty());
 
+    // SEO parity with Firecrawl: keywords, canonical, og:image, robots
+    let keywords = meta_name(&meta_props, "keywords");
+    let canonical_url = doc
+        .select(&Selector::parse("link[rel='canonical']").unwrap())
+        .next()
+        .and_then(|n| n.value().attr("href").map(ToString::to_string))
+        .or_else(|| meta_prop(&meta_props, "og:url"))
+        .filter(|s| !s.trim().is_empty());
+    let og_image = meta_prop(&meta_props, "og:image")
+        .or_else(|| meta_name(&meta_props, "twitter:image"))
+        .or_else(|| meta_name(&meta_props, "twitter:image:src"));
+    let robots = meta_name(&meta_props, "robots");
+
     PageMetadata {
         title,
         lang,
@@ -77,6 +90,10 @@ pub fn extract(html: &str, content_type: Option<String>) -> PageMetadata {
         author,
         published_at,
         modified_at,
+        keywords,
+        canonical_url,
+        og_image,
+        robots,
     }
 }
 

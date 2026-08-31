@@ -148,6 +148,18 @@ pub struct PageMetadata {
     /// `og:updated_time` → JSON-LD `dateModified`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<String>,
+    /// SEO keywords. `meta[name=keywords]`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<String>,
+    /// Canonical URL. `link[rel=canonical]` → `og:url`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_url: Option<String>,
+    /// OG image. `og:image` → `twitter:image`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub og_image: Option<String>,
+    /// Robots directive. `meta[name=robots]`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub robots: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

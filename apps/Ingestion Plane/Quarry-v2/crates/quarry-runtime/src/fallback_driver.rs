@@ -97,6 +97,28 @@ impl FallbackDriver {
                         best_block = Some(resp);
                         continue;
                     }
+                    // Firecrawl parity: detect JS-shell pages (Next.js etc) that
+                    // need browser rendering. Static fetch returns 200 with shell
+                    // HTML (__NEXT_DATA__) but readability yields <1k chars of
+                    // real content. Fall through to browser for full render.
+                    if is_js_shell_needing_browser(&resp.body, resp.status)
+                        && idx < order.len() - 1
+                        && *kind != DriverKind::Browser
+                    {
+                        // Find next browser driver in chain, skip Tls if it's also static
+                        let has_browser_ahead = order[idx + 1..].contains(&DriverKind::Browser);
+                        if has_browser_ahead {
+                            attempts.push((*kind, "js-shell detected — needs browser rendering".into()));
+                            warn!(
+                                driver = ?kind,
+                                status = resp.status,
+                                body_bytes = resp.body.len(),
+                                next = ?DriverKind::Browser,
+                                "JS shell detected — falling back to browser"
+                            );
+                            continue;
+                        }
+                    }
                     return Ok(resp);
                 }
                 Err(e) => {
@@ -179,6 +201,41 @@ impl Driver for FallbackDriver {
             .get(&self.primary)
             .and_then(|d: &Arc<dyn Driver>| d.tls_profile())
     }
+}
+
+/// Detect JS-shell pages (Next.js, SPA) that need browser rendering.
+/// Static fetch returns 200 with shell HTML containing __NEXT_DATA__ but
+/// readability yields truncated content. Trigger browser fallback.
+pub(crate) fn is_js_shell_needing_browser(body: &[u8], status: u16) -> bool {
+    if status != 200 {
+        return false;
+    }
+    // Fast path: check for Next.js / SPA markers without full parse
+    // 16KB shell is typical; 97808 for aquatiq. Small bodies are not JS shells.
+    if body.len() < 8000 {
+        return false;
+    }
+    // Look for JS framework shell markers
+    let markers: &[&[u8]] = &[
+        b"__NEXT_DATA__",
+        b"data-next-head",
+        b"_next/static",
+        b"__NUXT__",
+        b"id=\"__next\"",
+        b"id=\"root\"", // generic SPA root
+    ];
+    let is_shell = markers.iter().any(|m| {
+        // Simple substring search
+        body.windows(m.len()).any(|w| w == *m)
+    });
+    if !is_shell {
+        return false;
+    }
+    // Confirm shell by checking high script-to-content ratio:
+    // Shells have huge <script> blocks and tiny visible text.
+    // Heuristic: if body has >3 script tags and >20000 bytes, it's a shell
+    let script_count = body.windows(b"<script".len()).filter(|w| w == b"<script").count();
+    script_count >= 3 && body.len() > 20000
 }
 
 pub(crate) fn is_retryable_driver_error(code: ErrorCode) -> bool {

@@ -23,7 +23,10 @@ import { Agent, setGlobalDispatcher } from 'undici';
 // dns.lookup's option parameter across its overloads: a family number or an
 // options object. Deriving this via Parameters<typeof dns.lookup> collapses
 // to `never` under the overload set, so it is spelled out instead.
-type LookupOptions = number | (dns.LookupOptions & { all?: boolean }) | undefined;
+type LookupOptions =
+  | number
+  | (dns.LookupOptions & { all?: boolean })
+  | undefined;
 type LookupCallback = (
   err: NodeJS.ErrnoException | null,
   address: string | LookupAddress[],

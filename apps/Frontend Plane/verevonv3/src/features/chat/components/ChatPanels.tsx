@@ -4,6 +4,8 @@ import {
   Layers,
   ListChecks,
   MessageSquarePlus,
+  MoreHorizontal,
+  PanelRightOpen,
   RefreshCw,
   ShieldCheck,
   Sparkles,
@@ -69,25 +71,132 @@ function cancellationReceipt(event: VerevonUiEvent) {
 }
 
 export function ChatHeader(props: {
+  active: ChatTab
+  artifactCount: number
   branchCount: number
   messageCount: number
+  runAvailable?: boolean
+  sourceCount: number
+  stepCount: number
   title: string
+  traceAvailable?: boolean
+  onChange: (tab: ChatTab) => void
   onNewChat: () => void
   onRegenerate: () => void
 }) {
+  const i18n = useI18n()
+  const [openMenu, setOpenMenu] = createSignal<'workspace' | 'more' | null>(null)
+  const availability = (): ChatSurfaceAvailability => ({
+    sourceCount: props.sourceCount,
+    hasGrounding: props.sourceCount > 0,
+    artifactCount: props.artifactCount,
+    attachmentCount: 0,
+    stepCount: props.stepCount,
+    hasRun: Boolean(props.runAvailable || props.traceAvailable),
+  })
+  const workSurfaces = () => availableChatSurfaces(availability()).filter((surface) => surface.id !== 'chat')
+  const surfaceLabel = (tab: ChatTab) => {
+    if (tab === 'steps') return i18n.tr('Arbeid', 'Work')
+    if (tab === 'artifacts') return i18n.tr('Resultat', 'Output')
+    if (tab === 'sources') return i18n.tr('Kilder', 'Sources')
+    if (tab === 'trace') return i18n.tr('Spor', 'Trace')
+    return i18n.tr('Samtale', 'Chat')
+  }
+  const surfaceCount = (tab: ChatTab) => (
+    tab === 'sources'
+      ? props.sourceCount
+      : tab === 'artifacts'
+        ? props.artifactCount
+        : tab === 'steps' ? props.stepCount : 0
+  )
+  const selectSurface = (tab: ChatTab) => {
+    setOpenMenu(null)
+    props.onChange(tab)
+  }
+  const closeOnFocusOut = (event: FocusEvent) => {
+    const next = event.relatedTarget
+    if (!(event.currentTarget instanceof HTMLElement) || !(next instanceof Node) || !event.currentTarget.contains(next)) {
+      setOpenMenu(null)
+    }
+  }
+
   return (
     <header class="verevon-chat-header">
       <div class="verevon-chat-header__copy">
         <h1>{props.title}</h1>
-        <p>{props.messageCount} messages · {props.branchCount} regenerations</p>
+        <p>
+          {i18n.tr(`${props.messageCount} meldinger`, `${props.messageCount} messages`)}
+          <Show when={props.branchCount > 0}>
+            {' · '}{i18n.tr(`${props.branchCount} versjoner`, `${props.branchCount} versions`)}
+          </Show>
+        </p>
       </div>
       <div class="verevon-chat-header__actions">
-        <button type="button" class="verevon-chat-header-button" aria-label="Regenerate latest response" onClick={() => props.onRegenerate()}>
-          <RefreshCw size={15} />
-        </button>
-        <button type="button" class="verevon-chat-header-button verevon-chat-header-button--primary" aria-label="New chat" onClick={() => props.onNewChat()}>
-          <MessageSquarePlus size={15} />
-        </button>
+        <Show when={workSurfaces().length > 0}>
+          <div class="verevon-chat-header-menu" onFocusOut={closeOnFocusOut}>
+            <button
+              type="button"
+              class={{
+                'verevon-chat-workspace-trigger': true,
+                'verevon-chat-workspace-trigger--active': props.active !== 'chat',
+              }}
+              aria-haspopup="menu"
+              aria-expanded={openMenu() === 'workspace' ? 'true' : 'false'}
+              onClick={() => setOpenMenu(openMenu() === 'workspace' ? null : 'workspace')}
+            >
+              <PanelRightOpen size={14} />
+              <span>{props.active === 'chat' ? i18n.tr('Arbeidsflate', 'Workspace') : surfaceLabel(props.active)}</span>
+              <ChevronRight size={13} class="verevon-chat-workspace-trigger__chevron" />
+            </button>
+            <Show when={openMenu() === 'workspace'}>
+              <div class="verevon-chat-header-menu__popover verevon-chat-header-menu__popover--workspace" role="menu" aria-label={i18n.tr('Åpne arbeidsflate', 'Open workspace')}>
+                <For each={workSurfaces()}>
+                  {(surface) => {
+                    const Icon = surface.icon
+                    return (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        class={{ 'is-selected': props.active === surface.id }}
+                        onClick={() => selectSurface(surface.id)}
+                      >
+                        <Icon size={14} />
+                        <span>{surfaceLabel(surface.id)}</span>
+                        <Show when={surfaceCount(surface.id) > 0}><em>{surfaceCount(surface.id)}</em></Show>
+                      </button>
+                    )
+                  }}
+                </For>
+              </div>
+            </Show>
+          </div>
+        </Show>
+        <div class="verevon-chat-header__utility-actions">
+          <div class="verevon-chat-header-menu" role="presentation" onFocusOut={closeOnFocusOut}>
+            <button
+              type="button"
+              class="verevon-chat-header-button"
+              aria-haspopup="menu"
+              aria-expanded={openMenu() === 'more' ? 'true' : 'false'}
+              onClick={() => setOpenMenu(openMenu() === 'more' ? null : 'more')}
+            >
+              <MoreHorizontal size={14} />
+              <span class="sr-only">{i18n.tr('Flere handlinger', 'More actions')}</span>
+            </button>
+            <Show when={openMenu() === 'more'}>
+              <div class="verevon-chat-header-menu__popover" role="menu" aria-label={i18n.tr('Samtalehandlinger', 'Conversation actions')}>
+                <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); props.onRegenerate() }}>
+                  <RefreshCw size={14} />
+                  <span>{i18n.tr('Generer siste svar på nytt', 'Regenerate latest response')}</span>
+                </button>
+              </div>
+            </Show>
+          </div>
+          <button type="button" class="verevon-chat-header-button verevon-chat-header-button--primary" aria-label={i18n.tr('Ny samtale', 'New chat')} onClick={() => props.onNewChat()}>
+            <MessageSquarePlus size={15} />
+            <span>{i18n.tr('Ny', 'New')}</span>
+          </button>
+        </div>
       </div>
     </header>
   )

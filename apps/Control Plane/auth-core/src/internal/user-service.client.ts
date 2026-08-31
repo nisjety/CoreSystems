@@ -21,7 +21,7 @@ export class UserServiceClient {
   private async makeRequest<T>(
     endpoint: string,
     method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET',
-    body?: any,
+    body?: unknown,
   ): Promise<T> {
     const url = `${this.userServiceUrl}${endpoint}`;
     const headers: Record<string, string> = {
@@ -157,11 +157,15 @@ export class UserServiceClient {
   /**
    * Get user profile from user service
    */
-  async getUserProfile(userId: string): Promise<any> {
+  async getUserProfile(
+    userId: string,
+  ): Promise<Record<string, unknown> | null> {
     try {
       this.logger.log(`Getting user profile: ${userId}`);
 
-      const user = await this.makeRequest(`/api/v1/users/${userId}/profile`);
+      const user = await this.makeRequest<Record<string, unknown>>(
+        `/api/v1/users/${userId}/profile`,
+      );
 
       this.logger.log(`User profile retrieved successfully`);
       return user;
@@ -174,7 +178,10 @@ export class UserServiceClient {
   /**
    * Update user profile in user service
    */
-  async updateUserProfile(userId: string, data: any): Promise<boolean> {
+  async updateUserProfile(
+    userId: string,
+    data: Record<string, unknown>,
+  ): Promise<boolean> {
     try {
       this.logger.log(`Updating user profile: ${userId}`);
 

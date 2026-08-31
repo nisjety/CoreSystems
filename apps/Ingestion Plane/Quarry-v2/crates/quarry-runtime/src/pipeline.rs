@@ -555,7 +555,7 @@ impl PageRunner {
                 status: change,
                 prev_fingerprint: prev_fp.map(|p| p.0),
             },
-            branding: branding_json,
+            branding: branding_json.clone(),
             // Caching headers for conditional re-fetches. Persisted on
             // the NormalizedOutput so a future re-crawl can pull the
             // previous ETag/Last-Modified and send conditional GET
@@ -654,7 +654,75 @@ impl PageRunner {
                     source_url: resp.final_url.to_string(),
                     fetched_at,
                     fingerprint: fp.0.clone(),
-                    field_traces: vec![],
+                    field_traces: vec![
+                        quarry_core::contracts::FieldTrace {
+                            field: "title".into(),
+                            source_url: resp.final_url.to_string(),
+                            selector: Some("meta[property='og:title'], title, h1".into()),
+                        },
+                        quarry_core::contracts::FieldTrace {
+                            field: "description".into(),
+                            source_url: resp.final_url.to_string(),
+                            selector: Some("meta[property='og:description'], meta[name='description']".into()),
+                        },
+                        quarry_core::contracts::FieldTrace {
+                            field: "content".into(),
+                            source_url: resp.final_url.to_string(),
+                            selector: Some("readability → markdown".into()),
+                        },
+                    ],
+                };
+
+                // Preserve full SEO + link metadata for Firecrawl parity.
+                // Previously this was `json!({})`, dropping description/author/dates/lang.
+                let ingest_metadata = {
+                    let mut m = serde_json::Map::new();
+                    if let Some(desc) = &output.metadata.description {
+                        m.insert("description".into(), serde_json::Value::String(desc.clone()));
+                    }
+                    if let Some(author) = &output.metadata.author {
+                        m.insert("author".into(), serde_json::Value::String(author.clone()));
+                    }
+                    if let Some(lang) = &output.metadata.lang {
+                        m.insert("language".into(), serde_json::Value::String(lang.clone()));
+                    }
+                    if let Some(ct) = &output.metadata.content_type {
+                        m.insert("content_type".into(), serde_json::Value::String(ct.clone()));
+                    }
+                    if let Some(pub_at) = &output.metadata.published_at {
+                        m.insert("published_at".into(), serde_json::Value::String(pub_at.clone()));
+                    }
+                    if let Some(mod_at) = &output.metadata.modified_at {
+                        m.insert("modified_at".into(), serde_json::Value::String(mod_at.clone()));
+                    }
+                    if let Some(canonical) = &output.metadata.canonical_url {
+                        m.insert("canonical_url".into(), serde_json::Value::String(canonical.clone()));
+                    } else if let Some(canonical) = &output.url.canonical {
+                        m.insert("canonical_url".into(), serde_json::Value::String(canonical.clone()));
+                    }
+                    if let Some(keywords) = &output.metadata.keywords {
+                        m.insert("keywords".into(), serde_json::Value::String(keywords.clone()));
+                    }
+                    if let Some(og_image) = &output.metadata.og_image {
+                        m.insert("og_image".into(), serde_json::Value::String(og_image.clone()));
+                    }
+                    if let Some(robots) = &output.metadata.robots {
+                        m.insert("robots".into(), serde_json::Value::String(robots.clone()));
+                    }
+                    // Persist extracted links (Firecrawl parity: links array)
+                    if !output.formats.links.is_empty() {
+                        if let Ok(links_val) = serde_json::to_value(&output.formats.links) {
+                            m.insert("links".into(), links_val);
+                        }
+                    }
+                    // Persist branding signals (logo, colors, fonts) for UI
+                    if let Some(branding) = &branding_json {
+                        m.insert("branding".into(), branding.clone());
+                    }
+                    // Persist driver provenance for debugging
+                    m.insert("driver_kind".into(), serde_json::Value::String(format!("{:?}", output.driver.kind)));
+                    m.insert("fetched_at".into(), serde_json::Value::String(fetched_at.to_rfc3339()));
+                    serde_json::Value::Object(m)
                 };
 
                 let ingest_req = DataPlaneIngestRequest {
@@ -666,7 +734,7 @@ impl PageRunner {
                     html_ref: html_fmt.as_ref().map(|f| f.artifact_id.clone()),
                     raw_ref: None,
                     chunks,
-                    metadata: json!({}),
+                    metadata: ingest_metadata,
                     fingerprint: fp.0.clone(),
                     zdr: self.zdr,
                     retention_policy: self.privacy.retention_policy.clone(),

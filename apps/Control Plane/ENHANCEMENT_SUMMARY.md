@@ -293,13 +293,17 @@ If using the enhanced service layer:
 
 ```go
 // In org-core main.go or server initialization
-orgService := orgcore.NewService(repo, publisher, redisClient)
-orgService.SetSharedPublisher(sp)      // cross-plane verevon-nats events
-orgService.SetAuditPublisher(natsClient) // local audit bus
+package main
 
-// Now you can use:
-orgService.UpdatePlan(ctx, orgID, "pro", adminUserID, "Upgrade request")
-orgService.HardDelete(ctx, orgID) // GDPR deletion
+func setupOrgService(repo Repository, publisher Publisher, redisClient RedisClient, sp SharedPublisher, natsClient NATSClient) {
+	orgService := orgcore.NewService(repo, publisher, redisClient)
+	orgService.SetSharedPublisher(sp)      // cross-plane verevon-nats events
+	orgService.SetAuditPublisher(natsClient) // local audit bus
+
+	// Now you can use:
+	orgService.UpdatePlan(ctx, orgID, "pro", adminUserID, "Upgrade request")
+	orgService.HardDelete(ctx, orgID) // GDPR deletion
+}
 ```
 
 ### Step 4: Test Event Publishing
@@ -406,7 +410,7 @@ After migration, verify:
 
 Add REST/gRPC endpoints in org-core:
 
-```go
+```http
 POST   /organizations/:id/plan           // Update plan
 GET    /organizations/:id/quotas         // Get quotas
 POST   /organizations/:id/quotas/:key    // Update quota
@@ -422,6 +426,8 @@ DELETE /organizations/:id/gdpr           // GDPR hard delete
 ### Add Quota Enforcement
 
 ```go
+package orgcore
+
 func (s *Service) CheckQuota(ctx context.Context, orgID, quotaKey string) (bool, error) {
     quotas, err := s.repo.GetQuotas(ctx, orgID)
     if err != nil {
@@ -444,6 +450,8 @@ func (s *Service) CheckQuota(ctx context.Context, orgID, quotaKey string) (bool,
 ### Add Billing Webhook Integration
 
 ```go
+package orgcore
+
 // Stripe webhook handler
 func (s *Service) HandleStripeWebhook(ctx context.Context, event StripeEvent) error {
     switch event.Type {

@@ -105,7 +105,7 @@ The Control Plane publishes events via **NATS JetStream** for all state changes.
 
 #### Organization Events (auth-core + org-core)
 
-```typescript
+```json5
 // Published by: auth-core (on initial creation)
 {
   type: "organization.created",
@@ -152,7 +152,7 @@ The Control Plane publishes events via **NATS JetStream** for all state changes.
 
 #### User Events (auth-core)
 
-```typescript
+```json5
 // Published by: auth-core (on user registration)
 {
   type: "user.created",
@@ -179,7 +179,7 @@ The Control Plane publishes events via **NATS JetStream** for all state changes.
 
 #### Organization Membership Events (auth-core)
 
-```typescript
+```json5
 // Published by: auth-core (when user added to org)
 {
   type: "organization.member.added",
@@ -230,7 +230,7 @@ Convex **subscribes** to Control Plane events and maintains a **derived copy** o
 ### Convex Schema (Read-Only Fields)
 
 ```typescript
-organizations: defineTable({
+const organizationsTable = defineTable({
   externalOrgId: v.string(),  // ← Control Plane org ID (READ-ONLY)
   name: v.string(),            // ← Synced from Control Plane
   slug: v.string(),            // ← Synced from Control Plane
@@ -244,19 +244,19 @@ organizations: defineTable({
   // Sync metadata
   syncStatus: v.union(v.literal("syncing"), v.literal("synced"), v.literal("deleted")),
   lastSyncedAt: v.number(),
-})
+});
 
-users: defineTable({
+const usersTable = defineTable({
   externalAuthId: v.string(),  // ← Control Plane user ID (READ-ONLY)
   email: v.string(),            // ← Synced from Control Plane
   name: v.optional(v.string()), // ← Synced from Control Plane
   orgId: v.id("organizations"), // ← Synced from Control Plane
-  role: v.union(...),           // ← Synced from Control Plane
+  role: v.union(v.literal("owner"), v.literal("admin"), v.literal("member")), // ← Synced from Control Plane
   
   // Sync metadata
   syncStatus: v.union(v.literal("syncing"), v.literal("synced"), v.literal("deleted")),
   lastSyncedAt: v.number(),
-})
+});
 ```
 
 ### What Convex Can Do

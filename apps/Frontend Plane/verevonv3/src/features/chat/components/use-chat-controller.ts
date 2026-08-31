@@ -7,6 +7,7 @@ import {
 } from 'solid-js'
 import {
   createStore,
+  deep,
   snapshot,
 } from 'solid-js'
 import {
@@ -63,7 +64,6 @@ import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
   cancelInvocation,
   cheapDefaultModelId,
-  deleteChatThread,
   describeFeedbackFailure,
   getChatThreadTranscript,
   listChatThreadEvents,
@@ -416,9 +416,14 @@ export function useChatController() {
     threadId: string,
     turns: ChatTurn[],
     overrides: Partial<ChatThreadHistoryInput> = {},
-    taskSteps: AgentTaskStep[] = state.taskSteps,
+    taskSteps?: AgentTaskStep[],
     options: { persistServer?: boolean } = {},
   ) => {
+    // Stream callbacks and the resource persistence effect run in Solid 2's
+    // untracked phase. Materialize store-backed inputs once at this boundary so
+    // the normalizers and JSON storage never read a live proxy from that phase.
+    const stableTurns = untrack(() => snapshot(turns))
+    const stableTaskSteps = untrack(() => snapshot(taskSteps ?? state.taskSteps))
     // Temporary (ZDR) chat: never persisted, full stop. This is the single
     // funnel every persistence call site in this file goes through
     // (history + transcript + server snapshot below), so gating here covers
@@ -426,11 +431,16 @@ export function useChatController() {
     // Defensive: the backend already never emits a `title`/`follow_ups` event
     // for a ZDR turn, but a caller (e.g. `onTitle`) reaching here anyway must
     // still not write.
-    if (isTemporaryThread(threadId)) return
+    // This function is also called from the Solid 2 persistence effect's
+    // untracked phase and from async hydration continuations. The ownership
+    // markers are lifecycle guards, not dependencies of the snapshot itself;
+    // read them explicitly untracked so those callers never trigger strict
+    // reactive-read diagnostics.
+    if (untrack(() => isTemporaryThread(threadId))) return
     // A thread whose origin isn't "chat" (only reachable here via a
     // cross-surface deep link) is viewable but must not become a permanent
     // entry in Chat's own history/transcript/server-snapshot store.
-    if (isForeignOriginThread(threadId)) return
+    if (untrack(() => isForeignOriginThread(threadId))) return
     // …and the SERVER's posture, which this in-memory Set cannot represent.
     // `temporaryThreadIds` only knows about temporary chats started in THIS
     // tab; it says nothing about an org-wide Zero Data Retention policy, and it
@@ -438,8 +448,8 @@ export function useChatController() {
     // stated on the last threads listing, so a ZDR workspace writes no local
     // copy even though the composer toggle was never touched.
     if (!isLocalRetentionAllowed()) return
-    const firstUserTurn = turns.find((turn) => turn.role === 'user')
-    const lastTurn = turns.at(-1)
+    const firstUserTurn = stableTurns.find((turn) => turn.role === 'user')
+    const lastTurn = stableTurns.at(-1)
     const stored = readChatThreadHistory().find((item) => item.threadId === threadId)
     // Title lock: once a thread carries an AI-generated title (from the
     // gateway's `title` SSE event), every later snapshot keeps it — the
@@ -452,22 +462,25 @@ export function useChatController() {
         : stored?.titleKind === 'generated'
           ? stored.title
           : undefined
+    // Session Core intentionally rejects oversized presentation fields rather
+    // than silently mutating them. Keep the browser's local transcript rich,
+    // but send compact presentation text at the persistence boundary so a long
+    // streamed answer cannot turn the final snapshot into a 400 response.
     const title =
       generatedTitle ??
       overrides.title ??
-      (firstUserTurn ? createPreview(firstUserTurn.content, 48) : createChatTitle(turns))
+      (firstUserTurn ? createPreview(firstUserTurn.content, 48) : createChatTitle(stableTurns))
+    const durableTitle = createPreview(title, 96)
     const titleKind: ChatThreadTitleKind = generatedTitle ? 'generated' : 'preview'
-    // Server enforces ≤64 for durable titles (ChatTitleEvent sanitized to ≤64).
-    // Keep 48 for first preview but clamp the durable write to 64 to avoid 400.
-    const durableTitle = createPreview(title, 64)
-    const preview = overrides.preview ?? lastTurn?.content
+    const rawPreview = overrides.preview ?? lastTurn?.content
+    const preview = rawPreview == null ? undefined : createPreview(rawPreview, 180)
     // Activity timestamp, never write timestamp: when this snapshot carries no
     // usable message time (e.g. a selection self-heal over timestamp-less
     // server messages), keep the stored `updatedAt` instead of letting
     // normalizeTimestamp stamp "now" — a click must not re-date the thread.
     const updatedAt = overrides.updatedAt ?? (lastTurn?.createdAt || undefined) ?? stored?.updatedAt
-    const transcriptTurns = turnsToTranscript(turns)
-    const transcriptTaskSteps = taskStepsToTranscript(taskSteps)
+    const transcriptTurns = turnsToTranscript(stableTurns)
+    const transcriptTaskSteps = taskStepsToTranscript(stableTaskSteps)
     upsertChatThreadHistory({
       threadId,
       title: durableTitle,
@@ -638,7 +651,12 @@ export function useChatController() {
     sequence: number,
   ): Promise<ChatTurn[]> => {
     if (isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return turns
-    const candidates = turns.filter((turn) => turn.role === 'assistant' && Boolean(turn.runId))
+    // Ordinary Ask turns also receive a durable run id from model-gateway, but
+    // they have no Work/Trace surface and therefore no proof bundle to render.
+    // Restrict hydration to the same explicit Work classification used by the
+    // live panel so a calm chat reload does not issue a guaranteed 500-prone
+    // proof request for every ordinary answer.
+    const candidates = turns.filter((turn) => isWorkSurfaceTurn(turn))
     if (candidates.length === 0) return turns
     const results = await Promise.all(candidates.map(async (turn) => {
       const bundle = await getRunProofBundle(turn.runId as string).catch(() => null)
@@ -743,6 +761,13 @@ export function useChatController() {
    */
   let hydratingThreadId: string | null = null
   let threadLoadSequence = 0
+  // Mount-time restoration performs async authority/listing reads. A user can
+  // start a fresh chat (or choose another thread) while those reads are in
+  // flight; without a separate selection revision, the stale bootstrap then
+  // restores the old stored thread over the new stream. Besides showing the
+  // wrong conversation, that made the first stream lose ownership and emit the
+  // stale-projection warning seen in the browser console.
+  let threadSelectionRevision = 0
 
   const loadThread = async (threadId: string) => {
     // Switching threads must tear down the previously-selected thread's
@@ -781,16 +806,23 @@ export function useChatController() {
     const localCached = readChatThreadTranscript(threadId)
     const serverCached = await getChatThreadTranscript(threadId).catch(() => null)
     if (seq !== threadLoadSequence) return
-    const cached = serverCached
-      ? {
-          threadId: serverCached.threadId,
-          turns: serverCached.turns as ChatThreadTranscriptTurn[],
-          taskSteps: serverCached.taskSteps as ChatThreadTranscriptStep[] | undefined,
-          updatedAt: serverCached.updatedAt,
-        }
-      : localCached
-    const cachedTurns = dedupeChatTurns(cached?.turns.map(transcriptTurnToChatTurn) ?? [])
-    const cachedTaskSteps = cached?.taskSteps?.map(transcriptStepToTaskStep) ?? []
+    // Session Core's transcript is authoritative for message text, but it is
+    // intentionally envelope-only: it does not store the browser's rich
+    // presentation projection (task steps, tool calls, citations, artifacts,
+    // grounding, and telemetry). Keep the local projection as metadata even
+    // when the canonical server transcript is available. The previous
+    // server-first selection made every contextual surface look empty after a
+    // reload or thread switch while the Chat tab still showed the messages.
+    const localCachedTurns = dedupeChatTurns(localCached?.turns.map(transcriptTurnToChatTurn) ?? [])
+    const serverCachedTurns = dedupeChatTurns(serverCached?.turns.map((turn) =>
+      transcriptTurnToChatTurn(turn as ChatThreadTranscriptTurn),
+    ) ?? [])
+    const cachedTurns = localCachedTurns.length > 0 ? localCachedTurns : serverCachedTurns
+    const cachedTaskStepValues = (
+      localCached?.taskSteps ?? serverCached?.taskSteps
+    ) as ChatThreadTranscriptStep[] | undefined
+    const cachedTaskSteps = cachedTaskStepValues?.map(transcriptStepToTaskStep) ?? []
+    const cachedUpdatedAt = serverCached?.updatedAt ?? localCached?.updatedAt
     try {
       const history = await getThreadMessages(threadId)
       if (seq !== threadLoadSequence) return
@@ -798,7 +830,7 @@ export function useChatController() {
       const mergedTurns = serverTurns.length > 0
         ? mergeServerTurnsWithCachedMetadata(serverTurns, cachedTurns)
         : cachedTurns
-      let turns = fillMissingTurnTimestamps(mergedTurns, threadId, cached?.updatedAt)
+      let turns = fillMissingTurnTimestamps(mergedTurns, threadId, cachedUpdatedAt)
       // Clear the guard BEFORE the turns land: setState runs the snapshot
       // effect synchronously, and that very run is the one that must persist
       // this thread's real content (it also self-heals entries the old bug
@@ -1030,7 +1062,15 @@ export function useChatController() {
   }
 
   createEffect(
-    () => ({ threadId: state.threadId, turns: state.turns, taskSteps: state.taskSteps }),
+    // Solid 2 runs the second phase untracked. `deep` gives the compute phase a
+    // plain value while subscribing to nested stream changes, so history
+    // serialization never walks a live store proxy from that phase and still
+    // reruns as tokens append.
+    () => ({
+      threadId: state.threadId,
+      turns: deep(state.turns),
+      taskSteps: deep(state.taskSteps),
+    }),
     ({ threadId, turns, taskSteps }) => {
       if (!threadId || turns.length === 0) return
       // While a thread switch is hydrating, `state.turns` still belongs to the
@@ -1038,12 +1078,21 @@ export function useChatController() {
       // guard exists for. Live streaming is unaffected: hydratingThreadId is only
       // non-null inside loadThread.
       if (threadId === hydratingThreadId) return
-      writeThreadSnapshot(threadId, turns, {}, taskSteps, { persistServer: false })
+      // Persistence is an event-style side effect. Its guard helpers read
+      // lifecycle signals (temporary/foreign ownership); keep those reads out
+      // of Solid 2's untracked effect callback while retaining the reactive
+      // dependency collection in the compute phase above.
+      untrack(() => writeThreadSnapshot(threadId, turns, {}, taskSteps, { persistServer: false }))
     },
   )
 
   const resetChatState = () => {
     abortController?.abort()
+    // A mount-time (or previously selected) transcript load can still be
+    // awaiting its server response. Invalidate it before clearing state so it
+    // cannot repopulate the new empty chat after the user chose New chat.
+    threadLoadSequence += 1
+    hydratingThreadId = null
     setState(() => ({
       turns: [],
       taskSteps: [],
@@ -1070,11 +1119,17 @@ export function useChatController() {
     () => {
       const handleActiveThreadChange = (event: Event) => {
         const threadId = (event as CustomEvent<{ threadId: string | null }>).detail?.threadId
+        // This includes clearing the active thread for a fresh chat. It
+        // invalidates a mount-time restore that captured an older pointer.
+        threadSelectionRevision += 1
         if (!threadId) {
           resetChatState()
           return
         }
-        if (threadId && threadId !== state.threadId) void loadThread(threadId)
+        // This is an event callback, not a reactive derivation. Read the
+        // current thread intentionally without subscribing the lifecycle
+        // effect to a store field it cannot rerun from.
+        if (threadId && threadId !== untrack(() => state.threadId)) void loadThread(threadId)
       }
       window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
 
@@ -1085,8 +1140,9 @@ export function useChatController() {
         // the local selection rather than retaining a cross-user ghost thread.
         const linkedThread = readThreadDeepLink(window.location.search)
         const storedThread = linkedThread ?? readActiveChatThreadId()
-        if (storedThread) {
-          if (isTemporaryThread(storedThread)) {
+        const bootstrapSelectionRevision = threadSelectionRevision
+        if (storedThread && bootstrapSelectionRevision === threadSelectionRevision) {
+          if (untrack(() => isTemporaryThread(storedThread))) {
             await loadThread(storedThread)
           } else {
             // A stored or deep-linked pointer is only trusted as far as Chat's
@@ -1098,7 +1154,14 @@ export function useChatController() {
             // chat. Deep links fail closed to read-only until origin can be
             // proven; an existing Chat pointer can still load from cache.
             const listed = await listChatThreads().catch(() => null)
-            if (!listed && linkedThread) {
+            // The user may have selected a different thread or pressed New
+            // chat while the listing request was outstanding. The event
+            // listener owns that newer selection; never resurrect the
+            // mount-time value into shared chat state.
+            if (bootstrapSelectionRevision !== threadSelectionRevision) {
+              // Keep initializing models and a pending routed launch below;
+              // only this stale transcript restoration is cancelled.
+            } else if (!listed && linkedThread) {
               // An outage means origin cannot be proven. Keep the deep-linked
               // transcript viewable, but fail closed to read-only so a
               // transient listing failure can never turn a foreign thread
@@ -1157,8 +1220,9 @@ export function useChatController() {
             tools: pending.tools ?? [],
             actions: (pending.actions ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
           })
-          if (pending.supportHandoff && state.threadId) {
-            bindSupportChatThread(pending.supportHandoff, state.threadId)
+          const currentThreadId = untrack(() => state.threadId)
+          if (pending.supportHandoff && currentThreadId) {
+            bindSupportChatThread(pending.supportHandoff, currentThreadId)
           }
         }
       }
@@ -1408,15 +1472,6 @@ export function useChatController() {
   const sendContent = async (rawContent: string, modelOverride?: string, options: SendOptions = {}) => {
     const content = rawContent.trim()
     if (!content) return
-    // Deduplicate rapid double-sends (e.g., double Enter or double click).
-    // Long URL pastes in the screenshot produced two identical "Meg" bubbles
-    // within 1s when the submit raced. Ignore an identical user turn if the
-    // previous turn is the same user content and very recent.
-    const lastTurn = state.turns.at(-1)
-    if (lastTurn?.role === 'user' && lastTurn.content.trim() === content) {
-      const ageMs = Date.now() - Date.parse(lastTurn.createdAt)
-      if (Number.isFinite(ageMs) && ageMs < 2500) return
-    }
     // A deep-linked transcript from Spaces, Support, or another agent surface
     // can be displayed here for continuity, but Chat must never append a turn
     // to it or queue input into its run. The banner/composer guard is UX; this
@@ -1451,10 +1506,14 @@ export function useChatController() {
     if (isNewThread) {
       setState((s) => { s.threadId = activeThreadId })
       if (options.zdr) markThreadTemporary(activeThreadId)
-      // A temporary thread's id must never become the persisted "active
-      // thread" pointer — that pointer is itself a form of persistence
-      // (survives reload), which a no-history/no-memory session must not.
-      if (!options.zdr) setActiveChatThreadId(activeThreadId)
+      // Keep the provisional id in the in-memory chat state only. Publishing
+      // it as the active-thread pointer dispatches the selection event, which
+      // makes the history hydrator request `/transcript` and `/messages`
+      // before Session Core has minted the durable thread. Those intentional
+      // 404s abort this stream and leave the first turn queued until reload.
+      // The durable pointer is published from `onConnected` below, after the
+      // gateway returns the server-owned thread id. Temporary Chat remains
+      // unpersisted by design.
     }
 
     const submittedAt = options.createdAt ?? new Date().toISOString()
@@ -1502,7 +1561,17 @@ export function useChatController() {
     setState((s) => { s.turns = nextTurns })
     setUiEvents([])
     setTraceReplayTruncated(false)
-    writeThreadSnapshot(activeThreadId, nextTurns, { preview: content, updatedAt: submittedAt })
+    // A new conversation starts with a provisional client id. Persist its
+    // local transcript immediately, but do not enqueue a server PUT until the
+    // gateway's `connected` event gives us the durable thread id; otherwise the
+    // API quite correctly rejects a snapshot for a thread that does not exist.
+    writeThreadSnapshot(
+      activeThreadId,
+      nextTurns,
+      { preview: content, updatedAt: submittedAt },
+      state.taskSteps,
+      { persistServer: false },
+    )
     setState((s) => {
       s.taskSteps = [
         ...s.taskSteps,
@@ -1534,9 +1603,6 @@ export function useChatController() {
       ownsKey: ownsMachine,
       generation,
       activeGeneration: () => streamGeneration,
-      onDrop: (reason) => {
-        console.warn(`[chat] dropped a stale projection write (${reason}, gen ${generation})`)
-      },
     })
 
     let settled = false
@@ -1568,7 +1634,7 @@ export function useChatController() {
           // The local provisional ID remains only a UI correlation key until
           // `onConnected` replaces it; sending it as a thread ID would make
           // the BFF correctly treat the request as an existing-thread write.
-          threadId: selectedNewSpaceRef ? undefined : activeThreadId,
+          threadId: isNewThread ? undefined : activeThreadId,
           sessionKey: activeThreadId,
           spaceRef: requestedSpaceRef,
           browseWeb: options.browseWeb,
@@ -1605,7 +1671,10 @@ export function useChatController() {
                 const provisionalThreadId = activeThreadId
                 removeChatThreadHistoryItem(provisionalThreadId)
                 removeChatThreadTranscript(provisionalThreadId)
-                void deleteChatThread(provisionalThreadId).catch(() => undefined)
+                // A provisional client id only correlates this open browser
+                // stream. It is never a durable Session Core thread, so
+                // clearing its local projection is sufficient; a remote delete
+                // would only add a spurious 404 after the durable id arrives.
                 // The provisional id may have been the one just marked
                 // temporary above — carry that marking to the server's real
                 // id so the lock and the persistence guard both survive the
@@ -1891,8 +1960,9 @@ export function useChatController() {
             // Proof is committed after the run settles. Read the server-owned
             // bundle once it is available so effectful turns become immutable
             // in the message action bar as well as in Work/Trace.
-            const completedRunId = state.turns.find((turn) => turn.id === assistantId)?.runId
-            if (completedRunId && !isTemporaryThread(activeThreadId)) {
+            const completedTurn = state.turns.find((turn) => turn.id === assistantId)
+            const completedRunId = completedTurn?.runId
+            if (completedRunId && isWorkSurfaceTurn(completedTurn) && !isTemporaryThread(activeThreadId)) {
               void getRunProofBundle(completedRunId).then((bundle) => {
                 if (!bundle?.effectClass || !projection.accepts()) return
                 setState((s) => {
@@ -1928,6 +1998,11 @@ export function useChatController() {
             // never on a user-aborted stream.
             if (model && !controller.signal.aborted) {
               settled = true
+              // An SSE error frame can share a buffered response with trailing
+              // frames. End this failed connection before opening the fallback
+              // stream so none of its leftover events can contend with the new
+              // turn's projection channel.
+              controller.abort()
               markOpenSteps('stopped', 'Provider unavailable. Retrying with fallback model.', assistantId)
               setState((s) => {
                 s.turns = s.turns.filter((turn) => turn.id !== assistantId)

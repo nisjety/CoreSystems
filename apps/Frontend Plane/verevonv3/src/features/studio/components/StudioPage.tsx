@@ -20,7 +20,7 @@ import {
   Undo2,
   Video,
 } from '@/shared/icons'
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Match, Show, Switch, untrack } from 'solid-js'
 import { Dynamic } from '@solidjs/web'
 import {
   buildSocialDraftBody,
@@ -118,12 +118,30 @@ export default function StudioPage(props: { section?: StudioSection }) {
 
 function StudioCanvasPage() {
   const i18n = useI18n()
-  const launchCanvasTitle = i18n.tr('Lanseringslerret', 'Launch canvas')
-  const localCanvasMessage = i18n.tr('Lokalt lerret', 'Local canvas')
-  const ephemeralProjectMessage = i18n.tr(
+  // Translation reads must live in a Solid tracking scope. These memos keep
+  // the canvas labels in sync when the locale changes; imperative handlers
+  // use the `read*` helpers below to intentionally take an untracked snapshot.
+  const launchCanvasTitle = createMemo(() => i18n.tr('Lanseringslerret', 'Launch canvas'))
+  const localCanvasMessage = createMemo(() => i18n.tr('Lokalt lerret', 'Local canvas'))
+  const ephemeralProjectMessage = createMemo(() => i18n.tr(
     'Midlertidig Studio-prosjekt — nullstilles hvis gatewayen starter på nytt',
     'Temporary Studio project — resets when the gateway restarts',
-  )
+  ))
+  const loadingProjectMessage = createMemo(() => i18n.tr('Laster inn prosjekt', 'Loading project'))
+  const readyToSaveMessage = createMemo(() => i18n.tr('Klar til å lagre', 'Ready to save'))
+  const savingProjectMessage = createMemo(() => i18n.tr('Lagrer prosjekt', 'Saving project'))
+  const saveFailedMessage = createMemo(() => i18n.tr('Lagring mislyktes', 'Save failed'))
+  const exportingDraftMessage = createMemo(() => i18n.tr('Eksporterer utkast', 'Exporting draft'))
+  const socialDraftCreatedMessage = createMemo(() => i18n.tr('Sosialt utkast opprettet', 'Social draft created'))
+  const exportFailedMessage = createMemo(() => i18n.tr('Eksport mislyktes', 'Export failed'))
+  const readLaunchCanvasTitle = () => untrack(launchCanvasTitle)
+  const readLocalCanvasMessage = () => untrack(localCanvasMessage)
+  const readEphemeralProjectMessage = () => untrack(ephemeralProjectMessage)
+  const readSavingProjectMessage = () => untrack(savingProjectMessage)
+  const readSaveFailedMessage = () => untrack(saveFailedMessage)
+  const readExportingDraftMessage = () => untrack(exportingDraftMessage)
+  const readSocialDraftCreatedMessage = () => untrack(socialDraftCreatedMessage)
+  const readExportFailedMessage = () => untrack(exportFailedMessage)
   let canvasRef: HTMLDivElement | undefined
   let loadedProjectId: string | null = null
   const [blocks, setBlocks] = createSignal<StudioBlock[]>(initialBlocks)
@@ -131,9 +149,9 @@ function StudioCanvasPage() {
   const [previewDevice, setPreviewDevice] = createSignal<StudioPreviewDevice>('desktop')
   const [projectId, setProjectId] = createSignal<string | null>(null)
   const [orgId, setOrgId] = createSignal('')
-  const [projectTitle, setProjectTitle] = createSignal(launchCanvasTitle)
+  const [projectTitle, setProjectTitle] = createSignal(readLaunchCanvasTitle())
   const [persistenceSource, setPersistenceSource] = createSignal<StudioPersistenceSource>('fallback')
-  const [persistenceMessage, setPersistenceMessage] = createSignal(localCanvasMessage)
+  const [persistenceMessage, setPersistenceMessage] = createSignal(readLocalCanvasMessage())
   const [busyAction, setBusyAction] = createSignal<StudioPersistenceAction | null>(null)
   const [history, setHistory] = createSignal<StudioBlock[][]>([])
   const [future, setFuture] = createSignal<StudioBlock[][]>([])
@@ -153,10 +171,24 @@ function StudioCanvasPage() {
   })
 
   createEffect(
-    () => workspace(),
-    (nextWorkspace) => {
+    () => ({
+      workspace: workspace(),
+      launchCanvasTitle: launchCanvasTitle(),
+      localCanvasMessage: localCanvasMessage(),
+      ephemeralProjectMessage: ephemeralProjectMessage(),
+      loadingProjectMessage: loadingProjectMessage(),
+      readyToSaveMessage: readyToSaveMessage(),
+    }),
+    ({
+      workspace: nextWorkspace,
+      launchCanvasTitle: nextLaunchCanvasTitle,
+      localCanvasMessage: nextLocalCanvasMessage,
+      ephemeralProjectMessage: nextEphemeralProjectMessage,
+      loadingProjectMessage: nextLoadingProjectMessage,
+      readyToSaveMessage: nextReadyToSaveMessage,
+    }) => {
       if (!nextWorkspace) {
-        setPersistenceMessage(i18n.tr('Laster inn prosjekt', 'Loading project'))
+        setPersistenceMessage(nextLoadingProjectMessage)
         return
       }
 
@@ -164,7 +196,7 @@ function StudioCanvasPage() {
       setPersistenceSource(nextWorkspace.source)
 
       if (!nextWorkspace.project) {
-        setPersistenceMessage(nextWorkspace.orgId ? i18n.tr('Klar til å lagre', 'Ready to save') : localCanvasMessage)
+        setPersistenceMessage(nextWorkspace.orgId ? nextReadyToSaveMessage : nextLocalCanvasMessage)
         return
       }
 
@@ -175,12 +207,12 @@ function StudioCanvasPage() {
         : cloneBlocks(initialBlocks)
 
       setProjectId(nextWorkspace.project.id)
-      setProjectTitle(nextWorkspace.project.title || launchCanvasTitle)
+      setProjectTitle(nextWorkspace.project.title || nextLaunchCanvasTitle)
       setBlocks(nextBlocks)
       setSelectedBlockId(nextWorkspace.project.selectedBlockId ?? nextBlocks[0]?.id ?? '')
       setHistory([])
       setFuture([])
-      setPersistenceMessage(ephemeralProjectMessage)
+      setPersistenceMessage(nextEphemeralProjectMessage)
     },
   )
 
@@ -220,7 +252,7 @@ function StudioCanvasPage() {
     const activeOrgId = orgId()
     if (!activeOrgId) {
       setPersistenceSource('fallback')
-      setPersistenceMessage(localCanvasMessage)
+      setPersistenceMessage(readLocalCanvasMessage())
       return null
     }
 
@@ -238,7 +270,7 @@ function StudioCanvasPage() {
     setProjectId(result.project.id)
     setProjectTitle(result.project.title)
     setPersistenceSource('live')
-    setPersistenceMessage(ephemeralProjectMessage)
+    setPersistenceMessage(readEphemeralProjectMessage())
     return result.project
   }
 
@@ -246,12 +278,12 @@ function StudioCanvasPage() {
     if (busyAction()) return
 
     setBusyAction('save')
-    setPersistenceMessage(orgId() ? i18n.tr('Lagrer prosjekt', 'Saving project') : localCanvasMessage)
+    setPersistenceMessage(orgId() ? readSavingProjectMessage() : readLocalCanvasMessage())
     try {
       await persistCurrentProject()
     } catch (reason) {
       setPersistenceSource('fallback')
-      setPersistenceMessage(reason instanceof Error ? reason.message : i18n.tr('Lagring mislyktes', 'Save failed'))
+      setPersistenceMessage(reason instanceof Error ? reason.message : readSaveFailedMessage())
     } finally {
       setBusyAction(null)
     }
@@ -261,7 +293,7 @@ function StudioCanvasPage() {
     if (busyAction()) return
 
     setBusyAction('export')
-    setPersistenceMessage(orgId() ? i18n.tr('Eksporterer utkast', 'Exporting draft') : localCanvasMessage)
+    setPersistenceMessage(orgId() ? readExportingDraftMessage() : readLocalCanvasMessage())
     try {
       const project = await persistCurrentProject()
       if (!project || !orgId()) return
@@ -274,10 +306,10 @@ function StudioCanvasPage() {
       loadedProjectId = result.project.id
       setProjectId(result.project.id)
       setPersistenceSource('live')
-      setPersistenceMessage(i18n.tr('Sosialt utkast opprettet', 'Social draft created'))
+      setPersistenceMessage(readSocialDraftCreatedMessage())
     } catch (reason) {
       setPersistenceSource('fallback')
-      setPersistenceMessage(reason instanceof Error ? reason.message : i18n.tr('Eksport mislyktes', 'Export failed'))
+      setPersistenceMessage(reason instanceof Error ? reason.message : readExportFailedMessage())
     } finally {
       setBusyAction(null)
     }
@@ -481,7 +513,7 @@ function StudioCanvasPage() {
               LC
             </span>
             <div>
-              <strong>{launchCanvasTitle}</strong>
+              <strong>{launchCanvasTitle()}</strong>
               <span>{canvasSummary()}</span>
             </div>
           </div>

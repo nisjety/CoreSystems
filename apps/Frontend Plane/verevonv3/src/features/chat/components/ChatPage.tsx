@@ -6,6 +6,7 @@ import {
   createMemo,
   createEffect,
   createSignal,
+  untrack,
 } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
@@ -177,6 +178,22 @@ export default function ChatPage() {
     />
   )
 
+  // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
+  // all per-row reactive values up front so each mapper receives plain row data
+  // instead of reading the live store while it renders.
+  const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
+    turn,
+    createdAt: turn.createdAt,
+    showDateDivider: shouldShowDateDivider(turns[index - 1], turn),
+    copied: copiedTurnId() === turn.id,
+    planApproval: {
+      pending: planApprovalPending() === turn.id,
+      error: planApprovalError()[turn.id],
+    },
+    version: index === turns.length - 1 ? finalExchangeVersion() : null,
+    editLocked: turn.role === 'user' && isEffectfulChatTurn(turns[index + 1]?.effectClass),
+  })))
+
   // Context inspector data. Keyed on (thread, tab) so it is fetched only while
   // the Steps tab is open and refetched when the thread changes — assembling a
   // context window is real backend work, and doing it on every turn in case
@@ -223,7 +240,12 @@ export default function ChatPage() {
       } satisfies ChatSurfaceAvailability,
     }),
     ({ tab, availability }) => {
-      if (!isChatSurfaceAvailable(tab, availability)) setActiveTab('chat')
+      if (!isChatSurfaceAvailable(tab, availability)) {
+        // The effect computes availability reactively; changing the selected
+        // surface is an event-style correction whose persistence guards read
+        // lifecycle signals and must stay outside the untracked callback.
+        untrack(() => setActiveTab('chat'))
+      }
     },
   )
 
@@ -233,11 +255,16 @@ export default function ChatPage() {
         <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} />
       </Match>
       <Match when={activeTab() === 'artifacts'}>
-        <Show when={conversationAttachments().length > 0}>
-          <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
-        </Show>
-        <Show when={artifactItems().length > 0}>
-          <ArtifactsPanel items={artifactItems()} />
+        <Show
+          when={conversationAttachments().length > 0 || artifactItems().length > 0}
+          fallback={<ArtifactsPanel items={[]} />}
+        >
+          <Show when={conversationAttachments().length > 0}>
+            <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
+          </Show>
+          <Show when={artifactItems().length > 0}>
+            <ArtifactsPanel items={artifactItems()} />
+          </Show>
         </Show>
       </Match>
       <Match when={activeTab() === 'steps'}>
@@ -267,6 +294,18 @@ export default function ChatPage() {
     return tab === 'chat' ? 'sources' : tab
   }
   const workCanvasActive = () => Boolean(liveRunId()) && activeTab() === 'steps'
+  const workspaceNavigation = () => (
+    <ChatTabs
+      active={activeTab()}
+      artifactCount={artifactItems().length + conversationAttachments().length}
+      includeChat={false}
+      runAvailable={Boolean(liveRunId())}
+      sourceCount={evidenceSources().length + (latestGrounding() ? 1 : 0)}
+      stepCount={state.taskSteps.length}
+      traceAvailable={Boolean(liveRunId())}
+      onChange={setActiveTab}
+    />
+  )
 
   return (
     <div
@@ -286,20 +325,18 @@ export default function ChatPage() {
       <section class="verevon-chat-section" aria-label="Verevon chat workspace">
         <Show when={hasMessages()}>
           <ChatHeader
-            branchCount={state.branchCount}
-            messageCount={state.turns.length}
-            title={title()}
-            onNewChat={startNewChat}
-            onRegenerate={regenerateLatest}
-          />
-          <ChatTabs
             active={activeTab()}
             artifactCount={artifactItems().length + conversationAttachments().length}
-            sourceCount={evidenceSources().length + (latestGrounding() ? 1 : 0)}
+            branchCount={state.branchCount}
+            messageCount={state.turns.length}
             runAvailable={Boolean(liveRunId())}
+            sourceCount={evidenceSources().length + (latestGrounding() ? 1 : 0)}
             stepCount={state.taskSteps.length}
+            title={title()}
             traceAvailable={Boolean(liveRunId())}
             onChange={setActiveTab}
+            onNewChat={startNewChat}
+            onRegenerate={regenerateLatest}
           />
         </Show>
 
@@ -316,44 +353,33 @@ export default function ChatPage() {
               class="verevon-chat-message-list"
               onScroll={handleScroll}
             >
-              <Show when={isActiveThreadTemporary()}>
-                <div class="verevon-chat-temporary-banner" role="status">
-                  <EyeOff size={13} />
-                  <span>Midlertidig samtale – lagres ikke i historikk eller minne.</span>
-                </div>
-              </Show>
-              <Show when={isForeignOriginThread()}>
-                <div class="verevon-chat-foreign-thread-banner" role="status">
-                  <EyeOff size={13} />
-                  <span>Denne samtalen eies av en annen arbeidsflate og vises skrivebeskyttet.</span>
-                </div>
-              </Show>
+              <ThreadVisibilityBanners
+                temporary={isActiveThreadTemporary}
+                foreignOrigin={isForeignOriginThread}
+              />
               <div class="verevon-chat-thread">
-                <For each={state.turns}>
-                  {(turn, index) => (
+                <For each={messageRows()}>
+                  {(row) => (
                     <>
-                      <Show when={shouldShowDateDivider(state.turns[index() - 1], turn)}>
-                        <DateDivider value={turn.createdAt} />
+                      <Show when={row.showDateDivider}>
+                        <DateDivider value={row.createdAt} />
                       </Show>
                       <MessageBlock
-                        copied={copiedTurnId() === turn.id}
-                        message={turn}
-                        onBranch={() => branchAt(turn.id)}
-                        onCopy={() => void copyTurn(turn)}
-                        onEdit={(text) => void editAndResubmit(turn.id, text)}
+                        copied={row.copied}
+                        message={row.turn}
+                        onBranch={() => branchAt(row.turn.id)}
+                        onCopy={() => void copyTurn(row.turn)}
+                        onEdit={(text) => void editAndResubmit(row.turn.id, text)}
                         onRegenerate={regenerateLatest}
-                        onRerunAsNewTurn={() => void rerunAsNewTurn(turn.id)}
-                        onFeedback={(rating) => submitTurnFeedback(turn.id, rating)}
+                        onRerunAsNewTurn={() => void rerunAsNewTurn(row.turn.id)}
+                        onFeedback={(rating) => submitTurnFeedback(row.turn.id, rating)}
                         onApprovalDecision={(approvalId, decision) =>
-                          void handleApprovalDecision(turn.id, approvalId, decision)
+                          void handleApprovalDecision(row.turn.id, approvalId, decision)
                         }
                         onApprovePlan={(rung, justification) =>
-                          void approveTurnPlan(turn.id, rung, justification)
+                          void approveTurnPlan(row.turn.id, rung, justification)
                         }
-                        planApproval={{
-                          pending: planApprovalPending() === turn.id,
-                          error: planApprovalError()[turn.id],
-                        }}
+                        planApproval={row.planApproval}
                         onSelectFollowUp={setInput}
                         onViewSteps={() => setActiveTab('steps')}
                         onViewAttachments={(attachmentId) => {
@@ -363,9 +389,9 @@ export default function ChatPage() {
                         // The version switcher only ever applies to the trailing
                         // assistant turn — chat-versions.ts guards versioning to
                         // the final exchange, so no other turn can have one.
-                        version={index() === state.turns.length - 1 ? finalExchangeVersion() : null}
+                        version={row.version}
                         onSelectVersion={selectExchangeVersion}
-                        editLocked={turn.role === 'user' && isEffectfulChatTurn(state.turns[index() + 1]?.effectClass)}
+                        editLocked={row.editLocked}
                       />
                     </>
                   )}
@@ -404,20 +430,11 @@ export default function ChatPage() {
           </Match>
         </Switch>
 
-        {/*
-          Keep the composer mounted for the whole conversation and merely hide
-          it on non-chat tabs. Unmounting it on every tab switch disposed the
-          DashboardComposer instance, silently discarding its local state —
-          attached files (whose preview URLs its onCleanup revokes), the picked
-          model, slash-actions — so returning to Chat lost the attachment and
-          reset the model to the default. display:none preserves that state
-          while taking no layout space, matching the previous hidden result.
-        */}
+        {/* The conversation remains the command centre while a document,
+            source set, or work trace is open. Keeping this single composer
+            mounted also preserves drafts, attachments, and model selection. */}
         <Show when={hasMessages()}>
-          <div
-            class="verevon-chat-composer-dock"
-            style={{ display: activeTab() === 'chat' ? undefined : 'none' }}
-          >
+          <div class="verevon-chat-composer-dock">
             <Show when={showScrollDown()}>
               <button
                 type="button"
@@ -444,7 +461,11 @@ export default function ChatPage() {
       </section>
 
       <Show when={hasMessages() && activeTab() !== 'chat' && !workCanvasActive()}>
-        <ChatWorkspaceCanvas active={canvasTab()} onClose={() => setActiveTab('chat')}>
+        <ChatWorkspaceCanvas
+          active={canvasTab()}
+          navigation={workspaceNavigation()}
+          onClose={() => setActiveTab('chat')}
+        >
           {contextualPanel()}
         </ChatWorkspaceCanvas>
       </Show>
@@ -456,15 +477,39 @@ export default function ChatPage() {
         Planned and deep-research turns alone own this adjacent work canvas.
       */}
       <ChatLiveRunPanel
-        collapsed={runPanelCollapsed()}
+        collapsed={workCanvasActive() ? false : runPanelCollapsed()}
         hidden={activeTab() !== 'chat' && !workCanvasActive()}
         onToggleCollapsed={toggleRunPanel}
         orgId={session.activeOrg?.id}
         runId={liveRunId()}
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
+        navigation={workCanvasActive() ? workspaceNavigation() : undefined}
+        onCloseWork={() => setActiveTab('chat')}
         workContent={workCanvasActive() ? contextualPanel() : undefined}
       />
     </div>
+  )
+}
+
+function ThreadVisibilityBanners(props: {
+  temporary: () => boolean
+  foreignOrigin: () => boolean
+}) {
+  return (
+    <>
+      <Show when={props.temporary()}>
+        <div class="verevon-chat-temporary-banner" role="status">
+          <EyeOff size={13} />
+          <span>Midlertidig samtale – lagres ikke i historikk eller minne.</span>
+        </div>
+      </Show>
+      <Show when={props.foreignOrigin()}>
+        <div class="verevon-chat-foreign-thread-banner" role="status">
+          <EyeOff size={13} />
+          <span>Denne samtalen eies av en annen arbeidsflate og vises skrivebeskyttet.</span>
+        </div>
+      </Show>
+    </>
   )
 }

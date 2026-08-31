@@ -9,6 +9,26 @@ import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { AuthEventPublisher } from '../internal/auth-event.publisher';
 
+/**
+ * Shape of the fields this middleware reads off Better Auth organization
+ * endpoint responses/requests. Better Auth does not export a typed response
+ * contract for these routes, so this interface only covers the properties
+ * actually accessed below; everything is optional because the exact payload
+ * varies per endpoint.
+ */
+interface BetterAuthOrganizationBody {
+  id?: string;
+  name?: string;
+  slug?: string;
+  metadata?: Record<string, unknown>;
+  members?: Array<{ userId?: string }>;
+  success?: boolean;
+  organizationId?: string;
+  email?: string;
+  userId?: string;
+  role?: string;
+}
+
 @Injectable()
 export class OrganizationEventMiddleware implements NestMiddleware {
   private readonly logger = new Logger(OrganizationEventMiddleware.name);
@@ -18,11 +38,6 @@ export class OrganizationEventMiddleware implements NestMiddleware {
   use(req: Request, res: Response, next: NextFunction) {
     this.logger.debug(`🔍 Middleware intercepting: ${req.method} ${req.path}`);
 
-    // Only intercept organization-related endpoints
-    const orgCreatePath = '/api/auth/organization/create';
-    const orgInvitePath = '/api/auth/organization/invite-member';
-    const orgRemovePath = '/api/auth/organization/remove-member';
-
     if (!req.path.startsWith('/api/auth/organization')) {
       return next();
     }
@@ -30,26 +45,26 @@ export class OrganizationEventMiddleware implements NestMiddleware {
     this.logger.log(`📥 Intercepting organization endpoint: ${req.path}`);
 
     // Store original methods
-    const originalJson = res.json.bind(res);
-    const originalSend = res.send.bind(res);
+    const originalJson = res.json.bind(res) as typeof res.json;
+    const originalSend = res.send.bind(res) as typeof res.send;
 
     // Intercept json responses
-    res.json = (body: any) => {
-      this.handleResponse(req, body);
+    res.json = (body: unknown) => {
+      void this.handleResponse(req, body);
       return originalJson(body);
     };
 
     // Intercept send responses
-    res.send = (body: any) => {
+    res.send = (body: unknown) => {
       if (typeof body === 'string') {
         try {
-          const parsed = JSON.parse(body);
-          this.handleResponse(req, parsed);
+          const parsed: unknown = JSON.parse(body);
+          void this.handleResponse(req, parsed);
         } catch {
           // Not JSON, ignore
         }
       } else if (typeof body === 'object') {
-        this.handleResponse(req, body);
+        void this.handleResponse(req, body);
       }
       return originalSend(body);
     };
@@ -57,57 +72,65 @@ export class OrganizationEventMiddleware implements NestMiddleware {
     next();
   }
 
-  private async handleResponse(req: Request, body: any) {
+  private async handleResponse(req: Request, body: unknown): Promise<void> {
     try {
       const path = req.path;
+      const parsedBody = body as BetterAuthOrganizationBody | undefined;
 
       // Handle organization creation
-      if (path === '/api/auth/organization/create' && body?.id) {
+      if (path === '/api/auth/organization/create' && parsedBody?.id) {
         this.logger.log(
-          `🎊 Organization created via Better Auth: ${body.name}`,
+          `🎊 Organization created via Better Auth: ${parsedBody.name}`,
         );
 
         // Extract creator from members
-        const creatorMember = body.members?.[0];
+        const creatorMember = parsedBody.members?.[0];
 
         await this.eventPublisher.publishOrganizationCreated({
-          organizationId: body.id,
-          name: body.name,
-          slug: body.slug,
+          organizationId: parsedBody.id,
+          name: parsedBody.name || '',
+          slug: parsedBody.slug || '',
           creatorId: creatorMember?.userId || 'unknown',
           creatorEmail: '', // Not available in response
-          metadata: body.metadata || {},
+          metadata: parsedBody.metadata || {},
         });
 
-        this.logger.log(`📢 Published organization.created event: ${body.id}`);
+        this.logger.log(
+          `📢 Published organization.created event: ${parsedBody.id}`,
+        );
       }
 
       // Handle member invitation/addition
-      if (path === '/api/auth/organization/invite-member' && body?.id) {
+      if (path === '/api/auth/organization/invite-member' && parsedBody?.id) {
         this.logger.log(`👤 Member invited to organization via Better Auth`);
 
         // The invitation response may not have all details, but we can publish what we have
-        if (body.organizationId && body.email) {
+        if (parsedBody.organizationId && parsedBody.email) {
           await this.eventPublisher.publishOrganizationMemberAdded({
-            organizationId: body.organizationId,
+            organizationId: parsedBody.organizationId,
             organizationName: '', // Not available
-            userId: body.userId || 'pending', // May be pending until accepted
-            userEmail: body.email,
-            role: body.role || 'member',
+            userId: parsedBody.userId || 'pending', // May be pending until accepted
+            userEmail: parsedBody.email,
+            role: parsedBody.role || 'member',
             invitedBy: undefined,
           });
 
-          this.logger.log(`📢 Published member_added event for: ${body.email}`);
+          this.logger.log(
+            `📢 Published member_added event for: ${parsedBody.email}`,
+          );
         }
       }
 
       // Handle member removal
-      if (path === '/api/auth/organization/remove-member' && body?.success) {
+      if (
+        path === '/api/auth/organization/remove-member' &&
+        parsedBody?.success
+      ) {
         this.logger.log(`👋 Member removed from organization via Better Auth`);
 
         // Similar to invitation, publish what we have from the request
-        const reqBody = (req as any).body;
-        if (reqBody?.organizationId && reqBody?.userId) {
+        const reqBody = req.body as BetterAuthOrganizationBody | undefined;
+        if (reqBody?.organizationId && reqBody.userId) {
           await this.eventPublisher.publishOrganizationMemberRemoved({
             organizationId: reqBody.organizationId,
             organizationName: '', // Not available

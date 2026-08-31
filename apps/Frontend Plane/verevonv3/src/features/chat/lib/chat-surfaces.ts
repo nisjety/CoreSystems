@@ -45,8 +45,8 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
   },
   {
     id: 'steps',
-    label: 'Steg',
-    description: 'Følg agentens plan, verktøy og kontekst.',
+    label: 'Work',
+    description: 'Følg plan, fremdrift og beslutninger.',
     icon: ListChecks,
     priority: 10,
     available: (state) => state.stepCount > 0 || state.hasRun,
@@ -70,7 +70,7 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
   {
     id: 'trace',
     label: 'Trace',
-    description: 'Les hva som skjedde, hva som ble godkjent og hva som er verifisert.',
+    description: 'Se tekniske hendelser, godkjenninger og verifisering.',
     icon: Receipt,
     priority: 40,
     available: (state) => state.hasRun,
