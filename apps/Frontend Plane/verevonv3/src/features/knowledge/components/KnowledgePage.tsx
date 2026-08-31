@@ -25,7 +25,7 @@ import {
   Table2,
   type LucideProps,
 } from '@/shared/icons'
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component, untrack } from 'solid-js'
 import { Dynamic } from '@solidjs/web'
 import { KnowledgeAddSourceModal } from '@/features/knowledge/components/KnowledgeAddSourceModal'
 import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/KnowledgeOperatingMapCanvas'
@@ -395,7 +395,7 @@ export default function KnowledgePage() {
       const refresh = () => {
         if (document.visibilityState !== 'visible') return
         // Never race a user-initiated mutation; its own reload lands after it.
-        if (busyAction() !== null) return
+        if (untrack(() => busyAction()) !== null) return
         void loadKnowledgeWorkspace(controller.signal, { quiet: true })
       }
       const timer = window.setInterval(refresh, KNOWLEDGE_REFRESH_INTERVAL_MS)
@@ -1144,16 +1144,16 @@ function SegmentedView(props: {
   onActiveViewChange: (view: KnowledgeView) => void
 }) {
   const i18n = useI18n()
-  const views: Array<{ Icon: KnowledgeIcon; id: KnowledgeView; label: string }> = [
+  const views = createMemo<Array<{ Icon: KnowledgeIcon; id: KnowledgeView; label: string }>>(() => [
     { id: 'overview', label: i18n.tr('Oversikt', 'Overview'), Icon: Grid2X2 },
     { id: 'operating-map', label: i18n.tr('AI-kart', 'AI Map'), Icon: MapIcon },
     { id: 'graph', label: i18n.tr('Graf', 'Graph'), Icon: Network },
     { id: 'chunks', label: i18n.tr('Utdrag', 'Chunks'), Icon: Table2 },
-  ]
+  ])
 
   return (
     <VerevonSegmented>
-      <For each={views}>
+      <For each={views()}>
         {(view) => (
           <VerevonSegmentedButton
             selected={props.activeView === view.id}
@@ -1770,9 +1770,12 @@ function GraphPanel(props: {
         onZoomChange: setZoomPercent,
       })
       if (sceneController) {
-        const data = sceneData()
+        const { data, selectedNodeId } = untrack(() => ({
+          data: sceneData(),
+          selectedNodeId: props.selectedNode?.id,
+        }))
         sceneController.setData(data.nodes, data.edges)
-        if (props.selectedNode) sceneController.setActiveNode(props.selectedNode.id)
+        if (selectedNodeId) sceneController.setActiveNode(selectedNodeId)
         setZoomPercent(sceneController.zoomPercent())
       }
       return () => {
