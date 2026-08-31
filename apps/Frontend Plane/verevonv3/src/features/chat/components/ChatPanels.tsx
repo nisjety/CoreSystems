@@ -58,6 +58,7 @@ import {
 } from './chat-types'
 import { uiEventLabel, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import { availableChatSurfaces, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
+import { useI18n } from '@/shared/i18n'
 
 function shortReceipt(value: string) {
   return value.length > 24 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value
@@ -99,8 +100,10 @@ export function ChatTabs(props: {
   sourceCount: number
   stepCount: number
   traceAvailable?: boolean
+  includeChat?: boolean
   onChange: (tab: ChatTab) => void
 }) {
+  const i18n = useI18n()
   const availability = (): ChatSurfaceAvailability => ({
     sourceCount: props.sourceCount,
     hasGrounding: props.sourceCount > 0,
@@ -110,9 +113,17 @@ export function ChatTabs(props: {
     hasRun: Boolean(props.runAvailable || props.traceAvailable),
   })
   const tabs = (): Array<{ id: ChatTab; label: string; icon: IconComponent; count: number }> => (
-    availableChatSurfaces(availability()).map((surface) => ({
+    availableChatSurfaces(availability()).filter((surface) => props.includeChat !== false || surface.id !== 'chat').map((surface) => ({
       id: surface.id,
-      label: surface.label,
+      label: surface.id === 'steps'
+        ? i18n.tr('Arbeid', 'Work')
+        : surface.id === 'artifacts'
+          ? i18n.tr('Resultat', 'Output')
+          : surface.id === 'sources'
+            ? i18n.tr('Kilder', 'Sources')
+            : surface.id === 'trace'
+              ? i18n.tr('Spor', 'Trace')
+              : i18n.tr('Samtale', 'Chat'),
       icon: surface.icon,
       count: surface.id === 'sources'
         ? props.sourceCount
@@ -123,7 +134,7 @@ export function ChatTabs(props: {
   )
 
   return (
-    <Show when={tabs().length > 1}>
+    <Show when={tabs().length > (props.includeChat === false ? 0 : 1)}>
       <div class="verevon-chat-tabs" role="tablist" aria-label="Chat workspace views">
         <For each={tabs()}>
           {(item, index) => {

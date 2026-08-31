@@ -328,10 +328,11 @@ type ComposerSubmitState = {
 	voiceRecording: boolean;
 };
 
-function dashboardComposerRootClass(input: { dragActive: boolean }) {
+function dashboardComposerRootClass(input: { dragActive: boolean; appearance?: "chat" | "default" }) {
 	return cn(
 		"dashboard-composer-root",
 		input.dragActive ? "dashboard-composer-root--drag-active" : "",
+		input.appearance === "chat" ? "dashboard-composer-root--chat" : "",
 	);
 }
 
@@ -457,6 +458,8 @@ function pastedImageFiles(event: ClipboardEvent) {
 }
 
 export function DashboardComposer(props: {
+	/** Calm, conversation-first presentation used by the dedicated chat page. */
+	appearance?: "chat" | "default";
 	browseWeb?: boolean;
 	imageMode?: boolean;
 	message: string;
@@ -1429,10 +1432,19 @@ export function DashboardComposer(props: {
 			return;
 
 		const snapshot = createSubmissionSnapshot();
+		// A multi-link product comparison needs more than a single SERP result:
+		// use the existing bounded multi-source research pipeline when Search is
+		// already explicitly on. The user still sees Search as the opt-in control;
+		// this only chooses the appropriate depth for the work they supplied.
+		const productResearch = shouldResearchLinkedProducts({
+			browseWeb: browseWeb(),
+			message: snapshot.body,
+		});
+		const effectiveDeepSearch = deepSearch() || productResearch;
 		const payload = createComposerSubmitPayload({
 			actions: snapshot.actions,
 			browseWeb: browseWeb(),
-			deepSearch: deepSearch(),
+			deepSearch: effectiveDeepSearch,
 			files: snapshot.files,
 			imageMode: imageMode(),
 			minPrivacyTier: selectedPrivacyTier(),
@@ -1448,7 +1460,7 @@ export function DashboardComposer(props: {
 				createComposerTurn({
 					body: snapshot.submittedText,
 					browseWeb: browseWeb(),
-					deepSearch: deepSearch(),
+					deepSearch: effectiveDeepSearch,
 					files: snapshot.files,
 					model: selectedModelLabel(),
 					now: snapshot.now,
@@ -1485,7 +1497,7 @@ export function DashboardComposer(props: {
 			ref={(element) => {
 				composerRootRef = element;
 			}}
-			class={dashboardComposerRootClass({ dragActive: dragActive() })}
+			class={dashboardComposerRootClass({ dragActive: dragActive(), appearance: props.appearance })}
 			aria-disabled={props.disabled ? "true" : "false"}
 			inert={props.disabled}
 			onDragOver={(event) => {
@@ -1525,7 +1537,15 @@ export function DashboardComposer(props: {
 				</div>
 			</Show>
 
-			<div class="dashboard-composer-controls">
+			<Show when={props.appearance === "chat" && shouldResearchLinkedProducts({ browseWeb: browseWeb(), message: props.message }) && !deepSearch()}>
+				<div class="dashboard-composer-research-notice" role="status">
+					<Telescope class="size-3.5" />
+					<span>{i18n.tr("Produktlenker oppdaget — Verevon vil undersøke flere kilder per produkt.", "Product links detected — Verevon will research multiple sources per product.")}</span>
+				</div>
+			</Show>
+
+			<Show when={props.appearance !== "chat"}>
+				<div class="dashboard-composer-controls">
 				<div class="dashboard-composer-controls__left">
 					<div class="dashboard-composer-model-wrap">
 						<button
@@ -1867,6 +1887,7 @@ export function DashboardComposer(props: {
 					</span>
 				</div>
 			</div>
+			</Show>
 
 			<div class="dashboard-composer-field-wrap">
 				<input
@@ -2176,6 +2197,7 @@ export function DashboardComposer(props: {
 						</div>
 
 						<div class="dashboard-composer-toolbar__right">
+							<Show when={props.appearance !== "chat"}>
 							<div class="dashboard-composer-response-group">
 								<For each={responseModes}>
 									{(mode) => (
@@ -2214,6 +2236,7 @@ export function DashboardComposer(props: {
 							>
 								<Mic class="size-4" />
 							</ComposerIconButton>
+							</Show>
 							<Show
 								when={stopButtonVisible()}
 								fallback={
@@ -2363,6 +2386,32 @@ function getComposerTools(input: {
 	)
 		tools.push("image");
 	return [...new Set(tools)];
+}
+
+const PRODUCT_COMPARISON_WORDS = [
+	"best",
+	"better",
+	"compare",
+	"comparison",
+	"recommend",
+	"versus",
+	" vs ",
+	"hvilken",
+	"sammenlign",
+	"sammenlikn",
+	"anbefal",
+];
+
+function shouldResearchLinkedProducts(input: { browseWeb: boolean; message: string }): boolean {
+	if (!input.browseWeb) return false;
+	const urls = input.message.match(/https?:\/\/[^\s<>()]+/giu) ?? [];
+	const distinctLinks = new Set(urls.map((url) => url.replace(/[?#].*$/u, "").toLowerCase()));
+	if (distinctLinks.size < 2) return false;
+	// Intent has to come from the user's prose, not an accidental word in a
+	// product slug or tracking parameter.
+	const prose = input.message.replace(/https?:\/\/[^\s<>()]+/giu, " ");
+	const normalized = ` ${prose.toLocaleLowerCase()} `;
+	return PRODUCT_COMPARISON_WORDS.some((word) => normalized.includes(word));
 }
 
 function createComposerSubmitPayload(input: {

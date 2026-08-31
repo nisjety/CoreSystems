@@ -151,6 +151,7 @@ export default function ChatPage() {
 
   const composer = () => (
     <DashboardComposer
+      appearance="chat"
       browseWeb={browseWeb()}
       imageMode={imageMode()}
       message={input()}

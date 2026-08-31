@@ -457,6 +457,9 @@ export function useChatController() {
       overrides.title ??
       (firstUserTurn ? createPreview(firstUserTurn.content, 48) : createChatTitle(turns))
     const titleKind: ChatThreadTitleKind = generatedTitle ? 'generated' : 'preview'
+    // Server enforces ≤64 for durable titles (ChatTitleEvent sanitized to ≤64).
+    // Keep 48 for first preview but clamp the durable write to 64 to avoid 400.
+    const durableTitle = createPreview(title, 64)
     const preview = overrides.preview ?? lastTurn?.content
     // Activity timestamp, never write timestamp: when this snapshot carries no
     // usable message time (e.g. a selection self-heal over timestamp-less
@@ -467,7 +470,7 @@ export function useChatController() {
     const transcriptTaskSteps = taskStepsToTranscript(taskSteps)
     upsertChatThreadHistory({
       threadId,
-      title,
+      title: durableTitle,
       titleKind,
       preview,
       updatedAt,
@@ -481,7 +484,7 @@ export function useChatController() {
     if (options.persistServer !== false) {
       queueServerThreadSnapshot({
         threadId,
-        title,
+        title: durableTitle,
         preview,
         updatedAt,
         turns: transcriptTurns,
@@ -1405,6 +1408,15 @@ export function useChatController() {
   const sendContent = async (rawContent: string, modelOverride?: string, options: SendOptions = {}) => {
     const content = rawContent.trim()
     if (!content) return
+    // Deduplicate rapid double-sends (e.g., double Enter or double click).
+    // Long URL pastes in the screenshot produced two identical "Meg" bubbles
+    // within 1s when the submit raced. Ignore an identical user turn if the
+    // previous turn is the same user content and very recent.
+    const lastTurn = state.turns.at(-1)
+    if (lastTurn?.role === 'user' && lastTurn.content.trim() === content) {
+      const ageMs = Date.now() - Date.parse(lastTurn.createdAt)
+      if (Number.isFinite(ageMs) && ageMs < 2500) return
+    }
     // A deep-linked transcript from Spaces, Support, or another agent surface
     // can be displayed here for continuity, but Chat must never append a turn
     // to it or queue input into its run. The banner/composer guard is UX; this
