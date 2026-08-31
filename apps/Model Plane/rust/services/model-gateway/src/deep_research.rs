@@ -276,8 +276,8 @@ cached_cap!(
 // Sources
 // ---------------------------------------------------------------------------
 
-/// One candidate source discovered by search, plus whatever we managed to read
-/// from it.
+/// One candidate source discovered by search or explicitly linked by the user,
+/// plus whatever we managed to read from it.
 ///
 /// `number` is the load-bearing field: `Some(n)` means "we hold this page's own
 /// text and the report may cite it as `[n]`", `None` means "search found this
@@ -294,6 +294,11 @@ pub struct ResearchSource {
     /// evidence in the report, because a snippet is the engine's summary rather
     /// than the page's own words.
     pub snippet: String,
+    /// A page the user explicitly supplied with this request. It is still only
+    /// evidence after a successful read, but it receives read priority so a
+    /// product comparison cannot silently omit one of the products the user
+    /// asked us to assess.
+    pub user_supplied: bool,
     /// Indexes of the plan's sub-queries that surfaced this URL. More than one
     /// means independent corroboration, which is the primary read-priority
     /// signal.
@@ -627,13 +632,18 @@ pub fn parse_sub_queries(raw: &str, question: &str, max: usize) -> Vec<String> {
 fn plan_prompt(question: &str, max: usize) -> String {
     format!(
         "Break this research question into {max} or fewer DISTINCT web-search queries that \
-         together cover it. Each query must target a different sub-question, entity, time \
-         period, or perspective — never a reworded duplicate. Write them in the language the \
-         question is most likely to be documented in (for Norwegian subjects that is usually \
-         Norwegian; for international subjects usually English). Each query is a short search \
-         phrase, not a sentence, and carries no operators.\n\n\
-         Answer with ONLY a JSON array of strings. No prose, no explanation, no code fence.\n\n\
-         Question: {question}"
+          together cover it. Each query must target a different sub-question, entity, time \
+          period, or perspective — never a reworded duplicate. Write them in the language the \
+          question is most likely to be documented in (for Norwegian subjects that is usually \
+          Norwegian; for international subjects usually English). Each query is a short search \
+          phrase, not a sentence, and carries no operators. Links are source leads, not search \
+          queries: never search a raw URL or its tracking parameters. When the request compares \
+          linked products or options, derive each exact product/model from its readable URL path \
+          and reserve a distinct exact-name query for every candidate. Use the remaining queries \
+          for first-party specifications, an independent review or test, and any decision \
+          criterion the user explicitly asks about.\n\n\
+          Answer with ONLY a JSON array of strings. No prose, no explanation, no code fence.\n\n\
+          Question: {question}"
     )
 }
 
@@ -651,9 +661,13 @@ fn plan_prompt(question: &str, max: usize) -> String {
 pub fn normalize_url_key(raw: &str) -> String {
     let trimmed = raw.trim();
     let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
-    let rest = without_fragment
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let rest = without_query
         .split_once("://")
-        .map_or(without_fragment, |(_scheme, rest)| rest);
+        .map_or(without_query, |(_scheme, rest)| rest);
     let (host, path) = rest
         .split_once('/')
         .map_or((rest, String::new()), |(host, path)| {
@@ -738,6 +752,7 @@ pub fn dedupe_hits(hits: &[SearchHit]) -> Vec<ResearchSource> {
             // when a proper title was available all along.
             title: hit.title.trim().to_owned(),
             snippet: hit.snippet.trim().to_owned(),
+            user_supplied: false,
             sub_queries: vec![hit.sub_query],
             best_rank: hit.rank,
             provider_score: hit.score,
@@ -757,6 +772,89 @@ pub fn dedupe_hits(hits: &[SearchHit]) -> Vec<ResearchSource> {
         }
     }
     sources
+}
+
+/// Return distinct HTTP(S) URLs written directly in the user's message. This is
+/// intentionally a small parser rather than a crawler: the Model Plane already
+/// owns the audited fetch operation; this only preserves the user's source
+/// selection so it enters the normal candidate/read/citation pipeline.
+#[must_use]
+pub fn linked_source_urls(question: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut urls = Vec::new();
+
+    for raw in question.split_whitespace() {
+        let candidate = raw
+            .find("https://")
+            .or_else(|| raw.find("http://"))
+            .map_or(raw, |start| &raw[start..])
+            .trim_matches(|character: char| matches!(character, '<' | '>' | '(' | '[' | '"' | '\''))
+            .trim_end_matches(|character: char| {
+                matches!(
+                    character,
+                    '.' | ',' | ';' | ':' | '!' | ')' | ']' | '}' | '>'
+                )
+            });
+        if !(candidate.starts_with("https://") || candidate.starts_with("http://")) {
+            continue;
+        }
+        let key = normalize_url_key(candidate);
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        urls.push(candidate.to_owned());
+    }
+
+    urls
+}
+
+fn linked_source_title(url: &str) -> String {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let path = without_query.rsplit('/').next().unwrap_or_default();
+    let label = path.replace(['-', '_'], " ");
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() {
+        without_query.to_owned()
+    } else {
+        label
+    }
+}
+
+/// Merge direct user links into the ordinary source set. The same URL found by
+/// search is marked as user-supplied rather than duplicated, so it still has one
+/// citation and one auditable page read.
+pub fn merge_linked_sources(sources: &mut Vec<ResearchSource>, question: &str) -> usize {
+    let mut prioritized = 0usize;
+    for url in linked_source_urls(question) {
+        prioritized = prioritized.saturating_add(1);
+        let key = normalize_url_key(&url);
+        if let Some(source) = sources
+            .iter_mut()
+            .find(|source| normalize_url_key(&source.url) == key)
+        {
+            source.user_supplied = true;
+            source.best_rank = 0;
+            continue;
+        }
+
+        sources.push(ResearchSource {
+            number: None,
+            title: linked_source_title(&url),
+            url,
+            snippet:
+                "Link supplied with the request; read before independently discovered sources."
+                    .to_owned(),
+            user_supplied: true,
+            sub_queries: Vec::new(),
+            best_rank: 0,
+            provider_score: None,
+            relevance: 1.0,
+            filtered: false,
+            extract: None,
+            unread_reason: Some(NOT_ATTEMPTED.to_owned()),
+        });
+    }
+    prioritized
 }
 
 /// Stated when a source was never selected for reading, so the synthesis prompt
@@ -830,6 +928,14 @@ pub fn apply_relevance_gate(question: &str, sources: &mut [ResearchSource]) -> G
 
     let mut filtered = 0usize;
     for ((source, verdict), keep) in sources.iter_mut().zip(&verdicts).zip(&mask.keep) {
+        if source.user_supplied {
+            // The user selected this page as part of the question. It is not
+            // treated as evidence until it is read, but suppressing it before
+            // reading would make a comparison silently lose one candidate.
+            source.relevance = 1.0;
+            source.filtered = false;
+            continue;
+        }
         source.relevance = verdict.score;
         if *keep {
             // Left otherwise untouched, including `unread_reason`: the read phase
@@ -875,11 +981,13 @@ pub fn read_order(sources: &[ResearchSource]) -> Vec<usize> {
     order.sort_by(|&left, &right| {
         let a = &sources[left];
         let b = &sources[right];
-        relevance_tier(b.relevance)
-            .cmp(&relevance_tier(a.relevance))
-            .then(b.sub_queries.len().cmp(&a.sub_queries.len()))
-            .then(a.best_rank.cmp(&b.best_rank))
-            .then(left.cmp(&right))
+        b.user_supplied.cmp(&a.user_supplied).then(
+            relevance_tier(b.relevance)
+                .cmp(&relevance_tier(a.relevance))
+                .then(b.sub_queries.len().cmp(&a.sub_queries.len()))
+                .then(a.best_rank.cmp(&b.best_rank))
+                .then(left.cmp(&right)),
+        )
     });
     order
 }
@@ -1590,6 +1698,7 @@ pub async fn run_deep_research(
     tool_failures =
         tool_failures.saturating_add(u32::try_from(search_failures).unwrap_or(u32::MAX));
     let mut sources = dedupe_hits(&hits);
+    let linked_sources = merge_linked_sources(&mut sources, question);
     // The relevance gate, before reading and therefore before citing. Filtered
     // sources stay in `sources` (counted, shown, uncitable) but leave
     // `read_order`, so the page budget is never spent on a hit that cannot
@@ -1601,10 +1710,15 @@ pub async fn run_deep_research(
             STEP_SEARCH,
             "Søker kilder",
             &format!(
-                "{relevant} relevante av {} unike kilder fra {} av {} delspørsmål.",
+                "{relevant} relevante av {} unike kilder fra {} av {} delspørsmål{}.",
                 sources.len(),
                 search_ok,
-                plan.len()
+                plan.len(),
+                if linked_sources > 0 {
+                    format!("; {linked_sources} brukerlenke(r) prioritert")
+                } else {
+                    String::new()
+                }
             ),
             if relevant == 0 { "error" } else { "done" },
         )
@@ -2337,6 +2451,7 @@ mod tests {
             url: url.to_owned(),
             title: format!("Title of {url}"),
             snippet: "snippet".to_owned(),
+            user_supplied: false,
             sub_queries,
             best_rank: rank,
             provider_score: None,

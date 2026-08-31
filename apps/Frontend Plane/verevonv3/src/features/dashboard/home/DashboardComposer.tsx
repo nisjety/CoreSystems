@@ -1432,10 +1432,15 @@ export function DashboardComposer(props: {
 			return;
 
 		const snapshot = createSubmissionSnapshot();
+		const productResearch = shouldResearchLinkedProducts({
+			browseWeb: browseWeb(),
+			message: snapshot.body,
+		});
+		const effectiveDeepSearch = deepSearch() || productResearch;
 		const payload = createComposerSubmitPayload({
 			actions: snapshot.actions,
 			browseWeb: browseWeb(),
-			deepSearch: deepSearch(),
+			deepSearch: effectiveDeepSearch,
 			files: snapshot.files,
 			imageMode: imageMode(),
 			minPrivacyTier: selectedPrivacyTier(),
@@ -1451,7 +1456,7 @@ export function DashboardComposer(props: {
 				createComposerTurn({
 					body: snapshot.submittedText,
 					browseWeb: browseWeb(),
-					deepSearch: deepSearch(),
+					deepSearch: effectiveDeepSearch,
 					files: snapshot.files,
 					model: selectedModelLabel(),
 					now: snapshot.now,
@@ -1525,6 +1530,13 @@ export function DashboardComposer(props: {
 			<Show when={dragActive()}>
 				<div class="dashboard-composer-drop-overlay">
 					{i18n.tr("Slipp for å legge ved", "Drop to attach")}
+				</div>
+			</Show>
+
+			<Show when={props.appearance === "chat" && shouldResearchLinkedProducts({ browseWeb: browseWeb(), message: props.message }) && !deepSearch()}>
+				<div class="dashboard-composer-research-notice" role="status">
+					<Telescope class="size-3.5" />
+					<span>{i18n.tr("Produktlenker oppdaget — Verevon undersøker flere kilder per produkt.", "Product links detected — Verevon will research multiple sources per product.")}</span>
 				</div>
 			</Show>
 
@@ -2399,6 +2411,30 @@ function getComposerTools(input: {
 	)
 		tools.push("image");
 	return [...new Set(tools)];
+}
+
+const PRODUCT_COMPARISON_WORDS = [
+	"best",
+	"better",
+	"compare",
+	"comparison",
+	"recommend",
+	"versus",
+	" vs ",
+	"hvilken",
+	"sammenlign",
+	"sammenlikn",
+	"anbefal",
+];
+
+function shouldResearchLinkedProducts(input: { browseWeb: boolean; message: string }): boolean {
+	if (!input.browseWeb) return false;
+	const urls = input.message.match(/https?:\/\/[^\s<>()]+/giu) ?? [];
+	const distinctLinks = new Set(urls.map((url) => url.replace(/[?#].*$/u, "").toLowerCase()));
+	if (distinctLinks.size < 2) return false;
+	const prose = input.message.replace(/https?:\/\/[^\s<>()]+/giu, " ");
+	const normalized = ` ${prose.toLocaleLowerCase()} `;
+	return PRODUCT_COMPARISON_WORDS.some((word) => normalized.includes(word));
 }
 
 function createComposerSubmitPayload(input: {

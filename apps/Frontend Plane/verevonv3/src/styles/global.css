@@ -23699,7 +23699,87 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-chat-bubble__text {
+  display: grid;
+  gap: 8px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.verevon-chat-bubble__copy {
+  min-width: 0;
   white-space: pre-wrap;
+}
+
+.verevon-chat-bubble__source {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: min(100%, 320px);
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--verevon-border) 88%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--verevon-bg-white) 66%, transparent);
+  color: var(--verevon-j-text-soft);
+  text-decoration: none;
+}
+
+.verevon-chat-bubble__source:hover {
+  border-color: color-mix(in srgb, var(--verevon-a-earth) 45%, var(--verevon-border));
+  background: var(--verevon-bg-white);
+}
+
+.verevon-chat-bubble__source > svg {
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-bubble__source-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.verevon-chat-bubble__source-title,
+.verevon-chat-bubble__source-domain {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-chat-bubble__source-title {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.verevon-chat-bubble__source-domain {
+  color: var(--verevon-e-muted);
+  font-size: 11px;
+}
+
+.dashboard-composer-research-notice {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 14px 8px;
+  color: var(--verevon-e-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.dashboard-composer-research-notice svg {
+  flex: 0 0 auto;
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-bubble {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-markdown a {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .verevon-chat-message__avatar {
@@ -24605,7 +24685,11 @@ body.verevon-chat-canvas-resizing * {
 /* Wide tables scroll inside this container — the chat column itself never
    scrolls horizontally. */
 .verevon-chat-table-wrap {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
+  overscroll-behavior-inline: contain;
   border: 1px solid var(--verevon-border);
   border-radius: 10px;
   margin: 4px 0 14px;
@@ -24617,7 +24701,8 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-chat-table {
-  width: 100%;
+  width: max(100%, 620px);
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 13.5px;
   line-height: 1.5;
@@ -24632,7 +24717,8 @@ body.verevon-chat-canvas-resizing * {
   font-weight: 600;
   letter-spacing: 0.01em;
   text-align: left;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .verevon-chat-table td {
@@ -24640,6 +24726,23 @@ body.verevon-chat-canvas-resizing * {
   color: var(--verevon-j-text-soft);
   vertical-align: top;
   overflow-wrap: break-word;
+}
+
+.verevon-chat-table th:first-child,
+.verevon-chat-table td:first-child {
+  width: min(28%, 168px);
+  color: var(--verevon-j-text);
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .verevon-chat-bubble__source {
+    min-width: 0;
+  }
+
+  .verevon-chat-table {
+    width: 620px;
+  }
 }
 
 /* Hairline row separation — no vertical grid lines, no zebra. */

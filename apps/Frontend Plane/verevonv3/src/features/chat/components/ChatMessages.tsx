@@ -514,7 +514,7 @@ export function UserMessage(props: {
       >
         <>
           <div class="verevon-chat-bubble">
-            <span class="verevon-chat-bubble__text">{props.message.content}</span>
+            <UserMessageContent content={props.message.content} />
             <ToolChips tools={props.message.tools} />
             <AttachmentChips attachments={props.message.attachments} tone="user" onOpen={props.onViewAttachments} />
           </div>
@@ -543,6 +543,100 @@ export function UserMessage(props: {
       </Show>
     </article>
   )
+}
+
+/**
+ * Keep pasted product links easy to scan without changing what the model
+ * received. Long retail URLs are rendered as source rows while the original
+ * message remains the value submitted to the conversation.
+ */
+function UserMessageContent(props: { content: string }) {
+  const parts = createMemo(() => splitUserMessageContent(props.content))
+
+  return (
+    <div class="verevon-chat-bubble__text">
+      <For each={parts()}>
+        {(part) => (
+          <Switch>
+            <Match when={part.kind === 'copy' ? part : null}>
+              {(copy) => <span class="verevon-chat-bubble__copy">{copy().value}</span>}
+            </Match>
+            <Match when={part.kind === 'link' ? part : null}>
+              {(link) => (
+                <a
+                  class="verevon-chat-bubble__source"
+                  href={link().href}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={link().href}
+                >
+                  <Globe2 size={14} strokeWidth={1.8} aria-hidden="true" />
+                  <span class="verevon-chat-bubble__source-copy">
+                    <span class="verevon-chat-bubble__source-title">{link().label}</span>
+                    <span class="verevon-chat-bubble__source-domain">{link().domain}</span>
+                  </span>
+                  <ExternalLink size={13} strokeWidth={1.8} aria-hidden="true" />
+                </a>
+              )}
+            </Match>
+          </Switch>
+        )}
+      </For>
+    </div>
+  )
+}
+
+type UserMessagePart =
+  | { kind: 'copy'; value: string }
+  | { kind: 'link'; href: string; label: string; domain: string }
+
+const USER_MESSAGE_URL = /https?:\/\/[^\s<>()]+/gi
+
+function splitUserMessageContent(content: string): UserMessagePart[] {
+  const parts: UserMessagePart[] = []
+  let cursor = 0
+
+  for (const match of content.matchAll(USER_MESSAGE_URL)) {
+    const start = match.index ?? cursor
+    const raw = match[0]
+    const href = trimUrlPunctuation(raw)
+    if (start > cursor) parts.push({ kind: 'copy', value: content.slice(cursor, start) })
+    if (href) {
+      const descriptor = describeUserUrl(href)
+      parts.push({ kind: 'link', href, ...descriptor })
+    } else {
+      parts.push({ kind: 'copy', value: raw })
+    }
+    cursor = start + raw.length
+  }
+
+  if (cursor < content.length || parts.length === 0) {
+    parts.push({ kind: 'copy', value: content.slice(cursor) })
+  }
+
+  return parts
+}
+
+function trimUrlPunctuation(value: string): string {
+  return value.replace(/[.,;:!?]+$/u, '').replace(/[)\]}]+$/u, '')
+}
+
+function describeUserUrl(href: string): { domain: string; label: string } {
+  try {
+    const url = new URL(href)
+    const domain = url.hostname.replace(/^www\./iu, '')
+    const segments = url.pathname.split('/').filter(Boolean)
+    const lastSegment = segments.at(-1)
+    const decoded = lastSegment ? decodeURIComponent(lastSegment) : ''
+    const label = decoded
+      .replace(/[-_]+/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim()
+
+    return { domain, label: label || domain }
+  } catch {
+    return { domain: 'Nettlenke', label: href }
+  }
 }
 
 export function ChatMarkdown(props: { content: string; citations?: readonly Citation[] }) {
