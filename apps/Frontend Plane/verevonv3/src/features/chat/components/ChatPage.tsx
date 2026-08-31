@@ -209,18 +209,22 @@ export default function ChatPage() {
   // A tab restored from an older snapshot may no longer have evidence (for
   // example after a failed regeneration or a retention boundary). Fail closed
   // to Chat instead of opening a canvas that only says "nothing here".
-  createEffect(() => {
-    const tab = activeTab()
-    const availability: ChatSurfaceAvailability = {
-      sourceCount: evidenceSources().length,
-      hasGrounding: Boolean(latestGrounding()),
-      artifactCount: artifactItems().length,
-      attachmentCount: conversationAttachments().length,
-      stepCount: state.taskSteps.length,
-      hasRun: Boolean(liveRunId()),
-    }
-    if (!isChatSurfaceAvailable(tab, availability)) setActiveTab('chat')
-  })
+  createEffect(
+    () => ({
+      tab: activeTab(),
+      availability: {
+        sourceCount: evidenceSources().length,
+        hasGrounding: Boolean(latestGrounding()),
+        artifactCount: artifactItems().length,
+        attachmentCount: conversationAttachments().length,
+        stepCount: state.taskSteps.length,
+        hasRun: Boolean(liveRunId()),
+      } satisfies ChatSurfaceAvailability,
+    }),
+    ({ tab, availability }) => {
+      if (!isChatSurfaceAvailable(tab, availability)) setActiveTab('chat')
+    },
+  )
 
   const contextualPanel = () => (
     <Switch>
