@@ -260,6 +260,10 @@ export default function OnboardingPage() {
         sources: item.sources,
       })),
       locale: currentRecommendationLocale(),
+      // Keep the recommendation request aligned with the privacy choice the
+      // user made in the organization step. Model Plane still applies the
+      // signed issuer claim monotonically, so this can only tighten privacy.
+      zeroDataRetention: state.organization.zeroDataRetention,
       connectorCount: sources.connectorCount,
       connectedSourceCount: sources.connectedSourceCount,
       connectedSources: sources.sourceDetails,
@@ -395,10 +399,23 @@ export default function OnboardingPage() {
   )
 
   createEffect(
-    () => ({ reason: recommendationQuery.error, step: state.step, tr: i18n.tr }),
-    ({ reason, step, tr }) => {
-      if (step !== 'paywall' || !reason) return
-      setError(translateApiError(reason, tr, { no: 'Kunne ikke beregne en anbefaling.', en: 'Could not compute a recommendation.' }))
+    () => {
+      const reason = recommendationQuery.error
+      const step = state.step
+      if (step !== 'paywall' || !reason) return { step, message: undefined }
+
+      // Translation reads the reactive locale. Keep that read in the tracked
+      // computation; the effect callback receives only plain values.
+      return {
+        step,
+        message: translateApiError(reason, i18n.tr, {
+          no: 'Kunne ikke beregne en anbefaling.',
+          en: 'Could not compute a recommendation.',
+        }),
+      }
+    },
+    ({ step, message }) => {
+      if (step === 'paywall' && message) setError(message)
     },
   )
 

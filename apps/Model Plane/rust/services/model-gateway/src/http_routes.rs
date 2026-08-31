@@ -2219,12 +2219,48 @@ struct RecommendPlanRequest {
     locale: String,
 }
 
+fn requested_recommendation_zdr(context: &Value) -> bool {
+    context
+        .get("zeroDataRetention")
+        .and_then(Value::as_bool)
+        .or_else(|| context.get("zdr").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod recommendation_retention_tests {
+    use super::*;
+
+    #[test]
+    fn recommendation_defaults_to_normal_retention_when_toggle_is_absent() {
+        assert!(
+            !requested_recommendation_zdr(&json!({})),
+            "missing toggle must not force ZDR"
+        );
+    }
+
+    #[test]
+    fn recommendation_uses_the_explicit_toggle() {
+        assert!(!requested_recommendation_zdr(
+            &json!({ "zeroDataRetention": false })
+        ));
+        assert!(requested_recommendation_zdr(
+            &json!({ "zeroDataRetention": true })
+        ));
+    }
+
+    #[test]
+    fn recommendation_accepts_legacy_zdr_alias() {
+        assert!(requested_recommendation_zdr(&json!({ "zdr": true })));
+    }
+}
+
 /// Recommend an onboarding plan from accumulated onboarding signals. Wraps
 /// inference-core with a versioned prompt + JSON-schema structured output and
-/// runs with ZDR (the context contains org signals). The frontend renders an
-/// instant local recommendation first and swaps in this authoritative result;
-/// it also falls back to its local engine if this endpoint is unavailable, so
-/// this handler favors always returning a valid plan id.
+/// runs with the retention posture selected during onboarding. The frontend
+/// renders an instant local recommendation first and swaps in this authoritative
+/// result; it also falls back to its local engine if this endpoint is
+/// unavailable, so this handler favors always returning a valid plan id.
 async fn recommend_plan(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -2234,6 +2270,7 @@ async fn recommend_plan(
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
 
     let locale = if req.locale == "en" { "en" } else { "nb" };
+    let zdr = claims.effective_zdr(requested_recommendation_zdr(&req.context));
     let context_json = serde_json::to_string(&req.context).unwrap_or_else(|_| "{}".to_owned());
     let messages = vec![
         ChatMessage {
@@ -2262,7 +2299,7 @@ async fn recommend_plan(
                 temperature: 0.55,
                 max_tokens: 1100,
                 structured_output_schema: RECOMMEND_PLAN_SCHEMA.to_owned(),
-                zdr: true,
+                zdr,
                 ..Default::default()
             },
             &inference_bearer,

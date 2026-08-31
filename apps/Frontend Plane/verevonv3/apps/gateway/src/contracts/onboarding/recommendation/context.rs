@@ -10,6 +10,11 @@ pub(crate) struct RecommendContext {
     #[serde(alias = "source_count")]
     pub(crate) source_count: Option<u32>,
     pub(crate) locale: Option<String>,
+    /// The onboarding privacy choice for recommendation inference. The Model
+    /// Plane combines this request value with the signed issuer claim, so a
+    /// caller can request stricter retention but never downgrade ZDR.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "zdr")]
+    pub(crate) zero_data_retention: Option<bool>,
     /// Additional onboarding signals the SPA sends beyond the typed fields above
     /// (e.g. `dataPlane` graph evidence, `goal`, `industry`, `orgForm`,
     /// `branding`, `websitePages`). Captured verbatim and flattened back out so
