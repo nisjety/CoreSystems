@@ -5,9 +5,9 @@
 -- The legacy snapshots table stays untouched; backfill is best-effort so the
 -- table is usable immediately after apply.
 --
--- quarry_request_queues gains the columns required by the upgraded
--- RequestQueueSummary wire shape (kind/status/stats). Existing rows default
--- to status='active' so no data migration is needed.
+-- Request-queue tables are owned and migrated by the Rust runtime. The
+-- control plane only exposes a read-only projection over them; it must not
+-- alter that schema here because the runtime may use a separate database.
 
 CREATE TABLE IF NOT EXISTS snapshots_v2 (
     id           BIGSERIAL PRIMARY KEY,
@@ -54,12 +54,3 @@ BEGIN
         END;
     END IF;
 END $$;
-
-ALTER TABLE quarry_request_queues
-    ADD COLUMN IF NOT EXISTS kind       TEXT NOT NULL DEFAULT 'crawl',
-    ADD COLUMN IF NOT EXISTS status     TEXT NOT NULL DEFAULT 'active',
-    ADD COLUMN IF NOT EXISTS acked      BIGINT NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS failed     BIGINT NOT NULL DEFAULT 0;
-
-CREATE INDEX IF NOT EXISTS idx_request_queues_org_status_created
-    ON quarry_request_queues (org_id, status, created_at DESC, id DESC);
