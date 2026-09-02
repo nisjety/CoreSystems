@@ -272,12 +272,12 @@ rendered as a citation whose click-target is the owning surface.
 > | 7 | Non-image attachments | **Done, with a timing caveat.** Text attachments (`.txt/.md/.csv/.json/.html`) persist to Data Plane v2 and ground later turns — verified live: a `.txt` reached `documents` as `d201f41c…`, reached `status = indexed`, and the next turn quoted it correctly. The route had to be fixed, not just called: `POST /api/v1/chat/documents` was dead end-to-end (502) because model-gateway calls `DocumentService.CreateDocument` over gRPC and Data Plane v2 disabled it ("use documents-api-go POST /v1/documents instead"). The Frontend Plane gateway now takes that route directly, reusing the documents-api leg the knowledge domain already proxies. Caveat: DP2 chunks asynchronously, so the turn carrying the file cannot use it (measured: turn one answered "I find no notes"); the notice says so. PDF/DOCX stay on the per-file "Add to knowledge base" route, since `create_document` takes text `content`, not bytes. |
 > | 8 | Single four-tab right panel + auto-open rule | **Done.** Auto-open rule (Work > Output > Sources, once per thread, Trace never steals focus) implemented; `attachmentCount` no longer hardcoded to 0; the rail keeps ONE geometry whoever renders it. `ChatLiveRunPanel` already hosted Work during a live run but at the narrow basis meant for sitting beside the canvas — measured at 974px the rail was 234px on Work and 396px on Sources, so tab switches moved it 162px and the densest tab was the narrowest. Both rails now read `--verevon-workspace-rail` (verified equal at 974px and 1400px), and the panel reports itself as `Arbeidsflate` when hosting Work. Guarded by `workspace-rail-geometry.test.ts`. The literal component fold was deliberately not done: the 671-line panel is interwoven with its rail chrome, its own tests are already 8/10 red for unrelated reasons, and remounting the run stream on every tab switch would regress. |
 > | 9 | Ask/Do switch + grounding-scope control | Done before the 2026-09 pass; confirmed against code 2026-09-02 (`DashboardComposer.tsx`, response-mode selector). |
-> | 10 | Plan view in the Work tab | **Done.** Resource re-keyed on step progress so it stops going stale; `humanizePlanStepOperation` labels; `PLAN_(STEP_)STATE_` prefixes stripped; `CompleteStep` status mapping fixed in session-core (`skipped` + error-based fallback); `PlanStep.detail` added to the proto and surfaced. |
+> | 10 | Plan view in the Work tab | **Done.** Resource re-keyed on step progress so it stops going stale; `humanizePlanStepOperation` labels; `PLAN_(STEP_)STATE_` prefixes stripped; `CompleteStep` status mapping fixed in session-core (`skipped` + error-based fallback); `PlanStep.detail` added to the proto and surfaced. Amended 2026-09-02 (evening): the live audit found the panel stuck on "Laster plan og oppgaver …" for entire runs. Two causes, both fixed: the resource was keyed on the step count so every step restarted the fetch and the compat shim discarded each superseded result (now a stable key with a throttled, coalesced refetch and stale-while-revalidate rendering); and `ChatPage` handed the rail its Work content as an inline `contextualPanel()` call, which re-instantiated the panel on each of the rail's eight prop reads — seven orphaned panels fetching in parallel (now a `createMemo`). Measured after: one request per refresh, four seconds apart, quiet when no steps arrive. Still open, separate: follow-up turns in an existing thread and research-mode runs after reload get no `runId` on the turn, so the panel is absent for them. |
 > | 11 | Trace tab as audit record | **Done.** Owner decision: audit, not sharing (see §6 Q4). `appendUiEvent` with a 5,000-event cap and a visible notice replaces three silent `.slice(-160)` truncations; the duplicated run-proof panel now lives only in Trace. |
 > | 12 | Thread-list status chips | Done before the 2026-09 pass; confirmed 2026-09-02 (`CoreSidebar.tsx` renders `chatRunStatusChip(item.latestRunStatus)`). The "navigating away drops the run" half is closed by item 5. |
 > | 13 | Deep-research progress surface | **Done.** `SubQueryOutcome` per sub-query, steps emitted active then resolved, `search_sub_queries` returns the outcomes; visible in Work while it runs. |
 >
-> **Outside the plan, still open:** three UI markers from the owner's own list were logged rather than built because each needs a new Model Plane contract — claim-level span binding, source-freshness indicator, confidence/verification marker. The message-pinning UI indicator (pin one message into context; distinct from item 4's thread pins) was not addressed. The §2.3 "Unproxied Model Plane" row (realtime, video, translate, language, document-AI, `/v1/tasks`, `/v1/toon/encode`) is inventory only and untouched. The top nav still has two labels pointing at `/chat` ("Chat" and "Oppgaver").
+> **Outside the plan, still open:** three UI markers from the owner's own list were logged rather than built because each needs a new Model Plane contract — claim-level span binding, source-freshness indicator, confidence/verification marker. The message-pinning UI indicator (pin one message into context; distinct from item 4's thread pins) was not addressed. The §2.3 "Unproxied Model Plane" row (realtime, video, translate, language, document-AI, `/v1/tasks`, `/v1/toon/encode`) is inventory only and untouched. The top nav still has two labels pointing at `/chat` ("Chat" and "Oppgaver"). The 2026-09-02 cross-check (section 7) turned the externally corroborated gaps into plan items 14-18.
 
 ---
 
@@ -312,8 +312,94 @@ Drawn from the second-pass audit (`claude-hermes-deepseek.md` §13):
 ## 6. Open questions
 
 1. **Mobile.** Every reference collapses to one column; the rule for which panel wins is unverified. Recommendation: the right panel becomes a full-screen sheet, never a squeeze. Needs a decision.
+   **Corroborated 2026-09-02** by two of the articles in section 7 (designpixil: chat goes full screen on phones, history in a bottom sheet, never a side-sliding panel; uxstudioteam: action overlays over navigation). The recommendation stands; the decision is still open.
 2. **Norwegian vocabulary.** Ask/Do, Work/Sources/Output/Trace, "Grounded in", and the typed pause-state labels all need Norwegian equivalents settled **before** components are built, not translated afterwards.
 3. **Keyboard model.** Four tabs + a mode switch + a job-queue rail is a lot of focus surface; deserves its own pass (Claude's explicit `Cmd+;` branch is a useful precedent).
+   **Answered 2026-09-02: adopt the model thefrontkit spells out** (section 7.3), as plan item 14: Tab flows composer, send, latest answer, its actions, next message; Escape closes the contextual panel and any popover and returns focus to what opened it; arrow keys move between messages and between suggestion chips; Enter sends, Shift+Enter breaks a line; focus returns to the composer when an answer completes and moves to an inline error when one appears. Nothing here is built yet.
 4. **Trace = audit or sharing?** Determines the permission model.
    **Answered 2026-09-02: audit.** Trace is the run's audit record, not a sharing surface — owner decision. Applied: Trace never takes auto-focus; the UI-event buffer is capped at 5,000 events with a visible notice instead of the silent 160-event truncation it replaced; the run-proof panel lives only in Trace. Sharing, if ever wanted, is a separate permission model to design later.
 5. **Per-run cost to the end user.** None of the four references show it; Verevon has a real cost story in Model Plane that may need a home on this surface.
+
+---
+
+## 7. Reference-ecosystem cross-check (2026-09-02)
+
+An eight-platform "agent ecosystem matrix" (T3 Code, Claude Code, OpenAI Codex,
+Cursor, Google Antigravity, Warp, Manus.ai, Perplexity, DeepSeek Harness) with a
+"Universal Design Language" and a fused three-column "Web UI Matrix" mock-up was
+checked against this document, the Codex implementation plan, the Fjordlys audit,
+the code, and the live page. The three chat-UI articles it cites were read as
+well: designpixil (July 2026, mixes cited research and opinion), uxstudioteam
+(December 2025, opinion with case studies), thefrontkit (February 2026, opinion).
+The matrix itself carries no sources, and several of its claims cannot be checked
+("massive growth since early 2026", "Cordis graph topographies"), so it is treated
+as a design prompt, not as evidence. The same list of products already appears in
+the Codex plan's section 1 as the source of "persistence and control" -- nothing
+new in the list, only in the conclusions drawn from it.
+
+### 7.1 The "Universal Design Language": one tenet adopted, two rejected
+
+| Tenet | Verdict | Why |
+|---|---|---|
+| **High-density layout** -- "screen real estate is never wasted on whitespace" | **Rejected at cold start; accepted inside Work.** | It is derived from five coding tools and describes what developers expect from developer tools. It contradicts section 3.1 (density resolved "in time rather than in space"), section 5's explicit rejection of always-on density, Fjordlys laws 1-2 -- and the matrix's own sources: designpixil, "a chat window that works in isolation routinely fails next to a dense dashboard"; uxstudioteam, one question at a time, large friendly type, progressive disclosure. Where the work is dense -- plan, steps, telemetry, trace -- it lives in the summoned Work and Trace tabs, which may be as dense as they need to be. |
+| **Asymmetric 3-column shell** as the default frame, with a file explorer on the left | **Rejected as a default; already present when summoned.** | THE ONE RULE (section 3.1): the right panel is opened by the work, never by the product. The live check on 2026-09-02 found the product breaking its own rule in the other direction -- the Work panel auto-opens on a plain Ask turn because bookkeeping steps (model selected, memory recalled, usage recorded) count as "work" (ChatPage.tsx:267-309). That is a bug against this document (item 18), not a reason to adopt the shell. The left column is the thread rail with status chips -- Manus's job queue -- not a file explorer; there are no files. |
+| **Explicit permission gate** -- Approve / Stage / Reject / Halt before anything is written | **Adopted; built.** | Ask/Do (3.2), approval cards, typed pauses, effect-immutable turns (3.4), durable cancellation receipts (all verified 2026-09-02). "Stage" is a code-diff idea -- provider actions are atomic, so there is nothing to stage. Corroborated by uxstudioteam's "confirm before executing" cards. |
+
+### 7.2 Per platform: steal, have, or reject
+
+| Platform | The matrix says to steal | Verevon |
+|---|---|---|
+| T3 Code | Three-panel layout; one-click approve/reject | Approve/reject: **have** (approval cards, plan-approval control). Three panels: rejected as a default (7.1). |
+| Claude Code | Dense monospaced, append-only text loops | **Have where it belongs**: tool cards and code blocks use `--font-mono` (Geist Mono); the transcript is not a terminal. Three-way steering and the approval queue were already taken from Claude Code in section 5. |
+| OpenAI Codex | Async task loops, multi-worktree tracking | Not applicable to a chat product. The nearest concept is delegation -- Codex plan Phase 9, an unstarted backend spike. |
+| Cursor | Multi-file composer canvas, file explorer, inline autocomplete | **Rejected**: no files to explore, no code to complete. The one autocomplete-like affordance -- Tab accepts the rotating placeholder -- is built. |
+| Google Antigravity | Horizontal active-agent track, background scheduling | **Have, in calm form**: thread-rail status chips (`chatRunStatusChip` in CoreSidebar), quiet on completion by design. |
+| Warp | Isolated command blocks | **Have**: `ToolCallCard` renders each tool run as one surface; Trace is the append-only log. |
+| Manus.ai | Interactive browser canvas, sandbox persistence, /skill registry | **Have**: `ChatLiveRunPanel` with honest screenshot states and pause/resume; runs survive navigation (item 12); slash commands in the composer. Manus's desktop, terminal and VS Code surfaces stay rejected (section 5). |
+| Perplexity | Inline citation matrices, structured charts, source tracking | **Partly**: numbered `[n]` chips open source cards, Sources tab with counts. Claim-level anchors, freshness and confidence markers: logged, need a Model Plane contract. Charts: not rendered -- markdown tables only. |
+| DeepSeek Harness | Real-time token telemetry, cache metrics | **Have, in the Work tab**: tokens/sec, output tokens, prompt-cache reads (ChatPanels.tsx:606-614) plus per-turn cost in the transcript. Deliberately not in the header: Codex plan Phase 5 keeps developer telemetry off ordinary Ask turns. |
+
+### 7.3 What the three cited articles recommend, against the page today
+
+| Recommendation (source) | Status |
+|---|---|
+| Prominent Stop during streaming (thefrontkit, designpixil) | **Have**; Stop also records a durable cancellation receipt. |
+| Copy, thumbs, retry; edit-and-resubmit with branching (all three) | **Have**; tiered feedback (thumbs, then a note) have. |
+| Auto-scroll pauses when the reader scrolls up (designpixil) | **Have**: `autoFollow` releases at 80px, a scroll-down affordance appears at 160px (use-chat-controller.ts:1385-1396). |
+| 3-5 specific example prompts in the empty state (designpixil) | **Have**: three rotating org-specific prompts, Tab to accept (verified live). |
+| First message = "two sentences and a suggestion": scope plus a concrete next move (designpixil) | **Gap**: the greeting is a static "Hva vil du få gjort?" (ChatMessages.tsx:1988). This document's own deferred item, now externally corroborated -- item 17. |
+| AI-generated thread names, not timestamps (designpixil) | **Have**: generated titles are displayed and rehydrated. |
+| Superscript citations opening source cards with title, URL, excerpt, domain (thefrontkit) | **Have at source level**; chips appear only when the model returns a structured citations array (a narrow trigger, observed live). |
+| Freshness indicators and confidence markers (thefrontkit) | **Logged** -- needs a Model Plane contract (unchanged). |
+| "Searching in:" scope indicator (uxstudioteam) | **Have**: the "Kunnskap" / "Kunnskap + nett" label and its context panel. |
+| Breakdown of how the answer was produced (uxstudioteam) | **Have**: Trace tab, Work steps, the "Brukte N minner" recall notice. |
+| Partial results for long tasks (uxstudioteam) | **Have**: per-sub-query deep-research progress (verified). |
+| Low-confidence hedge plus a verification path (designpixil) | **Have for deep research**: the pipeline is instructed to say when the evidence base is thin (deep_research.rs:1191). Not generalized to ordinary answers. |
+| Errors inline, next to the message (designpixil) | **Have** (`verevon-chat-error-notice`). |
+| 44x44 minimum tap targets (designpixil) | **Gap**: 32px x the app-wide `zoom: 0.9` = 28.8px measured; Fjordlys found the same -- item 15. |
+| Streaming announced through `aria-live="polite"`, batched (thefrontkit) | **Gap**: banners use `role="status"`, the transcript has no live region -- item 16. |
+| Buffer incomplete markdown; defer code until the closing fence (thefrontkit) | **Have by construction**: an unclosed fence renders as a code block to end of content (chat-media-markdown.tsx:593-598), so partial tokens do not break the layout. |
+| Full keyboard model (thefrontkit) | **Adopted** as the answer to section 6 question 3 -- item 14; not built. |
+| Mobile: full screen on phones, bottom sheet rather than a side panel (designpixil, uxstudioteam) | **Corroborates** section 6 question 1; the decision is still open. |
+
+### 7.4 Additions to the plan
+
+14. **Keyboard model** -- the spec recorded under section 6 question 3.
+15. **44px hit areas** for message actions: 32px visual, 44px hit, as Fjordlys
+    already specifies -- and reconsider what the app-wide `zoom: 0.9` does to
+    every control's real size.
+16. **Streaming accessibility**: an `aria-live="polite"` region for the assistant
+    turn, announcements batched every few seconds; focus moves to an inline
+    error when one appears.
+17. **Proactive first message**: scope plus a suggested first move, computed
+    from org context, replacing the static greeting.
+18. **Tighten the auto-open trigger** so bookkeeping steps do not count as
+    work: the Work panel must not open for a plain Ask turn (ChatPage.tsx:267-309).
+    This restores THE ONE RULE the live check found broken.
+
+Deliberately not adopted, with the reason on record: a file explorer (nothing
+to explore); terminal blocks or a terminal surface (the block idea already lives
+in tool cards); an always-on telemetry header ("Agent Mesh Monitor [65 T/s]" --
+telemetry lives in Work); Stage as a partial apply (provider actions are
+atomic); Codex-style multi-worktree tracking (delegation is Phase 9 of the
+Codex plan); charts in answers (tables suffice until a real need appears).

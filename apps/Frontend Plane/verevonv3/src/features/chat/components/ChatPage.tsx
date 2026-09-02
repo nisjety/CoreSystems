@@ -372,6 +372,16 @@ export default function ChatPage() {
     return tab === 'chat' ? 'sources' : tab
   }
   const workCanvasActive = () => Boolean(liveRunId()) && activeTab() === 'steps'
+  // Evaluated once per dependency change, not once per prop read. Passed as an
+  // inline `cond ? contextualPanel() : undefined` these became getters, and the
+  // run panel reads `props.workContent` eight times (class, aria-label, title,
+  // onClick, two <Show>s, the render slot). Every read instantiated a fresh
+  // Work panel tree; only one reached the DOM, the other seven lived on as
+  // orphans whose plan resources kept fetching -- seven identical /plans
+  // requests per refresh, measured live. A memo hands every read the same tree.
+  const liveRailWorkContent = createMemo(() => (workCanvasActive() ? contextualPanel() : undefined))
+  const liveRailNavigation = createMemo(() => (workCanvasActive() ? workspaceNavigation() : undefined))
+
   const workspaceNavigation = () => (
     <ChatTabs
       active={activeTab()}
@@ -563,9 +573,9 @@ export default function ChatPage() {
         runId={liveRunId()}
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
-        navigation={workCanvasActive() ? workspaceNavigation() : undefined}
+        navigation={liveRailNavigation()}
         onCloseWork={() => setActiveTab('chat')}
-        workContent={workCanvasActive() ? contextualPanel() : undefined}
+        workContent={liveRailWorkContent()}
       />
     </div>
   )

@@ -2,7 +2,9 @@
 
 import { fireEvent, render } from '@solidjs/testing-library'
 import { describe, expect, it, vi } from 'vitest'
-import { ContextWindowPanel } from './ChatPanels'
+import { createSignal } from 'solid-js'
+import { ContextWindowPanel, RunPlanPanel } from './ChatPanels'
+import * as orchestration from '@/shared/api/orchestration-client'
 import {
   DiffView,
   MemoryRecallNotice,
@@ -14,6 +16,21 @@ import type { RecalledMemory } from '@/shared/api/chat-client'
 import type { QueuedInput } from './chat-types'
 import { diffText, parseUnifiedDiff } from '@/shared/chat-nodes'
 import type { ThreadContext } from '@/shared/api/chat-client'
+
+// RunPlanPanel's resource fires as soon as run and thread ids exist. Stubbed so
+// the panel tests stay deterministic and offline; each test sets listPlans.
+vi.mock('@/shared/api/orchestration-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/shared/api/orchestration-client')>()
+  return {
+    ...actual,
+    listPlans: vi.fn(async () => []),
+    listTodos: vi.fn(async () => []),
+    // Runs without sub-agents answer 404 here; the panel absorbs it via allSettled.
+    getLineage: vi.fn(async () => {
+      throw new Error('subagent lineage not found')
+    }),
+  }
+})
 
 const context = (overrides: Partial<ThreadContext> = {}): ThreadContext => ({
   threadId: 't1',
@@ -437,6 +454,113 @@ describe('PlanApprovalControl', () => {
       <PlanApprovalControl pending={false} error="Fullmakten ble avvist" onApprove={() => {}} />
     ))
     expect(container.textContent).toContain('Fullmakten ble avvist')
+    unmount()
+  })
+})
+
+describe('RunPlanPanel', () => {
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  it('shows the plan during step churn and does not refetch per step', async () => {
+    // The panel used to key its resource on the step count, so every step
+    // restarted the fetch. Under a deep-research run (a step every ~400ms, a
+    // ~450ms fetch) almost no fetch survived to resolve: the panel read
+    // "Laster plan og oppgaver …" for the whole run and fired three requests
+    // per step. Here the fetch takes 40ms and steps arrive every 10ms.
+    const listPlans = vi.mocked(orchestration.listPlans)
+    listPlans.mockReset()
+    listPlans.mockImplementation(() => new Promise((resolve) => {
+      setTimeout(() => resolve([{
+        id: 'plan_1',
+        runId: 'r1',
+        summary: 'Kartlegg leverandører',
+        state: 'PLAN_STATE_EXECUTING',
+        steps: [{ id: 's1', title: '', operation: 'tool_execution', state: 'PLAN_STEP_STATE_RUNNING' }],
+      }]), 40)
+    }))
+    const [progress, setProgress] = createSignal(0)
+    const { container, unmount } = render(() => (
+      <RunPlanPanel runId="r1" threadId="t1" progressKey={progress()} />
+    ))
+
+    for (let step = 1; step <= 30; step++) {
+      setProgress(step)
+      await wait(10)
+      if (step === 15) {
+        // Mid-churn: the initial fetch (40ms) must have landed and stayed.
+        const text = container.textContent ?? ''
+        expect(text).toContain('Kartlegg leverandører')
+        expect(text).not.toContain('Laster plan og oppgaver')
+      }
+    }
+    await wait(60)
+
+    const text = container.textContent ?? ''
+    expect(text).toContain('Kartlegg leverandører')
+    expect(text).not.toContain('Laster plan og oppgaver')
+    // 30 step changes are not 30 fetches. The initial load, plus at most one
+    // throttled refresh if the 1.5s interval happened to elapse.
+    expect(listPlans.mock.calls.length).toBeLessThanOrEqual(2)
+    unmount()
+  })
+
+  it('keeps the last plan on screen while a refresh runs', async () => {
+    const listPlans = vi.mocked(orchestration.listPlans)
+    listPlans.mockReset()
+    listPlans.mockImplementation(async () => [{ id: 'plan_1', runId: 'r1', summary: 'Første plan', state: 'PLAN_STATE_EXECUTING' }])
+    const [progress, setProgress] = createSignal(0)
+    const { container, unmount } = render(() => (
+      <RunPlanPanel runId="r1" threadId="t1" progressKey={progress()} refreshIntervalMs={200} />
+    ))
+    await wait(20)
+    expect(container.textContent).toContain('Første plan')
+    // A slow refresh must not blank the panel back to the loading note.
+    listPlans.mockImplementation(() => new Promise((resolve) => {
+      setTimeout(() => resolve([{ id: 'plan_1', runId: 'r1', summary: 'Andre plan', state: 'PLAN_STATE_COMPLETE' }]), 150)
+    }))
+    setProgress(1)
+    // The throttle holds the refresh until the interval has elapsed since mount
+    // (~200ms); by 270ms it is in flight and 80ms from landing.
+    await wait(250)
+    expect(listPlans.mock.calls.length).toBe(2)
+    const during = container.textContent ?? ''
+    expect(during).toContain('Første plan')
+    expect(during).not.toContain('Laster plan og oppgaver')
+    await wait(200)
+    // …and the refreshed plan replaces it once the fetch lands.
+    expect(container.textContent).toContain('Andre plan')
+    unmount()
+  })
+
+  it('holds the refresh interval even when fetches are slow and steps keep arriving', async () => {
+    // Observed live: a timer that fired mid-fetch cleared its gate, later steps
+    // re-armed zero-wait timers from a stale timestamp, and refetches ran
+    // back-to-back at fetch-duration cadence (28 requests in a 74s run at a 4s
+    // interval). Interval 200ms, fetch 120ms, a step every 20ms for ~1s: the
+    // interval must win, so roughly 1 + 1000/200 fetches, never 1 + 1000/120.
+    const listPlans = vi.mocked(orchestration.listPlans)
+    listPlans.mockReset()
+    listPlans.mockImplementation(() => new Promise((resolve) => {
+      setTimeout(() => resolve([{ id: 'plan_1', runId: 'r1', summary: 'Plan', state: 'PLAN_STATE_EXECUTING' }]), 120)
+    }))
+    const [progress, setProgress] = createSignal(0)
+    const started = performance.now()
+    const { unmount } = render(() => (
+      <RunPlanPanel runId="r1" threadId="t1" progressKey={progress()} refreshIntervalMs={200} />
+    ))
+    for (let step = 1; step <= 50; step++) {
+      setProgress(step)
+      await wait(20)
+    }
+    await wait(150)
+    // jsdom timers overrun, so bound by the measured window rather than a fixed
+    // count: one fetch per interval (plus the initial load and one of slack),
+    // and strictly fewer than back-to-back at fetch duration would produce.
+    const elapsed = performance.now() - started
+    const calls = listPlans.mock.calls.length
+    expect(calls).toBeLessThanOrEqual(1 + Math.ceil(elapsed / 200) + 1)
+    expect(calls).toBeLessThan(1 + Math.floor(elapsed / 120))
+    expect(calls).toBeGreaterThanOrEqual(3)
     unmount()
   })
 })

@@ -25,14 +25,7 @@ import {
   type Todo,
 } from '@/shared/api/orchestration-client'
 import { ToolCallCard } from './ChatMessages'
-import {
-  For,
-  Match,
-  Show,
-  Switch,
-  createMemo,
-  createSignal,
-} from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import type { JSX } from '@solidjs/web'
 import {
@@ -581,7 +574,11 @@ export function StepsPanel(props: {
               completed execution step into the run's plan, so a new task step
               is the cheapest available signal that the durable plan has more
               rows than the panel last read. */}
-          <RunPlanPanel runId={props.runId} threadId={props.threadId} progressKey={props.steps.length} />
+          <RunPlanPanel
+            runId={props.runId}
+            threadId={props.threadId}
+            progressKey={`${props.steps.length}:${props.steps.filter((step) => step.status !== 'active' && step.status !== 'waiting').length}`}
+          />
           {/* The proof bundle (receipts, approvals) lives in Trace, which is
               the audit record. It was mounted here as well, fetching the same
               bundle twice and splitting one audit trail across two tabs. */}
@@ -713,31 +710,34 @@ function humanizePlanStepOperation(operation?: string) {
     .replace(/^./, (character) => character.toLocaleUpperCase('nb-NO'))
 }
 
-function RunPlanPanel(props: {
+export function RunPlanPanel(props: {
   runId?: string | null
   threadId?: string | null
   /**
-   * Bumped as the run produces steps. The plan resource is otherwise keyed
-   * only on the ids, so it fetched once at run start — when session-core has
-   * created the plan shell but no step rows exist yet — and never again. The
-   * panel then showed a one-line plan for the whole run, and only a manual
-   * reload revealed the steps that had been recorded all along.
+   * Changes as the run records steps: new steps and status changes alike. It
+   * used to be part of the resource key, so every step restarted the fetch. A
+   * deep-research run emits a step every ~400ms while the three plan requests
+   * take ~450ms, so almost no fetch survived long enough to resolve: `value`
+   * never populated, `loading` stayed true, the panel read "Laster plan og
+   * oppgaver …" for the entire run, and it fired three requests per step (about
+   * 165 in a 24s run). It now schedules a throttled, coalesced refetch (one per
+   * `refreshIntervalMs`, never while a fetch is in flight), and the last
+   * successful snapshot stays on screen while a refresh runs.
    */
-  progressKey?: number
+  progressKey?: number | string
+  /** Minimum gap between progress-driven refetches. Tests shorten it. */
+  refreshIntervalMs?: number
 }) {
   const keySeparator = '\u0000'
+  // Keyed on the ids only. A stable key means progress never supersedes the
+  // in-flight fetch, so the initial load always lands.
   const source = () => {
     const runId = props.runId?.trim()
     const threadId = props.threadId?.trim()
     if (!runId || !threadId) return null
-    // `progressKey` is part of the key purely to retrigger the fetch; the
-    // loader below parses only the two ids back out of it.
-    return `${runId}${keySeparator}${threadId}${keySeparator}${props.progressKey ?? 0}`
+    return `${runId}${keySeparator}${threadId}`
   }
-  const [snapshot] = createResource(source, async (key: string): Promise<RunPlanSnapshot> => {
-    // Split on the separator rather than slicing at the first one: the key now
-    // carries a third, throwaway segment (`progressKey`), and the old
-    // "everything after the first separator" slice would fold it into threadId.
+  const [snapshot, { refetch }] = createResource(source, async (key: string): Promise<RunPlanSnapshot> => {
     const [runId = '', threadId = ''] = key.split(keySeparator)
     const [plans, todos, lineage] = await Promise.allSettled([
       listPlans(runId),
@@ -751,9 +751,76 @@ function RunPlanPanel(props: {
       failed: [plans, todos, lineage].filter((result) => result.status === 'rejected').length,
     }
   })
+  /** Best available data: the last successful snapshot while a refresh runs. */
+  const data = () => snapshot.latest
+
+  // Progress-driven refresh: at most one refetch per interval, never two in
+  // flight at once, and a change that arrives mid-flight is not lost — it
+  // queues exactly one more refresh after the current one settles.
+  const refreshInterval = () => props.refreshIntervalMs ?? 4000
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined
+  let refreshQueued = false
+  // Start time of the most recent fetch, initial load included; stamped by the
+  // loading effect below so the interval is always measured from a real start.
+  let lastRefreshAt = Date.now()
+  let progressSeen = false
+  const runRefresh = () => {
+    refreshTimer = undefined
+    // A timer armed from a stale timestamp must not fire early: wait out the
+    // rest of the interval measured from the latest fetch start. Without this,
+    // refetches ran back-to-back at fetch-duration cadence under load.
+    const remaining = lastRefreshAt + refreshInterval() - Date.now()
+    if (remaining > 0) {
+      refreshTimer = setTimeout(runRefresh, remaining)
+      return
+    }
+    // Never restart a fetch that is still in flight -- that is exactly how the
+    // old per-step key starved the panel. Queue one refresh; the loading effect
+    // releases it once the current fetch settles.
+    if (snapshot.loading) {
+      refreshQueued = true
+      return
+    }
+    // A failed refresh is recorded in `snapshot.error`; the panel keeps its
+    // last data rather than blanking.
+    void refetch().catch(() => {})
+  }
+  const scheduleRefresh = () => {
+    if (refreshTimer !== undefined) return
+    const wait = Math.max(0, lastRefreshAt + refreshInterval() - Date.now())
+    refreshTimer = setTimeout(runRefresh, wait)
+  }
+  createEffect(
+    () => props.progressKey ?? 0,
+    () => {
+      // The first run is mount; the source-driven fetch covers the initial load.
+      if (!progressSeen) {
+        progressSeen = true
+        return
+      }
+      if (!source()) return
+      scheduleRefresh()
+    },
+  )
+  createEffect(
+    () => snapshot.loading,
+    (loading) => {
+      if (loading) {
+        lastRefreshAt = Date.now()
+        return
+      }
+      // Release a refresh that arrived while a fetch was in flight.
+      if (!refreshQueued) return
+      refreshQueued = false
+      scheduleRefresh()
+    },
+  )
+  onCleanup(() => {
+    if (refreshTimer !== undefined) clearTimeout(refreshTimer)
+  })
 
   const lineageEdges = createMemo(() => {
-    const value = snapshot()?.lineage
+    const value = data()?.lineage
     if (!value || typeof value !== 'object') return [] as Array<Record<string, unknown>>
     const root = value as Record<string, unknown>
     const candidate = root.lineage && typeof root.lineage === 'object'
@@ -784,26 +851,26 @@ function RunPlanPanel(props: {
             <h3>Plan</h3>
             <p>Planen som er lagret av arbeidskjøringen.</p>
           </div>
-          <Show when={snapshot()?.plans.length}>
-            <span class="verevon-chat-run-plan__count">{snapshot()?.plans.length}</span>
+          <Show when={data()?.plans.length}>
+            <span class="verevon-chat-run-plan__count">{data()?.plans.length}</span>
           </Show>
         </div>
 
-        <Show when={snapshot.loading}>
+        <Show when={snapshot.loading && !data()}>
           <p class="verevon-chat-run-plan__note">Laster plan og oppgaver …</p>
         </Show>
 
-        <Show when={!snapshot.loading && snapshot.error}>
+        <Show when={!snapshot.loading && snapshot.error && !data()}>
           <p class="verevon-chat-run-plan__note">Klarte ikke å hente kjøringsplanen.</p>
         </Show>
 
-        <Show when={!snapshot.loading && snapshot() && snapshot()!.plans.length === 0 && snapshot()!.todos.length === 0 && lineageEdges().length === 0}>
+        <Show when={!snapshot.loading && data() && data()!.plans.length === 0 && data()!.todos.length === 0 && lineageEdges().length === 0}>
           <p class="verevon-chat-run-plan__note">
             Ingen varige plandetaljer er rapportert ennå.
           </p>
         </Show>
 
-        <For each={snapshot()?.plans ?? []}>
+        <For each={data()?.plans ?? []}>
           {(plan) => (
             <article class="verevon-chat-run-plan__card">
               <div class="verevon-chat-run-plan__card-head">
@@ -855,10 +922,10 @@ function RunPlanPanel(props: {
           )}
         </For>
 
-        <Show when={(snapshot()?.todos.length ?? 0) > 0}>
+        <Show when={(data()?.todos.length ?? 0) > 0}>
           <div class="verevon-chat-run-plan__todos">
             <h4>Oppgaver</h4>
-            <For each={snapshot()?.todos ?? []}>
+            <For each={data()?.todos ?? []}>
               {(todo) => (
                 <div class="verevon-chat-run-plan__todo" data-state={todo.state}>
                   <span class="verevon-chat-run-plan__step-state" data-state={todo.state}>{stateLabel(todo.state)}</span>
@@ -890,7 +957,7 @@ function RunPlanPanel(props: {
           </details>
         </Show>
 
-        <Show when={(snapshot()?.failed ?? 0) > 0}>
+        <Show when={(data()?.failed ?? 0) > 0}>
           <p class="verevon-chat-run-plan__partial" role="status">
             Noen kjøringsdetaljer kunne ikke hentes akkurat nå.
           </p>
