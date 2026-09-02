@@ -16,6 +16,13 @@ export type ChatSurfaceAvailability = {
   attachmentCount: number
   stepCount: number
   hasRun: boolean
+  /**
+   * Steps that are work rather than bookkeeping (see `isWorkStep`). Optional:
+   * only `claimsFocus` reads it, and only ChatPage has the state to supply it.
+   */
+  workStepCount?: number
+  /** Tool calls the model actually made across the thread. Optional, as above. */
+  toolCallCount?: number
 }
 
 export type ChatSurfaceSpec = {
@@ -25,6 +32,14 @@ export type ChatSurfaceSpec = {
   icon: IconComponent
   priority: number
   available: (state: ChatSurfaceAvailability) => boolean
+  /**
+   * Stricter than `available`: may this surface pull focus away from the
+   * conversation on its own? A tab can be offered (evidence exists) without
+   * being worth interrupting for. VEREVON_CHAT_DESIGN.md section 3.1 -- first
+   * citation opens Sources, first durable artifact opens Output, first
+   * effectful or multi-step run opens Work; bookkeeping never opens anything.
+   */
+  claimsFocus: (state: ChatSurfaceAvailability) => boolean
 }
 
 /**
@@ -42,6 +57,7 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
     icon: MessageSquare,
     priority: 0,
     available: () => true,
+    claimsFocus: () => false,
   },
   {
     id: 'steps',
@@ -50,6 +66,10 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
     icon: ListChecks,
     priority: 10,
     available: (state) => state.stepCount > 0 || state.hasRun,
+    // Lifecycle steps (connect, compose, model, usage, memory ...) keep the tab
+    // available but must not open it; a plain answer produces six of them.
+    claimsFocus: (state) =>
+      state.hasRun || (state.toolCallCount ?? 0) > 0 || (state.workStepCount ?? 0) > 0,
   },
   {
     id: 'artifacts',
@@ -58,6 +78,8 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
     icon: FileCode2,
     priority: 20,
     available: (state) => state.artifactCount > 0 || state.attachmentCount > 0,
+    // The user's own attachments are not the agent's output.
+    claimsFocus: (state) => state.artifactCount > 0,
   },
   {
     id: 'sources',
@@ -66,6 +88,8 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
     icon: Link2,
     priority: 30,
     available: (state) => state.sourceCount > 0 || state.hasGrounding,
+    // A grounding summary with no sources is not evidence worth interrupting for.
+    claimsFocus: (state) => state.sourceCount > 0,
   },
   {
     id: 'trace',
@@ -74,6 +98,8 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
     icon: Receipt,
     priority: 40,
     available: (state) => state.hasRun,
+    // Becomes available on completion without ever stealing focus.
+    claimsFocus: () => false,
   },
 ] as const
 
@@ -95,4 +121,9 @@ export function availableChatSurfaces(state: ChatSurfaceAvailability): ChatSurfa
 
 export function isChatSurfaceAvailable(id: ChatTab, state: ChatSurfaceAvailability): boolean {
   return chatSurfaceSpec(id).available(state)
+}
+
+/** Whether the surface may open itself right now. See `ChatSurfaceSpec.claimsFocus`. */
+export function chatSurfaceClaimsFocus(id: ChatTab, state: ChatSurfaceAvailability): boolean {
+  return chatSurfaceSpec(id).claimsFocus(state)
 }

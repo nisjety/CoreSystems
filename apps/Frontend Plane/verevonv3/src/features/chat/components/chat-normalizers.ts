@@ -329,6 +329,30 @@ export function isComposerToolId(value: string): value is ComposerToolId {
 }
 
 /**
+ * Does this task step represent work, as opposed to narrating the turn?
+ *
+ * VEREVON_CHAT_DESIGN.md section 3.1: the right panel is opened by the work,
+ * never by the product. Every lifecycle event (connect, compose, model
+ * selected, grounding summary, reasoning, usage, memory recall, verification)
+ * also becomes a task step, so "any step exists" was true for a bare answer
+ * and the Work panel opened on plain Ask turns -- the live audit of
+ * 2026-09-02 caught exactly that. Work is: an orchestration step
+ * (`:event-`, plan steps and deep-research sub-queries), a provider action
+ * (`:action-`), or a tool the model actually called (`:tool-<call id>`). The
+ * composer's requested-capability placeholders share the `:tool-` prefix but
+ * carry a composer tool id, so they stay bookkeeping. Unknown shapes are
+ * bookkeeping too: failing calm is the rule's whole point.
+ */
+export function isWorkStep(step: Pick<AgentTaskStep, 'id'>): boolean {
+  const marker = step.id.lastIndexOf(':')
+  if (marker < 0) return false
+  const kind = step.id.slice(marker + 1)
+  if (kind.startsWith('event-') || kind.startsWith('action-')) return true
+  if (kind.startsWith('tool-')) return !isComposerToolId(kind.slice('tool-'.length))
+  return false
+}
+
+/**
  * A persisted recalled-memory row, validated on the way back in.
  *
  * `origin` is re-narrowed here rather than trusted: a stored transcript may have

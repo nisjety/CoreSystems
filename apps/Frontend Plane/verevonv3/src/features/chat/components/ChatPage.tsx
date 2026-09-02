@@ -51,7 +51,8 @@ import {
 } from './chat-media-markdown'
 import { useChatController } from './use-chat-controller'
 import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
-import { isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
+import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
+import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
 
 export default function ChatPage() {
@@ -252,6 +253,8 @@ export default function ChatPage() {
         attachmentCount: conversationAttachments().length,
         stepCount: state.taskSteps.length,
         hasRun: Boolean(liveRunId()),
+        workStepCount: state.taskSteps.filter(isWorkStep).length,
+        toolCallCount: state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
       } satisfies ChatSurfaceAvailability,
     }),
     ({ tab, availability }) => {
@@ -274,6 +277,13 @@ export default function ChatPage() {
   // so a late-arriving source cannot yank them out of the panel they chose.
   // Trace is deliberately excluded: the doc has it become *available* on run
   // completion without stealing focus.
+  //
+  // Opening is gated on `claimsFocus`, not `available`: availability offers a
+  // tab, focus-claiming interrupts the reader. The two used to be the same
+  // predicate, and since every lifecycle event is also a task step, a bare
+  // answer counted as "work" and Work opened on plain Ask turns (live audit,
+  // 2026-09-02; plan item 18). Now: first tool call, plan step or durable run
+  // opens Work; first citation opens Sources; first artifact opens Output.
   const autoOpenedSurfaces = new Set<ChatTab>()
   let autoOpenThreadId: string | null = null
   createEffect(
@@ -286,6 +296,8 @@ export default function ChatPage() {
         attachmentCount: conversationAttachments().length,
         stepCount: state.taskSteps.length,
         hasRun: Boolean(liveRunId()),
+        workStepCount: state.taskSteps.filter(isWorkStep).length,
+        toolCallCount: state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
       } satisfies ChatSurfaceAvailability,
     }),
     ({ threadId, availability }) => {
@@ -295,7 +307,7 @@ export default function ChatPage() {
       }
       const claimant = (['steps', 'artifacts', 'sources'] as const).find(
         (surface) =>
-          !autoOpenedSurfaces.has(surface) && isChatSurfaceAvailable(surface, availability),
+          !autoOpenedSurfaces.has(surface) && chatSurfaceClaimsFocus(surface, availability),
       )
       if (!claimant) return
       autoOpenedSurfaces.add(claimant)

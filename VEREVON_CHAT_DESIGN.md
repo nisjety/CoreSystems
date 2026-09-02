@@ -342,7 +342,7 @@ new in the list, only in the conclusions drawn from it.
 | Tenet | Verdict | Why |
 |---|---|---|
 | **High-density layout** -- "screen real estate is never wasted on whitespace" | **Rejected at cold start; accepted inside Work.** | It is derived from five coding tools and describes what developers expect from developer tools. It contradicts section 3.1 (density resolved "in time rather than in space"), section 5's explicit rejection of always-on density, Fjordlys laws 1-2 -- and the matrix's own sources: designpixil, "a chat window that works in isolation routinely fails next to a dense dashboard"; uxstudioteam, one question at a time, large friendly type, progressive disclosure. Where the work is dense -- plan, steps, telemetry, trace -- it lives in the summoned Work and Trace tabs, which may be as dense as they need to be. |
-| **Asymmetric 3-column shell** as the default frame, with a file explorer on the left | **Rejected as a default; already present when summoned.** | THE ONE RULE (section 3.1): the right panel is opened by the work, never by the product. The live check on 2026-09-02 found the product breaking its own rule in the other direction -- the Work panel auto-opens on a plain Ask turn because bookkeeping steps (model selected, memory recalled, usage recorded) count as "work" (ChatPage.tsx:267-309). That is a bug against this document (item 18), not a reason to adopt the shell. The left column is the thread rail with status chips -- Manus's job queue -- not a file explorer; there are no files. |
+| **Asymmetric 3-column shell** as the default frame, with a file explorer on the left | **Rejected as a default; already present when summoned.** | THE ONE RULE (section 3.1): the right panel is opened by the work, never by the product. The live check on 2026-09-02 found the product breaking its own rule in the other direction -- the Work panel auto-opens on a plain Ask turn because bookkeeping steps (model selected, memory recalled, usage recorded) count as "work" (ChatPage.tsx:267-309). That was a bug against this document (item 18, fixed the same evening -- see 7.4), not a reason to adopt the shell. The left column is the thread rail with status chips -- Manus's job queue -- not a file explorer; there are no files. |
 | **Explicit permission gate** -- Approve / Stage / Reject / Halt before anything is written | **Adopted; built.** | Ask/Do (3.2), approval cards, typed pauses, effect-immutable turns (3.4), durable cancellation receipts (all verified 2026-09-02). "Stage" is a code-diff idea -- provider actions are atomic, so there is nothing to stage. Corroborated by uxstudioteam's "confirm before executing" cards. |
 
 ### 7.2 Per platform: steal, have, or reject
@@ -396,6 +396,17 @@ new in the list, only in the conclusions drawn from it.
 18. **Tighten the auto-open trigger** so bookkeeping steps do not count as
     work: the Work panel must not open for a plain Ask turn (ChatPage.tsx:267-309).
     This restores THE ONE RULE the live check found broken.
+    **Done 2026-09-02 (evening).** The registry now has two predicates: `available`
+    (may the tab be offered -- unchanged, fail-closed) and `claimsFocus` (may it
+    interrupt): Work on the first tool call, work step or durable run, Output on
+    the first artifact (never the user's attachments), Sources on the first
+    citation (never a bare grounding summary), Trace never. `isWorkStep` in
+    chat-normalizers.ts classifies steps by the id conventions the producers use
+    (`:event-`, `:action-`, real `:tool-<call id>`; composer placeholders and
+    unknown shapes stay bookkeeping). Verified live: "What is the capital of
+    Norway?" answered with no panel and no canvas class while Work stayed offered
+    in the header; a deep-research turn opened Work by itself at 3.1s. Guarded by
+    chat-surfaces.test.ts (19 assertions incl. a wiring guard on ChatPage).
 
 Deliberately not adopted, with the reason on record: a file explorer (nothing
 to explore); terminal blocks or a terminal surface (the block idea already lives
