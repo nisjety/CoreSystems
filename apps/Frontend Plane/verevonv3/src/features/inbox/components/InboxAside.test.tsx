@@ -144,11 +144,15 @@ describe('InboxAside Verevon actions', () => {
 
     expect(await screen.findByText('Use the verified delivery workflow.')).toBeTruthy()
     expect(invokeBody).not.toHaveProperty('thread_id', 'unrelated-thread')
-    // The link carries the resolved thread id itself (Chat's own deep-link
-    // resolver opens it); a support answer must never overwrite Chat's
-    // unrelated active-thread pointer as a side effect of merely answering.
-    const openInChat = await screen.findByRole('link', { name: /open in chat|åpne i chat/i })
-    expect(openInChat.getAttribute('href')).toBe('/chat?thread_id=support_thread')
+    // The "Åpne i Chat" deep-link is deliberately gone: a support thread's
+    // origin is not `chat`, so Chat marked it foreign and showed it read-only —
+    // the link promised the workspace and delivered a transcript you could not
+    // continue. The rail reports the shared thread instead and the conversation
+    // is worked here. See chat-route-ownership.test.ts.
+    expect(screen.queryByRole('link', { name: /open in chat|åpne i chat/i })).toBeNull()
+    expect(await screen.findByText(/shared thread active|delt tråd aktiv/i)).toBeTruthy()
+    // Unchanged and still the point of this test: answering must never
+    // overwrite Chat's unrelated active-thread pointer as a side effect.
     expect(window.localStorage.getItem('verevon.chat.threadId')).toBe('unrelated-thread')
     expect(window.localStorage.getItem('verevon.chat.supportContext.v1')).toBeNull()
   })

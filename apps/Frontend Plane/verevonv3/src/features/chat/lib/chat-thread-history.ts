@@ -217,10 +217,21 @@ export function replaceChatThreadHistory(inputs: ChatThreadHistoryInput[]): Chat
     const item = normalizeHistoryInput(input)
     if (!item || seen.has(item.threadId)) continue
     seen.add(item.threadId)
-    // Server session lists carry no titleKind or pin state (pinning is
-    // local-only); without these locks a sidebar refresh racing the debounced
-    // server snapshot would clobber a freshly generated title, and a full
-    // server-session resync would silently unpin every pinned thread.
+    // Server session lists carry no titleKind, so the title lock still does
+    // real work: a sidebar refresh racing the debounced server snapshot would
+    // otherwise clobber a freshly generated title.
+    //
+    // They DO carry pin state, contrary to what this comment used to claim.
+    // `ChatThreadSession.pinned` is non-optional and normalized to a hard
+    // boolean (`chat-client.ts`, `pinned: item.pinned === true`), so every
+    // server thread arrives with an explicit `pinned` and `withPinnedCarry`
+    // below takes its explicit branch — the carry-from-stored branch is
+    // unreachable from this caller. That is correct rather than broken: the
+    // server owns the pin now (both the sidebar toggle and the composer's
+    // History panel write through to `PUT /api/v1/chat/threads/{id}`), so an
+    // explicit `false` from the server is the truth, not a lost local pin.
+    // Do not "restore" a local carry here — it would resurrect pins the user
+    // removed on another device.
     const matchingStored = stored.find((candidate) => candidate.threadId === item.threadId)
     collected.push(withLatestRunCarry(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored), matchingStored))
   }

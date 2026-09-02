@@ -166,6 +166,11 @@ export type PlanStep = {
   title: string
   operation?: string
   state?: string
+  /**
+   * One line on how the step went — its failure reason, or a summary of its
+   * output. Absent when the step recorded neither.
+   */
+  detail?: string
 }
 
 /** A thread's todo as reported by model-gateway's orchestration API. */
@@ -209,6 +214,7 @@ function normalizePlan(raw: RawPlan): Plan | null {
           title,
           operation: str(step.operation),
           state: str(step.state) ?? str(step.status),
+          detail: str(step.detail),
         }
       })
       .filter((step): step is PlanStep => step !== null)

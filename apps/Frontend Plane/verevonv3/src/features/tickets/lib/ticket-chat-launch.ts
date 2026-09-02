@@ -71,6 +71,8 @@ export async function launchTicketAssistant(ticket: SupportTicket, actor: Action
       userId: actor.userId,
     },
     text: buildTicketChatPrompt(ticket, messages),
-    tools: ['reason'],
+    // Was `tools: ['reason']` — an inert tool that never reached the model, so
+    // omitting it changes nothing about how this hand-off is answered.
+
   })
 }

@@ -463,7 +463,9 @@ export function SearchPanel(props: {
     })
     await writePendingChatLaunch({
       text: prompt,
-      tools: ['search', 'research', 'reason'],
+      // 'reason' dropped with the tool itself: it never reached the model,
+      // so this launch behaves exactly as before.
+      tools: ['search', 'research'],
     })
     navigateToChat(navigate)
   }

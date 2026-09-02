@@ -279,6 +279,17 @@ message PlanStep {
 
   // Last update timestamp.
   google.protobuf.Timestamp updated_at = 6;
+
+  // What actually happened, in one line: the failure reason when the step
+  // failed, otherwise a short summary of its output. Empty when the step
+  // recorded neither.
+  //
+  // Execution steps already store their real detail in `plan_steps.payload`
+  // (the tool's error and output), but nothing carried it out to a caller — so
+  // a plan whose every step failed on "permission denied by policy" rendered
+  // as an unexplained list of identical `tool_execution` rows. The payload
+  // itself is deliberately NOT exposed: it holds raw, untruncated tool output.
+  string detail = 7;
 }
 
 // A durable plan record.

@@ -3,7 +3,7 @@ import { readClientJson, removeClientValue, writeClientJson } from '@/shared/ses
 
 const pendingLaunchKey = 'verevon.chat.pendingLaunch'
 
-export type PendingChatTool = 'image' | 'reason' | 'research' | 'search'
+export type PendingChatTool = 'image' | 'research' | 'search'
 
 export type PendingChatAction = {
   id: string
@@ -121,7 +121,10 @@ function isPendingAttachment(value: unknown): value is PendingChatAttachment {
 }
 
 function isPendingTool(value: unknown): value is PendingChatTool {
-  return value === 'image' || value === 'reason' || value === 'research' || value === 'search'
+  // A legacy hand-off carrying the removed 'reason' tool is filtered out
+  // here rather than rejected: the value no longer means anything, but the
+  // rest of the pending launch is still perfectly valid.
+  return value === 'image' || value === 'research' || value === 'search'
 }
 
 function isPendingAction(value: unknown): value is PendingChatAction {

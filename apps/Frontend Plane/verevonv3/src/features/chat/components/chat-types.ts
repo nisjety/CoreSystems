@@ -341,6 +341,11 @@ export type SendOptions = {
   actions?: ChatAction[]
   /** Reasoning effort from the composer's response-mode selector. */
   effort?: 'quick' | 'deep'
+  /**
+   * Response-style dial from composer settings — how much prose the answer
+   * spends, independent of `effort`'s thinking budget.
+   */
+  tone?: 'concise' | 'detailed'
 
   attachments?: StreamAttachment[]
   browseWeb?: boolean
@@ -419,7 +424,6 @@ export const OVERFLOW_PROMPTS = [
 
 export const TOOL_LABELS: Record<ComposerToolId, string> = {
   image: 'Create image',
-  reason: 'Reason',
   research: 'Deep research',
   search: 'Search',
 }

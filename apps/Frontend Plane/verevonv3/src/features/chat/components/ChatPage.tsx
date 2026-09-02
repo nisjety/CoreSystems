@@ -6,9 +6,11 @@ import {
   createMemo,
   createEffect,
   createSignal,
+  onCleanup,
   untrack,
 } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
+import { createElementHeight } from '@/shared/ui/verevon/createElementHeight'
 import {
   ArrowDown,
   EyeOff,
@@ -50,6 +52,7 @@ import {
 import { useChatController } from './use-chat-controller'
 import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
 import { isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
+import type { ChatTab } from './chat-types'
 
 export default function ChatPage() {
   const session = getSession()
@@ -205,9 +208,21 @@ export default function ChatPage() {
       // A temporary chat has no durable context to inspect, and asking would
       // be a server round-trip for a thread that is not meant to persist.
       if (!threadId || isActiveThreadTemporary()) return null
-      return { threadId }
+      // `turnCount` is part of the key so the window refetches as the
+      // conversation grows. Keyed on (tab, thread) alone it was fetched once
+      // and then silently went stale — an inspector showing last-turn's token
+      // count is worse than one that admits it is loading, because nothing on
+      // screen says the number is old. Still gated on the tab being open, so
+      // this costs nothing until someone actually looks.
+      return {
+        threadId,
+        turnCount: state.turns.length,
+        // Scope to the live run when there is one; the endpoint supports it
+        // and it is the assembly the user is actually watching.
+        runId: liveRunId() ?? undefined,
+      }
     },
-    async (key) => getThreadContext(key.threadId),
+    async (key) => getThreadContext(key.threadId, key.runId),
   )
 
   // Contextual surfaces are siblings of the transcript. Opening one must not
@@ -248,6 +263,69 @@ export default function ChatPage() {
       }
     },
   )
+
+  // VEREVON_CHAT_DESIGN.md §3.1 — "the right panel is never opened by the
+  // product, only by the work." The effect above only ever failed CLOSED, so
+  // the panel never opened itself and the workspace felt inert: evidence
+  // arrived and nothing happened until the user went looking for it.
+  //
+  // Auto-focus precedence is Work > Output > Sources, and a surface may claim
+  // focus at most once per thread — after that the user's own selection wins,
+  // so a late-arriving source cannot yank them out of the panel they chose.
+  // Trace is deliberately excluded: the doc has it become *available* on run
+  // completion without stealing focus.
+  const autoOpenedSurfaces = new Set<ChatTab>()
+  let autoOpenThreadId: string | null = null
+  createEffect(
+    () => ({
+      threadId: state.threadId,
+      availability: {
+        sourceCount: evidenceSources().length,
+        hasGrounding: Boolean(latestGrounding()),
+        artifactCount: artifactItems().length,
+        attachmentCount: conversationAttachments().length,
+        stepCount: state.taskSteps.length,
+        hasRun: Boolean(liveRunId()),
+      } satisfies ChatSurfaceAvailability,
+    }),
+    ({ threadId, availability }) => {
+      if (threadId !== autoOpenThreadId) {
+        autoOpenThreadId = threadId
+        autoOpenedSurfaces.clear()
+      }
+      const claimant = (['steps', 'artifacts', 'sources'] as const).find(
+        (surface) =>
+          !autoOpenedSurfaces.has(surface) && isChatSurfaceAvailable(surface, availability),
+      )
+      if (!claimant) return
+      autoOpenedSurfaces.add(claimant)
+      untrack(() => {
+        // Only ever pull focus away from the conversation itself. If the user
+        // is already reading another surface, record the claim above and leave
+        // them where they are.
+        if (activeTab() === 'chat') setActiveTab(claimant)
+      })
+    },
+  )
+
+  // The composer dock's height is unbounded (the textarea autosizes up to a
+  // 50vh cap in expanded mode), so anything anchored to the viewport bottom
+  // -- like the global feedback widget -- needs the real measured height,
+  // not a guessed offset, to avoid sitting underneath the send button.
+  const composerDockSize = createElementHeight<HTMLDivElement>()
+  createEffect(
+    () => ({ visible: hasMessages(), height: composerDockSize.height() }),
+    ({ visible, height }) => {
+      if (!visible || height == null) {
+        document.documentElement.style.removeProperty('--verevon-composer-dock-height')
+        return
+      }
+      document.documentElement.style.setProperty('--verevon-composer-dock-height', `${height}px`)
+    },
+  )
+  onCleanup(() => {
+    document.documentElement.style.removeProperty('--verevon-composer-dock-height')
+  })
 
   const contextualPanel = () => (
     <Switch>
@@ -327,6 +405,7 @@ export default function ChatPage() {
           <ChatHeader
             active={activeTab()}
             artifactCount={artifactItems().length + conversationAttachments().length}
+            attachmentCount={conversationAttachments().length}
             branchCount={state.branchCount}
             messageCount={state.turns.length}
             runAvailable={Boolean(liveRunId())}
@@ -342,7 +421,7 @@ export default function ChatPage() {
 
         <Switch>
           <Match when={!hasMessages()}>
-            <EmptyChatState onSelectPrompt={setInput}>{composer()}</EmptyChatState>
+            <EmptyChatState onSelectPrompt={setInput} orgName={session.activeOrg?.name}>{composer()}</EmptyChatState>
           </Match>
           <Match when={hasMessages()}>
             <div
@@ -372,7 +451,7 @@ export default function ChatPage() {
                         onEdit={(text) => void editAndResubmit(row.turn.id, text)}
                         onRegenerate={regenerateLatest}
                         onRerunAsNewTurn={() => void rerunAsNewTurn(row.turn.id)}
-                        onFeedback={(rating) => submitTurnFeedback(row.turn.id, rating)}
+                        onFeedback={(rating, note) => submitTurnFeedback(row.turn.id, rating, note)}
                         onApprovalDecision={(approvalId, decision) =>
                           void handleApprovalDecision(row.turn.id, approvalId, decision)
                         }
@@ -434,7 +513,7 @@ export default function ChatPage() {
             source set, or work trace is open. Keeping this single composer
             mounted also preserves drafts, attachments, and model selection. */}
         <Show when={hasMessages()}>
-          <div class="verevon-chat-composer-dock">
+          <div class="verevon-chat-composer-dock" ref={composerDockSize.setElement}>
             <Show when={showScrollDown()}>
               <button
                 type="button"

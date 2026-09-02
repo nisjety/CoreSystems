@@ -381,6 +381,10 @@ describe('VerevonIngestionsPage', () => {
     const navigation = screen.getByRole('navigation', { name: /innhenting navigasjon/i })
     expect(within(navigation).getByRole('link', { name: /^arbeidsflate$/i }).getAttribute('href')).toBe('/ingestions')
     expect(within(navigation).getByRole('link', { name: /^kunnskap$/i }).getAttribute('href')).toBe('/knowledge')
-    expect(within(navigation).getByRole('link', { name: /^spør verevon$/i }).getAttribute('href')).toBe('/chat')
+    // "Spør Verevon" was one of five `/chat` shortcuts scattered through
+    // unrelated sidebar sections. Chat has exactly one destination now (its own
+    // section); a surface that wants Verevon's help launches a chat of its own
+    // rather than linking sideways. See chat-route-ownership.test.ts.
+    expect(within(navigation).queryByRole('link', { name: /^spør verevon$/i })).toBeNull()
   })
 })

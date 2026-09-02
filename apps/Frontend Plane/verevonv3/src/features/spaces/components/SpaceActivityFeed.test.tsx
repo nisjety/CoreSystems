@@ -62,10 +62,28 @@ describe('SpaceActivityFeed', () => {
     expect(screen.getByText('Uten tittel')).toBeTruthy()
   })
 
-  it('links an item to its conversation', () => {
-    const { container } = render(() => <SpaceActivityFeed threads={[{ thread_id: 'thr_1', title: 'A' }]} />)
+  it('links an item to its conversation in the owning Space', () => {
+    const { container } = render(() => (
+      <SpaceActivityFeed threads={[{ thread_id: 'thr_1', title: 'A', space_id: 'space_1' }]} />
+    ))
     const link = container.querySelector('.verevon-activity-link')
-    expect(link?.getAttribute('href')).toBe('/chat?thread_id=thr_1')
+    expect(link?.getAttribute('href')).toBe('/spaces/space_1?thread_id=thr_1')
+  })
+
+  /**
+   * The old fallback linked an owner-less item into `/chat`, which contradicted
+   * the very comment above it ("a foreign Space thread cannot be adopted by
+   * Chat through a new activity link") and would have handed Chat a thread it
+   * does not own. Unknown owner now means no link.
+   */
+  it('renders no link when the owning Space is unknown', () => {
+    const { container } = render(() => <SpaceActivityFeed threads={[{ thread_id: 'thr_1', title: 'A' }]} />)
+    const row = container.querySelector('.verevon-activity-link')
+    // Still rendered — the row must stay readable — but not as a link.
+    expect(row).toBeTruthy()
+    expect(row?.tagName.toLowerCase()).toBe('span')
+    expect(row?.getAttribute('href')).toBeNull()
+    expect(container.querySelector('a.verevon-activity-link')).toBeNull()
   })
 
   it('says so plainly when the space has no activity', () => {

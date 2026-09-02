@@ -1,3 +1,21 @@
+//! AG-UI protocol client — an INTENTIONALLY UNWIRED interop surface.
+//!
+//! Nothing in the app imports this module (only its own test does), and that is
+//! deliberate rather than rot. It targets `POST /api/v1/ag-ui/stream`, the
+//! gateway's AG-UI adapter (`apps/gateway/src/domains/ag_ui.rs`), which exists
+//! so an AG-UI-speaking consumer can drive Verevon over the standard protocol.
+//! This client is the reference implementation of that contract, kept complete
+//! and tested so the surface stays honest while its consumer is pending.
+//!
+//! DO NOT "clean this up" as dead code — an audit has flagged it as such once
+//! already. If you are retiring AG-UI, retire the gateway route in the same
+//! change; if you are adopting it, this is the client to adopt.
+//!
+//! NOT the path the chat page uses. Ordinary chat posts to
+//! `/api/v1/chat/stream`, and AG-UI-shaped frames arriving on THAT stream are
+//! handled by `chat-client.ts`'s own `dispatchAgUiEvent`. That inline handling
+//! is live and independent of this file.
+
 import {
   buildChatWireBody,
   type ChatInvokeRequest,

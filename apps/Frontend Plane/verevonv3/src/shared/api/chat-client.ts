@@ -72,6 +72,17 @@ export type ChatInvokeRequest = {
    * `reasoning` feature (already in `DEFAULT_FEATURES`).
    */
   effort?: 'quick' | 'standard' | 'deep'
+  /**
+   * Response-style dial, orthogonal to `effort`: how much prose the answer
+   * spends, not how hard the model thinks.
+   *
+   * The gateway maps this to a short system directive (`crate::verbosity`);
+   * `balanced` is deliberately not sent, because an absent value already means
+   * "the model's natural verbosity" there. The composer has offered this
+   * setting all along but never transmitted it — it was read once, to draw its
+   * own checkmark.
+   */
+  verbosity?: 'concise' | 'balanced' | 'detailed'
   attachments?: ChatAttachment[]
   /** Explicit tool definitions (advanced); usually derived from actions/browseWeb. */
   tools?: ChatToolSpec[]
@@ -615,6 +626,12 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // no-op field on every ordinary turn.
     ...(request.effort && request.effort !== 'standard'
       ? { effort: request.effort }
+      : {}),
+    // Same shape as `effort` above, and for the same reason: the gateway reads
+    // an absent verbosity as "no directive", so `balanced` is omitted rather
+    // than sent as a no-op on every turn.
+    ...(request.verbosity && request.verbosity !== 'balanced'
+      ? { verbosity: request.verbosity }
       : {}),
     attachments: request.attachments ?? [],
     ...(supportContextQuery ? { support_context_query: supportContextQuery } : {}),
@@ -1348,6 +1365,46 @@ export type ThreadContext = {
   segments: ContextSegment[]
 }
 
+/** One document ingested from a chat attachment. */
+export type ChatDocumentUpload = {
+  documentId: string
+  status: string
+}
+
+/**
+ * Ingest an attached TEXT document so the conversation can retrieve it.
+ *
+ * `POST /api/v1/chat/documents` existed with zero callers: the composer
+ * accepted nine document types, showed a chip for each, and then discarded
+ * every non-image file on send while the transcript still said "1 attachment
+ * added". This is the route that closes that gap.
+ *
+ * Text only, and that is the route's own contract rather than a shortcut: the
+ * handler takes JSON with a `content` STRING (it creates a Data Plane document
+ * from text), so a PDF or DOCX cannot go through it. Those keep using the
+ * per-file "Add to knowledge base" action, which posts real `File` bytes to
+ * imports-core and lets the server extract them.
+ *
+ * Refused server-side under ZDR (412) — a temporary chat must not leave a
+ * durable document behind. Callers should skip it rather than rely on that.
+ */
+export async function uploadChatDocument(
+  title: string,
+  content: string,
+): Promise<ChatDocumentUpload> {
+  const raw = await requestJson<Record<string, unknown>>(
+    '/api/v1/chat/documents',
+    {
+      method: 'POST',
+      body: JSON.stringify({ title, content, source: 'chat-upload', type: 'text' }),
+    },
+  )
+  return {
+    documentId: typeof raw.document_id === 'string' ? raw.document_id : '',
+    status: typeof raw.status === 'string' ? raw.status : '',
+  }
+}
+
 export async function getThreadContext(
   threadId: string,
   runId?: string,
@@ -1370,7 +1427,12 @@ export async function getThreadContext(
       const segment = entry as Record<string, unknown>
       const kind = typeof segment.kind === 'string' ? segment.kind : ''
       // A segment with no kind cannot be labelled, and an unlabelled block of
-      // prompt text in an inspector is worse than omitting it.
+      // prompt text in an inspector is worse than omitting it. Deliberate, and
+      // covered by "drops a segment with no kind ..." in chat-client.test.ts:
+      // the dropped payload can be raw prompt content the product has not
+      // chosen to expose, so relabelling it "unknown" would leak rather than
+      // clarify. The trade-off is that segments need not sum to
+      // `estimatedTokens`; the panel reports the assembler's own total.
       if (!kind) return []
       return [
         {

@@ -1245,6 +1245,11 @@ pub async fn invoke_stream_sse(
     // Cloned into the persist task so the assistant message records which
     // persona this turn answered as (server-stamped by the gateway).
     let session_agent_name = req.agent_name.clone();
+    // Same reason, for the turn's evidence: without persisting this, grounding
+    // (and the citations nested in it) lived only in the SSE frames, so a
+    // reopened thread showed no sources anywhere but the browser that streamed
+    // it. Cloned here because the persist task outlives `grounding`'s use above.
+    let session_grounding = grounding.clone();
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
     let tool_phase_query = req.content.clone();
     // Provider-bound copy for the title inference: `user_content` already has
@@ -1989,6 +1994,10 @@ pub async fn invoke_stream_sse(
                         &assistant_output,
                         &session_bearer,
                         session_agent_name.as_deref(),
+                        crate::session_flow::turn_evidence_metadata(
+                            session_grounding.as_ref(),
+                            &sink.recorded_citations(),
+                        ),
                     )
                     .await
                     {
@@ -3222,6 +3231,8 @@ fn vision_stream(
                     &description,
                     &session_bearer,
                     None,
+                    // Vision describes an supplied image; it grounds nothing.
+                    None,
                 )
                 .await
                 {
@@ -3428,6 +3439,9 @@ fn image_gen_stream(
                         &thread_id,
                         &assistant_content,
                         &session_bearer,
+                        None,
+                        // Image generation grounds nothing, and its artifact is
+                        // a base64 data URI — far too large for message metadata.
                         None,
                     ),
                 )
@@ -3876,6 +3890,9 @@ async fn serve_cached_answer(
         cached,
         session_bearer,
         None,
+        // A cached-answer replay has no grounding of its own; the turn that
+        // originally produced this answer persisted its own evidence.
+        None,
     )
     .await
     {
@@ -4070,6 +4087,9 @@ async fn run_infer_fallback(
                 &resp.content,
                 session_bearer,
                 None,
+                // The fallback path runs no tool loop, so retrieval grounding
+                // is the only evidence it can have.
+                crate::session_flow::turn_evidence_metadata(grounding, &[]),
             )
             .await
             {

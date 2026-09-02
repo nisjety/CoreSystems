@@ -466,8 +466,16 @@ export function ChatLiveRunPanel(props: {
     <Show when={props.runId}>
       {(runId) => (
         <aside
-          class={['verevon-chat-run-panel', { 'verevon-chat-run-panel--collapsed': props.collapsed }]}
-          aria-label="Live agentkjøring"
+          class={[
+            'verevon-chat-run-panel',
+            {
+              'verevon-chat-run-panel--collapsed': props.collapsed,
+              // Hosting the Work tab means this panel IS the workspace rail, so it
+              // must not keep the narrow basis meant for sitting beside the canvas.
+              'verevon-chat-run-panel--workspace': Boolean(props.workContent),
+            },
+          ]}
+          aria-label={props.workContent ? 'Arbeidsflate' : 'Live agentkjøring'}
           style={{ display: props.hidden ? 'none' : undefined }}
         >
           <header class="verevon-chat-run-panel__head">

@@ -19,17 +19,17 @@ use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use mp_contracts::model_plane::v1::{
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, Approval, ApprovalKind,
-    ApprovalProof, ApprovalState, BatchTranslateTextRequest, ContinuationExecution,
-    CancelRunRequest, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
+    ApprovalProof, ApprovalState, BatchTranslateTextRequest, CancelRunRequest,
+    ContinuationExecution, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
     CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest, Event,
-    EventType, ExtractImageTextRequest,
-    GenerateImageRequest, GetApprovalRequest, GetPlanRequest, GetRunProofBundleRequest,
-    GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVerificationMetricsRequest,
-    GetVideoGenerationJobRequest, ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest,
-    ListPlansRequest, ListRunsRequest, ListSpeechVoicesRequest, ListSystemRunsRequest,
-    ListTodosRequest, ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep,
-    PlanStepState, RegisterMcpServerRequest, ResumeRunRequest, ResumeRunResponse, RunDetail,
-    ReplayThreadRequest, RunProofBundle, StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole,
+    EventType, ExtractImageTextRequest, GenerateImageRequest, GetApprovalRequest, GetPlanRequest,
+    GetRunProofBundleRequest, GetRunRequest, GetSubagentLineageRequest, GetTodoRequest,
+    GetVerificationMetricsRequest, GetVideoGenerationJobRequest, ListApprovalsRequest,
+    ListMcpServersRequest, ListModelsRequest, ListPlansRequest, ListRunsRequest,
+    ListSpeechVoicesRequest, ListSystemRunsRequest, ListTodosRequest,
+    ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep, PlanStepState,
+    RegisterMcpServerRequest, ReplayThreadRequest, ResumeRunRequest, ResumeRunResponse, RunDetail,
+    RunProofBundle, StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole,
     SynthesizeSpeechRequest, Todo, TodoPriority, TodoState, TranscribeSpeechRequest,
     TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
     VerificationMetrics, VerificationStatus,
@@ -1137,11 +1137,7 @@ async fn replay_run_events(
     const DEFAULT_LIMIT: u32 = 160;
     const MAX_LIMIT: u32 = 500;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let after_event_id = query
-        .after_event_id
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let after_event_id = query.after_event_id.unwrap_or_default().trim().to_owned();
 
     // `GetRun` is the run-level owner check. Do not rely on a caller-supplied
     // thread id, and do not turn a missing run into an empty successful page.
@@ -5501,6 +5497,10 @@ fn plan_step_value(step: &PlanStep) -> Value {
         "title": step.title,
         "operation": empty_to_null(&step.operation),
         "state": enum_name(PlanStepState::try_from(step.state).ok().as_ref()),
+        // Why a step ended the way it did. Without this the plan panel could
+        // only repeat the step's operation slug, so a run that failed every
+        // step on a policy denial looked identical to one that succeeded.
+        "detail": empty_to_null(&step.detail),
     })
 }
 
@@ -6795,6 +6795,12 @@ struct ThreadMessage {
     /// from session-core's record — never an authority claim.
     #[serde(skip_serializing_if = "String::is_empty")]
     agent_name: String,
+    /// The turn's persisted evidence, flattened so its keys (today
+    /// `grounding`) sit directly on the message the way the live SSE path
+    /// delivers them. Omitted entirely for turns recorded before metadata was
+    /// persisted, or for paths that ground nothing.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Map<String, Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -7389,6 +7395,14 @@ async fn list_thread_messages(
             role: m.role,
             content: m.content,
             agent_name: m.agent_name,
+            metadata: m
+                .metadata
+                .as_ref()
+                .map(prost_struct_to_json)
+                .and_then(|value| match value {
+                    Value::Object(map) if !map.is_empty() => Some(map),
+                    _ => None,
+                }),
         })
         .collect();
 
@@ -7456,11 +7470,7 @@ async fn replay_thread_events(
     const DEFAULT_LIMIT: u32 = 160;
     const MAX_LIMIT: u32 = 500;
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let after_event_id = query
-        .after_event_id
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let after_event_id = query.after_event_id.unwrap_or_default().trim().to_owned();
 
     let response = state
         .session_client
@@ -8024,6 +8034,10 @@ async fn invoke(
             &infer_resp.content,
             &model_bearer,
             req.agent_name.as_deref(),
+            // The unary invoke path does no retrieval of its own, so there is
+            // no grounding to record. `InvokeResponse.sources` is a separate,
+            // response-only field this append never sees.
+            None,
         )
         .await
         {

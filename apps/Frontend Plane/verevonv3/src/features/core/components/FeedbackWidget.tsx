@@ -30,6 +30,12 @@ export function FeedbackWidget() {
   const [state, setState] = createSignal<SubmitState>('idle')
   const orgId = createMemo(() => getSession().activeOrg?.id ?? null)
   const canSubmit = createMemo(() => note().trim().length > 0 && state() !== 'sending' && state() !== 'sent')
+  // The chat page docks its composer to the same bottom-right corner this
+  // widget floats in, and that dock's height is unbounded (autosizing
+  // textarea). --docked reads the live measured height ChatPage publishes
+  // as --verevon-composer-dock-height so the trigger always clears it
+  // instead of landing underneath the send button.
+  const isDocked = createMemo(() => location.pathname.startsWith('/chat'))
 
   const reset = () => {
     setOpen(false)
@@ -63,7 +69,7 @@ export function FeedbackWidget() {
 
   return (
     <Show when={orgId()}>
-      <div class="feedback-widget">
+      <div class={`feedback-widget${isDocked() ? ' feedback-widget--docked' : ''}`}>
         <Show
           when={open()}
           fallback={

@@ -427,11 +427,56 @@ export function isComposerAttachment(value: unknown): value is ComposerAttachmen
   )
 }
 
+/**
+ * Names the attachments the model will NOT receive.
+ *
+ * The composer accepts nine document types and renders a chip for each, and
+ * the transcript then says "1 attachment added" — but only `image/*` survives
+ * `toStreamAttachments`, so a PDF was silently discarded while every visible
+ * signal told the user it had been sent. Callers use this to say so out loud.
+ * Documents have their own working route: the per-file "Add to knowledge base"
+ * button, which ingests them into the knowledge base for retrieval.
+ */
+export function unsentAttachmentNames(
+  attachments: DashboardComposerSubmitPayload['attachments'],
+): string[] {
+  return attachments
+    .filter((attachment) => !attachment.url || !attachment.type.startsWith('image/'))
+    .map((attachment) => attachment.name?.trim() || 'uten navn')
+}
+
+/**
+ * Attachments whose text the browser can read, so they can be ingested through
+ * `POST /api/v1/chat/documents` (a JSON route taking a `content` string).
+ *
+ * PDF and DOCX are deliberately absent: extracting them needs a parser the
+ * browser does not have, and the chat-documents route takes text rather than
+ * bytes. They keep using the per-file "Add to knowledge base" action, which
+ * sends real `File` bytes to imports-core and extracts server-side.
+ */
+const TEXT_INGEST_EXTENSIONS = ['.txt', '.md', '.markdown', '.csv', '.json', '.html', '.htm']
+
+export function textIngestibleAttachments(
+  attachments: DashboardComposerSubmitPayload['attachments'],
+): DashboardComposerSubmitPayload['attachments'] {
+  return attachments.filter((attachment) => {
+    if (!attachment.url || attachment.type.startsWith('image/')) return false
+    const name = (attachment.name ?? '').toLowerCase()
+    // Trust the extension over the MIME type: browsers report `.md` and `.csv`
+    // inconsistently (often `application/octet-stream`), and the accept list is
+    // extension-based for the same reason.
+    return attachment.type.startsWith('text/')
+      || TEXT_INGEST_EXTENSIONS.some((extension) => name.endsWith(extension))
+  })
+}
+
 export async function toStreamAttachments(
   attachments: DashboardComposerSubmitPayload['attachments'],
 ): Promise<StreamAttachment[]> {
   const out: StreamAttachment[] = []
   for (const attachment of attachments) {
+    // Non-image files are not dropped silently any more — see
+    // `unsentAttachmentNames`, which the submit path reports to the user.
     if (!attachment.url || !attachment.type.startsWith('image/')) continue
     try {
       let dataUrl = attachment.url
@@ -613,7 +658,9 @@ export function toolNameForResult(calls: ChatToolCall[], id: string): string | u
 export function composerToolIdForToolName(name?: string): ComposerToolId | null {
   if (name === 'web_search') return 'search'
   if (name === 'image') return 'image'
-  if (name === 'reason' || name === 'reasoning') return 'reason'
+  // No 'reason' chip any more: the composer never sends such a tool, and a
+  // model's reasoning has its own surface (`turn.reasoning` -> ReasoningTrace)
+  // rather than a tool chip on the user's message.
   if (name === 'research' || name === 'deep_research') return 'research'
   return null
 }

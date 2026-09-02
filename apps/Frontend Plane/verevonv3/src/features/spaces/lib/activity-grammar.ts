@@ -167,9 +167,15 @@ export function activityFromThread(source: ThreadLikeActivitySource): SpaceActiv
   // SpaceThread responses always include it, so a foreign Space thread cannot
   // be adopted by Chat through a new activity link.
   const owner = source.space_id?.trim()
+  // The comment above used to promise that "a foreign Space thread cannot be
+  // adopted by Chat through a new activity link" while this very expression
+  // handed out exactly that link whenever `space_id` was missing. The fallback
+  // is gone: an activity item whose owning Space is unknown renders WITHOUT a
+  // link rather than routing into Chat, which would adopt a thread Chat does
+  // not own (and, since item 2's origin guard, could only show read-only).
   const href = owner
     ? `/spaces/${encodeURIComponent(owner)}?thread_id=${encodeURIComponent(source.thread_id)}`
-    : `/chat?thread_id=${encodeURIComponent(source.thread_id)}`
+    : undefined
 
   const conversation: SpaceActivityItem = {
     id: `thread:${source.thread_id}`,

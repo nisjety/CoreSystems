@@ -311,6 +311,25 @@ pub struct RichEventSink {
     tx: Sender<Result<Event, Infallible>>,
     features: Vec<String>,
     request_id: String,
+    /// Every citation that passed through this sink, kept so the turn's
+    /// evidence can be persisted with the assistant message.
+    ///
+    /// The tool loop streams citations straight out through `emit` and returns
+    /// an EMPTY buffer whenever a live sink is supplied (see
+    /// `DeepResearchOutcome.events`), so this is the only place a web-search
+    /// turn's citations can still be observed. Without it, only Data Plane
+    /// `Grounding` was persistable and every tool-sourced source vanished from
+    /// history the moment the browser cache was gone.
+    citations: std::sync::Arc<std::sync::Mutex<Vec<RecordedCitation>>>,
+}
+
+/// A citation observed on the wire, in the shape the SPA already reads back.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecordedCitation {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
 }
 
 impl RichEventSink {
@@ -324,16 +343,60 @@ impl RichEventSink {
             tx,
             features,
             request_id,
+            citations: std::sync::Arc::default(),
         }
     }
 
     /// Emit an event if the client opted into its family (control events always
     /// emit). Best-effort: a closed channel (client gone) is ignored.
     pub async fn emit(&self, event: ChatEvent) {
+        // Recorded BEFORE the feature gate on purpose: which sources a turn
+        // used is a fact about the turn, not about what this client opted into
+        // receiving. Persisting only what one client subscribed to would make
+        // durable history depend on the shape of the request that created it.
+        if let ChatEvent::Citation {
+            id,
+            title,
+            url,
+            snippet,
+        } = &event
+        {
+            if let Ok(mut recorded) = self.citations.lock() {
+                recorded.push(RecordedCitation {
+                    id: id.clone(),
+                    title: title.clone(),
+                    url: url.clone(),
+                    snippet: snippet.clone(),
+                });
+            }
+        }
         if !event.should_emit(&self.features) {
             return;
         }
         let _ = self.tx.send(Ok(event.to_sse(&self.request_id))).await;
+    }
+
+    /// The citations seen so far, deduplicated by url (falling back to id) in
+    /// first-seen order — the tool loop can legitimately re-cite one source
+    /// across rounds, and history should list it once.
+    #[must_use]
+    pub fn recorded_citations(&self) -> Vec<RecordedCitation> {
+        let Ok(recorded) = self.citations.lock() else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::HashSet::new();
+        recorded
+            .iter()
+            .filter(|citation| {
+                let key = if citation.url.is_empty() {
+                    &citation.id
+                } else {
+                    &citation.url
+                };
+                seen.insert(key.clone())
+            })
+            .cloned()
+            .collect()
     }
 }
 

@@ -73,6 +73,8 @@ function cancellationReceipt(event: VerevonUiEvent) {
 export function ChatHeader(props: {
   active: ChatTab
   artifactCount: number
+  /** Attachments on this conversation. See `availability()` below. */
+  attachmentCount?: number
   branchCount: number
   messageCount: number
   runAvailable?: boolean
@@ -90,7 +92,11 @@ export function ChatHeader(props: {
     sourceCount: props.sourceCount,
     hasGrounding: props.sourceCount > 0,
     artifactCount: props.artifactCount,
-    attachmentCount: 0,
+    // Was hardcoded to 0, which made this header disagree with the tab strip:
+    // `chat-surfaces.ts` gates Output on `artifactCount > 0 ||
+    // attachmentCount > 0`, so a conversation whose only output was an
+    // attachment offered Output in the tabs but never in this dropdown.
+    attachmentCount: props.attachmentCount ?? 0,
     stepCount: props.stepCount,
     hasRun: Boolean(props.runAvailable || props.traceAvailable),
   })
@@ -475,7 +481,20 @@ export function ContextWindowPanel(props: {
               Kunne ikke hente kontekstvinduet.
             </p>
           </Match>
-          <Match when={(props.context?.segments.length ?? 0) === 0}>
+          <Match when={!props.context}>
+            {/* Three outcomes used to collapse into one message. An unresolved
+                resource leaves `context` undefined with loading AND failed
+                both false — for a temporary chat, or before a thread exists —
+                and that fell through to "no segments reported", which reads as
+                "the server says your context is empty" rather than "nothing
+                was asked for". Say which one it is. Kept inside the Match
+                rather than between siblings, so Switch only ever sees Match
+                children. */}
+            <p class="verevon-chat-context-window__note">
+              Kontekstvinduet er ikke hentet for denne samtalen ennå.
+            </p>
+          </Match>
+          <Match when={props.context?.segments.length === 0}>
             <p class="verevon-chat-context-window__note">Ingen segmenter rapportert.</p>
           </Match>
           <Match when={props.context}>
@@ -558,8 +577,14 @@ export function StepsPanel(props: {
     >
       <div class="verevon-chat-panel">
         <div class="verevon-chat-panel__inner">
-          <RunPlanPanel runId={props.runId} threadId={props.threadId} />
-          <RunProofPanel runId={props.runId} />
+          {/* Step count drives the plan refetch: session-core mirrors each
+              completed execution step into the run's plan, so a new task step
+              is the cheapest available signal that the durable plan has more
+              rows than the panel last read. */}
+          <RunPlanPanel runId={props.runId} threadId={props.threadId} progressKey={props.steps.length} />
+          {/* The proof bundle (receipts, approvals) lives in Trace, which is
+              the audit record. It was mounted here as well, fetching the same
+              bundle twice and splitting one audit trail across two tabs. */}
           <div class="verevon-chat-steps-header">
             <div>
               <h2>Agent activity</h2>
@@ -675,17 +700,45 @@ type RunPlanSnapshot = {
  * Plane; this component only presents the returned records and never invents
  * plan steps from the chat text.
  */
-function RunPlanPanel(props: { runId?: string | null; threadId?: string | null }) {
+/**
+ * Steps carry no stored title, so their `operation` is all the plan API sends
+ * (`tool_execution`). Render it as a phrase rather than an identifier.
+ */
+function humanizePlanStepOperation(operation?: string) {
+  const value = operation?.trim()
+  if (!value) return 'Steg'
+  if (value === 'tool_execution') return 'Verktøykjøring'
+  return value
+    .replaceAll('_', ' ')
+    .replace(/^./, (character) => character.toLocaleUpperCase('nb-NO'))
+}
+
+function RunPlanPanel(props: {
+  runId?: string | null
+  threadId?: string | null
+  /**
+   * Bumped as the run produces steps. The plan resource is otherwise keyed
+   * only on the ids, so it fetched once at run start — when session-core has
+   * created the plan shell but no step rows exist yet — and never again. The
+   * panel then showed a one-line plan for the whole run, and only a manual
+   * reload revealed the steps that had been recorded all along.
+   */
+  progressKey?: number
+}) {
   const keySeparator = '\u0000'
   const source = () => {
     const runId = props.runId?.trim()
     const threadId = props.threadId?.trim()
-    return runId && threadId ? `${runId}${keySeparator}${threadId}` : null
+    if (!runId || !threadId) return null
+    // `progressKey` is part of the key purely to retrigger the fetch; the
+    // loader below parses only the two ids back out of it.
+    return `${runId}${keySeparator}${threadId}${keySeparator}${props.progressKey ?? 0}`
   }
   const [snapshot] = createResource(source, async (key: string): Promise<RunPlanSnapshot> => {
-    const separatorIndex = key.indexOf(keySeparator)
-    const runId = separatorIndex >= 0 ? key.slice(0, separatorIndex) : key
-    const threadId = separatorIndex >= 0 ? key.slice(separatorIndex + keySeparator.length) : ''
+    // Split on the separator rather than slicing at the first one: the key now
+    // carries a third, throwaway segment (`progressKey`), and the old
+    // "everything after the first separator" slice would fold it into threadId.
+    const [runId = '', threadId = ''] = key.split(keySeparator)
     const [plans, todos, lineage] = await Promise.allSettled([
       listPlans(runId),
       listTodos(threadId, { runId }),
@@ -714,6 +767,10 @@ function RunPlanPanel(props: { runId?: string | null; threadId?: string | null }
   const stateLabel = (value?: string) => {
     if (!value) return 'Ukjent'
     return value
+      // The API relays prost's enum spelling verbatim
+      // (`PLAN_STEP_STATE_RUNNING`), which rendered as the sentence "Plan step
+      // state running" beside every step. Only the last segment is the state.
+      .replace(/^PLAN_(?:STEP_)?STATE_/, '')
       .toLocaleLowerCase('nb-NO')
       .replaceAll('_', ' ')
       .replace(/^./, (character) => character.toLocaleUpperCase('nb-NO'))
@@ -767,9 +824,26 @@ function RunPlanPanel(props: { runId?: string | null; threadId?: string | null }
                       <li data-state={step.state}>
                         <span class="verevon-chat-run-plan__step-state" data-state={step.state}>{stateLabel(step.state)}</span>
                         <span>
-                          <strong>{step.title}</strong>
-                          <Show when={step.operation}>
-                            <small>{step.operation}</small>
+                          {/* session-core stores no per-step title, so the API
+                              sends `title: ""` and `normalizePlan` already
+                              falls back to `operation`. Both fields therefore
+                              arrive identical and the step rendered the same
+                              token twice ("tool_execution tool_execution").
+                              Show the operation underneath only when it really
+                              adds something. */}
+                          <strong>{humanizePlanStepOperation(step.title || step.operation)}</strong>
+                          {/* Prefer the outcome over the operation slug: "permission
+                              denied by policy" is what a reader of a failed plan
+                              needs, and repeating `tool_execution` is not. */}
+                          <Show
+                            when={step.detail?.trim()}
+                            fallback={(
+                              <Show when={step.operation && step.operation !== step.title}>
+                                <small>{step.operation}</small>
+                              </Show>
+                            )}
+                          >
+                            {(detail) => <small>{detail()}</small>}
                           </Show>
                         </span>
                       </li>
@@ -980,13 +1054,21 @@ export function TracePanel(props: {
         <header>
           <div>
             <h2>Trace</h2>
-            <p>En lesbar oversikt over hva som skjedde i denne kjøringen.</p>
+            <p>
+              Revisjonssporet for denne kjøringen: hva som skjedde, i rekkefølge,
+              med kvitteringer. Hentes fra den varige hendelsesloggen og er bare
+              synlig for deg som eier kjøringen — dette er ikke en delingsflate.
+            </p>
           </div>
           <span>{props.events.length} hendelser</span>
         </header>
         <Show when={props.replayTruncated}>
+          {/* An audit record that is incomplete must say so. This fires both
+              when the durable replay hits its page ceiling and when a long
+              live run reaches the same cap in memory. */}
           <p class="verevon-chat-trace-log__notice" role="status">
-            Trace-visningen er avkortet etter 5&nbsp;000 hendelser.
+            Visningen er avkortet ved 5&nbsp;000 hendelser — de eldste vises ikke
+            her. Den varige loggen er fortsatt komplett.
           </p>
         </Show>
         <Show

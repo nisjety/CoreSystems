@@ -1,4 +1,5 @@
 import { createMemo, For, Show } from 'solid-js'
+import { Dynamic } from '@solidjs/web'
 
 import {
   buildSpaceActivity,
@@ -67,7 +68,17 @@ export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
         <For each={items()}>
           {(item) => (
             <li class={rowClass(item)}>
-              <a class="verevon-activity-link" href={item.href} link>
+              {/* An item whose owning Space is unknown carries no href (the
+                  `/chat` adoption fallback was removed). Render it as a span
+                  rather than an anchor with no destination: an `<a>` without
+                  href is announced as a link and focusable, promising a
+                  navigation that does not exist. */}
+              <Dynamic
+                component={item.href ? 'a' : 'span'}
+                class="verevon-activity-link"
+                href={item.href}
+                link={item.href ? true : undefined}
+              >
                 <span class="verevon-activity-verb">{item.verb}</span>
                 {': '}
                 <span class="verevon-activity-object">{item.object}</span>
@@ -80,7 +91,7 @@ export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
                 >
                   {item.outcome.label}
                 </span>
-              </a>
+              </Dynamic>
               <Show when={item.at}>
                 {(at) => <span class="verevon-activity-when">{formatWhen(at())}</span>}
               </Show>

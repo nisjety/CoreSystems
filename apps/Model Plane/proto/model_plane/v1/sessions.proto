@@ -797,6 +797,13 @@ message SessionMessage {
   // The persona name this turn answered as (see AppendMessageRequest
   // .agent_name). Empty when the turn had no persona.
   string agent_name = 3;
+  // The turn's evidence, round-tripped from the same `metadata` this message
+  // was appended with (see AppendMessageRequest.metadata). Carries grounding,
+  // citations, and artifacts so reopening a thread on ANOTHER device shows the
+  // same sources the live stream did — without this the read path returns only
+  // role/content and every evidence surface renders empty away from the
+  // browser that created the turn. Absent for turns appended without metadata.
+  google.protobuf.Struct metadata = 4;
 }
 
 message ListConversationResponse {

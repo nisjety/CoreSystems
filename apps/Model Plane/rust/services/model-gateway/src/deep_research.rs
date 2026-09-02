@@ -444,12 +444,31 @@ impl ResearchEvents<'_> {
 /// unexplained `web_search` / `fetch_url` calls.
 pub const DEEP_RESEARCH_TOOL: &str = "deep_research";
 
+/// How one planned sub-query's search turned out, so each row can carry its own
+/// status instead of everything hiding behind the aggregate search count.
+#[derive(Debug, Clone, Copy)]
+enum SubQueryOutcome {
+    /// The search returned usable rows.
+    Hits(usize),
+    /// The call succeeded but matched nothing. Not a failure, and not coverage
+    /// either — the distinction this module exists to keep honest.
+    Empty,
+    /// The search call itself failed.
+    Failed,
+}
+
 /// Step ids. Stable strings: the client keys its activity log on them, so a
 /// later `status` for the same id updates the row instead of adding one.
 const STEP_PLAN: &str = "deep-research-plan";
 const STEP_SEARCH: &str = "deep-research-search";
 const STEP_READ: &str = "deep-research-read";
 const STEP_SYNTHESIZE: &str = "deep-research-report";
+/// Prefix for the per-sub-query rows. Deep research was real but opaque while
+/// it ran: the plan's sub-queries were flattened into one " · "-joined line on
+/// the plan row, so a reader could not tell which question was being searched,
+/// which came back empty, or which failed. Each planned query now gets its own
+/// stable step id so the Work tab shows the plan as a checklist that fills in.
+const STEP_SUB_QUERY_PREFIX: &str = "deep-research-subquery";
 
 // ---------------------------------------------------------------------------
 // Phase 1 — plan parsing (pure)
@@ -1658,6 +1677,20 @@ pub async fn run_deep_research(
         )
         .await;
 
+    // The plan as a checklist, one row per sub-query, before any search runs.
+    // Emitted here rather than after the search so the reader can see WHAT is
+    // being researched while it happens — the whole point of item 13.
+    for (index, query) in plan.iter().enumerate() {
+        events
+            .step(
+                &format!("{STEP_SUB_QUERY_PREFIX}-{index}"),
+                &format!("Delspørsmål {}", index + 1),
+                query,
+                "active",
+            )
+            .await;
+    }
+
     // ---- Phase 2: search -------------------------------------------------
     events
         .step(
@@ -1684,16 +1717,45 @@ pub async fn run_deep_research(
     )
     .await;
     let mut deadline_hit = false;
-    let (hits, search_ok, search_failures) = match searched {
+    let (hits, search_ok, search_failures, sub_query_outcomes) = match searched {
         Ok(result) => result?,
         Err(StopReason::Cancelled) => {
             return Ok(cancelled_outcome(events, base_messages));
         }
         Err(StopReason::Deadline) => {
             deadline_hit = true;
-            (Vec::new(), 0, plan.len())
+            // The deadline stopped every query, so report them all as failed
+            // rather than leaving their rows stuck "active" forever.
+            (
+                Vec::new(),
+                0,
+                plan.len(),
+                vec![SubQueryOutcome::Failed; plan.len()],
+            )
         }
     };
+
+    // Resolve each sub-query row with its own result. A query the plan listed
+    // but the search never reported on stays honest as "not run" rather than
+    // silently remaining active.
+    for (index, query) in plan.iter().enumerate() {
+        let (detail, status) = match sub_query_outcomes.get(index) {
+            Some(SubQueryOutcome::Hits(count)) => {
+                (format!("{count} treff · {query}"), "done")
+            }
+            Some(SubQueryOutcome::Empty) => (format!("Ingen treff · {query}"), "done"),
+            Some(SubQueryOutcome::Failed) => (format!("Søket feilet · {query}"), "error"),
+            None => (format!("Ikke kjørt · {query}"), "error"),
+        };
+        events
+            .step(
+                &format!("{STEP_SUB_QUERY_PREFIX}-{index}"),
+                &format!("Delspørsmål {}", index + 1),
+                &detail,
+                status,
+            )
+            .await;
+    }
     tool_successes = tool_successes.saturating_add(u32::try_from(search_ok).unwrap_or(u32::MAX));
     tool_failures =
         tool_failures.saturating_add(u32::try_from(search_failures).unwrap_or(u32::MAX));
@@ -2232,7 +2294,7 @@ async fn search_sub_queries(
     session_bearer: &str,
     zdr: bool,
     plan: &[String],
-) -> Result<(Vec<SearchHit>, usize, usize), &'static str> {
+) -> Result<(Vec<SearchHit>, usize, usize, Vec<SubQueryOutcome>), &'static str> {
     let dispatched = futures::future::join_all(plan.iter().enumerate().map(|(index, query)| {
         let call = ToolCall {
             id: format!("{request_id}-dr-search-{index}"),
@@ -2264,11 +2326,15 @@ async fn search_sub_queries(
     let mut hits: Vec<SearchHit> = Vec::new();
     let mut with_results = 0usize;
     let mut failures = 0usize;
+    // Same three-way distinction the counters below already make, kept per
+    // query so each planned sub-query can report its own status.
+    let mut outcomes: Vec<SubQueryOutcome> = Vec::with_capacity(plan.len());
     for (index, result) in dispatched.into_iter().enumerate() {
         let outcome = result?;
         if let Some(error) = &outcome.error {
             tracing::debug!(%request_id, sub_query = index, %error, "deep research sub-query search failed");
             failures = failures.saturating_add(1);
+            outcomes.push(SubQueryOutcome::Failed);
             continue;
         }
         let parsed = hits_from_search_output(index, &outcome.output);
@@ -2276,12 +2342,14 @@ async fn search_sub_queries(
             // A search that returned zero rows is not a failure of the call,
             // but it is not coverage either — counting it as coverage is how a
             // report ends up claiming six sub-queries were answered.
+            outcomes.push(SubQueryOutcome::Empty);
             continue;
         }
         with_results = with_results.saturating_add(1);
+        outcomes.push(SubQueryOutcome::Hits(parsed.len()));
         hits.extend(parsed);
     }
-    Ok((hits, with_results, failures))
+    Ok((hits, with_results, failures, outcomes))
 }
 
 /// Fetch the selected pages CONCURRENTLY through the audited `fetch_url` path.

@@ -27,7 +27,6 @@ import {
   ServerCog,
   Settings,
   ShieldCheck,
-  Sparkles,
   Telescope,
   TestTubeDiagonal,
   TicketCheck,
@@ -116,7 +115,6 @@ export const sidebarSections: SidebarSection[] = [
         label: 'Oversikt',
         items: [
           { id: 'overview-home', label: 'Hjem', href: '/dashboard', icon: Home, description: 'Tilbake til Verevon Home.', tabId: 'my-account' },
-          { id: 'overview-chat', label: 'Verevon Chat', href: '/chat', icon: MessageSquare, description: 'Start eller fortsett arbeid med AI.', tabId: 'my-account' },
           // Points at the /spaces resolver, not /spaces/:spaceId — the sidebar
           // has no Space ref to build a direct link from. `aliases` keeps the
           // item highlighted once the resolver has forwarded to a real room.
@@ -144,6 +142,13 @@ export const sidebarSections: SidebarSection[] = [
     panelGroups: [],
   },
   {
+    // The ONE sidebar destination for Chat. Five further `/chat` shortcuts used
+    // to sit inside unrelated sections (Overview, Agents, Ingestions,
+    // Knowledge, plus a redundant "Ny samtale" inside this very section),
+    // turning Chat into the app's dumping ground and making the rail imply
+    // five different chats. New chats start here or from a composer/search
+    // launch; a surface that wants Verevon's help launches a thread of its own
+    // (see `writePendingChatLaunch`) rather than linking sideways into Chat.
     id: 'messages',
     label: 'Chat',
     href: '/chat',
@@ -154,7 +159,6 @@ export const sidebarSections: SidebarSection[] = [
         id: 'messages-core',
         label: 'Chat',
         items: [
-          { id: 'messages-start', label: 'Ny samtale', href: '/chat', icon: Sparkles, description: 'Åpne Verevon AI-arbeidsflaten.' },
           { id: 'messages-inbox', label: 'Support', href: '/support', icon: Inbox, description: 'Gå til kundesamtaler og oppfølging.' },
         ],
       },
@@ -212,7 +216,6 @@ export const sidebarSections: SidebarSection[] = [
           { id: 'agents-all', label: 'Alle agenter', href: '/agents', icon: HatGlasses, description: 'Se og konfigurer agentroller.' },
           { id: 'agents-cost', label: 'Kostnad', href: '/agents/cost', icon: Coins, description: 'Reell modellbruk og kostnad per kjøring fra hovedboken.' },
           { id: 'agents-quality', label: 'Kvalitet', href: '/agents/quality', icon: Gauge, description: 'Nøyaktighet, drift og kvalitetssignal fra kjøringshistorikken.' },
-          { id: 'agents-chat', label: 'Arbeidsflate', href: '/chat', icon: Sparkles, description: 'Test agenten i chat-arbeidsflaten.' },
         ],
       },
     ],
@@ -313,7 +316,6 @@ export const sidebarSections: SidebarSection[] = [
         items: [
           { id: 'ingestions-home', label: 'Workspace', href: '/ingestions', icon: Radar, description: 'Operasjonell arbeidsflate for ingest og bevis.' },
           { id: 'ingestions-knowledge', label: 'Knowledge', href: '/knowledge', icon: BookOpen, description: 'Se kuraterte kilder og chunk-inspeksjon.' },
-          { id: 'ingestions-chat', label: 'Ask Verevon', href: '/chat', icon: MessageSquare, description: 'Planlegg eller trigge ingest-arbeid via chat.' },
         ],
       },
     ],
@@ -330,7 +332,6 @@ export const sidebarSections: SidebarSection[] = [
         label: 'Kunnskap',
         items: [
           { id: 'knowledge-overview', label: 'Datakilder', href: '/knowledge', icon: BookOpen, description: 'Koble, vurder og overvåk kilder.' },
-          { id: 'knowledge-chat', label: 'Spør kunnskapen', href: '/chat', icon: Sparkles, description: 'Bruk Verevon AI mot indeksert innhold.' },
         ],
       },
     ],

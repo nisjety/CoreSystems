@@ -38,6 +38,7 @@ use crate::auth::{
     DATA_PLANE_AUTH_METADATA_KEY,
 };
 use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
+use crate::orchestration_grpc::{json_to_struct, struct_to_json};
 use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
@@ -2084,11 +2085,21 @@ async fn append_message_inner(
         None => {}
     }
 
+    // `messages.metadata` has existed in the schema since 0001_init but was
+    // never written, so a turn's evidence (grounding/citations/artifacts) died
+    // with the stream that produced it. Persist it here and `list_conversation`
+    // can hand it back on any device. An absent metadata stays `{}` rather than
+    // NULL to match the column default.
+    let metadata_json = req
+        .metadata
+        .as_ref()
+        .map_or_else(|| serde_json::json!({}), struct_to_json);
+
     let row: (i64, Option<String>, Option<String>, Option<i64>, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
         "INSERT INTO messages
-         (id, thread_id, role, content, created_at, agent_name, space_id, recipient_audience_ref,
+         (id, thread_id, role, content, created_at, agent_name, metadata, space_id, recipient_audience_ref,
           recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref)
-         SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), t.space_id, t.recipient_audience_ref,
+         SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), $7, t.space_id, t.recipient_audience_ref,
                 t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref
          FROM threads t WHERE t.id=$2
          RETURNING sequence, space_id, recipient_audience_ref, recipient_audience_revision,
@@ -2100,6 +2111,7 @@ async fn append_message_inner(
     .bind(&req.content)
     .bind(now)
     .bind(req.agent_name.trim())
+    .bind(&metadata_json)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -2688,11 +2700,29 @@ async fn complete_step_inner(
             "output": req.output.chars().take(500).collect::<String>(),
             "error": req.error,
         });
+        // `CompleteStep` records a step that has ALREADY finished (see
+        // sessions.proto: status is "completed", "failed" or "skipped"), so the
+        // catch-all must never leave the row reading as still-running. It used
+        // to: "skipped" and any other value both fell to `_ => "running"`, so a
+        // web_search step that came back `permission denied` sat at "running"
+        // forever on a plan whose own state was `completed` — the plan panel
+        // showed four perpetually-running steps for work that had failed.
+        // Fall back on whether an error was reported, and log the unknown value
+        // so contract drift is visible rather than silently mislabelled.
         let mapped = match req.status.as_str() {
             "completed" => "done",
             "failed" => "failed",
+            "skipped" => "skipped",
             "awaiting_approval" => "awaiting_approval",
-            _ => "running",
+            other => {
+                tracing::warn!(
+                    status = %other,
+                    run_id = %req.run_id,
+                    step_id = %req.step_id,
+                    "unrecognised CompleteStep status; classifying by error presence"
+                );
+                if req.error.trim().is_empty() { "done" } else { "failed" }
+            }
         };
         match crate::orchestration_store::append_plan_step(
             pool,
@@ -4349,27 +4379,37 @@ impl SessionCore for SessionService {
             }
             caller.authorize_org(&req.org_id)?;
             authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
-            let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-                "SELECT m.role, m.content, m.agent_name
+            let rows: Vec<(String, String, Option<String>, Option<serde_json::Value>)> =
+                sqlx::query_as(
+                    "SELECT m.role, m.content, m.agent_name, m.metadata
                  FROM messages m
                  JOIN threads t ON t.id = m.thread_id
                  WHERE m.thread_id = $1 AND t.org_id = $2
                  ORDER BY m.sequence",
-            )
-            .bind(&req.thread_id)
-            .bind(&req.org_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "list_thread_messages failed");
-                Status::internal(e.to_string())
-            })?;
+                )
+                .bind(&req.thread_id)
+                .bind(&req.org_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, "list_thread_messages failed");
+                    Status::internal(e.to_string())
+                })?;
             let messages = rows
                 .into_iter()
-                .map(|(role, content, agent_name)| pb::SessionMessage {
+                .map(|(role, content, agent_name, metadata)| pb::SessionMessage {
                     role,
                     content,
                     agent_name: agent_name.unwrap_or_default(),
+                    // `{}` is the column default for every turn written before
+                    // metadata was persisted; send None rather than an empty
+                    // Struct so the caller can tell "no evidence recorded" from
+                    // "evidence recorded and empty".
+                    metadata: metadata
+                        .filter(|value| !matches!(value, serde_json::Value::Null))
+                        .filter(|value| value.as_object().is_none_or(|map| !map.is_empty()))
+                        .as_ref()
+                        .and_then(json_to_struct),
                 })
                 .collect();
             Ok(Response::new(pb::ListConversationResponse { messages }))

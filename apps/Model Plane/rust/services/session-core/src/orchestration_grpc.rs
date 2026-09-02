@@ -691,6 +691,34 @@ pub(crate) fn json_to_struct(v: &JsonValue) -> Option<prost_types::Struct> {
     }
 }
 
+/// Inverse of [`json_to_struct`], for writing an inbound proto `Struct` field
+/// into a JSONB column. Used by `append_message_inner` to persist a turn's
+/// evidence metadata; keep the two in step so a value survives the round trip.
+pub(crate) fn struct_to_json(s: &prost_types::Struct) -> JsonValue {
+    JsonValue::Object(
+        s.fields
+            .iter()
+            .map(|(k, v)| (k.clone(), prost_value_to_json(v)))
+            .collect(),
+    )
+}
+
+fn prost_value_to_json(v: &prost_types::Value) -> JsonValue {
+    use prost_types::value::Kind;
+    match &v.kind {
+        // A `Value` with no kind set is the proto default, which is null.
+        Some(Kind::NullValue(_)) | None => JsonValue::Null,
+        Some(Kind::BoolValue(b)) => JsonValue::Bool(*b),
+        Some(Kind::NumberValue(n)) => serde_json::Number::from_f64(*n)
+            .map_or(JsonValue::Null, JsonValue::Number),
+        Some(Kind::StringValue(s)) => JsonValue::String(s.clone()),
+        Some(Kind::StructValue(inner)) => struct_to_json(inner),
+        Some(Kind::ListValue(list)) => {
+            JsonValue::Array(list.values.iter().map(prost_value_to_json).collect())
+        }
+    }
+}
+
 fn json_to_value(v: &JsonValue) -> prost_types::Value {
     use prost_types::value::Kind;
     let kind = match v {
@@ -735,15 +763,67 @@ fn metadata_string_array(meta: &JsonValue, key: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 fn plan_step_from_row(row: &store::PlanStepRow) -> proto::PlanStep {
-    let title = metadata_str_field(&row.payload, "title");
+    // `complete_step` writes execution steps with no `title`, so this was
+    // always empty for them and every step surfaced as its bare `kind`. Fall
+    // back to the tool the step ran, and carry the outcome out in `detail`.
+    let stored_title = metadata_str_field(&row.payload, "title");
+    let title = if stored_title.is_empty() {
+        plan_step_tool_name(&row.payload).unwrap_or_default()
+    } else {
+        stored_title
+    };
     proto::PlanStep {
         id: row.id.clone(),
         title,
         operation: row.kind.clone(),
         state: plan_step_state_from_str(&row.status),
+        detail: plan_step_detail(&row.payload).unwrap_or_default(),
         created_at: Some(ts(row.created_at)),
         updated_at: Some(ts(row.updated_at)),
     }
+}
+
+/// The tool an execution step ran, recovered from the bracket envelope the
+/// tool layer prefixes to its output and errors
+/// (`[data_category=… zdr=false tool=web_search] …`).
+///
+/// Best-effort by necessity: `CompleteStepRequest` carries no tool field, so
+/// the name exists nowhere else on the record. Returns `None` rather than
+/// guessing when the envelope is absent, which leaves the previous behaviour
+/// (caller falls back to the step's `kind`) untouched.
+fn plan_step_tool_name(payload: &JsonValue) -> Option<String> {
+    let haystack = ["error", "output"]
+        .iter()
+        .filter_map(|key| payload.get(*key).and_then(JsonValue::as_str))
+        .find(|value| value.contains("tool="))?;
+    let after = haystack.split("tool=").nth(1)?;
+    let name: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// One line describing how a step went: its error if it has one, otherwise a
+/// trimmed slice of its output. The bracket envelope is stripped so the reader
+/// sees the message rather than the policy annotation that precedes it.
+fn plan_step_detail(payload: &JsonValue) -> Option<String> {
+    const MAX_DETAIL_CHARS: usize = 240;
+    let raw = ["error", "output"]
+        .iter()
+        .filter_map(|key| payload.get(*key).and_then(JsonValue::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())?;
+    let stripped = raw
+        .strip_prefix('[')
+        .and_then(|rest| rest.split_once(']'))
+        .map_or(raw, |(_, tail)| tail)
+        .trim();
+    if stripped.is_empty() {
+        return None;
+    }
+    let detail: String = stripped.chars().take(MAX_DETAIL_CHARS).collect();
+    Some(detail)
 }
 
 fn plan_from_row(row: &store::PlanRow, steps: Vec<proto::PlanStep>) -> proto::Plan {

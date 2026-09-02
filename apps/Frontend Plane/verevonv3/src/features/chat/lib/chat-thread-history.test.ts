@@ -546,7 +546,7 @@ describe('chat thread history', () => {
     })
   })
 
-  it('carries pin state across a server-session resync via replaceChatThreadHistory', () => {
+  it('carries pin state across a resync that omits pinned entirely', () => {
     upsertChatThreadHistory({
       threadId: 'thread-1',
       title: 'First chat',
@@ -562,6 +562,34 @@ describe('chat thread history', () => {
 
     expect(readChatThreadHistory().map((item) => item.threadId)).toEqual(['thread-1', 'thread-2'])
     expect(readChatThreadHistory()[0]).toMatchObject({ pinned: true, preview: 'Server-synced answer' })
+  })
+
+  /**
+   * The test above omits `pinned`, which the REAL caller never does:
+   * `CoreSidebar` passes `ChatThreadSession`s whose `pinned` is a hard boolean,
+   * so production always takes the explicit branch and never the carry. This
+   * covers what actually happens — and pins the intended semantics, since the
+   * server owns the pin: an explicit `false` must win, because it may mean the
+   * user unpinned the thread on another device.
+   */
+  it('lets an explicit server pinned:false win over a stale local pin', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    togglePinnedChatThread('thread-1')
+    expect(readChatThreadHistory()[0]).toMatchObject({ pinned: true })
+
+    replaceChatThreadHistory([
+      { threadId: 'thread-1', title: 'First chat', preview: 'Server-synced answer', updatedAt: '2026-06-17T09:10:00.000Z', pinned: false },
+      { threadId: 'thread-2', title: 'Second chat', preview: 'b', updatedAt: '2026-06-17T09:20:00.000Z', pinned: true },
+    ])
+
+    const after = readChatThreadHistory()
+    expect(after.find((item) => item.threadId === 'thread-1')?.pinned).toBeUndefined()
+    expect(after.find((item) => item.threadId === 'thread-2')?.pinned).toBe(true)
   })
 
   it('is a no-op when toggling a thread with no history entry', () => {

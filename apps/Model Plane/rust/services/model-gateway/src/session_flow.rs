@@ -986,7 +986,7 @@ pub async fn append_assistant_message(
     thread_id: &str,
     content: &str,
 ) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, None, None).await
+    append_assistant_message_with_bearer(state, thread_id, content, None, None, None).await
 }
 
 /// Persist an assistant message with an independently verified Session Core
@@ -1001,6 +1001,9 @@ pub async fn append_assistant_message_authenticated(
     content: &str,
     bearer: &VerifiedSessionBearer,
     agent_name: Option<&str>,
+    // Build with `grounding_metadata(...)`; `None` on paths that ground
+    // nothing (vision and image-generation streams).
+    metadata: Option<prost_types::Struct>,
 ) -> Result<()> {
     append_assistant_message_with_bearer(
         state,
@@ -1008,6 +1011,7 @@ pub async fn append_assistant_message_authenticated(
         content,
         Some(bearer.as_str()),
         agent_name,
+        metadata,
     )
     .await
 }
@@ -1020,7 +1024,7 @@ pub(crate) async fn append_assistant_message_with_token(
     content: &str,
     bearer: &str,
 ) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer), None).await
+    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer), None, None).await
 }
 
 async fn append_assistant_message_with_bearer(
@@ -1031,6 +1035,10 @@ async fn append_assistant_message_with_bearer(
     // The persona this turn answered as, recorded on the message for the
     // room's per-turn attribution. Identity history, never authority.
     agent_name: Option<&str>,
+    // The turn's evidence (grounding, and the citations nested inside it),
+    // persisted so reopening the thread on another device can still show
+    // where the answer came from. `None` for turns that grounded nothing.
+    metadata: Option<prost_types::Struct>,
 ) -> Result<()> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -1044,7 +1052,7 @@ async fn append_assistant_message_with_bearer(
                 thread_id: thread_id.to_owned(),
                 role: "assistant".to_owned(),
                 content: trimmed.to_owned(),
-                metadata: None,
+                metadata,
                 agent_name: agent_name.unwrap_or_default().trim().to_owned(),
                 ..Default::default()
             },
@@ -1054,6 +1062,68 @@ async fn append_assistant_message_with_bearer(
         .context("session-core append_message(assistant) failed")?;
 
     Ok(())
+}
+
+/// Shape a turn's evidence into the `metadata` Struct persisted with the
+/// assistant message.
+///
+/// Two independent sources, because the product has two:
+/// - `grounding` — Data Plane retrieval (knowledge base). Written under the
+///   `grounding` key, exactly what the SPA reads as `turn.grounding`.
+/// - `citations` — everything the tool loop cited (web search, deep research).
+///   These never appear in `Grounding`; they stream straight out through
+///   `RichEventSink` and are captured there. Written under `citations`, which
+///   the SPA reads as `turn.citations`.
+///
+/// A turn can have either, both, or neither. Returns `None` for neither, so an
+/// ungrounded turn stores no metadata rather than an empty object.
+///
+/// Generated-image artifacts are deliberately excluded: on that path they are
+/// base64 data URIs, far too large to belong in a message metadata column.
+pub(crate) fn turn_evidence_metadata(
+    grounding: Option<&crate::retrieval::Grounding>,
+    citations: &[crate::sse_events::RecordedCitation],
+) -> Option<prost_types::Struct> {
+    let mut fields = std::collections::BTreeMap::new();
+
+    if let Some(payload) = grounding.filter(|g| !g.is_empty()) {
+        if let Ok(value) = serde_json::to_value(payload) {
+            fields.insert("grounding".to_owned(), json_to_prost_value(&value));
+        }
+    }
+
+    if !citations.is_empty() {
+        if let Ok(value) = serde_json::to_value(citations) {
+            fields.insert("citations".to_owned(), json_to_prost_value(&value));
+        }
+    }
+
+    if fields.is_empty() {
+        return None;
+    }
+    Some(prost_types::Struct { fields })
+}
+
+fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
+    use prost_types::value::Kind;
+    let kind = match value {
+        serde_json::Value::Null => Kind::NullValue(0),
+        serde_json::Value::Bool(b) => Kind::BoolValue(*b),
+        serde_json::Value::Number(n) => n
+            .as_f64()
+            .map_or_else(|| Kind::StringValue(n.to_string()), Kind::NumberValue),
+        serde_json::Value::String(s) => Kind::StringValue(s.clone()),
+        serde_json::Value::Array(items) => Kind::ListValue(prost_types::ListValue {
+            values: items.iter().map(json_to_prost_value).collect(),
+        }),
+        serde_json::Value::Object(map) => Kind::StructValue(prost_types::Struct {
+            fields: map
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_prost_value(v)))
+                .collect(),
+        }),
+    };
+    prost_types::Value { kind: Some(kind) }
 }
 
 /// Persist a user message the caller sent MID-RUN, so the durable thread

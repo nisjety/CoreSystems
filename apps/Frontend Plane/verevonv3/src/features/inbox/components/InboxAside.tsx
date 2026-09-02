@@ -1,6 +1,5 @@
 import {
   AlertCircle,
-  ArrowUpRight,
   Bot,
   CalendarDays,
   CheckCircle2,
@@ -915,16 +914,17 @@ function VerevonPanel(props: {
       <div class="verevon-inbox-ask-verevon">
         <div class="verevon-inbox-ask-verevon__header">
           <span>{i18n.tr('Kontekst fra valgt samtale', 'Context from selected conversation')}</span>
+          {/* This used to offer an "Åpne i Chat" thread deep-link. A support
+              thread's origin is not `chat`, so Chat marks it foreign and
+              renders it READ-ONLY (see `initializeChat`'s origin guard): the
+              link promised the full workspace and delivered a transcript you
+              could not continue. The conversation is worked here, in its own
+              surface, which is what the shared thread is for. */}
           <Show
             when={sharedThreadId()}
             fallback={<em>{i18n.tr('Spør for å starte delt tråd', 'Ask to start a shared thread')}</em>}
           >
-            {(threadId) => (
-              <a href={`/chat?thread_id=${encodeURIComponent(threadId())}`} link>
-                {i18n.tr('Åpne i Chat', 'Open in Chat')}
-                <ArrowUpRight class="size-3.5" />
-              </a>
-            )}
+            <em>{i18n.tr('Delt tråd aktiv', 'Shared thread active')}</em>
           </Show>
         </div>
         <div>

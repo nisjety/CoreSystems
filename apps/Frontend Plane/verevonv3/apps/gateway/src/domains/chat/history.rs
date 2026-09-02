@@ -519,6 +519,19 @@ struct CanonicalMessage {
     /// at-the-time record, surfaced for per-turn attribution in the room.
     #[serde(default)]
     agent_name: String,
+    /// The turn's persisted evidence, as Model Gateway flattens it onto the
+    /// message. Relayed verbatim so a reopened thread shows the same sources
+    /// the live stream did; before this existed the read path returned
+    /// role/content only and every evidence surface was empty on any device
+    /// but the one that streamed the turn.
+    ///
+    /// Two keys because the product has two evidence sources: `grounding` is
+    /// Data Plane retrieval, `citations` is what the tool loop cited (web
+    /// search, deep research). A turn can carry either, both, or neither.
+    #[serde(default)]
+    grounding: Option<Value>,
+    #[serde(default)]
+    citations: Option<Value>,
 }
 
 async fn read_canonical_transcript(
@@ -586,6 +599,22 @@ fn canonical_messages_to_transcript(
             });
             if !message.agent_name.trim().is_empty() {
                 turn["agentName"] = json!(message.agent_name);
+            }
+            // Attached only when the turn actually recorded evidence, matching
+            // the conditional shape used for `agentName` above: the SPA treats
+            // an absent key as "nothing grounded" and a present one as real
+            // evidence, so writing `null` here would be a different claim.
+            if let Some(grounding) = message
+                .grounding
+                .filter(|value| !value.is_null())
+            {
+                turn["grounding"] = grounding;
+            }
+            if let Some(citations) = message
+                .citations
+                .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()))
+            {
+                turn["citations"] = citations;
             }
             turn
         })
@@ -890,11 +919,15 @@ mod tests {
                     role: "user".into(),
                     content: "Question".into(),
                     agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
                 },
                 CanonicalMessage {
                     role: "assistant".into(),
                     content: "Answer".into(),
                     agent_name: "Statusagent".into(),
+                    grounding: None,
+                    citations: None,
                 },
             ],
         )
@@ -909,5 +942,85 @@ mod tests {
         assert!(transcript.turns[0].get("agentName").is_none());
         assert!(transcript.task_steps.is_none());
         assert!(canonical_messages_to_transcript("thread-1", Vec::new()).is_none());
+    }
+
+    /// The regression this closes: history used to return role/content only, so
+    /// a reopened thread had no sources on any device but the one that streamed
+    /// it. Grounding must now survive the canonical read — and stay absent, not
+    /// null, for turns that grounded nothing.
+    #[test]
+    fn canonical_messages_carry_persisted_grounding() {
+        let transcript = canonical_messages_to_transcript(
+            "thread-1",
+            vec![
+                CanonicalMessage {
+                    role: "user".into(),
+                    content: "Which pram is best?".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                },
+                CanonicalMessage {
+                    role: "assistant".into(),
+                    content: "The Nuna TRIV LX.".into(),
+                    agent_name: String::new(),
+                    grounding: Some(json!({
+                        "mode": "hybrid",
+                        "source_count": 1,
+                        "citations": [{ "id": "c1", "title": "Nuna TRIV LX", "url": "https://example.test" }],
+                    })),
+                    citations: None,
+                },
+                CanonicalMessage {
+                    role: "assistant".into(),
+                    content: "Ungrounded reply".into(),
+                    agent_name: String::new(),
+                    grounding: Some(Value::Null),
+                    citations: None,
+                },
+            ],
+        )
+        .expect("canonical conversation should render");
+
+        assert_eq!(transcript.turns[1]["grounding"]["mode"], "hybrid");
+        assert_eq!(transcript.turns[1]["grounding"]["citations"][0]["id"], "c1");
+        // A turn that grounded nothing must not gain the key at all: the SPA
+        // reads its presence as "this turn has evidence".
+        assert!(transcript.turns[0].get("grounding").is_none());
+        assert!(transcript.turns[2].get("grounding").is_none());
+    }
+
+    /// Tool-loop evidence (web search, deep research) never appears in
+    /// `grounding` — it arrives as a separate `citations` list. This is the
+    /// common case in practice, so it gets its own coverage.
+    #[test]
+    fn canonical_messages_carry_tool_loop_citations() {
+        let transcript = canonical_messages_to_transcript(
+            "thread-1",
+            vec![
+                CanonicalMessage {
+                    role: "assistant".into(),
+                    content: "Oslo.".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: Some(json!([
+                        { "id": "w1", "title": "Oslo", "url": "https://example.test/oslo", "snippet": "capital" },
+                    ])),
+                },
+                CanonicalMessage {
+                    role: "assistant".into(),
+                    content: "No sources used.".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    // An empty list is not evidence; it must not create the key.
+                    citations: Some(json!([])),
+                },
+            ],
+        )
+        .expect("canonical conversation should render");
+
+        assert_eq!(transcript.turns[0]["citations"][0]["url"], "https://example.test/oslo");
+        assert!(transcript.turns[0].get("grounding").is_none());
+        assert!(transcript.turns[1].get("citations").is_none());
     }
 }

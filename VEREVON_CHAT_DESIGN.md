@@ -90,7 +90,7 @@ sidebar will show.
 | `Last-Event-Id` resume | Fully plumbed model-gateway → gateway → `readSseStream`; the SPA never passes it (`chat-client.ts:552`) and never records `event.id`. Resume replays text from seq 0 and **loses every tool/citation/usage/grounding event**. The single clearest dead path. |
 | Sidebar pin | localStorage-only, and **silently destroyed** on resync: `withPinnedCarry` sees server `pinned:false` and deletes the local pin. A second, server-owned pin exists in the composer's History panel. The unit test omits `pinned` from its inputs, so it never exercises the real caller. |
 | Plan view | `listPlans`/`listTodos`/`getLineage` exported with **zero callers app-wide**. A plan-mode run shows a one-line "Plan" string. The user cannot see, approve, or step through the plan. |
-| Non-image attachments | Composer accepts `*/*` and renders chips for PDFs; `toStreamAttachments` drops everything non-`image/*` (`chat-normalizers.ts:382`). The fixing route (`POST /api/v1/chat/documents` → Data Plane ingest) exists with zero callers. |
+| Non-image attachments | Composer accepts `*/*` and renders chips for PDFs; `toStreamAttachments` drops everything non-`image/*` (`chat-normalizers.ts:382`). The fixing route (`POST /api/v1/chat/documents` → Data Plane ingest) had zero callers AND was itself dead — model-gateway forwarded it to a gRPC method Data Plane v2 disabled, so it answered 502. Both are fixed; see item 7 in the status table. |
 | `@`-mention on chat page | Inserts styled text from people-search; never sets `mentionedAgentRef`. Agent invocation by mention works **only** in Space rooms. |
 | `reason` response mode | "Deep" pushes a `reason` tool that `handleComposerSubmit` never maps to any wire field. Composer tone setting likewise never sent. |
 | `?space_ref=` on `/chat` | Read by the controller; no link in `src/` produces it. |
@@ -258,6 +258,27 @@ rendered as a citation whose click-target is the owning surface.
     invisible while it runs, with no plan/sub-query view and no way to leave and
     return.
 
+
+> **Verified status, 2026-09-02** (checked against the code, not the plan text; re-created after the file was deleted from the repository root the same day):
+>
+> | # | Item | Status |
+> |---|---|---|
+> | 1 | Origin dimension on session-core threads | Done before the 2026-09 pass. Guard confirmed in `use-chat-controller.ts` (deep links fail closed to read-only for foreign origins). |
+> | 2 | Stop deep-link adoption | Done before the 2026-09 pass; confirmed against code 2026-09-02. |
+> | 3 | Route audit + lint rule | **Done.** `chat-route-ownership.test.ts` forbids `/chat?thread_id=` outside `features/chat/` and allows exactly one sidebar `/chat` destination. A vitest guard, because `pnpm lint` cannot run (typescript-eslint vs pinned TypeScript 7). |
+> | 4 | Collapse the two pin systems | Done before the 2026-09 pass. One system remains, in `chat-thread-history.ts`; no localStorage pin store exists. |
+> | 5 | Wire `Last-Event-Id` / resume | **Done.** Resume now receives the full evidence handler set, and `carryInFlightAssistantTurn` keeps the in-flight assistant turn across leave-and-return (session-core records no assistant message until a turn finishes, so the server merge used to drop it). |
+> | 6 | Delete or fix: `reason`, `@`-mention, `space_ref`, AG-UI | **Done.** `reason` removed from the composer tools and the tool-name mapping; `@`-mention and `?space_ref=` verified live (the inventory was stale); AG-UI kept as a planned surface by owner decision. |
+> | 7 | Non-image attachments | **Done, with a timing caveat.** Text attachments (`.txt/.md/.csv/.json/.html`) persist to Data Plane v2 and ground later turns — verified live: a `.txt` reached `documents` as `d201f41c…`, reached `status = indexed`, and the next turn quoted it correctly. The route had to be fixed, not just called: `POST /api/v1/chat/documents` was dead end-to-end (502) because model-gateway calls `DocumentService.CreateDocument` over gRPC and Data Plane v2 disabled it ("use documents-api-go POST /v1/documents instead"). The Frontend Plane gateway now takes that route directly, reusing the documents-api leg the knowledge domain already proxies. Caveat: DP2 chunks asynchronously, so the turn carrying the file cannot use it (measured: turn one answered "I find no notes"); the notice says so. PDF/DOCX stay on the per-file "Add to knowledge base" route, since `create_document` takes text `content`, not bytes. |
+> | 8 | Single four-tab right panel + auto-open rule | **Done.** Auto-open rule (Work > Output > Sources, once per thread, Trace never steals focus) implemented; `attachmentCount` no longer hardcoded to 0; the rail keeps ONE geometry whoever renders it. `ChatLiveRunPanel` already hosted Work during a live run but at the narrow basis meant for sitting beside the canvas — measured at 974px the rail was 234px on Work and 396px on Sources, so tab switches moved it 162px and the densest tab was the narrowest. Both rails now read `--verevon-workspace-rail` (verified equal at 974px and 1400px), and the panel reports itself as `Arbeidsflate` when hosting Work. Guarded by `workspace-rail-geometry.test.ts`. The literal component fold was deliberately not done: the 671-line panel is interwoven with its rail chrome, its own tests are already 8/10 red for unrelated reasons, and remounting the run stream on every tab switch would regress. |
+> | 9 | Ask/Do switch + grounding-scope control | Done before the 2026-09 pass; confirmed against code 2026-09-02 (`DashboardComposer.tsx`, response-mode selector). |
+> | 10 | Plan view in the Work tab | **Done.** Resource re-keyed on step progress so it stops going stale; `humanizePlanStepOperation` labels; `PLAN_(STEP_)STATE_` prefixes stripped; `CompleteStep` status mapping fixed in session-core (`skipped` + error-based fallback); `PlanStep.detail` added to the proto and surfaced. |
+> | 11 | Trace tab as audit record | **Done.** Owner decision: audit, not sharing (see §6 Q4). `appendUiEvent` with a 5,000-event cap and a visible notice replaces three silent `.slice(-160)` truncations; the duplicated run-proof panel now lives only in Trace. |
+> | 12 | Thread-list status chips | Done before the 2026-09 pass; confirmed 2026-09-02 (`CoreSidebar.tsx` renders `chatRunStatusChip(item.latestRunStatus)`). The "navigating away drops the run" half is closed by item 5. |
+> | 13 | Deep-research progress surface | **Done.** `SubQueryOutcome` per sub-query, steps emitted active then resolved, `search_sub_queries` returns the outcomes; visible in Work while it runs. |
+>
+> **Outside the plan, still open:** three UI markers from the owner's own list were logged rather than built because each needs a new Model Plane contract — claim-level span binding, source-freshness indicator, confidence/verification marker. The message-pinning UI indicator (pin one message into context; distinct from item 4's thread pins) was not addressed. The §2.3 "Unproxied Model Plane" row (realtime, video, translate, language, document-AI, `/v1/tasks`, `/v1/toon/encode`) is inventory only and untouched. The top nav still has two labels pointing at `/chat` ("Chat" and "Oppgaver").
+
 ---
 
 ## 5. Harness mechanisms this design depends on
@@ -294,4 +315,5 @@ Drawn from the second-pass audit (`claude-hermes-deepseek.md` §13):
 2. **Norwegian vocabulary.** Ask/Do, Work/Sources/Output/Trace, "Grounded in", and the typed pause-state labels all need Norwegian equivalents settled **before** components are built, not translated afterwards.
 3. **Keyboard model.** Four tabs + a mode switch + a job-queue rail is a lot of focus surface; deserves its own pass (Claude's explicit `Cmd+;` branch is a useful precedent).
 4. **Trace = audit or sharing?** Determines the permission model.
+   **Answered 2026-09-02: audit.** Trace is the run's audit record, not a sharing surface — owner decision. Applied: Trace never takes auto-focus; the UI-event buffer is capped at 5,000 events with a visible notice instead of the silent 160-event truncation it replaced; the run-proof panel lives only in Trace. Sharing, if ever wanted, is a separate permission model to design later.
 5. **Per-run cost to the end user.** None of the four references show it; Verevon has a real cost story in Model Plane that may need a home on this surface.

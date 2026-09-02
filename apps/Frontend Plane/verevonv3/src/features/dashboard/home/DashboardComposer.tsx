@@ -198,7 +198,13 @@ export type DashboardComposerSubmitPayload = {
 	attachments: DashboardComposerAttachment[];
 	model?: string;
 	text: string;
-	tools: Array<"image" | "reason" | "research" | "search">;
+	tools: Array<"image" | "research" | "search">;
+	/**
+	 * Response-style dial from composer settings. Sent so the setting has an
+	 * effect: the gateway maps it to a verbosity directive. Omitted for
+	 * "balanced", which is already the model's natural default there.
+	 */
+	tone?: "concise" | "detailed";
 	/** Temporary chat (Zero Data Retention) toggle state at send time. */
 	zdr?: boolean;
 	/**
@@ -379,13 +385,22 @@ function modeAnnouncementDisplay(announcement: string | null, message: string) {
 function textareaPlaceholder(
 	announcement: string | null,
 	i18n: ReturnType<typeof useI18n>,
+	suggestion: string | null,
 ) {
-	return announcement
-		? ""
-		: i18n.tr(
-				"Spør om hva som helst, bruk / for spesialhandlinger.",
-				"Ask anything, use / to activate specialized actions.",
-			);
+	if (announcement) return "";
+	// A rotating, concrete suggestion beats the standing generic line: the old
+	// placeholder told people the composer exists, not what it is good for.
+	// The Tab hint is part of the string because the affordance is otherwise
+	// invisible — nothing else on the surface says the key does anything.
+	if (suggestion)
+		return i18n.tr(
+			`${suggestion}  —  Tab for å bruke`,
+			`${suggestion}  —  Tab to use`,
+		);
+	return i18n.tr(
+		"Spør om hva som helst, bruk / for spesialhandlinger.",
+		"Ask anything, use / to activate specialized actions.",
+	);
 }
 
 function textareaCursorPosition(element: HTMLTextAreaElement) {
@@ -801,6 +816,62 @@ export function DashboardComposer(props: {
 				element.style.height = `${overflows ? TEXTAREA_AUTO_MAX_PX : naturalH}px`;
 				element.style.overflowY = overflows ? "auto" : "hidden";
 			}
+		},
+	);
+
+	/**
+	 * Rotating composer suggestions, Copilot-style.
+	 *
+	 * Context-derived where real context exists: an already-loaded recent
+	 * thread becomes a "follow up on X" prompt. No fetch is added for this —
+	 * `historyThreads` populates when the History panel is opened, and a
+	 * placeholder is not worth a network call on every composer mount. When
+	 * there is nothing to draw on it falls back to concrete examples rather
+	 * than the old generic line.
+	 */
+	const composerSuggestions = createMemo(() => {
+		const recent = historyThreads()
+			.slice(0, 2)
+			.map((thread) => thread.title?.trim())
+			.filter((title): title is string => !!title && title.length > 3)
+			.map((title) =>
+				i18n.tr(`Følg opp «${title}»`, `Follow up on "${title}"`),
+			);
+		return [
+			...recent,
+			i18n.tr(
+				"Oppsummer et dokument til beslutningspunkter",
+				"Summarize a document into decision points",
+			),
+			i18n.tr(
+				"Finn svaret i kunnskapsbasen, med kilder",
+				"Find the answer in the knowledge base, with sources",
+			),
+			i18n.tr(
+				"Lag et førsteutkast jeg kan redigere",
+				"Draft a first version I can edit",
+			),
+		];
+	});
+	const [suggestionIndex, setSuggestionIndex] = createSignal(0);
+	const activeSuggestion = () => {
+		// Only offered for an empty composer: rotating text under something the
+		// user is already typing would be noise, and Tab must keep its normal
+		// focus-move behaviour the moment there is real input to tab away from.
+		if (props.message.trim()) return null;
+		const list = composerSuggestions();
+		return list.length > 0 ? (list[suggestionIndex() % list.length] ?? null) : null;
+	};
+	createEffect(
+		() => ({ count: composerSuggestions().length, idle: !props.message.trim() }),
+		({ count, idle }) => {
+			if (count <= 1 || !idle) return undefined;
+			const timer = window.setInterval(() => {
+				setSuggestionIndex((index) => (index + 1) % count);
+			}, 6000);
+			// Returned, not `onCleanup`: inside a two-argument effect's effect
+			// function this fork drops onCleanup silently, leaking the interval.
+			return () => window.clearInterval(timer);
 		},
 	);
 
@@ -1376,6 +1447,22 @@ export function DashboardComposer(props: {
 		const state = autocomplete();
 		if (state && handleAutocompleteKeyDown(event, state)) return;
 
+		// Tab accepts the rotating suggestion. Deliberately only when the
+		// composer is empty and a suggestion is actually showing: `Tab` is the
+		// keyboard user's way out of a textarea, and swallowing it whenever
+		// this component has focus would trap them. `activeSuggestion()` is
+		// already null once anything is typed, so the guard is the same one the
+		// placeholder uses.
+		if (event.key === "Tab" && !event.shiftKey) {
+			const suggestion = activeSuggestion();
+			if (suggestion) {
+				event.preventDefault();
+				props.onMessageChange(suggestion);
+				textareaRef?.focus();
+				return;
+			}
+		}
+
 		if (event.key === "Enter" && !event.shiftKey) {
 			event.preventDefault();
 			void submitComposer();
@@ -1447,6 +1534,7 @@ export function DashboardComposer(props: {
 			model: selectedModel(),
 			responseMode: responseMode(),
 			text: snapshot.submittedText,
+			tone: settings().tone,
 			trimmedMessage: snapshot.body,
 			zdr: temporaryChat(),
 		});
@@ -2081,6 +2169,7 @@ export function DashboardComposer(props: {
 							placeholder={textareaPlaceholder(
 								modeAnnouncement(),
 								i18n,
+								activeSuggestion(),
 							)}
 							rows="3"
 							style={textareaOverlayStyle(hasEntityOverlay())}
@@ -2403,7 +2492,14 @@ function getComposerTools(input: {
 }): DashboardComposerSubmitPayload["tools"] {
 	const tools: DashboardComposerSubmitPayload["tools"] = [];
 	if (input.browseWeb) tools.push("search");
-	if (input.responseMode === "deep") tools.push("reason");
+	// `responseMode === "deep"` used to also push a `"reason"` tool. It never
+	// reached the model: `SendOptions.tools` is consumed only to draw the user
+	// turn's chips, `streamChat` has no `tools` key, and `createSelectedAgentToolSpecs`
+	// drops bare strings anyway (they have no `.name`). The backend has no
+	// `reason` tool either — "deep" is already honoured through the `effort`
+	// field, which this same responseMode sets and which does reach the wire.
+	// Removed rather than wired: it was a second, dead encoding of a dial that
+	// already works.
 	if (input.deepSearch) tools.push("research");
 	if (
 		input.imageMode ||
@@ -2447,6 +2543,7 @@ function createComposerSubmitPayload(input: {
 	model: string;
 	responseMode: ResponseMode;
 	text: string;
+	tone: ComposerTone;
 	trimmedMessage: string;
 	zdr: boolean;
 }): DashboardComposerSubmitPayload {
@@ -2479,6 +2576,12 @@ function createComposerSubmitPayload(input: {
 			: input.responseMode === "deep"
 				? { effort: "deep" as const }
 				: {}),
+		// Presence-only for the same reason as effort: "balanced" is the
+		// gateway's no-directive default, so sending it would be a no-op key on
+		// every ordinary turn.
+		...(input.tone === "concise" || input.tone === "detailed"
+			? { tone: input.tone }
+			: {}),
 	};
 }
 

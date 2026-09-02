@@ -100,7 +100,7 @@ export function MessageBlock(props: {
   onBranch: () => void
   onCopy: () => void
   onEdit: (text: string) => void
-  onFeedback: (rating: 'positive' | 'negative') => Promise<boolean>
+  onFeedback: (rating: 'positive' | 'negative', note?: string) => Promise<boolean>
   onRegenerate: () => void
   onRerunAsNewTurn?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
@@ -284,7 +284,7 @@ export function AssistantMessage(props: {
   message: ChatTurn
   onBranch: () => void
   onCopy: () => void
-  onFeedback: (rating: 'positive' | 'negative') => Promise<boolean>
+  onFeedback: (rating: 'positive' | 'negative', note?: string) => Promise<boolean>
   onRegenerate: () => void
   onRerunAsNewTurn?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
@@ -296,6 +296,7 @@ export function AssistantMessage(props: {
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
 }) {
+  const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
 
   /**
@@ -306,6 +307,32 @@ export function AssistantMessage(props: {
     const previous = reaction()
     setReaction(previous === next ? null : next)
     if (!(await props.onFeedback(wire))) setReaction(previous)
+  }
+
+  // Tiered feedback (thumbs -> optional category): a thumbs-down still records
+  // immediately, same as before -- the category row only *enriches* that
+  // rating with a `note` on a second call. It never gates or re-toggles the
+  // thumb, so a category pick can't be confused with un-rating the message.
+  const feedbackReasons = () => [
+    i18n.tr('Unøyaktig', 'Inaccurate'),
+    i18n.tr('Ikke relevant', 'Not relevant'),
+    i18n.tr('Ufullstendig', 'Incomplete'),
+    i18n.tr('Skadelig', 'Harmful'),
+  ]
+  const [showReasons, setShowReasons] = createSignal(false)
+  const [pickedReason, setPickedReason] = createSignal<string | null>(null)
+
+  const onThumbsDown = () => {
+    const wasDown = reaction() === 'down'
+    void rate('down', 'negative')
+    setShowReasons(!wasDown)
+    if (wasDown) setPickedReason(null)
+  }
+
+  const pickReason = async (reason: string) => {
+    setPickedReason(reason)
+    setShowReasons(false)
+    await props.onFeedback('negative', reason)
   }
 
   const waiting = createMemo(() => props.message.status === 'waiting')
@@ -375,7 +402,7 @@ export function AssistantMessage(props: {
             <MessageAction
               active={reaction() === 'down'}
               label="Bad response"
-              onClick={() => void rate('down', 'negative')}
+              onClick={onThumbsDown}
             >
               <ThumbsDown size={14} />
             </MessageAction>
@@ -421,7 +448,19 @@ export function AssistantMessage(props: {
                 </>
               )}
             >
-              <MessageAction label="Regenerate" onClick={props.onRegenerate}>
+              {/* The label names the outcome, not the verb. Regenerating keeps
+                  the previous answer as a switchable version, but the switcher
+                  only appears AFTER the first regenerate — so the one moment a
+                  user could learn the feature exists is the moment before they
+                  use it, and "Regenerate" alone never told them. */}
+              <MessageAction
+                label={
+                  props.version
+                    ? `Generer på nytt (versjon ${props.version.current}/${props.version.total})`
+                    : 'Generer på nytt — beholder dette svaret som versjon 1'
+                }
+                onClick={props.onRegenerate}
+              >
                 <RefreshCw size={14} />
               </MessageAction>
             </Show>
@@ -434,6 +473,29 @@ export function AssistantMessage(props: {
             <MessageMetricsBadge message={props.message} />
             <ReasoningPopover message={props.message} />
           </div>
+          <Show when={showReasons()}>
+            <div class="verevon-chat-feedback-reasons" role="group" aria-label={i18n.tr('Hva var galt?', 'What was wrong?')}>
+              <span>{i18n.tr('Hva var galt?', 'What was wrong?')}</span>
+              <For each={feedbackReasons()}>
+                {(reason) => (
+                  <button
+                    type="button"
+                    class="verevon-chat-feedback-reasons__chip"
+                    onClick={() => void pickReason(reason)}
+                  >
+                    {reason}
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+          <Show when={pickedReason()}>
+            {(reason) => (
+              <p class="verevon-chat-feedback-reasons__note">
+                {i18n.tr('Takk — merket som', 'Thanks — flagged as')} “{reason()}”.
+              </p>
+            )}
+          </Show>
         </Show>
       </div>
     </article>
@@ -1382,9 +1444,14 @@ export function ToolChips(props: { tools: ComposerToolId[] }) {
   )
 }
 
+/**
+ * Icons for the chips on a USER turn, keyed to the composer's own tool union.
+ * Unrelated to inbound server tool calls, which arrive as free-form names and
+ * render with `Wrench` — and unrelated to the `reasoning` node, which is fed by
+ * `turn.reasoning` and keeps its own Brain icon.
+ */
 export function toolChipIcon(tool: ComposerToolId): IconComponent {
   if (tool === 'search') return Globe2
-  if (tool === 'reason') return Brain
   if (tool === 'research') return Sparkles
   if (tool === 'image') return FileCode2
   return Wrench
@@ -1873,7 +1940,21 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
 
 // ── Empty state ───────────────────────────────────────────────────────────────
 
-export function EmptyChatState(props: { children: JSX.Element; onSelectPrompt: (prompt: string) => void }) {
+/**
+ * The opening surface states scope and offers a first move.
+ *
+ * Deliberately NOT a seeded assistant turn: an opening message rendered as
+ * something Verevon "said" would attribute content the model never generated,
+ * and would sit in the transcript as if it were part of the conversation. The
+ * same job — say what I can see, suggest where to start — is done here without
+ * putting words in the model's mouth.
+ */
+export function EmptyChatState(props: {
+  children: JSX.Element
+  onSelectPrompt: (prompt: string) => void
+  /** Names the actual grounding scope when the session knows it. */
+  orgName?: string
+}) {
   const i18n = useI18n()
   const starterPrompts = () => [
     {
@@ -1905,7 +1986,17 @@ export function EmptyChatState(props: { children: JSX.Element; onSelectPrompt: (
             <span>Verevon</span>
           </div>
           <h1>{i18n.tr('Hva vil du få gjort?', 'What would you like to get done?')}</h1>
-          <p>{i18n.tr('Start med et spørsmål. Arbeidsflaten åpnes først når du har noe å undersøke, følge eller gjennomgå.', 'Start with a question. The workspace opens only when there is something to research, follow, or review.')}</p>
+          <p>
+            <Show
+              when={props.orgName?.trim()}
+              fallback={i18n.tr('Verevon søker i kildene og systemene dere allerede bruker, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.', 'Verevon searches the sources and systems you already use, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.')}
+            >
+              {(orgName) => i18n.tr(
+                `Verevon søker i kunnskapsbasen og systemene til ${orgName()}, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.`,
+                `Verevon searches ${orgName()}'s knowledge base and systems, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.`,
+              )}
+            </Show>
+          </p>
         </div>
         <div class="verevon-chat-empty__composer">{props.children}</div>
         <div class="verevon-chat-empty__prompts">
