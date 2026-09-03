@@ -111,6 +111,16 @@ Set `zdr: true` on any scrape, agent, or structured extract request. Quarry:
 
 ZDR violations bubble up as typed `Forbidden` errors. Audit them via the `agent.failed` and `page.blocked` events.
 
+Set `zdr: true` on `/v1/search`, `/v1/answer`, or `/v1/answer/stream` and, in
+addition to the cache/event skips above, `SmartSearchRouter` never invokes
+Brave or Serper for that request — only in-infra providers (Tantivy /
+Stract / SearXNG + Data Plane) are queried, so the query text itself never
+egresses to a third party. This is a hard per-request override: it applies
+even when `QUARRY_EDGE__ZERO_SAAS_SEARCH` is left at its default (`0`), which
+only controls whether Brave/Serper are registered for *non-ZDR* traffic. See
+`SearchOptions::zdr` in `crates/quarry-runtime/src/serp.rs`, and the gate itself in
+`crates/quarry-runtime/src/smart_router.rs`.
+
 ## 8. Operations
 
 - See [RUNBOOKS.md](./RUNBOOKS.md) for incident playbooks.
