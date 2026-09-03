@@ -553,6 +553,12 @@ textarea:focus-visible {
   .core-product-shell {
     height: calc(100dvh / 0.9);
     zoom: 0.9;
+    /* `zoom` shrinks CSS pixels, so a 44px target would land at 39.6px on
+       screen. Scale the token by the same factor so the hit area is a real
+       44px. Only the zoomed (>=768px) case needs this; below it there is no
+       zoom and the base 44px is already correct -- which is the case that
+       matters most, since that is where touch happens. */
+    --verevon-touch-target: calc(44px / 0.9);
   }
 }
 
@@ -25381,15 +25387,28 @@ body.verevon-chat-canvas-resizing * {
   opacity: 1;
 }
 
+/* 32px of visible button inside a >=44px target. `background-clip:
+   content-box` confines the hover fill to the content box, so the padding
+   that carries the extra target area stays invisible. Sized from a token
+   rather than a literal because the desktop shell is zoomed -- see
+   `.core-product-shell`. */
 .verevon-chat-action-button,
 .verevon-chat-menu > button {
+  --verevon-action-visual: 32px;
   display: grid;
-  width: 32px;
-  height: 32px;
+  box-sizing: border-box;
+  width: var(--verevon-touch-target, 44px);
+  height: var(--verevon-touch-target, 44px);
+  padding: calc((var(--verevon-touch-target, 44px) - var(--verevon-action-visual)) / 2);
   place-items: center;
   border: 0;
   border-radius: 8px;
-  background: transparent;
+  /* `background-color`, not the `background` shorthand: the shorthand resets
+     `background-clip` to border-box, which would paint the hover fill across
+     the whole 44px target and make the button look oversized. Same reason the
+     hover rule below sets `background-color`. */
+  background-color: transparent;
+  background-clip: content-box;
   color: var(--verevon-text-subtle);
   cursor: pointer;
   transition:
@@ -25400,7 +25419,8 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-action-button:hover,
 .verevon-chat-action-button--active,
 .verevon-chat-menu > button:hover {
-  background: var(--verevon-surface-soft);
+  /* Not the shorthand — it would reset the content-box clip set above. */
+  background-color: var(--verevon-surface-soft);
   color: var(--verevon-j-text);
 }
 
@@ -44871,6 +44891,44 @@ body.verevon-chat-canvas-resizing * {
   max-width: 720px;
   gap: 0;
   margin-top: 20px;
+}
+
+/* The suggested first move (plan item 17). A borderless row that reads as an
+   offer rather than a button, per Fjordlys law 2 (negative space, not
+   hairlines) and its empty-state spec (borderless rows, surface-soft hover). */
+.verevon-chat-empty__resume {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px auto 0;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 12px;
+  background-color: transparent;
+  color: var(--verevon-j-text, #1a1a1a);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+
+.verevon-chat-empty__resume:hover {
+  background-color: var(--verevon-surface-soft);
+}
+
+.verevon-chat-empty__resume > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* The thread's own title, so the offer names the actual work being resumed. */
+.verevon-chat-empty__resume small {
+  color: var(--verevon-text-subtle);
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .verevon-chat-empty__prompt-label {

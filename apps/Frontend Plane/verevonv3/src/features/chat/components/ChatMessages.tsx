@@ -4,6 +4,7 @@ import {
 } from '@/shared/api/orchestration-client'
 import {
   AlertCircle,
+  ArrowRight,
   Brain,
   Check,
   ChevronLeft,
@@ -44,6 +45,7 @@ import {
   type ToolIntent,
 } from '@/shared/chat-nodes'
 import type { AutonomyRung, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import {
   For,
@@ -1954,8 +1956,47 @@ export function EmptyChatState(props: {
   onSelectPrompt: (prompt: string) => void
   /** Names the actual grounding scope when the session knows it. */
   orgName?: string
+  /** Greets the person by name when the session knows it. First name only. */
+  userName?: string
 }) {
   const i18n = useI18n()
+
+  /**
+   * A greeting instead of a question. "Hva vil du få gjort?" asked the user to
+   * supply everything, on a surface that already knows who they are and what
+   * it can reach — plan item 17, and the one part of designpixil's
+   * "two sentences and a suggestion" the empty state was missing.
+   *
+   * Time of day is read once per render of an empty thread, not tracked: the
+   * greeting must not change under someone mid-sentence at 11:59.
+   */
+  const greeting = () => {
+    const firstName = props.userName?.trim().split(/\s+/)[0] ?? ''
+    const hour = new Date().getHours()
+    const partOfDay = hour < 10
+      ? i18n.tr('God morgen', 'Good morning')
+      : hour < 17
+        ? i18n.tr('God dag', 'Good afternoon')
+        : i18n.tr('God kveld', 'Good evening')
+    return firstName ? `${partOfDay}, ${firstName}` : partOfDay
+  }
+
+  /**
+   * The most recent thread, when there is one worth resuming. Read once on
+   * mount rather than reactively: this is an empty-thread surface, so the
+   * history behind it cannot change while it is on screen, and a signal here
+   * would re-render the greeting for no reason.
+   */
+  const resumeTarget = () => {
+    const recent = readChatThreadHistory()
+      .filter((item) => item.title.trim() && item.threadId.trim())
+      .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0]
+    if (!recent) return null
+    // A title long enough to wrap would break the one-line affordance, and a
+    // truncated one reads as broken. Skip it rather than mangle it.
+    return recent.title.length <= 60 ? recent : null
+  }
+
   const starterPrompts = () => [
     {
       description: i18n.tr('Trekk ut beslutninger, risiko og neste steg.', 'Extract decisions, risks, and next steps.'),
@@ -1985,7 +2026,7 @@ export function EmptyChatState(props: {
             <span class="verevon-chat-empty__mark"><span /></span>
             <span>Verevon</span>
           </div>
-          <h1>{i18n.tr('Hva vil du få gjort?', 'What would you like to get done?')}</h1>
+          <h1>{greeting()}</h1>
           <p>
             <Show
               when={props.orgName?.trim()}
@@ -1997,6 +2038,32 @@ export function EmptyChatState(props: {
               )}
             </Show>
           </p>
+          {/* The suggested first move. Plan item 17 / designpixil's "two
+              sentences and a suggestion": the scope line above says what
+              Verevon can reach, this says what to do with it right now.
+              Sourced from real state — the most recent thread when there is
+              one — because a suggestion the product invented is just another
+              generic prompt, and there are three of those below already. */}
+          <Show when={resumeTarget()}>
+            {(target) => (
+              <button
+                type="button"
+                class="verevon-chat-empty__resume"
+                onClick={() => props.onSelectPrompt(
+                  i18n.tr(
+                    `Fortsett der vi slapp i «${target().title}». Oppsummer kort hva vi kom fram til, og foreslå neste steg.`,
+                    `Pick up where we left off in "${target().title}". Briefly summarise what we concluded, and suggest the next step.`,
+                  ),
+                )}
+              >
+                <ArrowRight size={14} aria-hidden="true" />
+                <span>
+                  {i18n.tr('Fortsett der du slapp', 'Pick up where you left off')}
+                  <small>{target().title}</small>
+                </span>
+              </button>
+            )}
+          </Show>
         </div>
         <div class="verevon-chat-empty__composer">{props.children}</div>
         <div class="verevon-chat-empty__prompts">

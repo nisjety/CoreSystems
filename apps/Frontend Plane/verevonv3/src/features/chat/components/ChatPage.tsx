@@ -324,6 +324,112 @@ export default function ChatPage() {
   // 50vh cap in expanded mode), so anything anchored to the viewport bottom
   // -- like the global feedback widget -- needs the real measured height,
   // not a guessed offset, to avoid sitting underneath the send button.
+  /**
+   * What a screen reader hears while a turn streams.
+   *
+   * Deliberately the turn's LIFECYCLE, not its tokens. The transcript is not a
+   * live region, so today streaming is announced as nothing at all and a
+   * multi-minute deep-research turn is indistinguishable from a hung page. The
+   * opposite extreme is just as unusable: piping a growing answer into a live
+   * region re-reads the whole thing on every token. So: one announcement when
+   * the turn starts, a sparse heartbeat so a long run does not go silent, and
+   * the opening of the answer once it lands.
+   */
+  const [streamAnnouncement, setStreamAnnouncement] = createSignal('')
+  createEffect(
+    () => isStreaming(),
+    (streaming) => {
+      if (!streaming) {
+        const latest = [...state.turns].reverse().find((turn) => turn.role === 'assistant')
+        const answer = latest?.content?.trim() ?? ''
+        // The answer itself is in the transcript to navigate; this is the cue
+        // that it is there, plus enough of it to know whether it is worth reading.
+        setStreamAnnouncement(answer ? `Svar fullført. ${answer.slice(0, 180)}` : '')
+        return
+      }
+      setStreamAnnouncement('Verevon svarer …')
+      // Ten seconds: frequent enough that a long run does not read as dead, rare
+      // enough not to be a metronome. The text alternates because a live region
+      // drops a repeat of the string it is already showing.
+      let tick = 0
+      const heartbeat = setInterval(() => {
+        tick += 1
+        setStreamAnnouncement(tick % 2 === 1 ? 'Arbeider fortsatt …' : 'Fortsatt underveis …')
+      }, 10_000)
+      // Solid 2 runs a cleanup RETURNED from the effect fn; `onCleanup` inside
+      // one is silently dropped.
+      return () => clearInterval(heartbeat)
+    },
+  )
+
+  /**
+   * Escape closes the contextual panel and puts focus back on the tab strip
+   * that opened it (plan item 14, section 6 question 3).
+   *
+   * Menus and popovers already handle Escape locally; the panel itself did not,
+   * so a keyboard user who opened Work had no way back to the conversation
+   * without tabbing through the whole panel. Registered on the page rather than
+   * the panel because focus may legitimately be inside either one.
+   *
+   * `defaultPrevented` is respected so an inner popover that already consumed
+   * the key closes only itself — one Escape, one dismissal.
+   */
+  createEffect(
+    () => activeTab(),
+    (tab) => {
+      if (tab === 'chat') return
+      const onKeyDown = (event: KeyboardEvent) => {
+        if (event.key !== 'Escape' || event.defaultPrevented) return
+        setActiveTab('chat')
+        // Focus follows the dismissal, or it is left stranded on a node that no
+        // longer exists. The tab strip is what opened the panel, so prefer it —
+        // but it unmounts along with the panel on a thread that has no other
+        // evidence, and focus then falls to <body>. The composer is the honest
+        // fallback: dismissing the panel means going back to the conversation.
+        requestAnimationFrame(() => {
+          const strip = document.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')
+          if (strip?.isConnected) {
+            strip.focus()
+            return
+          }
+          document.querySelector<HTMLTextAreaElement>('.verevon-chat-page textarea')?.focus()
+        })
+      }
+      document.addEventListener('keydown', onKeyDown)
+      return () => document.removeEventListener('keydown', onKeyDown)
+    },
+  )
+
+  /**
+   * Focus returns to the composer when an answer finishes (plan item 14).
+   *
+   * Deliberately conservative: it only reclaims focus that is sitting on
+   * nothing (`body`) or on the Stop button, which is removed the instant the
+   * turn settles and would otherwise leave focus on a detached node. If the
+   * reader has moved focus somewhere real — a source card, the panel, a message
+   * action — that is their choice and stealing it back would be worse than
+   * doing nothing.
+   */
+  // Tracked here rather than read from a second effect argument: nothing in
+  // this codebase uses that form, and on this Solid 2 RC the previous value is
+  // not delivered, so a `previous !== true` guard silently never fired.
+  let wasStreaming = false
+  createEffect(
+    () => isStreaming(),
+    (streaming) => {
+      const finished = wasStreaming && !streaming
+      wasStreaming = streaming
+      if (!finished) return
+      const active = document.activeElement
+      const stranded = !active
+        || active === document.body
+        || !active.isConnected
+        || active.classList?.contains('verevon-chat-stop-btn')
+      if (!stranded) return
+      document.querySelector<HTMLTextAreaElement>('.verevon-chat-page textarea')?.focus()
+    },
+  )
+
   const composerDockSize = createElementHeight<HTMLDivElement>()
   createEffect(
     () => ({ visible: hasMessages(), height: composerDockSize.height() }),
@@ -422,6 +528,16 @@ export default function ChatPage() {
         <div class="verevon-chat-launch-wash" aria-hidden="true" />
       </Show>
 
+      {/* Streaming is silent to a screen reader: tokens append into the
+          transcript, which is not a live region, so nothing is announced and a
+          long deep-research turn is indistinguishable from a hung page. This
+          announces the turn's lifecycle instead of its tokens — re-reading a
+          growing answer every few hundred milliseconds would be unusable. See
+          `streamAnnouncement`. */}
+      <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {streamAnnouncement()}
+      </div>
+
       <section class="verevon-chat-section" aria-label="Verevon chat workspace">
         <Show when={hasMessages()}>
           <ChatHeader
@@ -443,7 +559,13 @@ export default function ChatPage() {
 
         <Switch>
           <Match when={!hasMessages()}>
-            <EmptyChatState onSelectPrompt={setInput} orgName={session.activeOrg?.name}>{composer()}</EmptyChatState>
+            <EmptyChatState
+              onSelectPrompt={setInput}
+              orgName={session.activeOrg?.name}
+              userName={session.user?.name}
+            >
+              {composer()}
+            </EmptyChatState>
           </Match>
           <Match when={hasMessages()}>
             <div

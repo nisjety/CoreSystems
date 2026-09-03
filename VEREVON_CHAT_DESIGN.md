@@ -385,14 +385,54 @@ new in the list, only in the conclusions drawn from it.
 ### 7.4 Additions to the plan
 
 14. **Keyboard model** -- the spec recorded under section 6 question 3.
+    **Done 2026-09-03, partially.** Two real gaps closed: Escape now closes the
+    contextual panel (it only worked inside menus/popovers before, so a keyboard
+    user who opened Work had no way back without tabbing the whole panel), and
+    focus returns to the composer when an answer settles. Both verified live.
+    Two implementation notes worth keeping: the tab strip UNMOUNTS with the
+    panel on a thread with no other evidence, so focusing "what opened it" left
+    focus on `<body>` -- the composer is the fallback; and reading the previous
+    value from `createEffect`'s second argument silently never fires on this
+    Solid 2 RC, so the streaming flag is tracked explicitly. Still open from the
+    question-3 spec: Tab ORDER through answer/actions/next message, and arrow
+    keys BETWEEN messages. Arrow keys across the tab strip already worked
+    (roving tabindex in `ChatPanels.tsx`), as does Enter/Shift+Enter.
 15. **44px hit areas** for message actions: 32px visual, 44px hit, as Fjordlys
     already specifies -- and reconsider what the app-wide `zoom: 0.9` does to
     every control's real size.
+    **Done 2026-09-03.** Measured 44.0px on screen, up from 28.8px. The target
+    grows by padding, not an `::after` overlay: the action row's gap is 2px, so
+    a 44px overlay on a 32px button would have adjacent targets overlapping by
+    10px and the later button stealing its neighbour's edge -- worse than the
+    small target. `background-clip: content-box` keeps the visible button at
+    32px. On the zoom: rather than reconsider it globally (it is load-bearing
+    for the whole shell's density), the token is divided by it --
+    `calc(44px / 0.9)` -- so the target is a real 44px where the shell zooms
+    and a plain 44px on mobile, which has no zoom and is where touch happens.
+    Caveat found while fixing it: the `background` SHORTHAND resets
+    `background-clip`, so both the base and hover rules must use
+    `background-color`. Guarded, because that is invisible in review.
 16. **Streaming accessibility**: an `aria-live="polite"` region for the assistant
     turn, announcements batched every few seconds; focus moves to an inline
     error when one appears.
+    **Done 2026-09-03, live region only.** Verified live: "Verevon svarer …" on
+    start, then "Svar fullført." plus the opening of the answer. Announces the
+    turn's LIFECYCLE, not its tokens -- piping a growing answer into a live
+    region re-reads the whole thing on every token, which is worse than the
+    silence it replaces. A 10s heartbeat (alternating text, since a live region
+    drops a repeat of what it already shows) keeps a multi-minute deep-research
+    turn from reading as a hung page. Still open: moving focus to an inline
+    error when one appears.
 17. **Proactive first message**: scope plus a suggested first move, computed
     from org context, replacing the static greeting.
+    **Done 2026-09-03.** Verified live: "God morgen, Ima" (time of day + the
+    session's own user name) replaces the static "Hva vil du få gjort?", above
+    the scope line that already named AQUATIQ AS, plus a suggested first move
+    sourced from real state -- the most recent thread ("Fortsett der du slapp
+    — Bitcoin-pris 2. september 2026"). Deliberately from `readChatThreadHistory()`
+    rather than generated: a suggestion the product invented is just a fourth
+    generic starter chip, and three of those already sit below it. A title over
+    60 chars drops the offer rather than truncating it.
 18. **Tighten the auto-open trigger** so bookkeeping steps do not count as
     work: the Work panel must not open for a plain Ask turn (ChatPage.tsx:267-309).
     This restores THE ONE RULE the live check found broken.
