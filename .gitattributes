@@ -6,3 +6,14 @@
 # way across every plane's entrypoint scripts. Force LF regardless of local
 # autocrlf settings so this cannot recur on a fresh Windows checkout.
 *.sh text eol=lf
+
+# Makefiles have the same problem with a sharper edge: a recipe line ending in
+# a backslash continuation needs the backslash IMMEDIATELY before the newline.
+# With CRLF the CR sits in between, so the continuation stops joining lines and
+# the recipe runs as fragments (or dies on 'missing separator'). These are all
+# stored LF in the blob already; this pins the CHECKOUT so a Windows clone with
+# autocrlf=true cannot rewrite them.
+Makefile text eol=lf
+makefile text eol=lf
+GNUmakefile text eol=lf
+*.mk text eol=lf
