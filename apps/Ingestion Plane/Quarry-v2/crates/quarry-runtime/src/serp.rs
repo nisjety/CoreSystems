@@ -64,6 +64,15 @@ pub struct SearchOptions {
     /// Exclude these domains (Exa-style `excludeDomains`). Applied as `-site:`
     /// operators on remote SERP providers. Empty = no exclusion.
     pub exclude_domains: Vec<String>,
+    /// Zero Data Retention. When true, the query text itself must not egress
+    /// to an external paid SERP SaaS provider (Brave, Serper) — sending it
+    /// there is a disclosure `SmartSearchRouter` must refuse regardless of
+    /// the operator-wide `zero_saas_search` config toggle. In-infra providers
+    /// (Tantivy, Stract, SearXNG, Data Plane) are unaffected. Defaults to
+    /// `false`; callers with a real per-request ZDR signal (the edge's
+    /// `/v1/search`, `/v1/answer`, `/v1/answer/stream` handlers) must set it
+    /// explicitly rather than relying on `..Default::default()`.
+    pub zdr: bool,
 }
 
 impl Default for SearchOptions {
@@ -79,6 +88,7 @@ impl Default for SearchOptions {
             org_id: None,
             include_domains: Vec::new(),
             exclude_domains: Vec::new(),
+            zdr: false,
         }
     }
 }
@@ -167,10 +177,14 @@ pub trait SearchProvider: Send + Sync {
 /// to the next provider; on non-retryable errors (`BadRequest`, `Forbidden`)
 /// it surfaces the error immediately.
 ///
-/// Use case: production SERP wiring is typically Brave → Serper → SearXNG
-/// where Brave is the primary, Serper is a paid backup, and SearXNG is a
-/// local self-hosted last-resort. When Brave 429s during a burst, the
-/// chain transparently falls through.
+/// Superseded in production by [`crate::smart_router::SmartSearchRouter`]
+/// (Cycle 19 / cluster #17), which quarry-edge's `main.rs` actually
+/// constructs — this type is no longer wired into any binary and is kept
+/// for its simpler sequential-fallback semantics and unit tests only. It is
+/// also provider-order-agnostic and, unlike `SmartSearchRouter`, has no
+/// concept of ZDR or `zero_saas_search`: it will call whatever provider
+/// chain it is handed, in the order given, with no compliance gating. Do
+/// not wire this into a binary without adding that gating first.
 pub struct FallbackSearchProvider {
     providers: Vec<std::sync::Arc<dyn SearchProvider>>,
 }
@@ -898,6 +912,7 @@ mod tests {
         assert!(opts.safe_search);
         assert!(opts.include_domains.is_empty());
         assert!(opts.exclude_domains.is_empty());
+        assert!(!opts.zdr);
     }
 
     #[test]

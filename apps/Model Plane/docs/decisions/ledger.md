@@ -22,6 +22,73 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-09-03 — Quarry-v2 web search: ZDR did not gate Brave/Serper
+
+**State:** `implemented`
+
+`WebSearchRequest.zdr` was already threaded end-to-end — model-gateway's
+`handle_web_search` (`tools.rs:60`) passes it to `QuarryClient::search`, which
+serializes it onto `/v1/search` (`quarry.rs:674,694`), and quarry-edge's
+handler received it and derived a local `zdr` (`search_routes.rs:342`). But
+that `zdr` was used only for cache bypass and event/billing suppression
+(`search_routes.rs:378-420,491`) — it never reached `SearchOptions`, which had
+no `zdr` field at all, so `SmartSearchRouter` had no way to know a request was
+zero-retention. A ZDR-flagged chat turn's `web_search` call could still reach
+Brave (`api.search.brave.com`) or Serper (`google.serper.dev`), both US-based
+third parties, violating this repo's own "ZDR must propagate through any
+content-persisting boundary" rule for the one boundary that isn't persistence
+but is still disclosure. `AnswerPipeline::prepare` (`answer.rs:159`, backing
+`/v1/answer`, `/v1/answer/stream`, and `/v1/search?include_answer`) had the
+identical gap: it derives a `zdr: ZdrMode` for its markdown fetcher one line
+below where it builds `SearchOptions`, and never passed that same signal into
+the search call one line above it.
+
+**Not a documented tradeoff.** `SELF_HOST.md` §7's ZDR contract lists
+scrape/agent/extract guarantees and never mentions search. No entry in this
+ledger names Brave, Serper, SearXNG, or Stract. This was never decided either
+way — the flag existed and the byte was on the wire, but nothing on the
+Quarry-v2 side read it for provider selection.
+
+**What was already right, and nearly caused a wrong diagnosis.** Production
+does not wire `serp::FallbackSearchProvider` (whose stale module doc still
+claims "Brave is the primary" — corrected in the same pass) — `quarry-edge`'s
+`main.rs:758` builds `SmartSearchRouter`, which already treats Brave/Serper as
+a paid-backup tier behind Tantivy/Stract/SearXNG by design, and an existing
+`zero_saas_search` config flag (`config.rs:133`, wired at `main.rs:792`) already
+lets an operator refuse to register Brave/Serper at all. Neither of those
+covers the actual gap: `zero_saas_search` is a process-wide default posture,
+off by default, and orthogonal to any given request's ZDR flag.
+
+**Fix:** `SearchOptions` gained a `zdr: bool` field (`serp.rs`). The two real
+construction sites that had a per-request ZDR signal and weren't forwarding it
+now do (`search_routes.rs`, `answer.rs`). `SmartSearchRouter` gates every
+Brave/Serper call site — the eager-parallel race for short bare-entity
+queries, and the last-resort fallback in `default_path`, `fresh_path`, and
+`widen_path` — behind `!opts.zdr`, unconditionally, independent of
+`zero_saas_search`. Four call sites, one boolean each; no new abstraction.
+
+**Deliberately not done, flagged instead of decided:**
+
+- `zero_saas_search`'s default stays `false`. Flipping it is a product/legal
+  call trading search quality for a sovereign-only posture for *all* traffic,
+  not a compliance bug fix — the mechanism to flip it already exists
+  (`QUARRY_EDGE__ZERO_SAAS_SEARCH=1`).
+- No per-org/tenant data-residency policy was added. Nothing in `EdgeConfig`,
+  Control Plane's org model, or `TENANCY.md` models search residency per
+  tenant today (`TENANCY.md` §3 only says public SERPs ignore `org_id` for
+  leakage purposes, which is a different concern). Building a registry for a
+  policy axis with zero real callers today is the premature abstraction this
+  ledger already declined once (memory-adapter registry, 2026-05-30).
+- `deep_research.rs::ResearchExecutor::run_search` (`deep_research.rs:196`)
+  calls the same `dyn SearchProvider` and has the identical shape of gap, but
+  `zdr` isn't threaded to it at all — no `AnswerRequest`-style field exists on
+  its call chain to source a value from. That's a different subsystem
+  (autonomous multi-step research tasks, not the interactive `web_search`
+  tool) with its own question of whether/how ZDR should apply; left for a
+  separate pass rather than guessed at here.
+
+---
+
 ## 2026-08-28 — Data Plane retrieval: what to send when nothing declares a sovereignty posture
 
 **State:** `implemented`

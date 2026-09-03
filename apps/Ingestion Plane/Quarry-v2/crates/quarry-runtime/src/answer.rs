@@ -167,6 +167,11 @@ impl AnswerPipeline {
             org_id: req.org_id.clone(),
             include_domains: Vec::new(),
             exclude_domains: Vec::new(),
+            // ZDR: mirrors the `zdr` this method already derives above for
+            // the markdown fetcher — the search call needs the same signal
+            // so a zero-retention answer request can't leak the query to
+            // Brave/Serper via SmartSearchRouter.
+            zdr: req.zdr.unwrap_or(false),
         };
         let results = self.search.search(&req.query, &opts).await?;
         if results.is_empty() {

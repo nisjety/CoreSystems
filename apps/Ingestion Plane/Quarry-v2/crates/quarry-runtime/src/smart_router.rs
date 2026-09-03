@@ -30,6 +30,13 @@
 //!
 //! 5. **Brave is paid backup only** — never invoked until the free chain
 //!    (Tantivy + Stract + SearXNG) returns < min_results.
+//!
+//! 6. **ZDR overrides everything above.** When `SearchOptions.zdr` is set,
+//!    Brave and Serper are never invoked — not as an eager paid backup, not
+//!    as a last-resort fallback — regardless of `zero_saas_search`, which is
+//!    a separate, operator-wide, opt-in posture toggle. `zdr` is a per-request
+//!    signal that cannot be relaxed by config: the free chain (Tantivy /
+//!    Stract / SearXNG / Data Plane) is all a zero-retention query ever gets.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -460,8 +467,11 @@ impl SmartSearchRouter {
 
         // 2. Widen only if local corpus didn't meet the threshold.
         if combined.len() < self.config.min_local_results {
-            eager_paid_backups =
-                combined.is_empty() && should_eagerly_run_paid_backups(query, opts);
+            // ZDR: never race Brave/Serper in eagerly, no matter how terse
+            // the query looks — see module doc point 6.
+            eager_paid_backups = !opts.zdr
+                && combined.is_empty()
+                && should_eagerly_run_paid_backups(query, opts);
             let mut providers: Vec<(&'static str, Arc<dyn SearchProvider>)> = Vec::new();
             if let Some(s) = self.stract.clone() {
                 providers.push(("stract", s));
@@ -487,7 +497,9 @@ impl SmartSearchRouter {
         }
 
         // 3. Paid backup only when free chain returned <min_total_results.
-        if !eager_paid_backups && combined.len() < self.config.min_total_results {
+        // ZDR: `!opts.zdr` here is load-bearing, not defense in depth —
+        // this is the last point before Brave/Serper would be dispatched.
+        if !opts.zdr && !eager_paid_backups && combined.len() < self.config.min_total_results {
             if let Some(b) = &self.brave {
                 if let Some(rs) = self.run_provider("brave", b, query, opts).await {
                     combined = merge_dedupe(combined, rs);
@@ -542,8 +554,9 @@ impl SmartSearchRouter {
                 combined = merge_dedupe(combined, rs);
             }
         }
-        // Paid backup if both free providers failed/empty.
-        if combined.is_empty() {
+        // Paid backup if both free providers failed/empty. ZDR: skip Brave
+        // entirely — see module doc point 6.
+        if !opts.zdr && combined.is_empty() {
             if let Some(b) = &self.brave {
                 if let Some(rs) = self.run_provider("brave", b, query, opts).await {
                     combined = merge_dedupe(combined, rs);
@@ -670,8 +683,9 @@ impl SmartSearchRouter {
 
         // Paid backup only when the free fan-out came back empty —
         // research queries shouldn't fall to paid silently when we got
-        // good free results.
-        if combined.len() < self.config.min_total_results {
+        // good free results. ZDR: skip Brave/Serper entirely regardless —
+        // see module doc point 6.
+        if !opts.zdr && combined.len() < self.config.min_total_results {
             if let Some(b) = &self.brave {
                 if let Some(rs) = self.run_provider("brave", b, query, opts).await {
                     combined = merge_dedupe(combined, rs);
@@ -1357,6 +1371,138 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].provider, "stract");
+    }
+
+    // ---- ZDR: Brave/Serper must never be invoked --------------------------
+    //
+    // Each test below configures a provider that panics if called — a
+    // silent regression that let a ZDR query reach Brave/Serper would fail
+    // loudly here instead of shipping unnoticed.
+
+    struct PanickingBrave;
+    #[async_trait]
+    impl SearchProvider for PanickingBrave {
+        async fn search(
+            &self,
+            _query: &str,
+            _opts: &SearchOptions,
+        ) -> QuarryResult<Vec<SearchResult>> {
+            panic!("ZDR request must never reach Brave");
+        }
+        fn name(&self) -> &str {
+            "brave"
+        }
+    }
+
+    struct PanickingSerper;
+    #[async_trait]
+    impl SearchProvider for PanickingSerper {
+        async fn search(
+            &self,
+            _query: &str,
+            _opts: &SearchOptions,
+        ) -> QuarryResult<Vec<SearchResult>> {
+            panic!("ZDR request must never reach Serper");
+        }
+        fn name(&self) -> &str {
+            "serper"
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_skips_eager_paid_backup_for_short_queries() {
+        // Same shape as `short_head_queries_can_return_from_brave_without_
+        // waiting_for_free_timeout`, but zdr=true. A short bare-entity query
+        // with an empty local corpus would normally race Brave in
+        // immediately; ZDR must suppress that regardless of query shape.
+        let router = SmartSearchRouter::builder()
+            .with_searxng(Arc::new(Canned(vec![r("https://free/", "searxng")])))
+            .with_brave(Arc::new(PanickingBrave))
+            .with_config(RouterConfig {
+                min_local_results: 1,
+                min_total_results: 1,
+                cache_ttl_s: 0,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let opts = SearchOptions {
+            limit: 1,
+            zdr: true,
+            ..Default::default()
+        };
+        let results = router.search("OpenAI", &opts).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].provider, "searxng");
+    }
+
+    #[tokio::test]
+    async fn zdr_never_falls_back_to_brave_or_serper_in_default_path() {
+        // No free tier configured at all, so a non-ZDR run would fall
+        // through to Brave then Serper. ZDR must return empty instead.
+        let router = SmartSearchRouter::builder()
+            .with_brave(Arc::new(PanickingBrave))
+            .with_serper(Arc::new(PanickingSerper))
+            .with_config(RouterConfig {
+                cache_ttl_s: 0,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let opts = SearchOptions {
+            zdr: true,
+            ..Default::default()
+        };
+        let results = router
+            .search("an obscure research question", &opts)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn zdr_never_falls_back_to_brave_in_fresh_path() {
+        // "breaking news today" classifies as Fresh (skips Tantivy, goes
+        // straight to the free live-SERP fan-out then, normally, Brave on
+        // empty). No free provider is configured, so ZDR is the only thing
+        // standing between this query and Brave.
+        let router = SmartSearchRouter::builder()
+            .with_brave(Arc::new(PanickingBrave))
+            .with_config(RouterConfig {
+                cache_ttl_s: 0,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let opts = SearchOptions {
+            zdr: true,
+            ..Default::default()
+        };
+        let results = router.search("breaking news today", &opts).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn zdr_never_falls_back_to_brave_or_serper_in_widen_path() {
+        let router = SmartSearchRouter::builder()
+            .with_brave(Arc::new(PanickingBrave))
+            .with_serper(Arc::new(PanickingSerper))
+            .with_intent_classifier(Arc::new(FixedIntent(QueryIntent::Research)))
+            .with_config(RouterConfig {
+                cache_ttl_s: 0,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let opts = SearchOptions {
+            zdr: true,
+            ..Default::default()
+        };
+        let results = router
+            .search("explain consensus protocols", &opts)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
     }
 
     // ---- Intent classifier integration -----------------------------------
