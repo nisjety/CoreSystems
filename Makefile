@@ -36,8 +36,14 @@ SCAN_PINS = find apps $(PIN_PRUNE) -name 'Dockerfile*' -print0 2>/dev/null \
 	| sed -E 's/:[^:/@]*@/@/' \
 	| sort -u
 
+# Both targets check for Docker first. Without it every ref "fails" one by one,
+# burying the real reason under one line of noise per pin.
+REQUIRE_DOCKER = command -v docker >/dev/null 2>&1 || \
+	{ echo "  docker not available -- skipping"; exit 1; }
+
 check-bases:
-	@refs=$$($(SCAN_PINS)); \
+	@$(REQUIRE_DOCKER); \
+	refs=$$($(SCAN_PINS)); \
 	if [ -z "$$refs" ]; then echo "No digest-pinned bases found -- check the scan."; exit 1; fi; \
 	total=0; missing=0; \
 	for ref in $$refs; do \
@@ -52,7 +58,8 @@ check-bases:
 	[ "$$missing" -eq 0 ] || { echo "  run 'make warm-bases' to pull them"; exit 1; }
 
 warm-bases:
-	@refs=$$($(SCAN_PINS)); \
+	@$(REQUIRE_DOCKER); \
+	refs=$$($(SCAN_PINS)); \
 	if [ -z "$$refs" ]; then echo "No digest-pinned bases found -- check the scan."; exit 1; fi; \
 	total=0; pulled=0; failed=0; \
 	for ref in $$refs; do \
