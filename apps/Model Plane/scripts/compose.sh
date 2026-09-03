@@ -156,4 +156,44 @@ if [[ -n "$release_lock" ]]; then
   compose_files+=(-f "$ROOT_DIR/deploy/docker-compose.release.yml")
 fi
 
+# Every plane pins its Docker bases by digest (FROM ...@sha256:...), and Docker
+# re-pulls a missing one on demand -- but the pull lands mid-build and stalls it,
+# and a single `docker image prune -a` strips every pin at once. Warm them first
+# via the repo-root `make warm-bases`, which derives the digest list from the
+# Dockerfiles themselves.
+#
+# Only for invocations that actually build. This script is a pass-through for
+# every Compose verb, so warming unconditionally would run a Docker scan on
+# `down`, `logs` and `ps` as well.
+#
+# Never under a release lock: that layer replaces every image with an
+# artifact-contained content ID and disables pulls, so warming a base the build
+# will not consult is pointless and muddies a deployment that is meant to be
+# hermetic. Artifact mode never reaches this line -- it exits above, and neither
+# of its two permitted argv forms builds (`config --quiet`, `up ... --no-build`).
+builds_images=0
+if [[ -z "$release_lock" ]]; then
+  for argument in "$@"; do
+    case "$argument" in
+      # An explicit --no-build settles it regardless of anything else present.
+      --no-build)
+        builds_images=0
+        break
+        ;;
+      build | --build)
+        builds_images=1
+        ;;
+    esac
+  done
+fi
+
+if [[ "$builds_images" == "1" ]]; then
+  repo_root="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$ROOT_DIR/../..")"
+  # Non-fatal on purpose: warming is an optimisation, so an offline machine (or
+  # one without make) must still reach the build and let Docker pull, or fail,
+  # on its own terms. `make check-bases` at the root is the strict gate.
+  make --no-print-directory -C "$repo_root" warm-bases 2>/dev/null ||
+    echo "warm-bases skipped; Docker will pull pinned bases on demand" >&2
+fi
+
 exec docker compose "${env_files[@]}" "${compose_files[@]}" "$@"
