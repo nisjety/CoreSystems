@@ -367,7 +367,7 @@ new in the list, only in the conclusions drawn from it.
 | Copy, thumbs, retry; edit-and-resubmit with branching (all three) | **Have**; tiered feedback (thumbs, then a note) have. |
 | Auto-scroll pauses when the reader scrolls up (designpixil) | **Have**: `autoFollow` releases at 80px, a scroll-down affordance appears at 160px (use-chat-controller.ts:1385-1396). |
 | 3-5 specific example prompts in the empty state (designpixil) | **Have**: three rotating org-specific prompts, Tab to accept (verified live). |
-| First message = "two sentences and a suggestion": scope plus a concrete next move (designpixil) | **Gap**: the greeting is a static "Hva vil du få gjort?" (ChatMessages.tsx:1988). This document's own deferred item, now externally corroborated -- item 17. |
+| First message = "two sentences and a suggestion": scope plus a concrete next move (designpixil) | **Gap at the cross-check, CLOSED 2026-09-03.** The greeting was a static "Hva vil du få gjort?"; it is now a time-of-day greeting with the user's first name plus a resume offer taken from real thread history -- item 17 in 7.4. |
 | AI-generated thread names, not timestamps (designpixil) | **Have**: generated titles are displayed and rehydrated. |
 | Superscript citations opening source cards with title, URL, excerpt, domain (thefrontkit) | **Have at source level**; chips appear only when the model returns a structured citations array (a narrow trigger, observed live). |
 | Freshness indicators and confidence markers (thefrontkit) | **Logged** -- needs a Model Plane contract (unchanged). |
@@ -376,10 +376,10 @@ new in the list, only in the conclusions drawn from it.
 | Partial results for long tasks (uxstudioteam) | **Have**: per-sub-query deep-research progress (verified). |
 | Low-confidence hedge plus a verification path (designpixil) | **Have for deep research**: the pipeline is instructed to say when the evidence base is thin (deep_research.rs:1191). Not generalized to ordinary answers. |
 | Errors inline, next to the message (designpixil) | **Have** (`verevon-chat-error-notice`). |
-| 44x44 minimum tap targets (designpixil) | **Gap**: 32px x the app-wide `zoom: 0.9` = 28.8px measured; Fjordlys found the same -- item 15. |
-| Streaming announced through `aria-live="polite"`, batched (thefrontkit) | **Gap**: banners use `role="status"`, the transcript has no live region -- item 16. |
+| 44x44 minimum tap targets (designpixil) | **Gap at the cross-check, CLOSED 2026-09-03.** 32px x the app-wide `zoom: 0.9` measured 28.8px, and Fjordlys found the same; the target is now a zoom-compensated token measuring 44.0px -- item 15 in 7.4. |
+| Streaming announced through `aria-live="polite"`, batched (thefrontkit) | **Gap at the cross-check, CLOSED 2026-09-03.** The transcript had no live region; it now announces the turn's lifecycle with a 10s heartbeat -- item 16 in 7.4. Focus-to-inline-error remains open. |
 | Buffer incomplete markdown; defer code until the closing fence (thefrontkit) | **Have by construction**: an unclosed fence renders as a code block to end of content (chat-media-markdown.tsx:593-598), so partial tokens do not break the layout. |
-| Full keyboard model (thefrontkit) | **Adopted** as the answer to section 6 question 3 -- item 14; not built. |
+| Full keyboard model (thefrontkit) | **Adopted** as the answer to section 6 question 3 -- item 14 in 7.4. **Partly built 2026-09-03**: Escape closes the contextual panel and focus returns to a stranded composer. Tab order through answer/actions and arrow keys between messages remain open. |
 | Mobile: full screen on phones, bottom sheet rather than a side panel (designpixil, uxstudioteam) | **Corroborates** section 6 question 1; the decision is still open. |
 
 ### 7.4 Additions to the plan
