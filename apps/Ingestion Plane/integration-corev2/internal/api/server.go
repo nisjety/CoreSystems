@@ -29,6 +29,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/controlplane"
 	"github.com/triodelab/integration-corev2/internal/discovery"
 	"github.com/triodelab/integration-corev2/internal/events"
+	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/hotpath"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/providers"
@@ -53,7 +54,18 @@ type ServerConfig struct {
 	// WebhookOrg resolves the owning tenant for account-wide provider
 	// webhooks (Meta/Slack callbacks carry no Verevon org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
-	Logger     *zerolog.Logger
+	// Finspo lets the generic per-connection sync route refuse to queue a
+	// Microsoft job the finspo worker is guaranteed to fail (no SharePoint
+	// library registered yet) and answer 409 no_sources_registered instead.
+	// Nil-safe: without it the route queues as before.
+	Finspo FinspoSourceLister
+	Logger *zerolog.Logger
+}
+
+// FinspoSourceLister is the finspo-core surface the API needs: the org's
+// registered SharePoint/OneDrive sources. *handoff.FinspoClient satisfies it.
+type FinspoSourceLister interface {
+	ListSources(ctx context.Context, orgID, userID string) ([]handoff.FinspoSource, error)
 }
 
 const requestIDHeader = "X-Request-ID"
@@ -293,7 +305,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			return apiError(c, fiber.StatusInternalServerError, "connections_list_failed", err.Error())
 		}
 		connections = filterConnectionsByCategory(connections, firstNonEmpty(c.Query("category"), c.Query("providerCategory")))
-		return success(c, fiber.Map{"connections": connections})
+		return success(c, fiber.Map{"connections": connectionViews(c.UserContext(), cfg.Repo, organizationID, connections)})
 	})
 
 	app.Get("/api/v1/connections/:id", internalOrBearerAuth, func(c *fiber.Ctx) error {
@@ -304,7 +316,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 			return authAwareError(c, err)
 		}
-		return success(c, fiber.Map{"connection": connection})
+		return success(c, fiber.Map{"connection": connectionView1(c.UserContext(), cfg.Repo, connection)})
 	})
 
 	app.Get("/api/v1/connections/:id/status", internalOrBearerAuth, func(c *fiber.Ctx) error {
@@ -539,6 +551,14 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		}
 		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 			return authAwareError(c, err)
+		}
+		// A metadata-less Microsoft sync is handed to finspo-core, which fans
+		// out over the org's registered SharePoint/OneDrive libraries. With
+		// nothing registered the worker can only fail the job, so refuse up
+		// front with a code the SPA turns into "pick a library" instead of
+		// leaving a guaranteed-failed job in Settings → Integrations.
+		if refusal, refused := microsoftSyncNeedsSources(c.UserContext(), cfg, connection); refused {
+			return refusal(c)
 		}
 		job, err := createSyncJob(c.UserContext(), cfg, connection, syncJobBody{Reason: "manual", Mode: "incremental"})
 		if err != nil {
@@ -1885,6 +1905,12 @@ func advanceWorkerSyncJob(ctx context.Context, cfg ServerConfig, id string, body
 	})
 	if status == "completed" || status == "failed" || status == "cancelled" {
 		job.CompletedAt = &now
+	}
+	if status == "failed" && strings.TrimSpace(body.Message) != "" {
+		// Keep the worker's failure text on the job itself (not only in the
+		// event stream) so connection sync lanes can show the concrete next
+		// step without a second events query.
+		job.Metadata = mergeMetadata(job.Metadata, map[string]any{"failureMessage": strings.TrimSpace(body.Message)})
 	}
 	var updated store.SyncJob
 	err = withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
@@ -3901,14 +3927,27 @@ func prometheusLabel(input string) string {
 func requestLogger(logger zerolog.Logger) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		err := c.Next()
-		logger.Info().
+		status := c.Response().StatusCode()
+		logger.WithLevel(requestLogLevel(c.Method(), c.Path(), status)).
 			Str("request_id", requestIDFromFiber(c)).
 			Str("method", c.Method()).
 			Str("path", c.Path()).
-			Int("status", c.Response().StatusCode()).
+			Int("status", status).
 			Msg("request")
 		return err
 	}
+}
+
+// requestLogLevel keeps the request log at INFO except for the workers' idle
+// poll: every worker asks POST /internal/sync-jobs/claim about every two
+// seconds and a 404 sync_job_not_available simply means "nothing to do". At
+// INFO that is the bulk of integration-api's log volume; it stays visible at
+// DEBUG for anyone tracing the claim loop.
+func requestLogLevel(method, path string, status int) zerolog.Level {
+	if method == fiber.MethodPost && path == "/internal/sync-jobs/claim" && status == fiber.StatusNotFound {
+		return zerolog.DebugLevel
+	}
+	return zerolog.InfoLevel
 }
 
 func Shutdown(ctx context.Context, app *fiber.App) error {

@@ -443,7 +443,7 @@ export function AssistantMessage(props: {
                     Effekt registrert — kan ikke endres
                   </span>
                   <Show when={props.onRerunAsNewTurn}>
-                    <MessageAction label="Kjør som ny tur" onClick={() => props.onRerunAsNewTurn?.()}>
+                    <MessageAction label={i18n.tr('Kjør som ny tur', 'Run as a new turn')} onClick={() => props.onRerunAsNewTurn?.()}>
                       <RefreshCw size={14} />
                     </MessageAction>
                   </Show>
@@ -513,6 +513,7 @@ export function UserMessage(props: {
   onViewAttachments?: (attachmentId: string) => void
   editLocked?: boolean
 }) {
+  const i18n = useI18n()
   const [editing, setEditing] = createSignal(false)
   const [draft, setDraft] = createSignal('')
 
@@ -571,7 +572,7 @@ export function UserMessage(props: {
             />
             <div>
               <button type="button" onClick={() => setEditing(false)}>Avbryt</button>
-              <button type="button" disabled={!draft().trim()} onClick={submitEdit}>Send på nytt</button>
+              <button type="button" disabled={!draft().trim()} onClick={submitEdit}>{i18n.tr('Send på nytt', 'Send again')}</button>
             </div>
           </div>
         )}
@@ -737,7 +738,25 @@ export function MarkdownBlockView(props: { block: MarkdownBlock; citations?: rea
       <Match when={props.block.kind === 'paragraph'}>
         <p>{parseInline((props.block as Extract<MarkdownBlock, { kind: 'paragraph' }>).text, props.citations)}</p>
       </Match>
+      <Match when={props.block.kind === 'details'}>
+        <MarkdownDetails block={props.block as Extract<MarkdownBlock, { kind: 'details' }>} citations={props.citations} />
+      </Match>
     </Switch>
+  )
+}
+
+/** Model-authored `<details>`: a real collapsible whose body is parsed
+ * markdown (never injected HTML), instead of escaped tags around the text. */
+function MarkdownDetails(props: { block: Extract<MarkdownBlock, { kind: 'details' }>; citations?: readonly Citation[] }) {
+  return (
+    <details class="verevon-chat-details">
+      <summary>{parseInline(props.block.summary, props.citations)}</summary>
+      <div class="verevon-chat-details__body">
+        <For each={props.block.blocks}>
+          {(block) => <MarkdownBlockView block={block} citations={props.citations} />}
+        </For>
+      </div>
+    </details>
   )
 }
 
@@ -849,6 +868,7 @@ export function ReasoningTrace(props: { text: string; streaming: boolean }) {
 }
 
 export function ReasoningPopover(props: { message: ChatTurn }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const [tab, setTab] = createSignal('general')
   let ref!: HTMLDivElement
@@ -903,7 +923,7 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
           <div class="verevon-chat-reasoning-popover__panel">
             <div class="verevon-chat-reasoning-popover__head">
               <strong>Reasoning</strong>
-              <button type="button" aria-label="Lukk" onClick={() => setOpen(false)}>
+              <button type="button" aria-label={i18n.tr('Lukk', 'Close')} onClick={() => setOpen(false)}>
                 <X size={14} />
               </button>
             </div>
@@ -945,7 +965,7 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
                   <Show when={props.message.inputTokens != null}><MetricRow label="Input" value={`${props.message.inputTokens} tokens`} /></Show>
                   <Show when={props.message.outputTokens != null}><MetricRow label="Output" value={`${props.message.outputTokens} tokens`} /></Show>
                   <Show when={props.message.latencyMs != null}><MetricRow label="Total tid" value={formatLatency(props.message.latencyMs ?? 0)} /></Show>
-                  <Show when={props.message.confidence != null}><MetricRow label="Sikkerhet" value={`${Math.round((props.message.confidence ?? 0) * 100)}%`} /></Show>
+                  <Show when={props.message.confidence != null}><MetricRow label={i18n.tr('Sikkerhet', 'Confidence')} value={`${Math.round((props.message.confidence ?? 0) * 100)}%`} /></Show>
                   <Show when={props.message.costUsd != null}><MetricRow label="Kostnad" value={`$${(props.message.costUsd ?? 0).toFixed(4)}`} /></Show>
                 </dl>
               </Match>
@@ -1038,13 +1058,16 @@ export function MessageMetricsBadge(props: { message: ChatTurn }) {
  * `mcp__…__execute_query` cards; the full detail still lives in the Steps tab.
  */
 export function StepsPill(props: { calls: ChatToolCall[]; onViewSteps: () => void }) {
+  const i18n = useI18n()
   const total = () => props.calls.length
   const failed = () => props.calls.filter((call) => Boolean(call.error) || call.status === 'error').length
   const running = () => props.calls.some((call) => !call.status || call.status === 'running')
   const label = () => {
-    if (running()) return `Bruker verktøy … (${total()})`
-    const plural = total() === 1 ? 'steg' : 'steg'
-    return `${total()} ${plural}`
+    if (running()) return i18n.tr(`Bruker verktøy … (${total()})`, `Using tools … (${total()})`)
+    // Norwegian has one form for both counts, which is why this used to read
+    // `'steg' : 'steg'`; English needs the plural.
+    const unit = i18n.tr('steg', total() === 1 ? 'step' : 'steps')
+    return `${total()} ${unit}`
   }
 
   return (
@@ -1052,7 +1075,7 @@ export function StepsPill(props: { calls: ChatToolCall[]; onViewSteps: () => voi
       <Wrench size={13} />
       <span>{label()}</span>
       <Show when={failed() > 0}>
-        <em class="verevon-chat-steps-pill__failed">{failed()} feilet</em>
+        <em class="verevon-chat-steps-pill__failed">{i18n.tr(`${failed()} feilet`, `${failed()} failed`)}</em>
       </Show>
       <ChevronRight size={13} />
     </button>
@@ -1067,8 +1090,9 @@ export function StepsPill(props: { calls: ChatToolCall[]; onViewSteps: () => voi
  * there, `onSelectFollowUp` here, both ultimately wired to `setInput`).
  */
 export function FollowUpChips(props: { suggestions: string[]; onSelect?: (text: string) => void }) {
+  const i18n = useI18n()
   return (
-    <div class="verevon-chat-followups" role="group" aria-label="Forslag til oppfølgingsspørsmål">
+    <div class="verevon-chat-followups" role="group" aria-label={i18n.tr('Forslag til oppfølgingsspørsmål', 'Suggested follow-up questions')}>
       <For each={props.suggestions}>
         {(suggestion) => (
           <button
@@ -1088,15 +1112,19 @@ export function ApprovalRequests(props: {
   approvals: Approval[]
   onDecide: (approvalId: string, decision: ApprovalDecision) => void
 }) {
+  const i18n = useI18n()
   return (
-    <div class="verevon-chat-approvals" role="group" aria-label="Godkjenninger">
+    <div class="verevon-chat-approvals" role="group" aria-label={i18n.tr('Godkjenninger', 'Approvals')}>
       <For each={props.approvals}>
         {(approval) => (
           <div class="verevon-chat-approval">
             <div class="verevon-chat-approval__head">
-              <span class="verevon-chat-approval__badge">Godkjenning</span>
+              <span class="verevon-chat-approval__badge">{i18n.tr('Godkjenning', 'Approval')}</span>
               <span class="verevon-chat-approval__kind">
-                {approval.kind ?? 'Agenten venter på godkjenning før neste steg'}
+                {approval.kind ?? i18n.tr(
+                  'Agenten venter på godkjenning før neste steg',
+                  'The agent is waiting for approval before the next step',
+                )}
               </span>
             </div>
             <Show when={approval.detail}>
@@ -1296,6 +1324,7 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
  * discard mid-run input with no trace at all.
  */
 export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
+  const i18n = useI18n()
   const label = (entry: QueuedInput) => {
     if (entry.state === 'delivered') return 'levert til agenten'
     if (entry.state === 'refused') return 'ikke levert'
@@ -1303,7 +1332,7 @@ export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
   }
   return (
     <Show when={props.entries.length > 0}>
-      <ul class="verevon-chat-queued" aria-label="Meldinger sendt underveis">
+      <ul class="verevon-chat-queued" aria-label={i18n.tr('Meldinger sendt underveis', 'Messages sent mid-run')}>
         <For each={props.entries}>
           {(entry) => (
             <li class="verevon-chat-queued-item" data-state={entry.state}>
@@ -1344,6 +1373,7 @@ export function PlanApprovalControl(props: {
   error?: string
   onApprove: (rung: AutonomyRung, justification: string) => void
 }) {
+  const i18n = useI18n()
   const [rung, setRung] = createSignal<AutonomyRung>('workspace_write')
   const [reason, setReason] = createSignal('')
   const tooShort = () => reason().trim().length < MIN_PLAN_JUSTIFICATION_CHARS
@@ -1357,7 +1387,7 @@ export function PlanApprovalControl(props: {
         </p>
       }
     >
-      <section class="verevon-chat-plan" aria-label="Godkjenn planen">
+      <section class="verevon-chat-plan" aria-label={i18n.tr('Godkjenn planen', 'Approve the plan')}>
         <p class="verevon-chat-plan__lead">
           Dette var en plan – ingenting er utført. Velg hvor mye agenten får gjøre, og skriv
           hvorfor.
@@ -1585,6 +1615,7 @@ export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[
  * open-in-tab affordance survives only for real http(s) URLs, where it works.
  */
 export function GeneratedFiles(props: { files: GeneratedFile[] }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-generated-files">
       <For each={props.files}>
@@ -1606,7 +1637,7 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
                   href={file.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label={`Åpne ${file.name}`}
+                  aria-label={i18n.tr(`Åpne ${file.name}`, `Open ${file.name}`)}
                 >
                   <ExternalLink size={12} />
                 </a>
@@ -1809,6 +1840,7 @@ export function MessageAction(props: { active?: boolean; children: JSX.Element; 
 }
 
 export function MessageMenu(props: { align?: 'start' | 'end'; items: Array<{ label: string; icon: JSX.Element; onClick: () => void }> }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   let ref!: HTMLDivElement
 
@@ -1833,7 +1865,7 @@ export function MessageMenu(props: { align?: 'start' | 'end'; items: Array<{ lab
 
   return (
     <div ref={ref} class="verevon-chat-menu">
-      <button type="button" aria-label="Flere handlinger" aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
+      <button type="button" aria-label={i18n.tr('Flere handlinger', 'More actions')} aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
         <MoreHorizontal size={14} />
       </button>
       <Show when={open()}>

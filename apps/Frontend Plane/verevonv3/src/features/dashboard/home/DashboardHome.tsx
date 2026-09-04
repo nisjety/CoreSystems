@@ -6,6 +6,7 @@ import { dashboardCards, type DashboardCard } from '@/features/dashboard/home/da
 import type { DashboardTab } from '@/features/dashboard/home/dashboard-home-types'
 import {
   fallbackWorkspaceIdentity,
+  formatPlanBadge,
   formatPlanLabel,
   type WorkspaceIdentity,
 } from '@/features/core/lib/shell-data'
@@ -113,13 +114,13 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
 
         <div class={bandsClass()}>
           <Show when={!searchExpanded() && !knowledgeBrowserHeaderInline()}>
-            <DashboardHomeHeader compact={resultsView()} planLabel={planLabel()} title={homeTitle()} />
+            <DashboardHomeHeader compact={resultsView()} planLabel={planLabel()} planTrial={workspace().planTrial} title={homeTitle()} />
           </Show>
 
           <section class={composerSectionClass()}>
             <DashboardComposerPanel
               activeTab={activeTab()}
-              knowledgeInlinePlanLabel={knowledgeBrowserHeaderInline() ? planLabel() : undefined}
+              knowledgeInlinePlanLabel={knowledgeBrowserHeaderInline() ? formatPlanBadge(workspace().plan, workspace().planTrial, i18n.tr) : undefined}
               knowledgeInlineTitle={knowledgeBrowserHeaderInline() ? homeTitle() : undefined}
               message={message()}
               onKnowledgePreviewActiveChange={setKnowledgePreviewActive}

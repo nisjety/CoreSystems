@@ -1,5 +1,11 @@
+import { fileURLToPath } from 'node:url'
 import solid from 'eslint-plugin-solid'
 import tseslint from 'typescript-eslint'
+
+// typescript-eslint >= 8.67 refuses to guess the tsconfig root when more than
+// one candidate exists (this SPA and packages/remote-core each carry a
+// tsconfig), failing every file with a parse error. Pin it to this directory.
+const tsconfigRootDir = fileURLToPath(new URL('.', import.meta.url))
 
 export default tseslint.config(
   {
@@ -9,7 +15,26 @@ export default tseslint.config(
     // other sessions) that carry their own eslint.config.* with an unrelated
     // dependency tree — always exclude them regardless of what worktrees exist
     // on disk.
-    ignores: ['dist', 'coverage', 'node_modules', 'apps', '**/.claude/worktrees/**'],
+    // `packages/*` (remote-core) and `apps/remote-dev` are workspace sub-projects
+    // with their own eslint.config.js and tsconfig; linting them from here both
+    // double-lints them and confuses the parser's tsconfig-root detection.
+    ignores: ['dist', 'coverage', 'node_modules', 'apps', 'packages', '**/.claude/worktrees/**'],
+  },
+  {
+    files: ['**/*.{ts,tsx,js,mjs,cjs}'],
+    languageOptions: { parserOptions: { tsconfigRootDir } },
+  },
+  {
+    files: ['**/*.{ts,tsx}'],
+    rules: {
+      // `const { previewUrl: _previewUrl, ...rest } = x` is how a field is stripped
+      // before persisting; the bound name is intentionally unused. Honour the
+      // `_` prefix convention for the same reason.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { args: 'after-used', argsIgnorePattern: '^_', ignoreRestSiblings: true, varsIgnorePattern: '^_' },
+      ],
+    },
   },
   ...tseslint.configs.recommended,
   {

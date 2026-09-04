@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"os/signal"
 	"syscall"
 	"time"
@@ -22,15 +23,34 @@ import (
 	"github.com/triodelab/integration-corev2/internal/discovery"
 	"github.com/triodelab/integration-corev2/internal/egress"
 	"github.com/triodelab/integration-corev2/internal/events"
+	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/hotpath"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 	"github.com/triodelab/integration-corev2/internal/webhookorg"
 )
 
+// logLevelFromEnv reads LOG_LEVEL (trace|debug|info|warn|error); anything
+// unset or unparseable means INFO.
+func logLevelFromEnv() zerolog.Level {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
+	if raw == "" {
+		return zerolog.InfoLevel
+	}
+	level, err := zerolog.ParseLevel(raw)
+	if err != nil || level == zerolog.NoLevel {
+		return zerolog.InfoLevel
+	}
+	return level
+}
+
 func main() {
 	zerolog.TimeFieldFormat = time.RFC3339Nano
-	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
+	// INFO by default: zerolog's zero value is DEBUG, which made the request
+	// logger print the workers' idle claim polls (demoted to DEBUG in
+	// api.requestLogLevel) as if nothing had changed. LOG_LEVEL=debug brings
+	// them back when tracing the claim loop.
+	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339}).Level(logLevelFromEnv())
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -117,6 +137,11 @@ func main() {
 		Actions:           actions.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})),
 		WriteAttestations: writeAttestations,
 		HotPath:           hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
+		// Same finspo-core client the finspo worker uses; lets the generic
+		// sync route answer 409 no_sources_registered instead of queuing a
+		// Microsoft job that has no library to sync. ErrNotConfigured (no
+		// FINSPO_API_KEY) falls through to the normal queue path.
+		Finspo: handoff.NewFinspoClientFromConfig(cfg, controlPlaneClient),
 		WebhookOrg: &webhookorg.Resolver{
 			Store: repo,
 			Meta: &webhookorg.GraphAssetLister{

@@ -135,23 +135,26 @@ describe('deriveConnectedInboxSources', () => {
     }])).toEqual([])
   })
 
-  it('treats a failed Discord sync as setup-blocked even after OAuth created the source', () => {
+  it('treats a failed Discord conversation lane as setup-blocked even after OAuth created the source', () => {
     expect(isDiscordInboxChannelAwaitingSetup([{
       id: 'conn-discord-failed',
       providerKey: 'discord',
       status: 'active',
       capabilities: ['messages.read'],
       scopes: ['bot'],
-      lastSyncStatus: 'failed',
+      syncLanes: { collaboration: { status: 'failed', source: 'email-worker', lastError: 'guild binding missing' } },
     }])).toBe(true)
 
+    // The connection-level lastSyncStatus is not the Discord lane: another
+    // worker's failure must not block Discord setup.
     expect(isDiscordInboxChannelAwaitingSetup([{
       id: 'conn-discord-healthy',
       providerKey: 'discord',
       status: 'active',
       capabilities: ['messages.read'],
       scopes: ['bot'],
-      lastSyncStatus: 'synced',
+      lastSyncStatus: 'failed',
+      syncLanes: { collaboration: { status: 'synced', source: 'email-worker' } },
     }])).toBe(false)
   })
 
@@ -227,43 +230,79 @@ describe('deriveConnectedInboxSources', () => {
     ])
   })
 
-  it('derives mailbox sync health without treating a completed fetch as customer delivery', () => {
+  it('derives mailbox sync health from the mail lane without treating a completed fetch as customer delivery', () => {
     expect(deriveConnectedEmailAccounts([
       {
         id: 'conn-outlook-synced',
         providerKey: 'microsoft',
         status: 'active',
         capabilities: ['mail.read'],
-        lastSyncStatus: 'synced',
-        lastSyncAt: '2026-08-05T11:00:00.000Z',
+        syncLanes: { mail: { status: 'synced', source: 'email-worker', lastSyncAt: '2026-08-05T11:00:00.000Z' } },
       },
       {
         id: 'conn-gmail-refresh',
         providerKey: 'google',
         status: 'needs_refresh',
         capabilities: ['gmail.read'],
-        lastSyncStatus: 'failed',
+        syncLanes: { mail: { status: 'failed', source: 'email-worker' } },
       },
       {
         id: 'conn-outlook-failed',
         providerKey: 'microsoft',
         status: 'active',
         capabilities: ['mail.read'],
-        lastSyncStatus: 'failed',
+        syncLanes: { mail: { status: 'failed', source: 'email-worker', lastError: 'ingest message 42: ingest bridge returned unexpected status 401' } },
       },
       {
         id: 'conn-gmail-running',
         providerKey: 'google',
         status: 'active',
         capabilities: ['gmail.read'],
-        lastSyncStatus: 'running',
+        syncLanes: { mail: { status: 'running', source: 'email-worker', jobId: 'sync-1' } },
       },
-    ]).map(({ id, syncHealth, lastSyncAt }) => ({ id, syncHealth, lastSyncAt }))).toEqual([
-      { id: 'conn-outlook-synced', syncHealth: 'synced', lastSyncAt: '2026-08-05T11:00:00.000Z' },
-      { id: 'conn-outlook-failed', syncHealth: 'attention', lastSyncAt: undefined },
-      { id: 'conn-gmail-refresh', syncHealth: 'needs_reconnect', lastSyncAt: undefined },
-      { id: 'conn-gmail-running', syncHealth: 'syncing', lastSyncAt: undefined },
+      {
+        id: 'conn-gmail-token',
+        providerKey: 'google',
+        status: 'active',
+        capabilities: ['gmail.read'],
+        syncLanes: { mail: { status: 'failed', source: 'email-worker', lastError: 'resolve access token: invalid_grant' } },
+      },
+    ]).map(({ id, syncHealth, lastSyncAt, syncDetail }) => ({ id, syncHealth, lastSyncAt, syncDetail }))).toEqual([
+      { id: 'conn-outlook-synced', syncHealth: 'synced', lastSyncAt: '2026-08-05T11:00:00.000Z', syncDetail: undefined },
+      { id: 'conn-outlook-failed', syncHealth: 'attention', lastSyncAt: undefined, syncDetail: 'ingest message 42: ingest bridge returned unexpected status 401' },
+      { id: 'conn-gmail-refresh', syncHealth: 'needs_reconnect', lastSyncAt: undefined, syncDetail: undefined },
+      { id: 'conn-gmail-running', syncHealth: 'syncing', lastSyncAt: undefined, syncDetail: undefined },
+      { id: 'conn-gmail-token', syncHealth: 'needs_reconnect', lastSyncAt: undefined, syncDetail: 'resolve access token: invalid_grant' },
     ])
+  })
+
+  // Regression: the Outlook lane said "Trenger oppmerksomhet" because the
+  // connection-level lastSyncStatus carried a failed SharePoint (finspo-core)
+  // job. Mailbox health must come from the mail lane only.
+  it('ignores the connection-level lastSyncStatus and document-lane failures for mailbox health', () => {
+    const [outlook] = deriveConnectedEmailAccounts([{
+      id: 'conn-outlook',
+      providerKey: 'microsoft',
+      status: 'active',
+      capabilities: ['mail.read', 'sharepoint.read'],
+      lastSyncStatus: 'failed',
+      lastSyncAt: '2026-09-04T01:00:00.000Z',
+      syncLanes: {
+        mail: { status: 'synced', source: 'email-worker', lastSyncAt: '2026-09-04T02:00:00.000Z' },
+        documents: { status: 'failed', source: 'finspo-core', failureCode: 'no_sources_registered', lastError: 'no SharePoint or OneDrive library is registered' },
+      },
+    }])
+    expect(outlook?.syncHealth).toBe('synced')
+    expect(outlook?.lastSyncAt).toBe('2026-09-04T02:00:00.000Z')
+
+    const [legacy] = deriveConnectedEmailAccounts([{
+      id: 'conn-legacy',
+      providerKey: 'microsoft',
+      status: 'active',
+      capabilities: ['mail.read'],
+      lastSyncStatus: 'failed',
+    }])
+    expect(legacy?.syncHealth).toBe('unknown')
   })
 
   it('uses the provider-confirmed mailbox email before a generic provider label', () => {

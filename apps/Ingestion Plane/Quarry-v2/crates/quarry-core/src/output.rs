@@ -45,6 +45,62 @@ pub struct NormalizedOutput {
     /// absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_modified: Option<String>,
+    /// Post-transform page-level extraction (title provenance, excerpt,
+    /// word count, serving driver). Mirrors the `page_extracted` event
+    /// payload so the `/v1/internal/run_page` response can hand it to the
+    /// orchestrator, which re-emits it into control's per-job event log for
+    /// consumers that poll `/v1/jobs/{id}/events`. `None` for binary/non-HTML
+    /// responses and for outputs produced before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction: Option<PageExtraction>,
+}
+
+/// Where a page's display title came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    /// `<title>` / `og:title` parsed from the HTML and judged specific enough.
+    Html,
+    /// The HTML title was missing or generic (empty, the host name, "Home",
+    /// "Untitled", …) and Model Plane produced a clean title from the excerpt.
+    Model,
+    /// No usable HTML title and no model result: the host label is used.
+    Host,
+}
+
+impl TitleSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TitleSource::Html => "html",
+            TitleSource::Model => "model",
+            TitleSource::Host => "host",
+        }
+    }
+}
+
+/// Page-level extraction emitted as the `page_extracted` event payload and
+/// carried on [`NormalizedOutput::extraction`]. Every text field is derived
+/// from the transformed markdown, never from raw HTML, so it is safe to show
+/// verbatim in a UI card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageExtraction {
+    pub url: String,
+    /// Display title after provenance resolution (never empty).
+    pub title: String,
+    pub title_source: TitleSource,
+    /// First ~300 chars of the readable markdown, markup stripped and
+    /// whitespace collapsed. Empty when the page had no readable text.
+    #[serde(default)]
+    pub excerpt: String,
+    /// Optional one-sentence model summary (only when `title_source == model`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub word_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// Driver that actually served the fetch (`static` | `tls` | `browser`).
+    pub driver: DriverKind,
 }
 
 /// Compact policy/identity stamp embedded in [`NormalizedOutput`]. The

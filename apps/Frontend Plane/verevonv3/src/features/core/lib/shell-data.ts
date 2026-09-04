@@ -59,6 +59,9 @@ export type WorkspaceIdentity = {
   logoUrl?: string | null
   name: string
   plan: string
+  /** The plan is an active free trial (billing-core `trialing`), so badges
+   * must not present it as a paid tier. */
+  planTrial?: boolean
   role?: string | null
   userEmail?: string | null
   userName?: string | null
@@ -100,6 +103,21 @@ export function formatPlanLabel(plan?: string | null): string {
   }
 
   return labels[normalized] ?? normalized.replace(/(^|[-_\s])(\w)/g, (_match, prefix: string, char: string) => `${prefix === '_' ? ' ' : prefix}${char.toUpperCase()}`)
+}
+
+/**
+ * Badge text for a plan. billing-core elevates a trialing org to the `pro`
+ * tier (TrialPlan = "pro"), so the raw plan alone renders a 14-day trial as a
+ * bare "Expert" — indistinguishable from a paid subscription. Mark trials.
+ */
+export function formatPlanBadge(
+  plan: string | null | undefined,
+  planTrial: boolean | null | undefined,
+  tr: (no: string, en: string) => string,
+): string {
+  const label = formatPlanLabel(plan)
+  if (!planTrial || label === 'Trial') return label
+  return `${label} · ${tr('prøve', 'trial')}`
 }
 
 export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no') {

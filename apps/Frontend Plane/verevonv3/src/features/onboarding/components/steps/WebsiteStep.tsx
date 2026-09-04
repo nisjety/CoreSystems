@@ -1,10 +1,31 @@
 import { CheckCircle2, Circle, Globe, Loader2, RefreshCw } from '@/shared/icons'
-import { For, Match, Show, Switch } from 'solid-js'
+import { For, Match, Show, Switch, createMemo } from 'solid-js'
 import { Button } from '@/shared/ui/Button'
+import type { CrawlSnippet } from '@/features/onboarding/lib/api'
+import { dedupeCrawlSnippets } from '@/features/onboarding/lib/crawl-preview'
 import { type OnboardingState, onboardingCrawlPhases } from '@/features/onboarding/lib/model'
 import { activeCrawlPhase, stripUrlProtocol, websiteProgressPercent } from '@/features/onboarding/lib/view'
 import { OnboardingField } from '@/features/onboarding/components/shared/OnboardingField'
 import { OnboardingLinkButton } from '@/features/onboarding/components/shared/OnboardingLinkButton'
+import './WebsiteStep.css'
+
+const VISIBLE_PAGE_CARDS = 5
+
+/** `/om-oss` for `https://www.aquatiq.com/om-oss/`; the bare host for the root. */
+export function snippetPathLabel(snippet: Pick<CrawlSnippet, 'url'>): string {
+  try {
+    const url = new URL(snippet.url)
+    const path = url.pathname.replace(/\/+$/, '')
+    return path ? `${url.host.replace(/^www\./, '')}${path}` : url.host.replace(/^www\./, '')
+  } catch {
+    return snippet.url
+  }
+}
+
+/** Newest first, one card per page, richest version of each. */
+export function visibleCrawlPages(snippets: readonly CrawlSnippet[], limit = VISIBLE_PAGE_CARDS): CrawlSnippet[] {
+  return dedupeCrawlSnippets(snippets).slice(-limit).reverse()
+}
 
 type WebsiteStepContentProps = {
   website: OnboardingState['website']
@@ -144,12 +165,23 @@ export function WebsiteStepContent(props: WebsiteStepContentProps) {
 }
 
 export function WebsiteStepVisual(props: { website: OnboardingState['website'] }) {
+  const pages = createMemo(() => dedupeCrawlSnippets(props.website.snippets))
+  const visible = createMemo(() => visibleCrawlPages(props.website.snippets))
+  const hidden = () => Math.max(0, pages().length - visible().length)
+  const crawling = () => props.website.status === 'starting' || props.website.status === 'running'
+
   return (
     <div class="onboarding-website-visual">
-      <div class="onboarding-folder-card">
+      <div class={['onboarding-folder-card', { 'onboarding-folder-card--pages': pages().length > 0 }]}>
         <div class="onboarding-folder-card__tab" />
         <p>Nettsidekunnskap</p>
-        <h2>{props.website.snippets.length} utdrag samlet</h2>
+        <h2>
+          <Switch fallback={`${pages().length} sider lest`}>
+            <Match when={pages().length === 0 && crawling()}>Leser nettsiden …</Match>
+            <Match when={pages().length === 0}>0 sider lest</Match>
+            <Match when={pages().length === 1}>1 side lest</Match>
+          </Switch>
+        </h2>
         <span>
           <Switch fallback="Quarry henter strukturert tekst, bilder og filer fra nettstedet ditt.">
             <Match when={props.website.status === 'completed'}>
@@ -157,6 +189,59 @@ export function WebsiteStepVisual(props: { website: OnboardingState['website'] }
             </Match>
           </Switch>
         </span>
+        <Show when={visible().length > 0}>
+          <ul class="onboarding-folder-card__pages" aria-label="Sider funnet på nettstedet" aria-live="polite">
+            <For each={visible()}>
+              {(snippet) => {
+                const text = () => snippet.excerpt?.trim() || snippet.summary?.trim() || ''
+                const pending = () => !text()
+                return (
+                  <li
+                    class={['onboarding-page-card', { 'onboarding-page-card--pending': pending() }]}
+                    data-title-source={snippet.titleSource ?? 'unknown'}
+                  >
+                    <div class="onboarding-page-card__head">
+                      <strong class="onboarding-page-card__title" title={snippet.title}>
+                        {snippet.title}
+                      </strong>
+                      <Show when={snippet.titleSource === 'model'}>
+                        <span class="onboarding-page-card__badge" title="Navnet er foreslått av AI fra sideteksten">
+                          AI-navn
+                        </span>
+                      </Show>
+                    </div>
+                    <span class="onboarding-page-card__path" title={snippet.url}>
+                      {snippetPathLabel(snippet)}
+                    </span>
+                    <Show
+                      when={!pending()}
+                      fallback={
+                        <p class="onboarding-page-card__excerpt onboarding-page-card__excerpt--pending">
+                          {crawling() ? 'Henter tekst …' : 'Ingen lesbar tekst funnet på denne siden.'}
+                        </p>
+                      }
+                    >
+                      <p class="onboarding-page-card__excerpt">{text()}</p>
+                    </Show>
+                    <Show when={snippet.wordCount || snippet.summary}>
+                      <div class="onboarding-page-card__meta">
+                        <Show when={snippet.wordCount}>
+                          <span>{snippet.wordCount} ord</span>
+                        </Show>
+                        <Show when={snippet.summary && snippet.excerpt}>
+                          <span title={snippet.summary}>Oppsummert</span>
+                        </Show>
+                      </div>
+                    </Show>
+                  </li>
+                )
+              }}
+            </For>
+          </ul>
+          <Show when={hidden() > 0}>
+            <p class="onboarding-folder-card__more">+ {hidden()} flere sider</p>
+          </Show>
+        </Show>
         <div class="onboarding-folder-card__progress">
           <div>
             <span>Fremdrift</span>

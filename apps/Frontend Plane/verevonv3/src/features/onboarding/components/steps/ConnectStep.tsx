@@ -8,6 +8,8 @@ import {
   onboardingConnectorOptions,
 } from '@/features/onboarding/lib/model'
 import { truncateGraphLabel } from '@/features/onboarding/lib/view'
+import type { ConnectedAccountView } from '@/features/onboarding/lib/connection-truth'
+import { ConnectedAccountsPanel, type LibraryPickerActions } from '@/features/onboarding/components/steps/ConnectedAccountsPanel'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
@@ -51,6 +53,14 @@ type ConnectStepContentProps = {
    * can start fetching early (only armed by the caller when a source is
    * connected), so it's ready by the time the user reaches the plan step. */
   onPrefetch?: () => void
+  /** integration-core's truth about what is connected (connections +
+   * syncLanes), shown prominently above the connector catalogue. */
+  accounts?: ConnectedAccountView[]
+  accountsLoading?: boolean
+  accountsUnavailable?: boolean
+  onRefreshAccounts?: () => void
+  onReconnect?: (account: ConnectedAccountView) => void
+  library?: LibraryPickerActions
 }
 
 export function ConnectStepContent(props: ConnectStepContentProps) {
@@ -64,6 +74,15 @@ export function ConnectStepContent(props: ConnectStepContentProps) {
       <p class="onboarding-eyebrow">Integrations</p>
       <h1>Koble systemer</h1>
       <p>Velg systemene Verevon skal lære fra, svare på vegne av, eller bruke som signaler for automasjon.</p>
+
+      <ConnectedAccountsPanel
+        accounts={props.accounts ?? []}
+        loading={props.accountsLoading}
+        unavailable={props.accountsUnavailable}
+        onRefresh={props.onRefreshAccounts}
+        onReconnect={props.onReconnect}
+        library={props.library}
+      />
 
       <div class="onboarding-connector-tabs" role="tablist" aria-label="Integration categories">
         <For each={connectorTabs}>

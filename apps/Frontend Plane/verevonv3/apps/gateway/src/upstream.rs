@@ -1415,18 +1415,48 @@ pub(crate) async fn proxy_integration_json(
         }
 
         let msg = integration_error_message(&raw);
-        let code: &'static str = if status.as_u16() == 402
-            || status.as_u16() == 403
-            || msg.to_ascii_lowercase().contains("plan")
-        {
-            "PLAN_REQUIRED"
-        } else {
-            "integration_error"
-        };
+        let code = integration_error_code(&raw, status, &msg);
         return (status, Json(error(code, msg)));
     }
 
     (status, Json(raw))
+}
+
+/// Integration-core error codes the SPA is allowed to branch on by code
+/// rather than by message. Everything else still collapses into the opaque
+/// `integration_error` category, so an internal failure name never becomes a
+/// browser-visible contract.
+///
+/// An entry belongs here only when the code is (a) stable and owned by
+/// integration-corev2, (b) an expected state of a healthy workspace rather
+/// than a fault, and (c) actionable in the UI. `no_sources_registered` is the
+/// 409 that `POST /connections/{id}/sync` returns for a Microsoft connection
+/// with no SharePoint/OneDrive library registered yet — the normal state of a
+/// brand-new connection, which the SPA turns into "velg bibliotek" instead of
+/// a generic failure.
+const INTEGRATION_ERROR_CODE_ALLOWLIST: &[&str] = &["no_sources_registered"];
+
+/// Choose the browser-visible error code for an integration-core failure. The
+/// plan gate keeps precedence over the allow-list: a 402/403 must always route
+/// the user to upgrade, whatever code the upstream attached.
+fn integration_error_code(raw: &Value, status: StatusCode, message: &str) -> &'static str {
+    if status.as_u16() == 402
+        || status.as_u16() == 403
+        || message.to_ascii_lowercase().contains("plan")
+    {
+        return "PLAN_REQUIRED";
+    }
+    let upstream_code = raw
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    INTEGRATION_ERROR_CODE_ALLOWLIST
+        .iter()
+        .copied()
+        .find(|allowed| allowed.eq_ignore_ascii_case(upstream_code))
+        .unwrap_or("integration_error")
 }
 
 /// Extract only the bounded, public message from integration-core's error
@@ -1781,6 +1811,66 @@ mod tests {
                 "error": { "message": "provider failed at https://internal.example.test" }
             })),
             "Integration service error"
+        );
+    }
+
+    /// The allow-listed code reaches the SPA verbatim so Settings, Knowledge
+    /// and onboarding can offer "pick a library" instead of a generic failure.
+    #[test]
+    fn allow_listed_integration_codes_reach_the_spa_verbatim() {
+        let raw = json!({
+            "success": false,
+            "error": {
+                "code": "no_sources_registered",
+                "message": "No SharePoint or OneDrive library is registered for this organization yet."
+            }
+        });
+        let message = integration_error_message(&raw);
+        assert_eq!(
+            integration_error_code(&raw, StatusCode::CONFLICT, &message),
+            "no_sources_registered"
+        );
+    }
+
+    /// Everything outside the allow-list keeps collapsing into the opaque
+    /// category: an internal failure name is not a browser contract.
+    #[test]
+    fn unlisted_integration_codes_stay_opaque() {
+        for code in [
+            "sync_queue_failed",
+            "token_broker_failed",
+            "connections_list_failed",
+        ] {
+            let raw = json!({ "success": false, "error": { "code": code, "message": "Sync could not be queued." } });
+            let message = integration_error_message(&raw);
+            assert_eq!(
+                integration_error_code(&raw, StatusCode::INTERNAL_SERVER_ERROR, &message),
+                "integration_error",
+                "code {code} must not reach the SPA"
+            );
+        }
+        let legacy = json!({ "success": false, "error": "connection not found" });
+        let message = integration_error_message(&legacy);
+        assert_eq!(
+            integration_error_code(&legacy, StatusCode::NOT_FOUND, &message),
+            "integration_error"
+        );
+    }
+
+    /// The plan gate keeps precedence: a 402/403 (or a plan-worded message)
+    /// must route the user to upgrade even if an allow-listed code rides along.
+    #[test]
+    fn plan_gate_outranks_the_allow_list() {
+        let raw = json!({ "success": false, "error": { "code": "no_sources_registered", "message": "Library sync requires a higher plan." } });
+        let message = integration_error_message(&raw);
+        assert_eq!(
+            integration_error_code(&raw, StatusCode::FORBIDDEN, &message),
+            "PLAN_REQUIRED"
+        );
+        assert_eq!(
+            integration_error_code(&raw, StatusCode::CONFLICT, &message),
+            "PLAN_REQUIRED",
+            "a plan-worded message still routes to upgrade"
         );
     }
     use crate::middleware::AuthenticatedUser;

@@ -398,6 +398,10 @@ export type MarkdownTableAlign = 'center' | 'left' | 'right' | null
 
 export type MarkdownBlock =
   | { kind: 'code'; lang: string; text: string }
+  // Raw `<details>`/`<summary>` HTML written by the model (e.g. "Se alle
+  // tilbud" behind a shipping-quote table). Rendered as a real collapsible
+  // instead of escaped tag soup; `blocks` is the parsed inner markdown.
+  | { kind: 'details'; summary: string; blocks: MarkdownBlock[] }
   | { kind: 'heading'; level: 1 | 2 | 3; text: string }
   | { kind: 'hr' }
   | { kind: 'list'; ordered: boolean; items: MarkdownListItem[] }

@@ -15,16 +15,34 @@ import { signOut } from '@/shared/api/auth-client'
 import { clearSession, getSession, loadSession, markSessionOnboardingComplete } from '@/shared/session/session-store'
 import { createCrawlPreviewStream } from '@/features/onboarding/lib/crawl-preview'
 import {
+  NO_SOURCES_REGISTERED,
+  activeConnectionForProvider,
+  hasPendingSyncLanes,
+  reconcileConnectorsWithConnections,
+  summarizeConnectedAccounts,
+  type ConnectedAccountView,
+} from '@/features/onboarding/lib/connection-truth'
+import {
   type ConnectorOption,
   type OnboardingState,
   type PlanId,
   type Step,
+  onboardingConnectorOptions,
   onboardingPlanCards,
   onboardingSteps,
 } from '@/features/onboarding/lib/model'
+import { ApiError } from '@/shared/api/http'
+import { listConnections, type IntegrationConnection } from '@/shared/api/integrations-client'
+import {
+  listSharePointDrives,
+  listSharePointSites,
+  registerSharePointSource,
+  type SharePointSourceRegistration,
+} from '@/shared/api/knowledge-client'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { createOnboardingState } from '@/features/onboarding/lib/onboarding-state'
 import { createOnboardingPersistence } from '@/features/onboarding/lib/persistence'
-import { runDirectOauthWindow } from '@/features/onboarding/lib/provider-auth-window'
+import { reserveDirectOauthWindow, runDirectOauthWindow } from '@/features/onboarding/lib/provider-auth-window'
 import {
   createGraphPreviewQuery,
   createPlanRecommendationQuery,
@@ -55,6 +73,7 @@ import {
 } from '@/features/onboarding/lib/plan-recommendation'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { ContactSalesModal } from '@/features/onboarding/components/ContactSalesModal'
+import { LeaveOnboardingDialog } from '@/features/onboarding/components/LeaveOnboardingDialog'
 import { AssemblyStepContent, AssemblyStepVisual } from '@/features/onboarding/components/steps/AssemblyStep'
 import { ConnectStepContent, ConnectStepVisual } from '@/features/onboarding/components/steps/ConnectStep'
 import { IntroStepContent, IntroStepVisual } from '@/features/onboarding/components/steps/IntroStep'
@@ -93,6 +112,7 @@ export default function OnboardingPage() {
   const [connectingId, setConnectingId] = createSignal<string>()
   const [committingPlan, setCommittingPlan] = createSignal(false)
   const [contactSalesOpen, setContactSalesOpen] = createSignal(false)
+  const [leaveDialogOpen, setLeaveDialogOpen] = createSignal(false)
   // Armed on connect-step hover (only when a source is connected) to start the
   // plan recommendation early, so it's ready by the time the user reaches the
   // paywall. No-integration users still trigger it on entering the paywall.
@@ -129,6 +149,91 @@ export default function OnboardingPage() {
     () => state.organization.id,
     () => state.step === 'connect' && Boolean(state.organization.id),
   )
+
+  // The truth about what is connected lives in integration-core, not in
+  // `state.connectors` (which only records what was clicked). While the user
+  // is on the connect step we read `GET /api/v1/integrations/connections`
+  // (with per-pipeline syncLanes), show it prominently, fold it back into
+  // `state.connectors`, and keep refreshing while any lane is still syncing.
+  type ConnectionTruth = { connections: IntegrationConnection[]; unavailable: boolean }
+  const [connectionTruth, { refetch: refetchConnections }] = createResource<ConnectionTruth, string>(
+    () => (state.step === 'connect' && state.organization.id ? state.organization.id : undefined),
+    async (orgId) => {
+      if (!orgId) return { connections: [], unavailable: false }
+      try {
+        return { connections: await listConnections(orgId), unavailable: false }
+      } catch {
+        return { connections: [], unavailable: true }
+      }
+    },
+  )
+  const truthConnections = () => connectionTruth()?.connections ?? []
+  // Connections whose generic sync integration-core refused with
+  // 409 no_sources_registered: the panel shows the library picker for them.
+  const [librariesNeeded, setLibrariesNeeded] = createSignal<ReadonlySet<string>>(new Set())
+  const connectedAccounts = createMemo<ConnectedAccountView[]>(() =>
+    summarizeConnectedAccounts(truthConnections(), { librariesNeeded: librariesNeeded(), tr: i18n.tr }),
+  )
+
+  createEffect(
+    () => truthConnections(),
+    (connections) => {
+      if (connections.length === 0) return
+      const current = untrack(() => state.connectors)
+      const next = reconcileConnectorsWithConnections(current, connections)
+      if (next !== current) setState((s) => { s.connectors = next })
+    },
+  )
+
+  createEffect(
+    () => ({ step: state.step, pending: hasPendingSyncLanes(truthConnections()) }),
+    ({ step, pending }) => {
+      if (typeof window === 'undefined' || step !== 'connect' || !pending) return
+      const timer = window.setInterval(() => { void refetchConnections() }, 6000)
+      return () => window.clearInterval(timer)
+    },
+  )
+
+  // Inline "velg bibliotek" for a Microsoft connection: the same Knowledge
+  // SharePoint routes as Knowledge → Add source (finspo-core browse +
+  // register + first sync). Once a library exists the generic integration
+  // sync is accepted and the documents lane reports the job.
+  const libraryActions = {
+    listSites: () => listSharePointSites(state.organization.id ?? ''),
+    listDrives: (siteId: string) => listSharePointDrives(state.organization.id ?? '', siteId),
+    register: async (connectionId: string, selection: SharePointSourceRegistration) => {
+      const orgId = state.organization.id
+      if (!orgId) throw new Error(i18n.tr('Opprett organisasjonen først.', 'Create the organization first.'))
+      await registerSharePointSource(orgId, selection)
+      setLibrariesNeeded((current) => {
+        const next = new Set(current)
+        next.delete(connectionId)
+        return next
+      })
+      const option = onboardingConnectorOptions.find((candidate) => candidate.provider === 'microsoft')
+      try {
+        await actions.startIntegrationSync({
+          connectorId: option?.id ?? 'microsoft365',
+          orgId,
+          provider: 'microsoft',
+          sources: option?.sources ?? ['sharepoint', 'onedrive'],
+        })
+      } catch (reason) {
+        setError(translateApiError(reason, i18n.tr, {
+          no: 'Biblioteket er registrert, men synkroniseringen kunne ikke settes i kø.',
+          en: 'The library was registered, but the sync could not be queued.',
+        }))
+      }
+      void refetchConnections()
+      void queryClient.invalidateQueries({ queryKey: onboardingQueryKeys.graphPreview(orgId) })
+    },
+  }
+
+  function reconnectAccount(account: ConnectedAccountView) {
+    const option = onboardingConnectorOptions.find((candidate) => candidate.id === account.connectorId)
+      ?? onboardingConnectorOptions.find((candidate) => candidate.provider === account.provider)
+    if (option) void connectSource(option)
+  }
 
   // Solid v2 has no onMount; a two-phase createEffect with a constant
   // compute runs its effect function exactly once after mount.
@@ -607,6 +712,12 @@ export default function OnboardingPage() {
     }
 
     const orgId = state.organization.id
+    // Reserve the popup before the first await, while the click still carries
+    // user activation: browsers otherwise treat the consent window opened after
+    // the async connect-session request as unsolicited and block it (same
+    // pattern as WorkspaceSettingsPage.runAction). shipping-core has no OAuth,
+    // so nothing is reserved for it.
+    const reservedOAuthWindow = option.provider === 'shipping' ? null : reserveDirectOauthWindow()
     setConnectingId(option.id)
     setError(undefined)
 
@@ -640,7 +751,7 @@ export default function OnboardingPage() {
       await runDirectOauthWindow({
         connectUrl: session.connectUrl,
         sessionToken: session.sessionToken,
-      })
+      }, reservedOAuthWindow)
 
       // Show connector in-flight while discover/sync settle
       setState((s) => { s.connectors = ((current) => [
@@ -661,6 +772,15 @@ export default function OnboardingPage() {
         provider: option.provider,
         sources: option.sources,
       }
+      // Refresh integration-core's truth first: the connected-accounts panel
+      // shows the new connection immediately, and a sync refusal below can be
+      // attributed to its connection id.
+      const refreshedTruth = await refetchConnections().catch(() => undefined)
+      const connectionId = activeConnectionForProvider(
+        refreshedTruth?.connections ?? untrack(truthConnections),
+        option.provider,
+      )?.id
+
       const [discoverResult, syncResult] = await Promise.allSettled([
         actions.discoverSource(source),
         actions.startIntegrationSync(source),
@@ -669,8 +789,21 @@ export default function OnboardingPage() {
           : Promise.resolve({ warmed: false }),
       ])
 
+      // A Microsoft sync is handed to finspo-core, which can only sync
+      // registered SharePoint/OneDrive libraries. Until one exists
+      // integration-core refuses to queue the job (409 no_sources_registered)
+      // instead of leaving a guaranteed-failed job behind. That is the
+      // expected state of a brand-new connection, not an error: the panel
+      // turns it into "Velg bibliotek" and the first sync starts from there.
+      const needsLibrary = syncResult.status === 'rejected'
+        && syncResult.reason instanceof ApiError
+        && syncResult.reason.code === NO_SOURCES_REGISTERED
+      if (needsLibrary && connectionId) {
+        setLibrariesNeeded((current) => new Set(current).add(connectionId))
+      }
+
       const coresFailed =
-        discoverResult.status === 'rejected' || syncResult.status === 'rejected'
+        discoverResult.status === 'rejected' || (syncResult.status === 'rejected' && !needsLibrary)
 
       setState((s) => { s.connectors = ((current) => [
         ...current.filter((item) => item.id !== option.id),
@@ -687,7 +820,19 @@ export default function OnboardingPage() {
         setError(`${option.label} tilkoblet, men synkronisering kan ha feilet. Sjekk innstillinger.`)
       }
       void queryClient.invalidateQueries({ queryKey: onboardingQueryKeys.graphPreview(orgId) })
+      void refetchConnections()
     } catch (reason) {
+      // A failure before the hand-off (e.g. the connect-session request) leaves
+      // the reserved popup sitting on about:blank; close it rather than
+      // stranding an empty window. Once the provider page owns it, COOP makes
+      // the handle throw on access -- leave it alone then.
+      try {
+        if (reservedOAuthWindow && !reservedOAuthWindow.closed && reservedOAuthWindow.location.href === 'about:blank') {
+          reservedOAuthWindow.close()
+        }
+      } catch {
+        // COOP-severed handle: the provider page owns it now.
+      }
       setError(translateApiError(reason, i18n.tr, { no: `Kunne ikke koble til ${option.label}.`, en: `Could not connect ${option.label}.` }))
     } finally {
       setConnectingId(undefined)
@@ -939,12 +1084,16 @@ export default function OnboardingPage() {
       setState((s) => { s.step = previous })
       return
     }
-    if (!window.confirm(i18n.tr(
-      'Vil du avslutte oppsettet og logge ut? Påbegynt oppsett blir slettet.',
-      'Leave setup and sign out? Your unfinished setup will be deleted.',
-    ))) {
-      return
-    }
+    // Ask via an in-app dialog, never `window.confirm`: embedded webviews and
+    // automation-driven browsers auto-dismiss native dialogs with `false`
+    // without rendering them, which made this button look dead (observed in
+    // the Claude desktop browser pane). The dialog's confirm button calls
+    // leaveOnboarding().
+    setLeaveDialogOpen(true)
+  }
+
+  function leaveOnboarding() {
+    setLeaveDialogOpen(false)
     // Start of onboarding — "back" exits entirely: log out AND restore the
     // session to zero, so the next sign-in starts from a clean slate rather
     // than resuming half-finished progress. Order matters:
@@ -1014,6 +1163,12 @@ export default function OnboardingPage() {
             onPrefetch={() => {
               if (state.connectors.length > 0) setRecommendationPrefetch(true)
             }}
+            accounts={connectedAccounts()}
+            accountsLoading={connectionTruth.loading}
+            accountsUnavailable={connectionTruth()?.unavailable ?? false}
+            onRefreshAccounts={() => void refetchConnections()}
+            onReconnect={reconnectAccount}
+            library={libraryActions}
           />
         )
       case 'social-proof':
@@ -1067,17 +1222,59 @@ export default function OnboardingPage() {
   }
 
   return (
-    <Show
-      when={currentStep() === 'paywall'}
-      fallback={
+    <>
+      <Show
+        when={currentStep() === 'paywall'}
+        fallback={
+          <OnboardingScreen
+            steps={onboardingSteps}
+            currentStep={currentStep()}
+            currentStepIndex={currentStepIndex()}
+            visibleStepNumber={visibleStepNumber()}
+            onBack={back}
+            onSelectStep={(step) => setState((s) => { s.step = step })}
+            backHref="/"
+            screenStyle={{
+              '--onboarding-accent': '#111111',
+              '--onboarding-rail': '#FF2E63',
+            }}
+            chromeStyle={{
+              transform: `scale(${cardScale()})`,
+              'transform-origin': 'center center',
+            }}
+          >
+            <>
+              <OnboardingBrandStrip branding={state.website.branding} websiteUrl={state.website.url} />
+              <OnboardingFrame
+                leftPaneHeight={leftPaneSize.height()}
+                onLeftPaneRef={leftPaneSize.setElement}
+                showScanner={state.step !== 'connect'}
+                stepTransitionPhase={stepTransitionPhase()}
+                left={
+                  <>
+                    {renderLeftStep(displayedStep())}
+                    <Show when={error()}>
+                      {(message) => <p class="onboarding-error">{message()}</p>}
+                    </Show>
+                    <p class="onboarding-support-copy">
+                      Står du fast? <a href="mailto:support@verevon.com">support@verevon.com</a>
+                    </p>
+                  </>
+                }
+                right={renderRightStep(displayedStep())}
+              />
+            </>
+          </OnboardingScreen>
+        }
+      >
         <OnboardingScreen
+          paywall
           steps={onboardingSteps}
           currentStep={currentStep()}
           currentStepIndex={currentStepIndex()}
           visibleStepNumber={visibleStepNumber()}
           onBack={back}
           onSelectStep={(step) => setState((s) => { s.step = step })}
-          backHref="/"
           screenStyle={{
             '--onboarding-accent': '#111111',
             '--onboarding-rail': '#FF2E63',
@@ -1087,86 +1284,51 @@ export default function OnboardingPage() {
             'transform-origin': 'center center',
           }}
         >
-          <>
-            <OnboardingBrandStrip branding={state.website.branding} websiteUrl={state.website.url} />
-            <OnboardingFrame
-              leftPaneHeight={leftPaneSize.height()}
-              onLeftPaneRef={leftPaneSize.setElement}
-              showScanner={state.step !== 'connect'}
-              stepTransitionPhase={stepTransitionPhase()}
-              left={
-                <>
-                  {renderLeftStep(displayedStep())}
-                  <Show when={error()}>
-                    {(message) => <p class="onboarding-error">{message()}</p>}
-                  </Show>
-                  <p class="onboarding-support-copy">
-                    Står du fast? <a href="mailto:support@verevon.com">support@verevon.com</a>
-                  </p>
-                </>
-              }
-              right={renderRightStep(displayedStep())}
-            />
-          </>
+          <PaywallStep
+            activePlanId={activePlan()}
+            checkoutReturnUrl={checkoutReturnUrl()}
+            checkoutSession={checkoutSession()}
+            committing={committingPlan()}
+            confirmingCheckout={confirmingCheckout()}
+            error={error()}
+            identity={{
+              orgName: state.organization.name,
+              industry: state.organization.industry,
+              orgNumber: state.organization.orgNumber,
+              websiteUrl: state.website.url,
+              websitePages: state.website.pages,
+              connectedSourceCount: sourceSummary().connectedSourceCount,
+              connectorCount: sourceSummary().connectorCount,
+              sourceCount: sourceSummary().totalSourceCount,
+              employeeCount: state.organization.employeeCount ?? approxEmployeesFromSize(state.organization.size),
+              branding: state.website.branding,
+            }}
+            loadingRecommendation={recommendationQuery.isFetching}
+            recommendation={localizedRecommendation()}
+            onRefreshRecommendation={() => {
+              void recommendationQuery.refetch()
+            }}
+            onSelectPlan={(planId) => {
+              setCheckoutSession(undefined)
+              setState((s) => { s.plan = planId })
+            }}
+            onConfirmCheckout={finalizePaidCheckout}
+            onCommitPlan={commitPlan}
+          />
         </OnboardingScreen>
-      }
-    >
-      <OnboardingScreen
-        paywall
-        steps={onboardingSteps}
-        currentStep={currentStep()}
-        currentStepIndex={currentStepIndex()}
-        visibleStepNumber={visibleStepNumber()}
-        onBack={back}
-        onSelectStep={(step) => setState((s) => { s.step = step })}
-        screenStyle={{
-          '--onboarding-accent': '#111111',
-          '--onboarding-rail': '#FF2E63',
-        }}
-        chromeStyle={{
-          transform: `scale(${cardScale()})`,
-          'transform-origin': 'center center',
-        }}
-      >
-        <PaywallStep
-          activePlanId={activePlan()}
-          checkoutReturnUrl={checkoutReturnUrl()}
-          checkoutSession={checkoutSession()}
-          committing={committingPlan()}
-          confirmingCheckout={confirmingCheckout()}
-          error={error()}
-          identity={{
-            orgName: state.organization.name,
-            industry: state.organization.industry,
-            orgNumber: state.organization.orgNumber,
-            websiteUrl: state.website.url,
-            websitePages: state.website.pages,
-            connectedSourceCount: sourceSummary().connectedSourceCount,
-            connectorCount: sourceSummary().connectorCount,
-            sourceCount: sourceSummary().totalSourceCount,
-            employeeCount: state.organization.employeeCount ?? approxEmployeesFromSize(state.organization.size),
-            branding: state.website.branding,
-          }}
-          loadingRecommendation={recommendationQuery.isFetching}
-          recommendation={localizedRecommendation()}
-          onRefreshRecommendation={() => {
-            void recommendationQuery.refetch()
-          }}
-          onSelectPlan={(planId) => {
-            setCheckoutSession(undefined)
-            setState((s) => { s.plan = planId })
-          }}
-          onConfirmCheckout={finalizePaidCheckout}
-          onCommitPlan={commitPlan}
+        <ContactSalesModal
+          open={contactSalesOpen()}
+          onClose={() => setContactSalesOpen(false)}
+          orgName={state.organization.name}
+          employeeCount={state.organization.employeeCount}
+          websiteUrl={state.website.url}
         />
-      </OnboardingScreen>
-      <ContactSalesModal
-        open={contactSalesOpen()}
-        onClose={() => setContactSalesOpen(false)}
-        orgName={state.organization.name}
-        employeeCount={state.organization.employeeCount}
-        websiteUrl={state.website.url}
+      </Show>
+      <LeaveOnboardingDialog
+        open={leaveDialogOpen()}
+        onCancel={() => setLeaveDialogOpen(false)}
+        onConfirm={leaveOnboarding}
       />
-    </Show>
+    </>
   )
 }

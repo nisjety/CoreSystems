@@ -85,6 +85,20 @@ pub struct EdgeConfig {
     /// Development-only static Model Plane bearer. Production uses Auth Core.
     #[serde(default)]
     pub model_plane_token: Option<String>,
+    /// Routed Model Plane alias used by the page pipeline to name pages whose
+    /// HTML `<title>` is missing or generic (`page_extracted.title_source =
+    /// "model"`). Must be a routing alias the Model Plane intent layer
+    /// resolves (`verevon-budget` = cheapest capable model, `verevon-balance`,
+    /// `verevon-genius`), never a vendor model id. Default `verevon-budget`.
+    /// Env: `QUARRY_EDGE__PAGE_TITLE_MODEL`.
+    #[serde(default)]
+    pub page_title_model: Option<String>,
+    /// Master switch for the page-title Model Plane hop. Defaults to `true`
+    /// whenever `model_plane_url` is set; `false` keeps extraction purely
+    /// local (`title_source` is then `html` or `host`).
+    /// Env: `QUARRY_EDGE__PAGE_TITLE_ENRICH`.
+    #[serde(default)]
+    pub page_title_enrich: Option<bool>,
     /// BrowserBroker grant validation endpoint. When set, every agent run
     /// must present a grant_id and every action revalidates that grant.
     #[serde(default)]
@@ -300,6 +314,8 @@ impl EdgeConfig {
             local_index_dir: None,
             model_plane_url: None,
             model_plane_token: None,
+            page_title_model: None,
+            page_title_enrich: None,
             browser_grant_validator_url: None,
             browser_grant_validator_grpc_url: None,
             require_browser_grants: false,

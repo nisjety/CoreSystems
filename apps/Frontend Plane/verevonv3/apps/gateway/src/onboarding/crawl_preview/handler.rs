@@ -17,6 +17,7 @@ use crate::{
     contracts::CrawlPreviewRequest,
     middleware::AuthenticatedUser,
     onboarding::crawl_preview::{
+        dedupe::{Admission, SnippetLedger},
         quarry::{create_crawl_job, forward_seed_scrape, poll_crawl_events},
         sse::sse_json,
     },
@@ -61,21 +62,38 @@ pub(crate) async fn crawl_preview(
             Ok(job_id) => {
                 yield Ok::<Event, std::convert::Infallible>(sse_json("started", json!({ "jobId": job_id, "url": url, "target": max_pages })));
                 yield Ok(sse_json("progress", json!({ "status": "starting", "pages": 0, "elements": 0, "target": max_pages, "jobId": job_id })));
+                // One ledger across seed + live: the seed scrape and the crawl
+                // job both emit the homepage (page_fetched, then page_extracted),
+                // and every page arrives twice (pre-/post-transform). The ledger
+                // forwards the first snippet per URL, forwards a richer one as an
+                // update (same id → the wizard replaces the card), and drops the
+                // rest. `pages` counts unique pages, seed included.
+                let mut ledger = SnippetLedger::default();
+                let mut pages = 0u32;
+                let mut elements = 0u32;
                 let mut seed_yielded = false;
                 match forward_seed_scrape(&state_clone, token.as_deref(), &url).await {
-                    Ok(events) => {
-                        seed_yielded = !events.is_empty();
-                        for event in events {
-                            yield Ok::<Event, std::convert::Infallible>(event);
+                    Ok(payloads) => {
+                        for payload in payloads {
+                            let Some(value) = payload.value else { continue };
+                            if payload.kind == "snippet" {
+                                match ledger.admit(&value) {
+                                    Admission::First => {
+                                        pages = pages.saturating_add(1);
+                                        elements = elements.saturating_add(value.get("elementCount").and_then(Value::as_u64).unwrap_or(0) as u32);
+                                    }
+                                    Admission::Richer => {}
+                                    Admission::Skip => continue,
+                                }
+                            }
+                            seed_yielded = true;
+                            yield Ok::<Event, std::convert::Infallible>(sse_json(&payload.kind, value));
                         }
                     }
                     Err(error) => {
                         error!(?error, "seed scrape failed");
                     }
                 }
-
-                let mut pages = 0u32;
-                let mut elements = 0u32;
                 // Stream events live: a background task polls quarry-control and pushes
                 // each normalized event through the channel, which we forward the moment
                 // it arrives (instead of buffering the whole crawl).
@@ -92,9 +110,13 @@ pub(crate) async fn crawl_preview(
                     match payload.kind.as_str() {
                         "snippet" => {
                             if let Some(value) = payload.value {
-                                if payload.source == Some("live".into()) {
-                                    pages = pages.saturating_add(1);
-                                    elements = elements.saturating_add(value.get("elementCount").and_then(Value::as_u64).unwrap_or(0) as u32);
+                                match ledger.admit(&value) {
+                                    Admission::First => {
+                                        pages = pages.saturating_add(1);
+                                        elements = elements.saturating_add(value.get("elementCount").and_then(Value::as_u64).unwrap_or(0) as u32);
+                                    }
+                                    Admission::Richer => {}
+                                    Admission::Skip => continue,
                                 }
                                 yield Ok::<Event, std::convert::Infallible>(sse_json("snippet", value));
                             }

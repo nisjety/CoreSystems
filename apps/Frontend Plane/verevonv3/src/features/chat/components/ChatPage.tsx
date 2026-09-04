@@ -54,6 +54,7 @@ import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
 import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
+import { useI18n } from '@/shared/i18n'
 
 export default function ChatPage() {
   const session = getSession()
@@ -240,6 +241,15 @@ export default function ChatPage() {
       })
   }
 
+  // One derivation for every surface host: the header dropdown, the canvas tab
+  // strip, the stale-tab guard and the auto-open rule all have to agree on what
+  // counts as work (audit item 27 -- the header offered "Arbeid 4" for four
+  // lifecycle rows). `isWorkStep` in chat-normalizers.ts owns the rule.
+  const workStepCount = createMemo(() => state.taskSteps.filter(isWorkStep).length)
+  const toolCallCount = createMemo(
+    () => state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
+  )
+
   // A tab restored from an older snapshot may no longer have evidence (for
   // example after a failed regeneration or a retention boundary). Fail closed
   // to Chat instead of opening a canvas that only says "nothing here".
@@ -253,8 +263,8 @@ export default function ChatPage() {
         attachmentCount: conversationAttachments().length,
         stepCount: state.taskSteps.length,
         hasRun: Boolean(liveRunId()),
-        workStepCount: state.taskSteps.filter(isWorkStep).length,
-        toolCallCount: state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
+        workStepCount: workStepCount(),
+        toolCallCount: toolCallCount(),
       } satisfies ChatSurfaceAvailability,
     }),
     ({ tab, availability }) => {
@@ -296,8 +306,8 @@ export default function ChatPage() {
         attachmentCount: conversationAttachments().length,
         stepCount: state.taskSteps.length,
         hasRun: Boolean(liveRunId()),
-        workStepCount: state.taskSteps.filter(isWorkStep).length,
-        toolCallCount: state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
+        workStepCount: workStepCount(),
+        toolCallCount: toolCallCount(),
       } satisfies ChatSurfaceAvailability,
     }),
     ({ threadId, availability }) => {
@@ -508,6 +518,8 @@ export default function ChatPage() {
       runAvailable={Boolean(liveRunId())}
       sourceCount={evidenceSources().length + (latestGrounding() ? 1 : 0)}
       stepCount={state.taskSteps.length}
+      workStepCount={workStepCount()}
+      toolCallCount={toolCallCount()}
       traceAvailable={Boolean(liveRunId())}
       onChange={setActiveTab}
     />
@@ -549,6 +561,8 @@ export default function ChatPage() {
             runAvailable={Boolean(liveRunId())}
             sourceCount={evidenceSources().length + (latestGrounding() ? 1 : 0)}
             stepCount={state.taskSteps.length}
+            workStepCount={workStepCount()}
+            toolCallCount={toolCallCount()}
             title={title()}
             traceAvailable={Boolean(liveRunId())}
             onChange={setActiveTab}
@@ -719,18 +733,22 @@ function ThreadVisibilityBanners(props: {
   temporary: () => boolean
   foreignOrigin: () => boolean
 }) {
+  const i18n = useI18n()
   return (
     <>
       <Show when={props.temporary()}>
         <div class="verevon-chat-temporary-banner" role="status">
           <EyeOff size={13} />
-          <span>Midlertidig samtale – lagres ikke i historikk eller minne.</span>
+          <span>{i18n.tr('Midlertidig samtale – lagres ikke i historikk eller minne.', 'Temporary conversation - not stored in history or memory.')}</span>
         </div>
       </Show>
       <Show when={props.foreignOrigin()}>
         <div class="verevon-chat-foreign-thread-banner" role="status">
           <EyeOff size={13} />
-          <span>Denne samtalen eies av en annen arbeidsflate og vises skrivebeskyttet.</span>
+          <span>{i18n.tr(
+            'Denne samtalen eies av en annen arbeidsflate og vises skrivebeskyttet.',
+            'This conversation belongs to another workspace and is shown read-only.',
+          )}</span>
         </div>
       </Show>
     </>

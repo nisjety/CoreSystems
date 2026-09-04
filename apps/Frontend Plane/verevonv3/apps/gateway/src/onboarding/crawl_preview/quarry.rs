@@ -1,5 +1,4 @@
 use anyhow::Result;
-use axum::response::sse::Event;
 use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::time::{sleep, Duration};
@@ -7,9 +6,7 @@ use tokio::time::{sleep, Duration};
 use crate::{
     config::AppState,
     envelope::unwrap_data,
-    onboarding::crawl_preview::{
-        normalize::normalize_quarry_payload, sse::sse_json, types::CrawlPayload,
-    },
+    onboarding::crawl_preview::{normalize::normalize_quarry_payload, types::CrawlPayload},
 };
 
 /// All onboarding crawl traffic goes through `quarry-edge` — the only
@@ -23,11 +20,15 @@ fn bearer(request: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::Req
     }
 }
 
+/// Returns the seed page's normalized payloads (snippets, branding, …) in
+/// stream order. The handler — not this function — serializes them to SSE,
+/// so it can run the same snippet ledger over seed and live events and let
+/// the richer `page_extracted` snippet update the `page_fetched` card.
 pub(super) async fn forward_seed_scrape(
     state: &AppState,
     token: Option<&str>,
     url: &str,
-) -> Result<Vec<Event>> {
+) -> Result<Vec<CrawlPayload>> {
     let response = bearer(
         state
             .client
@@ -62,14 +63,38 @@ pub(super) async fn forward_seed_scrape(
         }
         let Some(data) = data else { continue };
         let json = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!({}));
-        if let Some(payload) = normalize_quarry_payload(json, event_name, "seed") {
-            out.push(sse_json(
-                &payload.kind,
-                payload.value.unwrap_or_else(|| json!({})),
-            ));
+        let (event_type, payload) = seed_event(json, event_name);
+        if let Some(payload) = normalize_quarry_payload(payload, &event_type, "seed") {
+            out.push(payload);
         }
     }
     Ok(out)
+}
+
+/// `/v1/scrape/stream` frames carry quarry-core's full `Event` envelope as
+/// their data (`{ event_id, run_id, type, ts, seq, payload, .. }`) -- the same
+/// shape `/v1/jobs/{id}/events` returns and `poll_crawl_events` unwraps. This
+/// path used to hand the envelope itself to `normalize_quarry_payload`, which
+/// reads `url` / `branding` at the top level, so every seed-scrape event (the
+/// seed page's `page_fetched` and its `branding_extracted`) was silently
+/// dropped and only the crawl job's own events ever reached the wizard.
+/// Prefer the envelope's `type` when the SSE `event:` line is absent or the
+/// default `message`; a frame without a `payload` object is used as-is.
+fn seed_event(frame: Value, event_name: &str) -> (String, Value) {
+    let event_type = match event_name {
+        "" | "message" => frame
+            .get("type")
+            .or_else(|| frame.get("event_type"))
+            .and_then(Value::as_str)
+            .unwrap_or(event_name)
+            .to_owned(),
+        named => named.to_owned(),
+    };
+    let payload = match frame.get("payload") {
+        Some(payload) if payload.is_object() => payload.clone(),
+        _ => frame,
+    };
+    (event_type, payload)
 }
 
 pub(super) async fn create_crawl_job(
@@ -111,6 +136,18 @@ pub(super) async fn create_crawl_job(
     Ok(job_id.to_owned())
 }
 
+/// Ceiling on how long the preview follows a crawl job's event log.
+///
+/// This is a CEILING, not a dwell time: the loop returns the moment a
+/// terminal event arrives, and the wizard lets the user move on while the
+/// stream is still open. The previous 18s routinely expired before the crawl
+/// emitted anything — the orchestrator's dispatcher polls for accepted jobs,
+/// Temporal then has to schedule `CrawlJobWF`, and only then does the first
+/// page get fetched and transformed. Measured live against aquatiq.com, the
+/// first `page_extracted` landed ~21s after handoff, so the stream closed
+/// three seconds early and the wizard showed nothing but the seed page.
+const CRAWL_POLL_BUDGET_MS: i64 = 45_000;
+
 /// Poll quarry-edge's job-event log and forward each normalized event to `tx`
 /// the moment it is read, so the onboarding SSE streams live progress instead
 /// of buffering the whole crawl and emitting it at the end. Edge serves the
@@ -131,7 +168,7 @@ pub(super) async fn poll_crawl_events(
     let started_at = Utc::now().timestamp_millis();
 
     loop {
-        if Utc::now().timestamp_millis() - started_at > 18_000 {
+        if Utc::now().timestamp_millis() - started_at > CRAWL_POLL_BUDGET_MS {
             break;
         }
         let response = bearer(
@@ -195,4 +232,41 @@ pub(super) async fn poll_crawl_events(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod seed_event_tests {
+    use super::seed_event;
+    use serde_json::json;
+
+    // Regression: the seed scrape's SSE data is the whole quarry-core Event
+    // envelope. Passing it through unchanged made the normalizer look for
+    // `url` on the envelope, so the seed page never produced a snippet or
+    // branding for the onboarding wizard.
+    #[test]
+    fn unwraps_the_event_envelope_payload() {
+        let frame = json!({
+            "event_id": "evt_1", "run_id": "run_1", "type": "page_fetched", "seq": 3,
+            "payload": { "url": "https://aquatiq.com/", "status": 200 },
+        });
+        let (event_type, payload) = seed_event(frame, "page_fetched");
+        assert_eq!(event_type, "page_fetched");
+        assert_eq!(payload["url"], "https://aquatiq.com/");
+        assert!(payload.get("event_id").is_none());
+    }
+
+    #[test]
+    fn falls_back_to_the_envelope_type_for_unnamed_frames() {
+        let frame = json!({ "type": "branding_extracted", "payload": { "branding": {} } });
+        let (event_type, _) = seed_event(frame, "message");
+        assert_eq!(event_type, "branding_extracted");
+    }
+
+    #[test]
+    fn keeps_flat_frames_and_named_events_as_is() {
+        let frame = json!({ "url": "https://aquatiq.com/", "title": "Aquatiq" });
+        let (event_type, payload) = seed_event(frame.clone(), "page_fetched");
+        assert_eq!(event_type, "page_fetched");
+        assert_eq!(payload, frame);
+    }
 }

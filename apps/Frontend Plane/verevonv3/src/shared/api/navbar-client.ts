@@ -60,6 +60,10 @@ export type NavbarPayload = {
   calendar: CalendarState
   notifications: NotificationPayload
   plan?: string | null
+  /** billing-core `subscription_state === "trialing"` with a live trial end;
+   * `plan` is then the elevated trial tier ("pro"), not something paid for. */
+  planTrial?: boolean | null
+  trialEndsAt?: string | null
   profile: NavbarProfile | null
   theme: ThemePayload | null
 }

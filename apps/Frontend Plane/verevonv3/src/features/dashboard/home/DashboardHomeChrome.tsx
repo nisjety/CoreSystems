@@ -10,13 +10,14 @@ import { useI18n } from '@/shared/i18n'
 export function DashboardHomeHeader(props: {
   compact: boolean
   planLabel: string
+  planTrial?: boolean
   title: string
 }) {
   return (
     <section class={props.compact ? 'verevon-home-header verevon-home-band verevon-home-band-top verevon-fade-up px-4 items-start pt-8 pb-3' : 'verevon-home-header verevon-home-band verevon-home-band-top verevon-fade-up px-4'}>
       <div class="dashboard-home__center">
         <div class={props.compact ? 'verevon-home-plan w-full max-w-[720px] opacity-55' : 'verevon-home-plan w-full max-w-[720px]'}>
-          <DashboardPlanBadge planLabel={props.planLabel} />
+          <DashboardPlanBadge planLabel={props.planLabel} planTrial={props.planTrial} />
         </div>
 
         <h1 class={props.compact ? 'verevon-home-title verevon-home-title--compact' : 'verevon-home-title'}>

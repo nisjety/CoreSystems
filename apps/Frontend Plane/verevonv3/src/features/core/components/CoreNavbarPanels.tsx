@@ -15,7 +15,7 @@ import {
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch, type Component } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { Dynamic } from '@solidjs/web'
-import type { VerevonRoute, WorkspaceIdentity } from '@/features/core/lib/shell-data'
+import { formatPlanBadge, type VerevonRoute, type WorkspaceIdentity } from '@/features/core/lib/shell-data'
 import {
   createNavbarCalendarEvent,
   createNavbarCalendarNote,
@@ -45,6 +45,7 @@ export function CoreNavbarPanel(props: {
   workspace: WorkspaceIdentity
 }) {
   const session = getSession()
+  const i18n = useI18n()
   const notificationPayload = () => props.navbarData?.notifications ?? emptyNotifications
   const calendarState = () => props.navbarData?.calendar ?? emptyCalendar
   const handleOpenNotification = (id: string) => {
@@ -82,7 +83,7 @@ export function CoreNavbarPanel(props: {
       <Match when={props.panel === 'profile'}>
         <ProfileDropdown
           canManageWorkspace={shouldShowWorkspaceAdminNavigation(session)}
-          planLabel={props.workspace.plan}
+          planLabel={formatPlanBadge(props.workspace.plan, props.workspace.planTrial, i18n.tr)}
           profile={{
             email: props.navbarData?.profile?.email ?? props.workspace.userEmail,
             name: props.navbarData?.profile?.name ?? props.workspace.userName,

@@ -39,6 +39,7 @@ import {
   groupTaskSteps,
   hostname,
 } from './chat-media-markdown'
+import { isWorkStep } from './chat-normalizers'
 import {
   type AgentTaskStep,
   type ChatArtifact,
@@ -73,6 +74,10 @@ export function ChatHeader(props: {
   runAvailable?: boolean
   sourceCount: number
   stepCount: number
+  /** Steps that are work rather than bookkeeping; gates the Work destination. */
+  workStepCount?: number
+  /** Tool calls the model actually made; gates the Work destination. */
+  toolCallCount?: number
   title: string
   traceAvailable?: boolean
   onChange: (tab: ChatTab) => void
@@ -91,6 +96,8 @@ export function ChatHeader(props: {
     // attachment offered Output in the tabs but never in this dropdown.
     attachmentCount: props.attachmentCount ?? 0,
     stepCount: props.stepCount,
+    workStepCount: props.workStepCount,
+    toolCallCount: props.toolCallCount,
     hasRun: Boolean(props.runAvailable || props.traceAvailable),
   })
   const workSurfaces = () => availableChatSurfaces(availability()).filter((surface) => surface.id !== 'chat')
@@ -207,6 +214,10 @@ export function ChatTabs(props: {
   runAvailable?: boolean
   sourceCount: number
   stepCount: number
+  /** Steps that are work rather than bookkeeping; gates the Work destination. */
+  workStepCount?: number
+  /** Tool calls the model actually made; gates the Work destination. */
+  toolCallCount?: number
   traceAvailable?: boolean
   includeChat?: boolean
   onChange: (tab: ChatTab) => void
@@ -218,6 +229,8 @@ export function ChatTabs(props: {
     artifactCount: props.artifactCount,
     attachmentCount: 0,
     stepCount: props.stepCount,
+    workStepCount: props.workStepCount,
+    toolCallCount: props.toolCallCount,
     hasRun: Boolean(props.runAvailable || props.traceAvailable),
   })
   const tabs = (): Array<{ id: ChatTab; label: string; icon: IconComponent; count: number }> => (
@@ -233,11 +246,13 @@ export function ChatTabs(props: {
               ? i18n.tr('Spor', 'Trace')
               : i18n.tr('Samtale', 'Chat'),
       icon: surface.icon,
+      // The Work badge counts work, not the lifecycle rows that sit behind the
+      // technical-activity disclosure (audit items 19 and 27).
       count: surface.id === 'sources'
         ? props.sourceCount
         : surface.id === 'artifacts'
           ? props.artifactCount
-          : surface.id === 'steps' ? props.stepCount : 0,
+          : surface.id === 'steps' ? (props.workStepCount ?? props.stepCount) : 0,
     }))
   )
 
@@ -304,14 +319,15 @@ export function EmptyPanel(props: { icon: JSX.Element; title: string; subtitle: 
 }
 
 export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null; sources: EvidenceSource[] }) {
+  const i18n = useI18n()
   return (
     <Show
       when={props.sources.length > 0 || props.grounding}
       fallback={(
         <EmptyPanel
           icon={<Link2 size={20} />}
-          title="Ingen kilder ennå"
-          subtitle="Interne kunnskapskilder og websøk dukker opp her når Verevon bruker dem i svaret."
+          title={i18n.tr('Ingen kilder ennå', 'No sources yet')}
+          subtitle={i18n.tr('Interne kunnskapskilder og websøk dukker opp her når Verevon bruker dem i svaret.', 'Internal knowledge sources and web results appear here once Verevon uses them in an answer.')}
         />
       )}
     >
@@ -385,6 +401,7 @@ export function GroundingGraphSummary(props: { compact?: boolean; graph: ChatGro
 }
 
 export function KnowledgeSourceCard(props: { source: ChatGroundingSource; index: number }) {
+  const i18n = useI18n()
   return (
     <article class="verevon-chat-source-card">
       <div class="verevon-chat-source-card__meta">
@@ -397,7 +414,7 @@ export function KnowledgeSourceCard(props: { source: ChatGroundingSource; index:
       <a
         href={props.source.href}
         link={props.source.href.startsWith('/') ? true : undefined}
-        aria-label={`Åpne ${props.source.title} i Kunnskap`}
+        aria-label={i18n.tr(`Åpne ${props.source.title} i Kunnskap`, `Open ${props.source.title} in Knowledge`)}
       >
         Open knowledge <ChevronRight size={14} />
       </a>
@@ -435,6 +452,7 @@ export function ContextWindowPanel(props: {
   loading: boolean
   failed: boolean
 }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const used = () => props.context?.estimatedTokens ?? 0
   const budget = () => props.context?.budgetTokens ?? 0
@@ -488,7 +506,7 @@ export function ContextWindowPanel(props: {
             </p>
           </Match>
           <Match when={props.context?.segments.length === 0}>
-            <p class="verevon-chat-context-window__note">Ingen segmenter rapportert.</p>
+            <p class="verevon-chat-context-window__note">{i18n.tr('Ingen segmenter rapportert.', 'No segments reported.')}</p>
           </Match>
           <Match when={props.context}>
             {(context) => (
@@ -536,8 +554,27 @@ export function StepsPanel(props: {
   screen?: ChatArtifact | null
   onStopTask: () => void
 }) {
+  const i18n = useI18n()
   const activeTask = () => props.steps.some((step) => step.status === 'active' || step.status === 'waiting')
   const sections = createMemo(() => groupTaskSteps(props.steps))
+  // UX spec section 7, question 1: what is Verevon doing now, in plain language.
+  const waitingStep = () => props.steps.find((step) => step.status === 'waiting')
+  const activeStep = () => props.steps.find((step) => step.status === 'active')
+  const failedStep = () => [...props.steps].reverse().find((step) => step.status === 'error')
+  const statusLine = () => {
+    if (waitingStep()) return i18n.tr('Venter på deg', 'Waiting for you')
+    const active = activeStep()
+    if (active) return active.title
+    if (failedStep()) return i18n.tr('Siste steg feilet', 'The last step failed')
+    if (props.steps.length > 0) return i18n.tr('Ferdig', 'Finished')
+    return i18n.tr('Ingen aktivitet nå', 'Nothing running')
+  }
+  // The timeline shows work; lifecycle rows go behind the disclosure. Sections
+  // with nothing but bookkeeping disappear rather than render an empty group.
+  const workSections = createMemo(() => sections()
+    .map((section) => ({ ...section, steps: section.steps.filter(isWorkStep) }))
+    .filter((section) => section.steps.length > 0))
+  const bookkeepingSteps = createMemo(() => props.steps.filter((step) => !isWorkStep(step)))
   const latestUsage = createMemo(() => {
     const events = props.events ?? []
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -563,13 +600,30 @@ export function StepsPanel(props: {
       fallback={(
         <EmptyPanel
           icon={<ListChecks size={20} />}
-          title="Ingen steg ennå"
-          subtitle="Agentens arbeidssteg vises her mens en oppgave kjører."
+          title={i18n.tr('Ingen steg ennå', 'No steps yet')}
+          subtitle={i18n.tr(
+            'Agentens arbeidssteg vises her mens en oppgave kjører.',
+            "The agent's work steps appear here while a task runs.",
+          )}
         />
       )}
     >
       <div class="verevon-chat-panel">
         <div class="verevon-chat-panel__inner">
+          {/* UX spec section 7 order: what is happening now, what is left, does
+              Verevon need me, what happened underneath. The header used to read
+              "Agent activity / Live oppgavestatus" -- an English heading over a
+              Norwegian subtitle -- above run telemetry and a flat event list. */}
+          <div class="verevon-chat-steps-header">
+            <div>
+              <h2>{i18n.tr('Arbeid', 'Work')}</h2>
+              <p>{statusLine()}</p>
+            </div>
+            <button type="button" disabled={!activeTask()} onClick={() => props.onStopTask()}>
+              <Square size={12} />
+              {i18n.tr('Stopp', 'Stop')}
+            </button>
+          </div>
           {/* Step count drives the plan refetch: session-core mirrors each
               completed execution step into the run's plan, so a new task step
               is the cheapest available signal that the durable plan has more
@@ -579,43 +633,17 @@ export function StepsPanel(props: {
             threadId={props.threadId}
             progressKey={`${props.steps.length}:${props.steps.filter((step) => step.status !== 'active' && step.status !== 'waiting').length}`}
           />
-          {/* The proof bundle (receipts, approvals) lives in Trace, which is
-              the audit record. It was mounted here as well, fetching the same
-              bundle twice and splitting one audit trail across two tabs. */}
-          <div class="verevon-chat-steps-header">
-            <div>
-              <h2>Agent activity</h2>
-              <p>Live oppgavestatus</p>
-            </div>
-            <button type="button" disabled={!activeTask()} onClick={() => props.onStopTask()}>
-              <Square size={12} />
-              Stopp
-            </button>
-          </div>
-          <Show when={latestUsage()}>
-            {(usage) => {
-              const current = usage()
-              if (!current) return null
-              const tokensPerSecond = () => {
-                const outputTokens = current.outputTokens
-                const latencyMs = current.latencyMs
-                return outputTokens != null && latencyMs != null && latencyMs > 0
-                  ? Math.round((outputTokens / latencyMs) * 1000)
-                  : null
-              }
-              const cacheTotal = () => {
-                return (current.cacheReadTokens ?? 0) + (current.cacheWriteTokens ?? 0)
-              }
-              return (
-                <div class="verevon-chat-telemetry" aria-label="Kjøringsmålinger">
-                  <Metric label="Output" value={`${current.outputTokens ?? '—'} tokens`} />
-                  <Metric label="Tokens/sec" value={tokensPerSecond() != null ? String(tokensPerSecond()) : '—'} />
-                  <Show when={cacheTotal() > 0}>
-                    <Metric label="Prompt cache" value={`${current.cacheReadTokens ?? 0} read`} />
-                  </Show>
-                </div>
-              )
-            }}
+          {/* Question 3: does Verevon need me. A waiting step is the typed pause
+              the run reported; the panel never invents one. The proof bundle
+              (receipts, approvals) stays in Trace, which is the audit record. */}
+          <Show when={waitingStep()}>
+            {(step) => (
+              <section class="verevon-chat-steps-attention" role="note">
+                <strong>{i18n.tr('Verevon venter på deg', 'Verevon needs you')}</strong>
+                <p>{step().title}</p>
+                <Show when={step().detail}><p>{step().detail}</p></Show>
+              </section>
+            )}
           </Show>
           <Show when={props.screen}>
             {(screen) => (
@@ -626,7 +654,7 @@ export function StepsPanel(props: {
             )}
           </Show>
           <div class="verevon-chat-step-groups">
-            <For each={sections()}>
+            <For each={workSections()}>
               {(section) => (
                 <section class={{ 'verevon-chat-step-group': true, 'is-collapsed': isCollapsed(section.id) }}>
                   <button
@@ -656,25 +684,78 @@ export function StepsPanel(props: {
             </For>
             <Show when={(props.toolCalls?.length ?? 0) > 0}>
               <section class="verevon-chat-steps-tools">
-                <h3>{'Verktøykall'}</h3>
+                <h3>{i18n.tr('Verktøykall', 'Tool calls')}</h3>
                 <For each={props.toolCalls ?? []}>
                   {(call) => <ToolCallCard call={call} />}
                 </For>
               </section>
             </Show>
-            <Show when={(props.events?.length ?? 0) > 0}>
-              <details class="verevon-chat-event-log">
-                <summary>Hendelsesstrøm · {props.events?.length ?? 0}</summary>
-                <ol>
-                  <For each={props.events ?? []}>
-                    {(event) => (
-                      <li>
-                        <span>{uiEventLabel(event)}</span>
-                        <time>{formatTime(event.at)}</time>
-                      </li>
-                    )}
-                  </For>
-                </ol>
+            {/* Question 4: what happened underneath. Run telemetry, the lifecycle
+                rows and the raw event stream in one collapsed disclosure, the
+                same shape the live rail uses -- not four peers of the work
+                timeline. Closed by default; the reader opts in. */}
+            <Show when={bookkeepingSteps().length > 0 || latestUsage() || (props.events?.length ?? 0) > 0}>
+              <details class="verevon-chat-run-activity-disclosure">
+                <summary>
+                  <span>{i18n.tr('Teknisk aktivitet', 'Technical activity')}</span>
+                  <em>{bookkeepingSteps().length + (props.events?.length ?? 0)}</em>
+                </summary>
+                <Show when={latestUsage()}>
+                  {(usage) => {
+                    const current = usage()
+                    if (!current) return null
+                    const tokensPerSecond = () => {
+                      const outputTokens = current.outputTokens
+                      const latencyMs = current.latencyMs
+                      return outputTokens != null && latencyMs != null && latencyMs > 0
+                        ? Math.round((outputTokens / latencyMs) * 1000)
+                        : null
+                    }
+                    const cacheTotal = () => {
+                      return (current.cacheReadTokens ?? 0) + (current.cacheWriteTokens ?? 0)
+                    }
+                    return (
+                      <div class="verevon-chat-telemetry" aria-label={i18n.tr('Kjøringsmålinger', 'Run metrics')}>
+                        <Metric label="Output" value={`${current.outputTokens ?? '—'} tokens`} />
+                        <Metric label="Tokens/sec" value={tokensPerSecond() != null ? String(tokensPerSecond()) : '—'} />
+                        <Show when={cacheTotal() > 0}>
+                          <Metric label="Prompt cache" value={`${current.cacheReadTokens ?? 0} read`} />
+                        </Show>
+                      </div>
+                    )
+                  }}
+                </Show>
+                <Show when={bookkeepingSteps().length > 0}>
+                  <section
+                    class="verevon-chat-run-activity"
+                    aria-label={i18n.tr('Livsløpssteg', 'Lifecycle steps')}
+                  >
+                    <For each={bookkeepingSteps()}>
+                      {(step) => (
+                        <div class="verevon-chat-run-activity__row" data-status={step.status}>
+                          <strong>{step.title}</strong>
+                          <Show when={step.detail}><span>{step.detail}</span></Show>
+                        </div>
+                      )}
+                    </For>
+                  </section>
+                </Show>
+                <Show when={(props.events?.length ?? 0) > 0}>
+                  {/* `.verevon-chat-event-log ol` is scoped to that ancestor class,
+                      so the wrapper stays and the list keeps its existing styling. */}
+                  <div class="verevon-chat-event-log">
+                    <ol>
+                      <For each={props.events ?? []}>
+                        {(event) => (
+                          <li>
+                            <span>{uiEventLabel(event)}</span>
+                            <time>{formatTime(event.at)}</time>
+                          </li>
+                        )}
+                      </For>
+                    </ol>
+                  </div>
+                </Show>
               </details>
             </Show>
           </div>
@@ -728,6 +809,7 @@ export function RunPlanPanel(props: {
   /** Minimum gap between progress-driven refetches. Tests shorten it. */
   refreshIntervalMs?: number
 }) {
+  const i18n = useI18n()
   const keySeparator = '\u0000'
   // Keyed on the ids only. A stable key means progress never supersedes the
   // in-flight fetch, so the initial load always lands.
@@ -845,11 +927,11 @@ export function RunPlanPanel(props: {
 
   return (
     <Show when={source()}>
-      <section class="verevon-chat-run-plan" aria-label="Kjøringsplan">
+      <section class="verevon-chat-run-plan" aria-label={i18n.tr('Kjøringsplan', 'Run plan')}>
         <div class="verevon-chat-run-plan__header">
           <div>
             <h3>Plan</h3>
-            <p>Planen som er lagret av arbeidskjøringen.</p>
+            <p>{i18n.tr('Planen som er lagret av arbeidskjøringen.', 'The plan stored by the work run.')}</p>
           </div>
           <Show when={data()?.plans.length}>
             <span class="verevon-chat-run-plan__count">{data()?.plans.length}</span>
@@ -861,7 +943,7 @@ export function RunPlanPanel(props: {
         </Show>
 
         <Show when={!snapshot.loading && snapshot.error && !data()}>
-          <p class="verevon-chat-run-plan__note">Klarte ikke å hente kjøringsplanen.</p>
+          <p class="verevon-chat-run-plan__note">{i18n.tr('Klarte ikke å hente kjøringsplanen.', 'Could not load the run plan.')}</p>
         </Show>
 
         <Show when={!snapshot.loading && data() && data()!.plans.length === 0 && data()!.todos.length === 0 && lineageEdges().length === 0}>
@@ -973,6 +1055,7 @@ export function RunPlanPanel(props: {
  * distinction between unavailable, unproven, and verified execution.
  */
 export function RunProofPanel(props: { runId?: string | null }) {
+  const i18n = useI18n()
   const runId = () => props.runId?.trim() || null
   const [proof, proofActions] = createResource(runId, async (id: string): Promise<ProofBundle | null> =>
     getRunProofBundle(id),
@@ -999,7 +1082,7 @@ export function RunProofPanel(props: { runId?: string | null }) {
 
   return (
     <Show when={runId()}>
-      <section class="verevon-run-panel verevon-run-proof verevon-chat-run-proof" aria-label="Kjøringskvittering">
+      <section class="verevon-run-panel verevon-run-proof verevon-chat-run-proof" aria-label={i18n.tr('Kjøringskvittering', 'Run receipt')}>
         <div class="verevon-run-panel__head">
           <span class="verevon-run-panel__eyebrow">
             <ShieldCheck size={14} strokeWidth={2.1} /> Kvittering
@@ -1011,13 +1094,13 @@ export function RunProofPanel(props: { runId?: string | null }) {
         </div>
 
         <Show when={proof.loading}>
-          <p class="verevon-run-proof__note">Henter kjøringskvittering …</p>
+          <p class="verevon-run-proof__note">{i18n.tr('Henter kjøringskvittering …', 'Loading the run receipt …')}</p>
         </Show>
         <Show when={proof.error != null}>
-          <p class="verevon-run-proof__note">Kvitteringen kunne ikke hentes akkurat nå.</p>
+          <p class="verevon-run-proof__note">{i18n.tr('Kvitteringen kunne ikke hentes akkurat nå.', 'The receipt could not be loaded right now.')}</p>
         </Show>
         <Show when={!proof.loading && proof.error == null && !proof()}>
-          <p class="verevon-run-proof__note">Ingen varig kvittering er registrert ennå.</p>
+          <p class="verevon-run-proof__note">{i18n.tr('Ingen varig kvittering er registrert ennå.', 'No durable receipt has been recorded yet.')}</p>
         </Show>
         <Show when={proof()}>
           {(bundle) => (
@@ -1026,7 +1109,7 @@ export function RunProofPanel(props: { runId?: string | null }) {
                 {(run) => <p class="verevon-run-proof__goal">{run().goal || 'Arbeidskjøring'}<Show when={run().status}><span class="verevon-run-proof__agent"> · {run().status}</span></Show></p>}
               </Show>
               <div class="verevon-chat-run-proof__stats">
-                <Metric label="Godkjenninger" value={String(bundle().approvals.length)} />
+                <Metric label={i18n.tr('Godkjenninger', 'Approvals')} value={String(bundle().approvals.length)} />
                 <Metric label="Verifisert" value={String(verified())} />
                 <Show when={effectClass()}>
                   <Metric label="Effektklasse" value={effectClassLabel()} />
@@ -1036,7 +1119,7 @@ export function RunProofPanel(props: { runId?: string | null }) {
                 </Show>
               </div>
               <Show when={bundle().approvals.length > 0}>
-                <div class="verevon-run-proof__approvals verevon-chat-run-proof__approvals" aria-label="Godkjenninger og kvitteringer">
+                <div class="verevon-run-proof__approvals verevon-chat-run-proof__approvals" aria-label={i18n.tr('Godkjenninger og kvitteringer', 'Approvals and receipts')}>
                   <For each={bundle().approvals}>
                     {(approval) => <ChatProofApproval approval={approval} />}
                   </For>
@@ -1054,6 +1137,7 @@ export function RunProofPanel(props: { runId?: string | null }) {
 }
 
 function ChatProofApproval(props: { approval: ProofApproval }) {
+  const i18n = useI18n()
   const execution = () => props.approval.execution
   const outcome = () => execution()?.outcome
   const verification = () => outcome()?.verification
@@ -1076,7 +1160,7 @@ function ChatProofApproval(props: { approval: ProofApproval }) {
           <Show when={execution()?.receiptId}>
             {(receipt) => (
               <div class="verevon-run-proof__receipt-row">
-                <dt>Kvittering</dt>
+                <dt>{i18n.tr('Kvittering', 'Receipt')}</dt>
                 <dd><code title={receipt()}>{shortReceipt(receipt())}</code></dd>
               </div>
             )}
@@ -1114,10 +1198,11 @@ export function TracePanel(props: {
   replayTruncated?: boolean
   runId?: string | null
 }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-trace-panel">
       <RunProofPanel runId={props.runId} />
-      <section class="verevon-chat-trace-log" aria-label="Trace-hendelser">
+      <section class="verevon-chat-trace-log" aria-label={i18n.tr('Trace-hendelser', 'Trace events')}>
         <header>
           <div>
             <h2>Trace</h2>
@@ -1140,7 +1225,7 @@ export function TracePanel(props: {
         </Show>
         <Show
           when={props.events.length > 0}
-          fallback={<p class="verevon-chat-trace-log__empty">Ingen hendelser er registrert ennå.</p>}
+          fallback={<p class="verevon-chat-trace-log__empty">{i18n.tr('Ingen hendelser er registrert ennå.', 'No events have been recorded yet.')}</p>}
         >
           <ol>
             <For each={props.events}>

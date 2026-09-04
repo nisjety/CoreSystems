@@ -1,5 +1,6 @@
 import { requestJson } from '@/shared/api/http'
 import { withDevActor } from '@/features/onboarding/lib/api/actor'
+import { connectBundlesForSources } from '@/shared/integrations/connect-bundles'
 import type { ActionActor } from '@/features/onboarding/lib/api/contracts'
 import {
   cleanupSourceSchema,
@@ -23,7 +24,7 @@ export async function startConnectSession(input: {
       orgId: input.orgId,
       provider: input.provider,
       selectedSources: input.selectedSources,
-      bundles: ['onboarding'],
+      bundles: connectBundlesForSources(input.provider, input.selectedSources),
     }, input.actor)),
   }), endpoint)
 }

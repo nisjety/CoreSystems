@@ -120,6 +120,7 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         searxng_url: None,
         model_plane_url: None,
         model_plane_token: None,
+        page_title_enricher: None,
         service_token_provider: None,
         answer_pipeline: None,
         local_index: None,

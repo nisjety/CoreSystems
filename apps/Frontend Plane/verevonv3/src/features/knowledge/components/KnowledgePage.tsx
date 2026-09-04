@@ -45,6 +45,7 @@ import {
 } from '@/features/knowledge/components/knowledgeGraphHierarchy'
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
+import { connectBundlesForSources } from '@/shared/integrations/connect-bundles'
 import {
   knowledgeAddSourceRequested,
   knowledgeRequestedView,
@@ -628,7 +629,10 @@ export default function KnowledgePage() {
           method: 'POST',
           body: JSON.stringify({
             selectedSources: [...provider.sources],
-            bundles: ['onboarding'],
+            // Shared policy: the picked content sources decide the consent
+            // bundle (e.g. Google `knowledge` = drive.read, not the
+            // metadata-only `onboarding` preview this used to request).
+            bundles: connectBundlesForSources(provider.id, provider.sources),
           }),
         },
       )

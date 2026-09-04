@@ -46,7 +46,8 @@ the failure modes, and the dev/prod posture for the auth bypass.
        │   │ CrawlJobWF (Temporal workflow)                          │
        │   │  → emit run_started                                     │
        │   │  → loop frontier: runPage activity per URL              │
-       │   │  → emit page_fetched + branding_extracted per page      │
+       │   │  → emit page_fetched + branding_extracted               │
+       │   │    + page_extracted per page                            │
        │   │  → emit run_completed                                   │
        │   └──────────────────────────────┬──────────────────────────┘
        │                                  │
@@ -59,7 +60,8 @@ the failure modes, and the dev/prod posture for the auth bypass.
        │   │  → branding_rendered::extract: palette, favicon,        │
        │   │    logo_candidate, og_image, theme_color, font_family   │
        │   │  → returns RunPageResult{links, content_type, title,    │
-       │   │    branding}                                            │
+       │   │    branding, display_title, title_source, excerpt,      │
+       │   │    summary, word_count, lang, driver}                   │
        │   └──────────────────────────────┬──────────────────────────┘
        │                                  │
        │                workflow re-emits events via
@@ -80,6 +82,127 @@ the failure modes, and the dev/prod posture for the auth bypass.
          verevon's poll sees the events arrive and forwards them
          as SSE snippets + branding to the wizard.
 ```
+
+## `page_extracted` — real titles and text for the wizard
+
+`page_fetched` is emitted by `PageRunner` **before** the transform step and
+carries only `{url, status, duration_ms, content_type}` (plus `title` when the
+orchestrator re-emits it from `RunPageResult`). `artifact_written` carries
+artifact ids and byte counts. Neither can carry page text, which is why the
+wizard used to render "N utdrag samlet" over cards with an empty excerpt and
+the host name as title.
+
+`page_extracted` (`quarry_core::event::EventType::PageExtracted`,
+`quarrycontracts.EvtPageExtracted`, NATS token `page_extracted`) is emitted
+once per successfully transformed HTML page, **after** readability, markdown
+and metadata have run. It is additive: consumers that only know
+`page_fetched` keep working.
+
+```json
+{
+  "url": "https://aquatiq.com/",
+  "title": "Aquatiq – hygiene for matindustrien",
+  "title_source": "model",
+  "excerpt": "Vi leverer hygieneløsninger, kjemikalier og kompetanse til …",
+  "summary": "Leverandør av hygieneløsninger til matindustrien.",
+  "word_count": 412,
+  "lang": "no",
+  "driver": "browser",
+  "content_type": "text/html; charset=utf-8",
+  "fingerprint": "blake3:…"
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `title` | Display title after provenance resolution; never empty. |
+| `title_source` | `html` — cleaned `<title>`/`og:title`, judged specific. `model` — HTML title was missing/generic (empty, host name, "Home", "Untitled", "Forside", …) and Model Plane proposed a ≤ 60-char title. `host` — no usable title and no model result; host label. |
+| `excerpt` | First ~300 chars of the readable markdown, markup stripped, whitespace collapsed, cut on a word boundary. Empty when the page had no readable text. |
+| `summary` | One-sentence model summary. Only with `title_source: model`. |
+| `word_count` | Whitespace-token count of the plain text. |
+| `lang` | Detected/declared ISO-639-1 language. |
+| `driver` | Driver that actually served the fetch: `static`, `tls` or `browser` (from `FetchResponse.served_by`, so a static-primary run rescued by the browser says `browser`). |
+
+Paths to the wizard:
+
+* **Seed scrape** — `/v1/scrape/stream` streams the runtime's live event sink,
+  so the frame arrives as a full quarry-core `Event` envelope
+  (`{event_id, run_id, type: "page_extracted", ts, seq, payload, idempotency_key}`).
+* **Crawl job** — the orchestrator's `runPage` re-emits it from
+  `RunPageResult` (`display_title`, `title_source`, `excerpt`, `summary`,
+  `word_count`, `lang`, `driver`) into control's per-job event log, right
+  after `page_fetched`/`branding_extracted`, so `/v1/jobs/{id}/events` polls
+  see it. No event is emitted when the runtime supplied no extraction
+  (older edge, non-HTML response).
+* **Gateway** — `normalize.rs` maps both `page_fetched` and `page_extracted`
+  to a `snippet` (`title`, `titleSource`, `excerpt`, `summary`, `wordCount`,
+  `lang`, `driver`). A per-stream `SnippetLedger` keyed by URL forwards the
+  first snippet per page, forwards a richer one as an update (same id, so the
+  wizard replaces the card) and drops poorer duplicates; `pages` in the `done`
+  packet counts unique pages, seed included. The preview follows the job's
+  event log for at most `CRAWL_POLL_BUDGET_MS` (45s), a ceiling rather than a
+  dwell time: the stream ends as soon as a terminal event arrives. It was
+  18s, which could expire before the orchestrator had dispatched the workflow
+  and emitted its first page, leaving the wizard with only the seed page.
+
+### Model Plane title hop
+
+When `title_source` would be `host`, `PageRunner` asks Model Plane
+(`POST /v1/invoke`, the same client the AI formats use) for a clean title and
+a one-sentence summary from a ≤ 1 200-char slice of the excerpt.
+
+* **Model** — `QUARRY_EDGE__PAGE_TITLE_MODEL`, default `verevon-budget`. This
+  is a *routing alias* resolved by inference-core's intent layer (its
+  `RoutingPolicy.table.budget` ladder / `cheap_fallback`), i.e. the cheapest
+  capable model the Model Plane currently routes. Never set a vendor model
+  id here; use `verevon-budget`, `verevon-balance` or `verevon-genius`.
+* **Enable/disable** — `QUARRY_EDGE__PAGE_TITLE_ENRICH` (default `true`
+  whenever `QUARRY_EDGE__MODEL_PLANE_URL` is set). Without a Model Plane URL
+  the hop is simply absent and `title_source` stays `html`/`host`.
+* **Guards** — time-boxed at 2 s, at most 3 concurrent calls, a rolling cap
+  of 600 calls/hour per edge process, results cached by content
+  fingerprint (re-crawls of an unchanged page never pay twice), reply must
+  be JSON with a non-generic ≤ 60-char title or it is discarded. Every
+  failure degrades to `title_source: host`; the page never fails.
+* **ZDR** — skipped when the request is `zdr: true` or the privacy
+  classification is `zdr_ephemeral` / `credential_or_secret`, and nothing is
+  cached for such runs. `page_extracted` itself goes through
+  `EventSink::emit_for_zdr`, so under ZDR it reaches only already-connected
+  live subscribers and never the durable publisher or NATS. Quarry only
+  *proposes*/validates; Model Plane never sees the HTML, only the excerpt.
+
+### JS-shell pages (aquatiq.com)
+
+A page can trip every shell marker (`__NEXT_DATA__`, `_next/static`, dozens
+of `<script>` blocks, >20 KB) and still be fully server-rendered.
+aquatiq.com is exactly that: ~220 KB of HTML carrying ~4.8k characters of
+real text. The heuristic used to escalate it anyway, costing a browser
+session plus a hydration settle per page and returning no more text than the
+static body already had. `is_js_shell_needing_browser` now also requires the
+body to expose fewer than `SHELL_MAX_TEXT_CHARS` (2 000) visible characters,
+so a server-rendered page is fetched once and a 4-page preview completes in
+~10s instead of outliving the gateway's event-poll ceiling.
+
+For pages that ARE content-less shells, three fixes make the escalation
+actually produce text:
+
+* `BrowserDriverAdapter` now waits for hydration when no `wait_for_selector`
+  was given and the first snapshot still looks like a shell (scripts present,
+  < 600 visible chars): it re-snapshots every 300 ms until the text stops
+  growing or `QUARRY_BROWSER_SETTLE_MS` (default 3 500) elapses.
+* `FallbackDriver` keeps the best shell response it saw; if the browser
+  fails, or renders no more visible text than the shell, it returns the
+  shell (title, links and metadata are still extractable) instead of an
+  error or an emptier body.
+* A non-browser fallback that returns an unfollowed 3xx (the TLS-profile
+  driver never follows redirects — each hop needs its own SSRF/DNS
+  preflight, which only the static driver performs) or less visible text
+  than the shell no longer wins: the chain keeps rotating towards the
+  browser. This was the actual source of the empty excerpts: static
+  followed `aquatiq.com → www.aquatiq.com` into the shell, TLS answered
+  with a 44-char "Redirecting (308)" body, and that body was extracted. Both decisions are logged at `info`/`warn`
+  (`browser hydration settle`, `browser fallback rendered the JS shell`,
+  `… keeping the static response`).
 
 ## Services + ports
 

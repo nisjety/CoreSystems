@@ -2,7 +2,7 @@
 
 import { createRouter, memoryHistory } from '@solidjs/router'
 import { fireEvent, render, screen } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // Coverage for the mid-run submit opt-in. The regression this pins: the chat
@@ -58,6 +58,10 @@ function renderComposer(allowMidRunSubmit?: boolean) {
 function typeAndSubmit(text: string) {
   const textbox = screen.getByRole('textbox')
   fireEvent.input(textbox, { target: { value: text } })
+  // Solid v2 schedules signal writes: `onMessageChange` has run, but the
+  // composer's `message` prop (and so `hasContent`) only updates after a flush.
+  // Without it the submit guard sees an empty message and swallows the send.
+  flush()
   const form = textbox.closest('form')
   if (!form) throw new Error('composer form not found')
   fireEvent.submit(form)

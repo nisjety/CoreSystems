@@ -41,6 +41,20 @@ ROOT_ENV="$CORE_ROOT/.env"
 DATA_ENV="$CORE_ROOT/apps/Data Plane v2/.env"
 CONTROL_ENV="$CORE_ROOT/apps/Control Plane/.env"
 INGESTION_ENV="$CORE_ROOT/apps/Ingestion Plane/.env"
+# These plane-level files are this script's own LEDGER of shared secrets: the
+# running stacks read `.env.generated-secrets` and each `<core>/.env`, and this
+# script syncs outward into them. Do NOT "fix" the paths below by repointing
+# them at `.env.generated-secrets` — measured 2026-09-04 with --dry-run on a
+# live machine: targeting the ledger reports 21 pending changes (all outbound
+# syncs into Data Plane v2 / Model deploy / verevonv3), whereas repointing to
+# `.env.generated-secrets` reports 62, because those files are sparse (7-8 keys
+# for Ingestion/Application) so every ledger-owned secret becomes a fresh MINT
+# — silently rotating credentials the fleet still authenticates with.
+#
+# If all three are absent the guard below refuses every run: on this machine
+# they had been renamed to `.env.bootstrap-orphan`. Restore those, do not
+# repoint.
+#
 # Ingestion Plane retired a shared plane-level .env for runtime purposes
 # (2026-07-17, see run-ingestion-plane.sh's own header comment): each core
 # owns its own <core>/.env, injected per-service via compose's `env_file:`.
@@ -68,7 +82,13 @@ ENV_FILES=(
 LOCK_DIR="$CORE_ROOT/.bootstrap-runtime-environment.lock"
 LOCK_HELD=false
 
-log() { printf '[runtime-env] %s\n' "$*"; }
+# Logs go to STDERR, never stdout. `ensure_secret`/`ensure_value` return the
+# secret by printing it, and every caller captures that with `$(...)` — so a
+# log written to stdout was swallowed into the captured value instead of being
+# shown. Under --dry-run that both HID every ensure_* change from the report
+# (making the "require ZERO would-configure lines" gate unsound) and prefixed
+# the log text onto the value each sync_value then compared.
+log() { printf '[runtime-env] %s\n' "$*" >&2; }
 
 release_lock() {
   if [[ "$LOCK_HELD" == "true" ]]; then
@@ -225,6 +245,17 @@ ensure_event_keypair() {
   local key_dir="$CORE_ROOT/apps/Data Plane v2/.secrets/event-keys"
   local private_key="$key_dir/$domain-events.pem"
   local public_key="$key_dir/$domain-events.pub"
+  # What gets STORED in $DATA_ENV must stay project-relative. These variables
+  # are compose BIND-MOUNT SOURCES (docker-compose.yml mounts
+  # `${..._KEY_PATH:-.secrets/event-keys/<domain>-events.pem}` at
+  # /run/event-keys/...), resolved against the Data Plane project directory,
+  # and compose's own defaults are exactly these relative paths. Storing the
+  # $CORE_ROOT-absolute form hands Docker an MSYS path ("/c/dev/...") it cannot
+  # resolve as a Windows host path, and Docker then auto-vivifies an empty
+  # DIRECTORY at the mount source — the "Is a directory" crash-loop documented
+  # under `retrieval` below. Filesystem work keeps the absolute paths.
+  local private_key_env=".secrets/event-keys/$domain-events.pem"
+  local public_key_env=".secrets/event-keys/$domain-events.pub"
 
   if [[ "$DRY_RUN" == "true" ]]; then
     if [[ ! -s "$private_key" || ! -s "$public_key" ]]; then
@@ -250,20 +281,20 @@ ensure_event_keypair() {
 
   case "$domain" in
     documents)
-      upsert_env "$DATA_ENV" DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key"
-      upsert_env "$DATA_ENV" DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key"
+      upsert_env "$DATA_ENV" DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key_env"
+      upsert_env "$DATA_ENV" DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key_env"
       ;;
     index)
-      upsert_env "$DATA_ENV" INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key"
-      upsert_env "$DATA_ENV" INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key"
+      upsert_env "$DATA_ENV" INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key_env"
+      upsert_env "$DATA_ENV" INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key_env"
       ;;
     embedding)
-      upsert_env "$DATA_ENV" EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key"
-      upsert_env "$DATA_ENV" EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key"
+      upsert_env "$DATA_ENV" EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key_env"
+      upsert_env "$DATA_ENV" EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key_env"
       ;;
     wiki)
-      upsert_env "$DATA_ENV" WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key"
-      upsert_env "$DATA_ENV" WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key"
+      upsert_env "$DATA_ENV" WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key_env"
+      upsert_env "$DATA_ENV" WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key_env"
       ;;
     retrieval)
       # Missing from this function's domain list until 2026-08-20 — retrieval
@@ -274,8 +305,8 @@ ensure_event_keypair() {
       # crash-looping retrieval-engine itself (missing its own signing key)
       # and data-orchestrator-go (missing retrieval's public verifying key
       # for signed cost events) with an unrelated-looking "Is a directory".
-      upsert_env "$DATA_ENV" RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key"
-      upsert_env "$DATA_ENV" RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key"
+      upsert_env "$DATA_ENV" RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key_env"
+      upsert_env "$DATA_ENV" RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key_env"
       ;;
   esac
 }

@@ -68,6 +68,7 @@ import {
   type IconComponent,
 } from './chat-types'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
+import { useI18n } from '@/shared/i18n'
 
 const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   binary: FileSpreadsheet,
@@ -79,6 +80,7 @@ const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
 }
 
 export function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
+  const i18n = useI18n()
   const [requestedId, setRequestedId] = createSignal<string | null>(null)
 
   // The selection follows the newest artifact until the user picks one, and
@@ -97,13 +99,13 @@ export function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
       fallback={(
         <EmptyPanel
           icon={<FileCode2 size={20} />}
-          title="Ingen artefakter ennå"
-          subtitle="Dokumenter, kode, bilder og andre artefakter Verevon lager dukker opp her."
+          title={i18n.tr('Ingen artefakter ennå', 'No artifacts yet')}
+          subtitle={i18n.tr('Dokumenter, kode, bilder og andre artefakter Verevon lager dukker opp her.', 'Documents, code, images and other artifacts Verevon creates appear here.')}
         />
       )}
     >
       <div class="verevon-chat-artifact-workspace">
-        <div class="verevon-chat-artifact-list" role="tablist" aria-label="Artefakter i samtalen">
+        <div class="verevon-chat-artifact-list" role="tablist" aria-label={i18n.tr('Artefakter i samtalen', 'Artifacts in this conversation')}>
           <For each={props.items}>
             {(item) => (
               <ArtifactListEntry
@@ -153,6 +155,7 @@ function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; 
 }
 
 export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
+  const i18n = useI18n()
   const [versionCursor, setVersionCursor] = createSignal<number | null>(null)
   const [copyState, setCopyState] = createSignal<'copied' | 'failed' | 'idle'>('idle')
   const [showSource, setShowSource] = createSignal(false)
@@ -237,7 +240,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
   }
 
   return (
-    <section class="verevon-chat-artifact-view" aria-label={`Artefakt ${title()}`}>
+    <section class="verevon-chat-artifact-view" aria-label={i18n.tr(`Artefakt ${title()}`, `Artifact ${title()}`)}>
       <header class="verevon-chat-artifact-view__head">
         <div class="verevon-chat-artifact-view__title">
           <span class="verevon-chat-artifact-view__icon">{kindIcon(renderKind())}</span>
@@ -266,10 +269,10 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
         </div>
         <div class="verevon-chat-artifact-view__actions">
           <Show when={versions().length > 1}>
-            <div class="verevon-chat-artifact-versions" aria-label="Versjonshistorikk">
+            <div class="verevon-chat-artifact-versions" aria-label={i18n.tr('Versjonshistorikk', 'Version history')}>
               <button
                 type="button"
-                aria-label="Forrige versjon"
+                aria-label={i18n.tr('Forrige versjon', 'Previous version')}
                 disabled={revisionIndex() <= 0}
                 onClick={() => stepVersion(-1)}
               >
@@ -278,7 +281,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               <span>v{revision().version} · {revisionIndex() + 1}/{versions().length}</span>
               <button
                 type="button"
-                aria-label="Neste versjon"
+                aria-label={i18n.tr('Neste versjon', 'Next version')}
                 disabled={revisionIndex() >= versions().length - 1}
                 onClick={() => stepVersion(1)}
               >
@@ -434,10 +437,11 @@ export function ArtifactCodeView(props: { content: string; language: string }) {
  * request the preview makes.
  */
 export function ArtifactHtmlPreview(props: { html: string; title: string }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-artifact-frame">
       <iframe
-        title={`Forhåndsvisning av ${props.title}`}
+        title={i18n.tr(`Forhåndsvisning av ${props.title}`, `Preview of ${props.title}`)}
         sandbox="allow-scripts"
         srcdoc={sandboxHtmlDocument(props.html)}
         referrerpolicy="no-referrer"
@@ -448,6 +452,7 @@ export function ArtifactHtmlPreview(props: { html: string; title: string }) {
 }
 
 export function ArtifactImageView(props: { item: ArtifactPanelItem; title: string; onFailed: () => void }) {
+  const i18n = useI18n()
   const [dimensions, setDimensions] = createSignal<string | null>(null)
   const src = createMemo(() => imageArtifactSrc(props.item.artifact.content))
   const specs = createMemo(() => buildArtifactImageSpecs(props.item, dimensions()))
@@ -463,7 +468,7 @@ export function ArtifactImageView(props: { item: ArtifactPanelItem; title: strin
           setDimensions(`${image.naturalWidth} x ${image.naturalHeight}px`)
         }}
       />
-      <div class="verevon-chat-artifact-specs" aria-label="Bildespesifikasjoner">
+      <div class="verevon-chat-artifact-specs" aria-label={i18n.tr('Bildespesifikasjoner', 'Image specifications')}>
         <For each={specs()}>
           {(spec) => (
             <div>
@@ -520,11 +525,12 @@ export function ArtifactPlainText(props: { content: string }) {
  * unusable. An honest failure beats an empty box the user cannot interpret.
  */
 export function ArtifactLoadFailure(props: { kind: string }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-artifact-failure" role="status">
       <AlertCircle size={18} />
       <div>
-        <strong>Artefaktet kunne ikke lastes</strong>
+        <strong>{i18n.tr('Artefaktet kunne ikke lastes', 'The artifact could not be loaded')}</strong>
         <p>Verevon meldte om et artefakt av typen «{props.kind}», men innholdet kom aldri fram. Prøv å generere det på nytt.</p>
       </div>
     </div>

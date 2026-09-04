@@ -37,6 +37,13 @@ test('Space shell uses server-composed context and never exposes an authority be
   )
 })
 
-function unwrap(payload: any) {
-  return payload?.data ?? payload
+type SpaceContextPayload = {
+  membership?: { space_ref?: string }
+  space?: { name?: string; space_ref?: string }
+}
+
+// Gateway responses arrive as `{ data }` envelopes; tolerate a bare body too.
+function unwrap(payload: unknown): SpaceContextPayload {
+  const record = payload as { data?: SpaceContextPayload } | null
+  return record?.data ?? ((payload as SpaceContextPayload | null) ?? {})
 }

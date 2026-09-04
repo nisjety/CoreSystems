@@ -22,6 +22,24 @@ export interface IntegrationProvider {
   }>
 }
 
+/** One provider connection feeds several independent worker pipelines.
+ * integration-core projects each pipeline's health as a sync lane so a
+ * SharePoint (finspo-core) failure is never read as an Outlook problem. */
+export type SyncLaneKey = 'mail' | 'collaboration' | 'documents'
+
+export type SyncLaneStatus = 'pending' | 'running' | 'synced' | 'failed' | 'cancelled'
+
+export interface SyncLane {
+  status: SyncLaneStatus | string
+  /** Worker that owns the lane: email-worker | finspo-core | data-plane-v2. */
+  source?: string
+  lastSyncAt?: string
+  lastError?: string
+  /** Stable machine code for a failure, e.g. `no_sources_registered`. */
+  failureCode?: string
+  jobId?: string
+}
+
 export interface IntegrationConnection {
   id: string
   userId?: string
@@ -41,7 +59,12 @@ export interface IntegrationConnection {
   providerEmail?: string
   status: string
   lastSyncAt?: string
+  /** Legacy single-cell status written by whichever worker ran last. Do not
+   * derive lane health from it; read `syncLanes` instead. */
   lastSyncStatus?: string
+  /** Per-pipeline sync health (mail, collaboration, documents). Only lanes the
+   * connection's grants make meaningful are present. */
+  syncLanes?: Partial<Record<SyncLaneKey, SyncLane>>
   createdAt: string
   deletedAt?: string
   metadata?: Record<string, unknown>
@@ -164,6 +187,7 @@ export async function listConnections(orgId: string): Promise<IntegrationConnect
       status: stringField(row.status) || 'unknown',
       lastSyncAt: stringField(row.lastSyncAt ?? row.last_sync_at) || undefined,
       lastSyncStatus: stringField(row.lastSyncStatus ?? row.last_sync_status) || undefined,
+      syncLanes: syncLanesField(row.syncLanes ?? row.sync_lanes),
       createdAt: stringField(row.createdAt ?? row.created_at),
       deletedAt: stringField(row.deletedAt ?? row.deleted_at) || undefined,
       metadata: metadata ?? undefined,
@@ -190,6 +214,29 @@ function objectField(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null
+}
+
+const syncLaneKeys: readonly SyncLaneKey[] = ['mail', 'collaboration', 'documents']
+
+function syncLanesField(value: unknown): Partial<Record<SyncLaneKey, SyncLane>> | undefined {
+  const record = objectField(value)
+  if (!record) return undefined
+  const lanes: Partial<Record<SyncLaneKey, SyncLane>> = {}
+  for (const key of syncLaneKeys) {
+    const lane = objectField(record[key])
+    if (!lane) continue
+    const status = stringField(lane.status)
+    if (!status) continue
+    lanes[key] = {
+      status,
+      source: stringField(lane.source) || undefined,
+      lastSyncAt: stringField(lane.lastSyncAt ?? lane.last_sync_at) || undefined,
+      lastError: stringField(lane.lastError ?? lane.last_error) || undefined,
+      failureCode: stringField(lane.failureCode ?? lane.failure_code) || undefined,
+      jobId: stringField(lane.jobId ?? lane.job_id) || undefined,
+    }
+  }
+  return Object.keys(lanes).length > 0 ? lanes : undefined
 }
 
 export function getConnection(orgId: string, id: string): Promise<IntegrationConnection> {

@@ -219,7 +219,51 @@ func runPage(
 			"branding": res.Branding,
 		}, ids.RunID, url, string(quarrycontracts.EvtBrandingExtracted))
 	}
+	// Re-emit the post-transform extraction as page_extracted so the
+	// control event log — the only path the onboarding wizard's
+	// /v1/jobs/{id}/events poll can see — carries the page title (with its
+	// provenance), a plain-text excerpt, word count and the serving driver.
+	// page_fetched above is pre-transform by design and cannot carry text.
+	if payload := pageExtractedPayload(url, res); payload != nil {
+		_ = emitEvent(ctx, a, ids, quarrycontracts.EvtPageExtracted, payload,
+			ids.RunID, url, string(quarrycontracts.EvtPageExtracted))
+	}
 	return res, nil
+}
+
+// pageExtractedPayload builds the page_extracted payload from a runtime
+// RunPageResult, mirroring quarry_runtime::page_extract::event_payload
+// (Rust) field-for-field. Returns nil when the runtime supplied no
+// extraction (older edge, non-HTML response) so no half-empty event is
+// emitted. Optional fields (summary, lang, content_type) are omitted rather
+// than sent as "" so the gateway's blank-vs-absent handling stays simple.
+func pageExtractedPayload(url string, res activities.RunPageResult) map[string]any {
+	if res.TitleSource == "" {
+		return nil
+	}
+	title := res.DisplayTitle
+	if title == "" {
+		title = res.Title
+	}
+	payload := map[string]any{
+		"url":          url,
+		"title":        title,
+		"title_source": res.TitleSource,
+		"excerpt":      res.Excerpt,
+		"word_count":   res.WordCount,
+		"driver":       res.Driver,
+		"fingerprint":  res.Fingerprint,
+	}
+	if res.Summary != "" {
+		payload["summary"] = res.Summary
+	}
+	if res.Lang != "" {
+		payload["lang"] = res.Lang
+	}
+	if res.ContentType != "" {
+		payload["content_type"] = res.ContentType
+	}
+	return payload
 }
 
 // ScrapeJobWF runs a single URL and emits lifecycle events.

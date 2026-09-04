@@ -5,6 +5,7 @@ import {
   Square,
 } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
+import { For } from 'solid-js'
 import {
   imageArtifactSrc,
   looksLikeImageContent,
@@ -33,6 +34,7 @@ import {
   PROSE_ARTIFACT_KINDS,
   type TaskStepStatus,
 } from './chat-types'
+import { useI18n } from '@/shared/i18n'
 
 export function collectArtifactItems(turns: ChatTurn[]): ArtifactPanelItem[] {
   const byId = new Map<string, ArtifactPanelItem>()
@@ -456,14 +458,20 @@ export function createChatTitle(turns: ChatTurn[]) {
   return createPreview(first.content, 48)
 }
 
+// Both helpers hard-cap at `max` INCLUDING the three-character ellipsis. They
+// used to slice to `max - 1` and then append "...", returning `max + 2`
+// characters: the thread snapshot preview is `createPreview(content, 180)`
+// and the gateway rejects previews over 180 ("preview must not exceed 180
+// characters"), so every reply longer than 180 characters made the thread
+// PUT fail with 400 and the title/preview never persisted.
 export function createPreview(content: string, max = 34) {
   const clean = content.replace(/\s+/g, ' ').trim()
-  return clean.length > max ? `${clean.slice(0, max - 1)}...` : clean
+  return clean.length > max ? `${clean.slice(0, Math.max(max - 3, 0))}...` : clean
 }
 
 export function truncateText(content: string, max: number): string {
   const clean = content.replace(/\s+/g, ' ').trim()
-  return clean.length > max ? `${clean.slice(0, max - 1)}...` : clean
+  return clean.length > max ? `${clean.slice(0, Math.max(max - 3, 0))}...` : clean
 }
 
 export function capitalize(value: string): string {
@@ -647,6 +655,13 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue
     }
 
+    const details = parseDetails(lines, index)
+    if (details) {
+      blocks.push(details.block)
+      index = details.next
+      continue
+    }
+
     const paragraph: string[] = []
     while (index < lines.length && lines[index]?.trim() && !isMarkdownBlockStart(lines[index] ?? '', lines[index + 1])) {
       paragraph.push(lines[index] ?? '')
@@ -659,6 +674,43 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
 }
 
 const LIST_ITEM_PATTERN = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/
+
+const DETAILS_OPEN_PATTERN = /^\s*<details(?:\s[^>]*)?>/i
+const DETAILS_CLOSE_PATTERN = /<\/details>/i
+const SUMMARY_PATTERN = /<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary>/i
+
+/**
+ * A raw HTML `<details>` block, as models write it for optional detail
+ * ("<details><summary>Se alle tilbud</summary> ...table... </details>").
+ * The renderer has no HTML pass-through, so this used to show up as literal
+ * tags around the content. Only the details/summary tags are interpreted;
+ * the body is ordinary markdown and goes back through `parseMarkdownBlocks`,
+ * so nothing inside is ever injected as HTML. An unterminated block runs to
+ * the end of the message rather than being dropped.
+ */
+export function parseDetails(lines: string[], start: number): { block: Extract<MarkdownBlock, { kind: 'details' }>; next: number } | null {
+  if (!DETAILS_OPEN_PATTERN.test(lines[start] ?? '')) return null
+  let index = start
+  const collected: string[] = []
+  while (index < lines.length) {
+    collected.push(lines[index] ?? '')
+    index += 1
+    if (DETAILS_CLOSE_PATTERN.test(collected[collected.length - 1] ?? '')) break
+  }
+  let body = collected.join('\n')
+    .replace(DETAILS_OPEN_PATTERN, '')
+    .replace(DETAILS_CLOSE_PATTERN, '')
+  let summary = ''
+  const summaryMatch = SUMMARY_PATTERN.exec(body)
+  if (summaryMatch) {
+    summary = (summaryMatch[1] ?? '').replace(/\s+/g, ' ').trim()
+    body = body.replace(SUMMARY_PATTERN, '')
+  }
+  return {
+    block: { kind: 'details', summary: summary || 'Detaljer', blocks: parseMarkdownBlocks(body.trim()) },
+    next: index,
+  }
+}
 
 export function parseList(lines: string[], start: number): { block: Extract<MarkdownBlock, { kind: 'list' }>; next: number } | null {
   const first = LIST_ITEM_PATTERN.exec(lines[start] ?? '')
@@ -775,6 +827,7 @@ function normalizeTableRow(cells: string[], width: number): string[] {
 
 export function isMarkdownBlockStart(line: string, nextLine?: string) {
   return /^\s*```/.test(line)
+    || DETAILS_OPEN_PATTERN.test(line)
     || /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
     || /^#{1,6}\s+/.test(line)
     || /^\s*>\s?/.test(line)
@@ -794,27 +847,30 @@ export function InlineCitationMarker(props: {
   citations: Citation[]
   indexes: number[]
 }) {
+  const i18n = useI18n()
   const first = props.citations[0]
   if (!first) return null
   const label = `${hostname(first.url)}${props.citations.length > 1 ? ` +${props.citations.length - 1}` : ''}`
   return (
     <details class="verevon-chat-citation-chip">
-      <summary aria-label={`Kilde ${props.indexes.join(', ')}`}>{label}</summary>
-      <div class="verevon-chat-citation-chip__popover" role="group" aria-label="Kildedetaljer">
-        {props.citations.map((citation, index) => (
-          <a
-            href={citation.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            class="verevon-chat-citation-chip__source"
-          >
-            <span class="verevon-chat-citation-chip__index">{props.indexes[index]}</span>
-            <span class="verevon-chat-citation-chip__body">
-              <strong>{citation.title || hostname(citation.url)}</strong>
-              {citation.snippet ? <span>{citation.snippet}</span> : null}
-            </span>
-          </a>
-        ))}
+      <summary aria-label={i18n.tr(`Kilde ${props.indexes.join(', ')}`, `Source ${props.indexes.join(', ')}`)}>{label}</summary>
+      <div class="verevon-chat-citation-chip__popover" role="group" aria-label={i18n.tr('Kildedetaljer', 'Source details')}>
+        <For each={props.citations}>
+          {(citation, index) => (
+            <a
+              href={citation.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="verevon-chat-citation-chip__source"
+            >
+              <span class="verevon-chat-citation-chip__index">{props.indexes[index()]}</span>
+              <span class="verevon-chat-citation-chip__body">
+                <strong>{citation.title || hostname(citation.url)}</strong>
+                {citation.snippet ? <span>{citation.snippet}</span> : null}
+              </span>
+            </a>
+          )}
+        </For>
       </div>
     </details>
   )

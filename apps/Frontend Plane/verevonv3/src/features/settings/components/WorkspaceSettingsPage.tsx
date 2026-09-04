@@ -13,7 +13,7 @@ import { MemorySection } from '@/features/settings/components/MemorySection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
 import { reserveDirectOauthWindow, runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
-import { connectBundlesForProvider, instagramInboxConnectionRequest } from '@/features/settings/lib/integration-bundles'
+import { connectBundlesForSources, instagramInboxConnectionRequest } from '@/shared/integrations/connect-bundles'
 import {
   confirmBillingCheckout,
   loadBillingAccount,
@@ -50,6 +50,13 @@ import {
 } from '@/shared/api/organization-client'
 import { triggerSync } from '@/shared/api/integrations-client'
 import { ApiError } from '@/shared/api/http'
+import {
+  listSharePointDrives,
+  listSharePointSites,
+  registerSharePointSource,
+  type SharePointSourceRegistration,
+} from '@/shared/api/knowledge-client'
+import { SharePointLibraryPicker } from '@/shared/integrations/SharePointLibraryPicker'
 import {
   getWorkspaceSettingsSection,
   isWorkspaceSettingsSection,
@@ -1493,6 +1500,10 @@ function IntegrationsSection() {
   const [loadFailed, setLoadFailed] = createSignal(false)
   const [syncProgress, setSyncProgress] = createSignal<Record<string, string>>({})
   const [notice, setNotice] = createSignal<string | null>(null)
+  // Connections whose sync integration-core refused with 409
+  // no_sources_registered: the row offers the library picker until one is
+  // registered (or the user chooses to do it later under Knowledge).
+  const [librariesNeeded, setLibrariesNeeded] = createSignal<ReadonlySet<string>>(new Set())
   const eventSources: EventSource[] = []
   const orgId = createMemo(() => session.activeOrg?.id ?? '')
 
@@ -1559,7 +1570,7 @@ function IntegrationsSection() {
           `/api/v1/integrations/providers/${encodeURIComponent(row.provider.key)}/connect-session`,
           {
             method: 'POST',
-            body: JSON.stringify({ bundles: connectBundlesForProvider(row.provider.key) }),
+            body: JSON.stringify({ bundles: connectBundlesForSources(row.provider.key) }),
             headers: integrationHeaders(orgId()),
           },
         )
@@ -1596,7 +1607,7 @@ function IntegrationsSection() {
           `/api/v1/integrations/providers/${encodeURIComponent(row.provider.key)}/connect-session`,
           {
             method: 'POST',
-            body: JSON.stringify({ bundles: connectBundlesForProvider(row.provider.key) }),
+            body: JSON.stringify({ bundles: connectBundlesForSources(row.provider.key) }),
             headers: integrationHeaders(orgId()),
           },
         )
@@ -1609,21 +1620,76 @@ function IntegrationsSection() {
         )
         setNotice(`${row.name} ${i18n.tr('koblet fra.', 'disconnected.')}`)
       } else if (action === 'sync' && row.connection) {
-        const result = await triggerSync(orgId(), row.connection.id)
-        const jobId = result.syncJob?.id
-        setSyncProgress((prev) => ({
-          ...prev,
-          [row.connection!.id]: result.syncJob?.status ?? 'queued',
-        }))
-        if (jobId) watchSyncProgress(row.connection.id, jobId, setSyncProgress, eventSources, refresh)
+        await queueSync(row.connection.id)
       }
       await refresh()
     } catch (error) {
       if (reservedOAuthWindow && !reservedOAuthWindow.closed) reservedOAuthWindow.close()
-      setNotice(error instanceof Error ? error.message : i18n.tr('Integrasjonshandlingen mislyktes.', 'Integration action failed.'))
+      // integration-core refuses a Microsoft sync with 409
+      // no_sources_registered until the org has a SharePoint/OneDrive library
+      // registered in finspo-core. That is the normal state of a fresh
+      // connection, not a fault, so offer the picker (same recovery as the
+      // onboarding connect step) instead of a generic "action failed".
+      if (error instanceof ApiError && error.code === 'no_sources_registered' && row.connection) {
+        const connectionId = row.connection.id
+        setLibrariesNeeded((current) => new Set(current).add(connectionId))
+        setNotice(i18n.tr(
+          `${row.name}: velg et SharePoint- eller OneDrive-bibliotek nedenfor. Første synkronisering starter når du har valgt.`,
+          `${row.name}: pick a SharePoint or OneDrive library below. The first sync starts once you have chosen.`,
+        ))
+      } else {
+        setNotice(error instanceof Error ? error.message : i18n.tr('Integrasjonshandlingen mislyktes.', 'Integration action failed.'))
+      }
     } finally {
       setActionBusy(null)
     }
+  }
+
+  async function queueSync(connectionId: string) {
+    const result = await triggerSync(orgId(), connectionId)
+    const jobId = result.syncJob?.id
+    setSyncProgress((prev) => ({ ...prev, [connectionId]: result.syncJob?.status ?? 'queued' }))
+    if (jobId) watchSyncProgress(connectionId, jobId, setSyncProgress, eventSources, refresh)
+  }
+
+  // Wired to the same Knowledge SharePoint routes the Add-source modal uses
+  // (finspo-core browse + register + first sync). Registering a library is
+  // what makes the refused sync acceptable, so retry it right after.
+  const libraryActions = {
+    listSites: () => listSharePointSites(orgId()),
+    listDrives: (siteId: string) => listSharePointDrives(orgId(), siteId),
+    register: async (connectionId: string, selection: SharePointSourceRegistration) => {
+      await registerSharePointSource(orgId(), selection)
+      setLibrariesNeeded((current) => {
+        const next = new Set(current)
+        next.delete(connectionId)
+        return next
+      })
+      try {
+        await queueSync(connectionId)
+        setNotice(i18n.tr(
+          'Biblioteket er registrert og synkronisering er startet.',
+          'The library is registered and a sync has started.',
+        ))
+      } catch (error) {
+        setNotice(error instanceof Error
+          ? error.message
+          : i18n.tr('Biblioteket er registrert, men synkroniseringen kunne ikke settes i kø.', 'The library was registered, but the sync could not be queued.'))
+      }
+      await refresh()
+    },
+  }
+
+  const dismissLibraryPicker = (connectionId: string) => {
+    setLibrariesNeeded((current) => {
+      const next = new Set(current)
+      next.delete(connectionId)
+      return next
+    })
+    setNotice(i18n.tr(
+      'Du kan velge biblioteket senere under Kunnskap → Legg til kilde → SharePoint.',
+      'You can pick the library later under Knowledge → Add source → SharePoint.',
+    ))
   }
 
   return (
@@ -1726,7 +1792,12 @@ function IntegrationsSection() {
                 : undefined
             const groups = createMemo(() => capabilityGroups(integration.provider, integration.connection?.capabilities))
             const twoWay = () => groups().reads.length > 0 && groups().writes.length > 0
+            const libraryPickerConnectionId = () => {
+              const connection = 'connection' in integration ? integration.connection : undefined
+              return connection && librariesNeeded().has(connection.id) ? connection.id : undefined
+            }
             return (
+              <>
               <div class="verevon-settings-integration-row">
                 <div class="verevon-settings-integration-row__main">
                   <div class="verevon-settings-integration-row__head">
@@ -1763,6 +1834,19 @@ function IntegrationsSection() {
                   ) : null}
                 </div>
               </div>
+              <Show when={libraryPickerConnectionId()}>
+                {(connectionId) => (
+                  <div class="verevon-settings-integration-library-picker">
+                    <SharePointLibraryPicker
+                      connectionId={connectionId()}
+                      library={libraryActions}
+                      onDone={() => undefined}
+                      onSkip={() => dismissLibraryPicker(connectionId())}
+                    />
+                  </div>
+                )}
+              </Show>
+              </>
             )
           }}
         </For>

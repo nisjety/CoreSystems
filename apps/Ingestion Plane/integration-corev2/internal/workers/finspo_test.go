@@ -253,8 +253,13 @@ func TestFinspoWorkerFailsMetadataLessJobWhenNothingRegistered(t *testing.T) {
 	if integration.progressRequest.Status != "failed" {
 		t.Fatalf("progress status = %q, want failed", integration.progressRequest.Status)
 	}
-	if !strings.Contains(integration.progressRequest.Message, "no SharePoint sources are registered") {
+	if !strings.Contains(integration.progressRequest.Message, "no SharePoint or OneDrive library is registered") {
 		t.Fatalf("failure message %q lacks registration guidance", integration.progressRequest.Message)
+	}
+	// The stable code is what integration-api's sync lanes and the SPA key
+	// on ("pick a library"), independent of the human-readable message.
+	if integration.progressRequest.Metadata["failureCode"] != "no_sources_registered" {
+		t.Fatalf("failure metadata = %#v, want failureCode no_sources_registered", integration.progressRequest.Metadata)
 	}
 }
 

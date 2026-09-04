@@ -851,6 +851,57 @@ export interface SharePointFolder {
   web_url?: string
 }
 
+export interface SharePointSourceRegistration {
+  /** `drive` (default) registers a document library; `site_pages` a site's pages. */
+  kind?: 'drive' | 'site_pages'
+  siteId: string
+  siteWebUrl?: string
+  driveId?: string
+  driveName?: string
+  driveType?: string
+  tenantId?: string
+  folderId?: string
+  folderPath?: string
+}
+
+export interface SharePointSourceRegistered {
+  id: string
+  syncStarted: boolean
+}
+
+/**
+ * Registers a SharePoint/OneDrive library as a finspo-core source and starts
+ * its first sync (gateway `POST /api/v1/knowledge/sharepoint` →
+ * finspo-core `POST /api/v1/sources` + `/sources/{id}/sync`). This is the
+ * step that makes a Microsoft connection's documents lane actually have
+ * something to sync; integration-core answers `409 no_sources_registered`
+ * to a generic Microsoft sync until it has happened.
+ */
+export async function registerSharePointSource(
+  orgId: string,
+  input: SharePointSourceRegistration,
+  signal?: AbortSignal,
+): Promise<SharePointSourceRegistered> {
+  const payload = await requestJson<{ id?: string; syncStarted?: boolean }>('/api/v1/knowledge/sharepoint', {
+    method: 'POST',
+    body: JSON.stringify({
+      kind: input.kind ?? 'drive',
+      siteId: input.siteId,
+      siteWebUrl: input.siteWebUrl ?? '',
+      driveId: input.driveId ?? '',
+      driveName: input.driveName ?? '',
+      driveType: input.driveType ?? '',
+      tenantId: input.tenantId ?? '',
+      folderId: input.folderId ?? '',
+      folderPath: input.folderPath ?? '',
+    }),
+    headers: orgHeaders(orgId),
+    signal,
+  })
+  if (!payload?.id) throw new Error('SharePoint source registration returned no source id.')
+  return { id: payload.id, syncStarted: payload.syncStarted === true }
+}
+
 /**
  * Lists the folders directly under one drive item (`itemId` omitted = the
  * library root) so the Add-source modal can drill into a library and register

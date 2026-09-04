@@ -33,6 +33,7 @@ import { supportProviderIcon, type SupportProvider } from '@/features/support/co
 import { deriveConnectedEmailAccounts, deriveConnectedInboxSources, type ConnectedEmailAccount, type EmailAccountSyncHealth } from '@/features/inbox/lib/inbox-sources'
 import { listConnections, startConnectSession, type IntegrationConnection } from '@/shared/api/integrations-client'
 import { ApiError } from '@/shared/api/http'
+import { connectBundlesForSources } from '@/shared/integrations/connect-bundles'
 import { runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
 import { getSession } from '@/shared/session/session-store'
 
@@ -97,11 +98,11 @@ export function SupportExpandedSidebarPanel(props: { onCollapse: () => void }) {
     setConnectingEmailProvider(provider)
     setEmailConnectNotice(null)
     try {
-      // Same scoped, user-initiated full inbox grant Inbox itself uses
-      // (InboxPage.connectInbox) — duplicated rather than shared because this
-      // panel and Inbox sit in separate component trees with their own
-      // connection-list resources; both call the identical gateway action.
-      const session = await startConnectSession(id, provider, { bundles: ['full'] })
+      // One bundle policy for every surface (shared/integrations/connect-bundles):
+      // a whole-provider connect from Support asks for the provider's default
+      // card sources, so the connection also serves Knowledge and Settings and
+      // an onboarding-made connection is upgraded in place, not duplicated.
+      const session = await startConnectSession(id, provider, { bundles: connectBundlesForSources(provider) })
       const connectUrl = session.connectUrl || session.redirectUrl
       const sessionToken = session.sessionToken || session.id
       if (!connectUrl || !sessionToken) throw new Error(i18n.tr('Tilkoblingen kunne ikke startes.', 'The connection could not be started.'))
@@ -409,12 +410,20 @@ export function EmailAccountHealthBadge(props: { account: ConnectedEmailAccount 
           label: i18n.tr('Koble til på nytt', 'Reconnect'),
           title: i18n.tr('Tilkoblingen trenger ny autorisasjon før nye e-poster kan hentes.', 'This connection needs authorization again before new mail can be fetched.'),
         }
-      case 'attention':
+      case 'attention': {
+        // The detail is the email worker's own error for THIS mailbox lane
+        // (integration-core syncLanes.mail) — never a SharePoint or Data
+        // Plane job on the same connection.
+        const detail = props.account.syncDetail ? ` ${props.account.syncDetail}` : ''
         return {
           icon: CircleAlert,
           label: i18n.tr('Trenger oppmerksomhet', 'Needs attention'),
-          title: i18n.tr('Siste innbokssynk mislyktes. Eksisterende samtaler er uendret.', 'The latest inbox sync failed. Existing conversations are unchanged.'),
+          title: i18n.tr(
+            `Siste innbokssynk mislyktes.${detail} Eksisterende samtaler er uendret.`,
+            `The latest inbox sync failed.${detail} Existing conversations are unchanged.`,
+          ),
         }
+      }
       default:
         return {
           icon: CircleHelp,

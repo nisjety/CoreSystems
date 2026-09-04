@@ -454,3 +454,236 @@ in tool cards); an always-on telemetry header ("Agent Mesh Monitor [65 T/s]" --
 telemetry lives in Work); Stage as a partial apply (provider actions are
 atomic); Codex-style multi-worktree tracking (delegation is Phase 9 of the
 Codex plan); charts in answers (tables suffice until a real need appears).
+---
+
+## 8. Chat-page audit against all three chat documents (2026-09-04)
+
+The live `/chat` page was checked against this document, the UX design
+specification (`VEREVON_CHAT_UX_DESIGN_SPEC.md`, 2026-08-31) and the workspace
+implementation plan (`VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md`,
+2026-08-30). Method: the running stack (org AQUATIQ AS, signed-in user, viewport
+1243px) driven through cold start, a plain Ask turn, a tool-calling turn and the
+contextual canvas, with the code read alongside. Every finding below was
+observed in the browser; the breakpoint geometry in item 24 was measured at four
+viewport widths in a second pass after Docker Desktop was restarted.
+
+The UX specification's own header says "Implementation: Deliberately not
+started in this pass". That is now out of date -- most of it is built. Its
+section 3 audit resolves as follows.
+
+| UX spec section 3 finding | State on 2026-09-04 |
+|---|---|
+| 1. Composer disappears when a workspace destination is selected (Blocking) | **Closed.** Verified live: the composer stays mounted and usable with the canvas open. |
+| 2. Workspace navigation owned by the wrong region (Blocking) | **Closed.** The tab strip renders inside the canvas head (`Arbeid`/`Kilder` + `Lukk arbeidsflate`); the conversation header holds only a workspace trigger, one overflow menu and New chat. |
+| 3. Tasks presents an event exhaust rather than a work summary (Blocking) | **Open** -- item 19 below. |
+| 4. Action hierarchy duplicated | **Closed.** One New chat control plus one overflow menu in the header; per-message actions stay on the message. |
+| 5. Surface vocabulary mixes objects and actions | **Closed.** Chat is no longer a canvas tab (`includeChat={false}`) and Actions is not a tab. |
+| 6. Empty state is generic | **Closed** by item 17 (greeting, scope line, resume offer, three starter rows). |
+| 7. Provider and token metadata competes with the answer | **Partly open** -- item 20 below. |
+| 8. Errors are too close to raw runtime language | **Not verified.** `ErrorNotice` renders a message plus "Prøv igjen"; no failure was induced in this pass. |
+
+### 8.1 Conformant, verified live
+
+| Rule | Evidence |
+|---|---|
+| Acceptance criteria 1, 10; THE ONE RULE (3.1) | Cold start showed no canvas. "Hva er hovedstaden i Norge?" answered with no panel and no `--canvas` class. |
+| Acceptance criterion 2 | Composer mounted and visible with the canvas open. |
+| Acceptance criteria 3, 4 | Exactly one tab strip, inside the canvas head. |
+| Acceptance criterion 6 | Registry `available` / `claimsFocus` split intact (`chat-surfaces.ts`), precedence Work > Output > Sources > Trace. |
+| UX 6 (composer) | `Spør`/`Utfør` is a real segmented control with `aria-pressed`; grounding reads "Kunnskap"; the effort dial reads Rask/Standard/Grundig. |
+| Item 15 | Message action buttons measured 44x44 on screen. |
+| Item 16 | The live region announced "Verevon svarer …" then "Svar fullført. Oslo." |
+| Item 14 (partial) | Focus returned to the composer when the answer settled. |
+| Item 17 | "God morgen, Ima", the scope line naming AQUATIQ AS, a resume offer from real thread history, three starter rows. |
+
+Transcript measured 720px wide with the canvas closed and 640px with it open,
+against the 680-760px comfort band in UX 5B. The narrower figure is the
+split-pane case, where UX 10 only requires 480px for the conversation.
+
+### 8.2 Additions to the plan
+
+19. **The Work canvas is still an event exhaust, and the two Work renderers
+    disagree.** UX section 7 wants four answers in order -- what is happening
+    now, what is left, does Verevon need me, what happened underneath (collapsed)
+    -- and forbids putting connection events, model selection, tool payloads and
+    content steps in one flat timeline. The canvas Work surface
+    (`ChatPanels.tsx:587`) opens with `<h2>Agent activity</h2>` plus run
+    telemetry, then a per-answer group whose contents are flat: observed live on
+    the shipping-quote thread as `Connect stream`, `Compose response`,
+    `Model selected`, `Tool: Web search`, five `Source found` rows,
+    `Tool: Shipping get quotes`, `Usage recorded`, all at equal weight. The live
+    rail already implements the specified shape -- status, screenshots, and a
+    collapsed `Teknisk aktivitet` disclosure at `ChatLiveRunPanel.tsx:655`. The
+    fix is to give the canvas renderer that treatment: plan and typed pause
+    above the timeline, runtime rows and telemetry behind the disclosure. This
+    is UX finding 3, the one remaining Blocking item.
+
+    **Done 2026-09-04.** The canvas renderer now answers the four questions in
+    order: an `<h2>Arbeid/Work</h2>` with a plain-language status line derived
+    from the steps themselves (waiting, the active step's title, "Siste steg
+    feilet", "Ferdig", or "Ingen aktivitet nå"), the durable plan, a typed
+    needs-you callout built only from a step the run actually reported as
+    waiting, the work timeline, and one collapsed `Teknisk aktivitet`
+    disclosure holding run telemetry, the lifecycle rows and the raw event
+    stream. `isWorkStep` splits the two; a per-answer group with nothing but
+    bookkeeping no longer renders at all. Reuses the live rail's disclosure
+    classes, so the two Work hosts finally look alike; the only new CSS is the
+    callout, which borrows the approval card's tint. Verified live on the
+    shipping-quote thread: header "Arbeid / Siste steg feilet", two tool rows
+    visible, `Teknisk aktivitet 15` closed by default, and no telemetry left in
+    the reading flow.
+20. **The composer still exposes the raw provider catalog, and the transcript
+    still shows a provider name.** Section 3.5 says the composer offers an
+    effort dial "and nothing else", and that the pinned Budget/Balance/Genius
+    grouping "just needs to stop exposing the raw provider catalog underneath";
+    UX 6 repeats it ("Do not show raw provider model IDs in the default
+    composer"). The "Velg AI-modell" menu still renders `VEREVON_MODES` followed
+    by `chatModelGroups()`. Separately the per-turn chip beside the answer reads
+    "Claude Sonnet · 5 tokens"; it is the trigger for the reasoning popover, so
+    the detail is disclosed, but the provider name and output-token count sit in
+    the reading flow, which is UX finding 7.
+21. **Mixed-language chrome.** Acceptance criterion 9 rejects it outright. 42
+    Norwegian strings in `src/features/chat` bypass `i18n.tr` (visible text plus
+    `aria-label`/`title`), against 44 that use it, so roughly half the chat
+    chrome cannot switch to English. One header renders "Agent activity" over
+    "Live oppgavestatus" in the same block. Distribution: `ChatPanels.tsx` 14,
+    `ChatLiveRunPanel.tsx` 9, `ChatArtifactPanel.tsx` 5,
+    `ChatAttachmentCanvas.tsx` 5, `ChatMessages.tsx` 5,
+    `ChatWorkspaceCanvas.tsx` 2, `ChatPage.tsx` 1, `chat-media-markdown.tsx` 1.
+    Examples: "Ingen kilder ennå", "Venter på agenten", "Lukk arbeidsflate",
+    "Endre bredde på arbeidsflaten", "Godkjenning", the ZDR banner, and the
+    citation chip's `Kilde N` label.
+
+    **Done 2026-09-04.** 65 strings wrapped across eight files (50 found by the
+    first sweep, 15 more once the detector stopped being case-sensitive about
+    Norwegian words -- the `StepsPill` label read `total() === 1 ? 'steg' :
+    'steg'`, which is right in Norwegian and needs a real plural in English).
+    `i18n.tr` calls in `src/features/chat` went from 59 to 125, and a scan for
+    Norwegian text or aria-labels outside `i18n.tr` now returns nothing. Two
+    mechanical traps worth recording: the hook must be placed by the SHAPE of
+    the line that opens a component body (`) {`, `}) {`, `=> {`), because a
+    multi-line props TYPE opens a brace of its own and a depth-based rule put
+    `const i18n = useI18n()` inside `InlineCitationMarker(props: {`; and the
+    import has to follow the last complete import STATEMENT, not the last line
+    starting with `import`, which is the opening line of a multi-line specifier
+    list. Verified live: with the locale switched to English the chat chrome
+    reads Work / More actions / New chat, tabs Work and Sources, "The last step
+    failed", "Technical activity", and a DOM sweep of the header, canvas, run
+    panel and composer found no Norwegian left. Only the assistant's own answer
+    text stays Norwegian, which is content, not chrome.
+22. **Generic curiosity follow-up chips are shipping.** Section 5 lists them
+    under Explicitly rejected, to be replaced with permission-scoped next
+    actions. Observed live after the answer "Oslo.": "Hva er befolkningen i
+    Oslo?", "Hvilke kjente severdigheter finnes i Oslo?", "Hva er klimaet som
+    vanligvis er i Oslo?" -- rendered by `FollowUpChips` from model-suggested
+    text.
+23. **The low-confidence hedge is now generalized to ordinary answers.** Section
+    7.3 records it as present for deep research and deliberately *not*
+    generalized. Observed live: "Usikkert svar (52% sikkerhet) — sjekk kilder
+    før du stoler på dette" under the one-word answer "Oslo.", driven by
+    `message.n`. A hedge on a trivially correct fact trains the user to ignore
+    the badge; either scope it back to retrieval-backed turns or raise the
+    threshold so it marks answers a reader should actually re-check.
+24. **The mobile-sheet threshold is 40px short of the specification, so a band
+    of widths shows the squeeze UX 10 forbids.** Measured with the Work canvas
+    open on a durable thread:
+
+    | Viewport | Canvas | Share | Conversation | Layout | UX 10 |
+    |---|---|---|---|---|---|
+    | 1400px | 396px | 28% | 576px | split | split, conversation >= 480px -- **met** |
+    | 1000px | 396px | 40% | 481px | split | canvas 48-58% -- **missed**, conversation readable |
+    | 745px | 340px | 46% | 372px | split | full-screen sheet -- **missed**, squeezed side by side |
+    | 700px | 699px | 100% | covered | `position: absolute; inset: 0` | sheet with "Lukk arbeidsflate" -- **met** |
+
+    The sheet itself is correct; it is keyed at `max-width: 720px` where UX 10
+    says 760px, so 720-759px keeps a 372px conversation beside a 340px canvas --
+    exactly the "never squeeze chat and preview side by side" case. Moving the
+    media query to 760px closes it. The 1000px row is a separate, milder
+    mismatch: the rail is `clamp(320px, 30vw, 440px)` and lands at 40% of the
+    workspace where the specification asks for 48-58%. That deviation protects
+    the conversation, so the specification may be the side to change -- but the
+    two should not disagree silently. The composer stayed mounted and visible at
+    all four widths.
+
+    **Done 2026-09-04, the sheet half.** The canvas block moved to
+    `max-width: 760px`, and `.verevon-chat-page--canvas .verevon-chat-run-panel`
+    -- the same sheet rule for the live rail, which also hosts Work -- moved out
+    of the 720px header-chrome block into it, so both Work hosts flip at one
+    width instead of two. Re-measured at 745px: `position: absolute`, 744px of a
+    745px viewport, "Lukk arbeidsflate" present and the composer still mounted.
+    The mid-band share is deliberately NOT changed and stays open: the canvas is
+    31-40% of a 1000px workspace (it varies with which host renders) where the
+    specification asks for 48-58%. That deviation protects the conversation, so
+    the specification is the more likely side to move -- but it needs a decision
+    rather than silence.
+25. **Two top-nav labels still point at `/chat`** ("Chat" and "Oppgaver",
+    `shell-data.ts:131`). Already on the open list at the end of section 4; still
+    true. The route-ownership guard (`chat-route-ownership.test.ts`) covers
+    cross-surface adoption links, not this duplication.
+26. **Keyboard model, remaining half.** From item 14: arrow keys move across the
+    canvas tab strip (roving tabindex, `ChatPanels.tsx:274`), resize the canvas
+    (`ChatWorkspaceCanvas.tsx:101`) and move sidebar thread selection with
+    Cmd/Ctrl+Shift (`use-chat-shortcuts.ts:25`), but nothing moves focus between
+    transcript messages, and Tab order through answer -> actions -> next message
+    is still unspecified. From item 16: focus does not move to an inline error
+    when one appears.
+27. **Work is offered on a plain Ask turn whose whole content is bookkeeping.**
+    UX 4 says "Only evidence-backed destinations appear. The panel never opens
+    empty in the ordinary Ask flow." Item 18 fixed the *opening* by giving the
+    registry a stricter `claimsFocus` predicate over `isWorkStep`, but left
+    `available: stepCount > 0 || hasRun`, which still counts bookkeeping. Measured
+    on the "Hovedstaden i Norge" thread -- one question, one-word answer, no tool
+    call: the conversation header advertised `Arbeidsflate -> Arbeid 4`, and the
+    panel contained exactly `Connect stream`, `Compose response`,
+    `Model selected`, `Usage recorded`. Nothing there is work. Gating `available`
+    with the same `isWorkStep` classifier `claimsFocus` already uses would leave
+    a plain Ask thread with no workspace trigger at all, which is what UX 4
+    describes.
+
+    **Done 2026-09-04.** The registry gained `hasWorkEvidence(state)` --
+    `workStepCount > 0 || toolCallCount > 0` -- and `available` is now that or a
+    durable run, which is exactly what `claimsFocus` reads. Both surface hosts
+    had to be told: `ChatHeader` (the dropdown that advertised "Arbeid 4") and
+    `ChatTabs` each build their own `ChatSurfaceAvailability`, and a caller that
+    omits the counts now gets no Work destination rather than one keyed on the
+    lifecycle total. The Work badge counts work too, so the shipping thread
+    reads 3 rather than 18. ChatPage derives both counts once in a `createMemo`
+    that the stale-tab guard, the auto-open rule, the header and the tab strip
+    all share -- four inline `filter(isWorkStep)` copies is how they drift.
+    Verified live: the one-question thread's header is down to "Flere
+    handlinger" and "Ny samtale" with no workspace trigger, in both languages,
+    while the tool-calling thread still offers Work. `chat-surfaces.test.ts` now
+    asserts the inverted contract (12 pass), including the wiring guard, which
+    had pinned the old inline expression.
+
+### 8.3 Document integrity
+
+Two of the three documents existed only in the retired OneDrive folder and were
+absent from `C:\dev\CoresSystem`, the checkout the running stack now builds
+from: `VEREVON_CHAT_UX_DESIGN_SPEC.md` and
+`VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md`. Both were copied into the clone
+as part of this audit. The OneDrive copy of *this* document is 48 lines behind
+the clone's -- it predates the 2026-09-03 closures of items 14 through 17 -- so
+the clone is authoritative and the OneDrive copy should not be merged back.
+
+### 8.4 Fix pass, 2026-09-04
+
+Items 19, 21, 24 (sheet threshold) and 27 are implemented; each is recorded
+against its own entry above. Items 20, 22, 23, 25, 26 and the mid-band half of
+24 are untouched and still open.
+
+Checks after the pass: `pnpm typecheck` clean, `pnpm lint` 0 errors (120
+pre-existing `solid/reactivity` warnings), `chat-surfaces.test.ts` 12/12.
+
+Fourteen tests fail in `src/features/chat`, none of them caused by this pass and
+all worth their own fix:
+
+- `ChatPanels.test.tsx` 10 and `ChatArtifactPanel.test.tsx` 2 -- both files fail
+  identically with the committed component swapped back in, so they pre-date
+  this work. The design doc's item-8 note already recorded this class of red for
+  `ChatLiveRunPanel`.
+- `mid-run-input.test.ts` 1 -- a source-scanning guard searching
+  `use-chat-controller.ts` for an anchor written with `\n` line endings, in a
+  file that has 2,813 CRLF pairs. It cannot match on this checkout regardless of
+  the code, and the file is untouched by this pass. The guard should normalize
+  line endings before searching.

@@ -1195,6 +1195,41 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "browser-agent"))]
     let page_renderer: Option<std::sync::Arc<quarry_runtime::page_renderer::PageRenderer>> = None;
 
+    // Page-title enrichment for `page_extracted`: the cheapest routed Model
+    // Plane alias names pages whose `<title>` is missing/generic. Same client
+    // builder (and therefore the same Auth Core token minting / dev bypass)
+    // as the other Model Plane consumers above. Absence of a Model Plane URL
+    // simply leaves `title_source` at `html`/`host`.
+    let page_title_enricher: Option<Arc<quarry_runtime::page_extract::PageTitleEnricher>> =
+        if !cfg.page_title_enrich.unwrap_or(true) {
+            tracing::info!("page-title enrichment disabled by QUARRY_EDGE__PAGE_TITLE_ENRICH=false");
+            None
+        } else {
+            match cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
+                Some(mp_url) => match build_model_client(mp_url) {
+                    Ok(mp) => {
+                        let enricher = quarry_runtime::page_extract::PageTitleEnricher::new(
+                            Arc::new(mp),
+                        )
+                        .with_model(cfg.page_title_model.clone().unwrap_or_default());
+                        tracing::info!(
+                            model = enricher.model(),
+                            "page-title enrichment enabled (Model Plane /v1/invoke, routed alias)"
+                        );
+                        Some(Arc::new(enricher))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "page-title enrichment disabled: model plane client init failed");
+                        None
+                    }
+                },
+                None => {
+                    tracing::info!("page-title enrichment disabled (MODEL_PLANE_URL unset)");
+                    None
+                }
+            }
+        };
+
     let app_state = state::AppState {
         readiness: state::ReadinessState {
             durable: durable_ready,
@@ -1229,6 +1264,7 @@ async fn main() -> anyhow::Result<()> {
             .cross_plane_auth_dev_bypass
             .then(|| cfg.model_plane_token.clone())
             .flatten(),
+        page_title_enricher,
         service_token_provider: cross_plane_tokens.clone(),
         answer_pipeline,
         local_index,

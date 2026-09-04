@@ -23208,7 +23208,14 @@ body.verevon-chat-canvas-resizing * {
   }
 }
 
-@media (max-width: 720px) {
+/* Mobile sheet. 760px, not 720px: UX spec section 10 says the canvas becomes a
+   full-screen sheet below 760px and that chat and preview are never squeezed
+   side by side. At 720px this band did exactly that -- measured 2026-09-04 at
+   745px, a 372px conversation next to a 340px canvas (audit item 24).
+   `.verevon-chat-run-panel` hosts Work during a live run, so it has to become a
+   sheet at the same width; its rule used to sit in the 720px header-chrome
+   block, which flipped the two Work hosts at different widths. */
+@media (max-width: 760px) {
   .verevon-chat-workspace-canvas {
     position: absolute;
     inset: 0;
@@ -23224,6 +23231,15 @@ body.verevon-chat-canvas-resizing * {
 
   .verevon-chat-workspace-canvas__head {
     padding-top: max(14px, env(safe-area-inset-top));
+  }
+
+  .verevon-chat-page--canvas .verevon-chat-run-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    width: 100%;
+    flex-basis: auto;
+    border-left: 0;
   }
 }
 
@@ -29436,6 +29452,246 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-selectable-row--compact strong {
   font-size: 12.5px;
+}
+
+/* Connect step — integration-core's truth about connected accounts. Sits
+   above the connector catalogue so the state of a connection the user just
+   made (provider, account, grants, per-lane sync, next step) is the first
+   thing they read when they come back from the provider consent screen. */
+.onboarding-connected {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--onboarding-accent, var(--ink)) 32%, var(--verevon-border));
+  border-radius: 8px;
+  box-shadow: 0 14px 30px rgb(31 27 23 / 7%);
+}
+
+.onboarding-connected__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.onboarding-connected__eyebrow {
+  margin: 0;
+  color: var(--onboarding-accent, var(--ink));
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.onboarding-connected__refresh {
+  padding: 2px 0;
+  color: var(--verevon-text-muted);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.onboarding-connected__refresh:hover:not(:disabled) {
+  color: var(--foreground);
+}
+
+.onboarding-connected__refresh:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.onboarding-connected-account {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--verevon-border);
+}
+
+.onboarding-connected-account__title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.onboarding-connected-account__title strong {
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.onboarding-connected-account__title small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--verevon-text-muted);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11.5px;
+}
+
+.onboarding-connected-account__title .onboarding-lane-status {
+  margin-left: auto;
+}
+
+.onboarding-connected-account__grants,
+.onboarding-connected-lanes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboarding-grant-chip {
+  padding: 2px 8px;
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10.5px;
+  font-weight: 500;
+  background: var(--onboarding-surface-subtle);
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+}
+
+.onboarding-connected-lanes {
+  display: grid;
+  gap: 3px;
+}
+
+.onboarding-connected-lane {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11.5px;
+}
+
+.onboarding-lane-status {
+  color: var(--subtle);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.onboarding-lane-status--synced {
+  color: #1f7a4d;
+}
+
+.onboarding-lane-status--failed {
+  color: #b42318;
+}
+
+.onboarding-lane-status--running,
+.onboarding-lane-status--pending {
+  color: var(--verevon-text-muted);
+}
+
+.onboarding-connected-next {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: var(--onboarding-surface-subtle);
+  border-radius: 6px;
+}
+
+.onboarding-connected-next p {
+  flex: 1 1 12rem;
+  margin: 0;
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.onboarding-connected-next--attention,
+.onboarding-connected-next--reconnect {
+  background: color-mix(in srgb, #b42318 8%, var(--panel));
+}
+
+.onboarding-connected-next--pick_library {
+  background: color-mix(in srgb, var(--onboarding-accent, var(--ink)) 8%, var(--panel));
+}
+
+.onboarding-connected-next--ready {
+  background: color-mix(in srgb, #1f7a4d 8%, var(--panel));
+}
+
+.onboarding-library-picker {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  background: var(--onboarding-surface-subtle);
+  border: 1px dashed var(--verevon-border);
+  border-radius: 6px;
+}
+
+.onboarding-library-picker__field {
+  display: grid;
+  gap: 3px;
+}
+
+.onboarding-library-picker__field span {
+  color: var(--subtle);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.onboarding-library-picker__field select {
+  min-height: 32px;
+  padding: 4px 8px;
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  background: var(--panel);
+  border: 1px solid var(--verevon-border);
+  border-radius: 6px;
+}
+
+.onboarding-library-picker__error {
+  margin: 0;
+  color: #b42318;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11.5px;
+}
+
+.onboarding-library-picker__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+/* Settings → Integrations hosts the same picker beneath the refused row, so
+   it inherits the picker's own styles and only needs list-row insetting. */
+.verevon-settings-integration-library-picker {
+  padding: 0 16px 14px;
 }
 
 .verevon-selectable-row--compact small {
@@ -45116,6 +45372,29 @@ body.verevon-chat-canvas-resizing * {
   padding: 8px 7px 0;
 }
 
+/* Audit item 19 / UX spec section 7 question 3, "does Verevon need me": the
+   Work canvas's typed-pause callout. Shares the approval card's trust tint so
+   a pause reads as the same class of moment wherever it surfaces. */
+.verevon-chat-steps-attention {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0;
+  border-radius: 10px;
+  background: var(--verevon-coral-soft);
+  padding: 10px 12px;
+}
+
+.verevon-chat-steps-attention strong {
+  font-size: 12px;
+}
+
+.verevon-chat-steps-attention p {
+  margin: 0;
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 @media (max-width: 1180px) {
   .verevon-chat-page--canvas .dashboard-composer-root--chat .dashboard-composer-toolbar__left > :is(.dashboard-composer-toolbar__divider, .dashboard-composer-toolbar-icon:nth-of-type(1)) {
     display: none;
@@ -45224,17 +45503,55 @@ body.verevon-chat-canvas-resizing * {
     max-width: 64px;
   }
 
-  .verevon-chat-page--canvas .verevon-chat-run-panel {
-    position: absolute;
-    inset: 0;
-    z-index: 30;
-    width: 100%;
-    flex-basis: auto;
-    border-left: 0;
-  }
-
   .verevon-chat-run-panel__runid,
   .verevon-chat-run-panel__workspace-status {
     display: none;
   }
+}
+
+/* Model-authored <details> blocks in chat answers (chat-media-markdown
+   parseDetails): a quiet collapsible for optional detail such as "Se alle
+   tilbud" under a quote table. */
+.verevon-chat-details {
+  margin: 10px 0;
+  border: 1px solid color-mix(in srgb, var(--verevon-text-muted) 22%, transparent);
+  border-radius: 10px;
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-chat-details > summary {
+  padding: 8px 12px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  list-style: none;
+}
+
+.verevon-chat-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verevon-chat-details > summary::before {
+  content: '\25B8';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 140ms ease;
+}
+
+.verevon-chat-details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.verevon-chat-details > summary:hover,
+.verevon-chat-details > summary:focus-visible {
+  color: var(--verevon-j-text);
+  outline: 2px solid var(--verevon-chat-fjord);
+  outline-offset: -2px;
+  border-radius: 10px;
+}
+
+.verevon-chat-details__body {
+  padding: 0 12px 10px;
 }
