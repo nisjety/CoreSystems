@@ -552,6 +552,8 @@ pub async fn invoke_stream_sse(
     // `stream_buffer::scoped_stream_key`.
     let buffer_key = crate::stream_buffer::scoped_stream_key(&org_clone, &user_clone, &req_id);
     let model_clone = model.clone();
+    let provider_hint = normalized.provider_hint.clone();
+    let subscription_connection_id = normalized.subscription_connection_id.clone();
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
 
     // chat-parity §1 — stream-path idempotency. A concurrent duplicate (same
@@ -1603,7 +1605,8 @@ pub async fn invoke_stream_sse(
             request_id: req_id.clone(),
             org_id: org_clone.clone(),
             model: answer_model.clone(),
-            provider_hint: String::new(),
+            provider_hint,
+            subscription_connection_id,
             messages,
             temperature: 0.7,
             max_tokens: answer_token_budget(),

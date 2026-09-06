@@ -3834,6 +3834,9 @@ pub async fn run_tool_rounds(
                 // No caller here has a residency floor to express yet; left for
                 // a future org-policy wiring (see inference.proto's field doc).
                 min_residency: String::new(),
+                // Tool loops must not inherit a subscription selected for a
+                // text-only answer; the broker rejects tool execution.
+                subscription_connection_id: String::new(),
             },
             inference_bearer,
         ));

@@ -45,6 +45,25 @@ describe('ConnectStepContent', () => {
       }),
     )
   })
+
+  it('offers ChatGPT subscription sign-in in the AI tab without treating it as a source connector', () => {
+    render(() => (
+      <ConnectStepContent
+        connectedSources={[]}
+        orgId="org-coresystem"
+        onConnect={vi.fn()}
+        onContinue={vi.fn()}
+        onSkip={vi.fn()}
+      />
+    ))
+
+    fireEvent.click(screen.getByRole('tab', { name: /^AI/i }))
+    flush()
+
+    expect(screen.getByRole('heading', { name: /chatgpt-abonnementet/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /koble til chatgpt/i })).toBeTruthy()
+    expect(screen.queryByText('Slack')).toBeNull()
+  })
 })
 
 describe('ConnectStepContent connected accounts', () => {

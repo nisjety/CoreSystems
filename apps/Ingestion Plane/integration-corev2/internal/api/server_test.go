@@ -3152,6 +3152,7 @@ func testConfig() config.Config {
 		ServiceName:               "integration-corev2",
 		InternalAPIKey:            "dev-key",
 		InternalAPIKeyHeader:      "X-Internal-API-Key",
+		CodexSubscriptionModelPlaneAPIKey: "codex-subscription-test-key",
 		AllowLegacyTenantKey:      true,
 		PublicBaseURL:             "http://localhost:3026",
 		MicrosoftClientID:         "client",

@@ -872,6 +872,10 @@ const integrationsDisconnectInput = z.object({
   id: z.string().min(1),
 })
 
+const integrationsDisconnectChatGptSubscriptionInput = z.object({
+  connectionId: z.string().min(1),
+})
+
 const integrationsTriggerSyncInput = z.object({
   id: z.string().min(1),
 })
@@ -2457,6 +2461,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: integrationsDisconnectInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'integrations.start_chatgpt_subscription',
+    label: 'Start ChatGPT subscription connection',
+    description: 'Start the official ChatGPT device-code connection without collecting an API key.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: z.object({}),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'integrations.disconnect_chatgpt_subscription',
+    label: 'Disconnect ChatGPT subscription',
+    description: 'Disconnect the workspace from an official ChatGPT subscription connection.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: integrationsDisconnectChatGptSubscriptionInput,
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"strings"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/actions"
 	"github.com/triodelab/integration-corev2/internal/api"
 	"github.com/triodelab/integration-corev2/internal/attestation"
+	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
@@ -64,6 +65,18 @@ func main() {
 		logger.Fatal().Err(err).Msg("initialize provider-write attestation verifier")
 	}
 	writeAttestations := attestation.NewVerifier(writeAttestationKeys, nil)
+	var codexSubscriptions *codexsubscription.Manager
+	if cfg.CodexSubscriptionEnabled {
+		codexSubscriptions, err = codexsubscription.NewManager(codexsubscription.Config{
+			Enabled:           true,
+			Home:              cfg.CodexSubscriptionHome,
+			LoginTTL:          cfg.CodexSubscriptionLoginTTL,
+			InvocationTimeout: cfg.CodexSubscriptionInvocationTimeout,
+		}, codexsubscription.NewProcessRunner(cfg.CodexAppServerCommand))
+		if err != nil {
+			logger.Fatal().Err(err).Msg("initialize Codex subscription broker")
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -141,10 +154,11 @@ func main() {
 		// independent second DNS resolution. Every other provider these two
 		// services call gets the same connect-timeout/DNS-pinning hardening
 		// for free since the client is shared.
-		Discovery:         discovery.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 8 * time.Second})),
-		Actions:           actions.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})),
-		WriteAttestations: writeAttestations,
-		HotPath:           hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
+		Discovery:          discovery.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 8 * time.Second})),
+		Actions:            actions.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})),
+		WriteAttestations:  writeAttestations,
+		HotPath:            hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
+		CodexSubscriptions: codexSubscriptions,
 		// Same finspo-core client the finspo worker uses; lets the generic
 		// sync route answer 409 no_sources_registered instead of queuing a
 		// Microsoft job that has no library to sync. ErrNotConfigured (no

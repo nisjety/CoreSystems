@@ -115,7 +115,35 @@ func Catalog() []Provider {
 		Shipping(),
 		Okta(),
 		SCIM(),
+		OpenAICodexSubscription(),
 	})
+}
+
+// OpenAICodexSubscription is not in OAuthCatalog: the official Codex
+// app-server owns its ChatGPT device-code exchange and refreshed auth state.
+// Integration Core persists only a connection reference and brokers bounded
+// text inference for Model Plane.
+func OpenAICodexSubscription() Provider {
+	return Provider{
+		Key:              "openai-codex-subscription",
+		Label:            "ChatGPT subscription (Codex)",
+		Category:         "ai",
+		ConnectorType:    "openai-codex-subscription",
+		AuthType:         "codex_chatgpt_device_code",
+		DirectOAuthReady: true,
+		Capabilities: []Capability{{
+			Key:         "model.inference",
+			Label:       "Subscription-backed text inference",
+			Description: "Use the connected ChatGPT subscription through the official Codex app-server. CoreSystem never receives a reusable ChatGPT token.",
+			Sensitive:   true,
+		}},
+		Bundles: []Bundle{{
+			Key:          "inference",
+			Label:        "Text inference",
+			Description:  "Route text-only Model Plane requests through this user's ChatGPT subscription.",
+			Capabilities: []string{"model.inference"},
+		}},
+	}
 }
 
 func WithReadiness(catalog []Provider, readiness map[string][]string) []Provider {

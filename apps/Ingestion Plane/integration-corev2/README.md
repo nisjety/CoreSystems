@@ -431,6 +431,53 @@ See [docs/PROVIDER_BLUEPRINT.md](docs/PROVIDER_BLUEPRINT.md) for how the Go
 integration core uses Nango and the existing NestJS services as blueprints while
 keeping OAuth, tokens, refresh, revocation, audit, and token leasing first-party.
 
+## ChatGPT subscription connections (Codex broker)
+
+`openai-codex-subscription` is an opt-in, text-only provider for a user who
+chooses to use their eligible ChatGPT plan through OpenAI's official Codex
+app-server. It is intentionally not an API-key importer and does not scrape a
+ChatGPT browser session.
+
+Integration Core starts the documented device-code flow at
+`POST /api/v1/model-subscriptions/openai-codex/connect`, returns the
+verification URL and user code, and reports completion through
+`GET /api/v1/model-subscriptions/openai-codex/connect/{connectionId}/{loginId}`.
+The authenticated caller owns the resulting opaque `conn_*` connection. A
+caller can revoke it with `DELETE
+/api/v1/model-subscriptions/openai-codex/connections/{connectionId}`.
+
+The Codex CLI/app-server keeps its managed ChatGPT sign-in state in the
+connection's `CODEX_HOME` below `CODEX_SUBSCRIPTION_HOME`. The database stores
+only opaque connection metadata, capability consent, lifecycle status, and
+metadata-only audit events. There is no credential-lease endpoint for this
+provider, and Model Plane never receives a ChatGPT access token, refresh token,
+or browser cookie.
+
+The Compose API image installs a pinned, reviewed release of the official
+`codex` CLI (override `CODEX_VERSION` only after reviewing a release). Mount
+encrypted persistent storage at `CODEX_SUBSCRIPTION_HOME`, and configure a unique
+`CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY`. Model Plane must use the same value as
+`CODEX_SUBSCRIPTION_INTERNAL_API_KEY`, set
+`CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL`, allow-list models in
+`CODEX_SUBSCRIPTION_MODELS`, and add `openai-codex-subscription` to
+`INFERENCE_PROVIDER_ORDER`. The provider declares Global residency and no
+verified ZDR commitment, so deployments that use Model Plane's strict residency
+gate must explicitly allow that posture before registering it.
+
+Callers select the connection by setting `provider_hint` to
+`openai-codex-subscription` and `subscription_connection_id` on Model Plane's
+`InferRequest`. Model Gateway exposes the same selector as `provider` and
+`subscription_connection_id` (or `subscriptionConnectionId`) on its normal
+invoke and streaming contracts. The broker checks the verified org and user
+scope before every turn, runs Codex with a per-connection read-only empty
+workspace and approvals disabled, and audits only the request id and model —
+never message content.
+Tools, structured output, vision, embeddings, and ZDR requests are rejected,
+rather than silently using a less constrained route. ChatGPT plan availability,
+model availability, rate limits, and terms remain governed by the user's OpenAI
+subscription; this avoids API-token spend for an eligible run but does not make
+usage unlimited or guaranteed free.
+
 ## Unified-service replacement
 
 The old unified-service profile and real-time features are split by ownership:

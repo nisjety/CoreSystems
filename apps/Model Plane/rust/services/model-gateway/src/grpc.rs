@@ -456,6 +456,7 @@ fn build_infer_request(
         // Same floor the HTTP transports thread; enforced fail-closed by
         // inference-core's chain selection.
         min_privacy_tier: req.min_privacy_tier,
+        subscription_connection_id: req.subscription_connection_id.clone(),
         ..Default::default()
     })
 }

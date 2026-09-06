@@ -17704,6 +17704,182 @@ textarea:focus-visible {
   line-height: 1.2;
 }
 
+/* Subscription connections are intentionally distinct from source integration
+   rows: they grant Model Plane inference access and never sync source data. */
+.verevon-chatgpt-subscription {
+  display: grid;
+  gap: 16px;
+  margin: 24px 0 28px;
+  padding: 20px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgb(16 163 127 / 7%), rgb(255 255 255 / 44%));
+}
+
+.dark .verevon-chatgpt-subscription {
+  border-color: rgb(255 255 255 / 12%);
+  background: linear-gradient(135deg, rgb(16 163 127 / 13%), rgb(255 255 255 / 4%));
+}
+
+.verevon-chatgpt-subscription__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.verevon-chatgpt-subscription__header > div {
+  min-width: 0;
+}
+
+.verevon-chatgpt-subscription__product {
+  display: block;
+  color: #087b62;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.15em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.verevon-chatgpt-subscription h3 {
+  margin: 5px 0 0;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 720;
+  line-height: 24px;
+}
+
+.dark .verevon-chatgpt-subscription h3 {
+  color: var(--panel);
+}
+
+.verevon-chatgpt-subscription__header p,
+.verevon-chatgpt-subscription__device p,
+.verevon-chatgpt-subscription__privacy,
+.verevon-chatgpt-subscription__notice {
+  margin: 6px 0 0;
+  color: var(--subtle);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dark .verevon-chatgpt-subscription__header p,
+.dark .verevon-chatgpt-subscription__device p,
+.dark .verevon-chatgpt-subscription__privacy,
+.dark .verevon-chatgpt-subscription__notice {
+  color: var(--sidebar-muted);
+}
+
+.verevon-chatgpt-subscription__status {
+  flex: none;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.verevon-chatgpt-subscription__status--connected {
+  border-color: rgb(16 163 127 / 35%);
+  color: #087b62;
+  background: rgb(16 163 127 / 8%);
+}
+
+.verevon-chatgpt-subscription__status--pending {
+  border-color: rgb(183 121 31 / 36%);
+  color: #916011;
+  background: rgb(183 121 31 / 8%);
+}
+
+.verevon-chatgpt-subscription__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.verevon-chatgpt-subscription__device {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 16px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid rgb(16 163 127 / 20%);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 48%);
+}
+
+.dark .verevon-chatgpt-subscription__device {
+  border-color: rgb(16 163 127 / 30%);
+  background: rgb(0 0 0 / 12%);
+}
+
+.verevon-chatgpt-subscription__device strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.dark .verevon-chatgpt-subscription__device strong {
+  color: var(--panel);
+}
+
+.verevon-chatgpt-subscription__device code {
+  justify-self: end;
+  padding: 9px 11px;
+  border: 1px dashed rgb(16 163 127 / 42%);
+  border-radius: 8px;
+  color: #087b62;
+  font-size: 15px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+
+.verevon-chatgpt-subscription__device .verevon-chatgpt-subscription__actions {
+  grid-column: 1 / -1;
+}
+
+.verevon-chatgpt-subscription__device a {
+  color: #087b62;
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.verevon-chatgpt-subscription__privacy {
+  margin: 0;
+  font-size: 12px;
+}
+
+.verevon-chatgpt-subscription__notice {
+  margin: 0;
+}
+
+.verevon-chatgpt-subscription--onboarding {
+  margin: 0;
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.verevon-chatgpt-subscription--onboarding h3 {
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.verevon-chatgpt-subscription--onboarding .verevon-chatgpt-subscription__header p,
+.verevon-chatgpt-subscription--onboarding .verevon-chatgpt-subscription__device p,
+.verevon-chatgpt-subscription--onboarding .verevon-chatgpt-subscription__privacy,
+.verevon-chatgpt-subscription--onboarding .verevon-chatgpt-subscription__notice {
+  font-size: 11px;
+  line-height: 17px;
+}
+
 .verevon-settings-social-layer {
   display: grid;
   gap: 16px;
@@ -29417,7 +29593,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-connector-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -30791,6 +30967,19 @@ body.verevon-chat-canvas-resizing * {
 }
 
 @media (max-width: 640px) {
+  .verevon-chatgpt-subscription__header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .verevon-chatgpt-subscription__device {
+    grid-template-columns: 1fr;
+  }
+
+  .verevon-chatgpt-subscription__device code {
+    justify-self: start;
+  }
+
   .onboarding-connector-tabs {
     grid-template-columns: 1fr;
   }

@@ -953,6 +953,9 @@ async fn run_rounds(
             // No caller here has a residency floor to express yet; left for
             // a future org-policy wiring (see inference.proto's field doc).
             min_residency: String::new(),
+            // Governed agent loops cannot select a user-owned ChatGPT
+            // subscription; only an explicit user chat request may do so.
+            subscription_connection_id: String::new(),
         });
         infer_request.metadata_mut().insert(
             "authorization",

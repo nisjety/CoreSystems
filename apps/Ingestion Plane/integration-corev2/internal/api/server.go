@@ -25,6 +25,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/actions"
 	"github.com/triodelab/integration-corev2/internal/attestation"
 	"github.com/triodelab/integration-corev2/internal/auth"
+	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
 	"github.com/triodelab/integration-corev2/internal/discovery"
@@ -51,6 +52,9 @@ type ServerConfig struct {
 	Actions           *actions.Service
 	WriteAttestations *attestation.Verifier
 	HotPath           hotpath.WebhookNormalizer
+	// CodexSubscriptions owns ChatGPT subscription device-code flows and
+	// execution. It is nil unless explicitly enabled in deployment config.
+	CodexSubscriptions *codexsubscription.Manager
 	// WebhookOrg resolves the owning tenant for account-wide provider
 	// webhooks (Meta/Slack callbacks carry no Verevon org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
@@ -118,11 +122,12 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			"natsEnabled": cfg.Config.NATSEnabled,
 			"providers":   len(providers.Catalog()),
 			"capabilities": fiber.Map{
-				"oauth":          true,
-				"tokenBroker":    true,
-				"discovery":      cfg.Discovery != nil,
-				"actions":        cfg.Actions != nil,
-				"webhookHotPath": cfg.HotPath != nil,
+				"oauth":             true,
+				"tokenBroker":       true,
+				"codexSubscription": cfg.CodexSubscriptions != nil,
+				"discovery":         cfg.Discovery != nil,
+				"actions":           cfg.Actions != nil,
+				"webhookHotPath":    cfg.HotPath != nil,
 			},
 		}
 		if auditMonitor != nil {
@@ -150,6 +155,10 @@ func NewServer(cfg ServerConfig) *fiber.App {
 
 	internalAuth := auth.InternalOnly(auth.Config{
 		APIKey:       cfg.Config.InternalAPIKey,
+		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
+	})
+	codexSubscriptionModelPlaneAuth := auth.InternalOnly(auth.Config{
+		APIKey:       cfg.Config.CodexSubscriptionModelPlaneAPIKey,
 		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
 	})
 	app.Get("/metrics", internalAuth, func(c *fiber.Ctx) error {
@@ -1259,6 +1268,8 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		}
 		return success(c, token)
 	})...)
+
+	registerCodexSubscriptionRoutes(app, cfg, codexSubscriptionModelPlaneAuth, internalOrBearerAuth, rateLimited)
 
 	app.Get("/internal/gdpr/export", internalAuth, func(c *fiber.Ctx) error {
 		organizationID := strings.TrimSpace(c.Query("organizationId"))
