@@ -67,6 +67,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| proto_root.join(p))
         .collect();
 
+    // These make a proto edit rebuild the generated code — on a HOST.
+    //
+    // In Docker they are not sufficient on their own, and the failure is
+    // silent: the service Dockerfiles share one `/app/rust/target` cache
+    // mount across every model-plane build, and BuildKit normalises the
+    // mtimes of files it COPYs into the image. `rerun-if-changed` is
+    // mtime-based, so a `mp-contracts` artifact cached by an EARLIER
+    // service's build looks fresh against a proto whose content changed but
+    // whose mtime did not. The generated struct then silently lacks the new
+    // field, and the first sign is a service failing to compile against its
+    // own contract (`SessionMessage has no field named message_id`).
+    //
+    // If a proto change does not appear inside a container build, bust this
+    // crate's own fingerprint (edit this file) or drop the cache mount with
+    // `docker builder prune --filter type=exec.cachemount`. Editing the
+    // proto alone is not enough.
     for p in &proto_paths {
         println!("cargo:rerun-if-changed={}", p.display());
     }
