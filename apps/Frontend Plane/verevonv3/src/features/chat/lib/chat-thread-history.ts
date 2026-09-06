@@ -6,6 +6,7 @@ import {
   writeClientValue,
 } from '@/shared/session/client-storage'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
+import type { ConversationNode } from '@/shared/chat-nodes'
 
 export const CHAT_ACTIVE_THREAD_KEY = 'verevon.chat.threadId'
 export const CHAT_THREAD_HISTORY_KEY = 'verevon.chat.threadHistory.v1'
@@ -69,6 +70,13 @@ export type ChatThreadTranscriptTurn = {
   /** Server-derived effect evidence from the durable run proof bundle. */
   effectClass?: ChatEffectClass
   confidence?: number
+  /**
+   * What the backend's verification pass found, persisted so the notice
+   * survives a reload — the same reason `memoryRecallCount` below is
+   * stored. Shaped from the confidence node rather than restated, so the
+   * snapshot cannot drift from what the renderer reads.
+   */
+  verification?: Extract<ConversationNode, { kind: 'confidence' }>['verification']
   files?: unknown[]
   grounding?: unknown
   id: string

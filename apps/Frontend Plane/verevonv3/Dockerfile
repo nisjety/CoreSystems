@@ -23,7 +23,16 @@ COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # as a BuildKit named context by compose/CI; copying it to the path encoded by
 # the local `file:` dependency keeps the frontend context small without
 # publishing a second, drifting SDK package.
-COPY --from=quarry-client [".", "/Ingestion Plane/Quarry-v2/sdks/typescript/"]
+# `--chown` matters here, and its absence is not cosmetic: `@quarry/client` is a
+# `file:` dependency, and pnpm imports those by HARDLINKING the package's files
+# into the virtual store. This stage runs as `node`, so without the chown the
+# SDK lands root-owned and every hardlink fails with `Operation not permitted`
+# (os error 1) once the kernel has `fs.protected_hardlinks=1` — the default in
+# Docker Desktop's VM, which is why this reproduces there and not in every CI.
+# The error names a different file on each run, so it reads like a flake rather
+# than a permission problem. Prefer this over `package-import-method=copy`,
+# which would hide the cause and copy the whole SDK on every install.
+COPY --from=quarry-client --chown=node:node [".", "/Ingestion Plane/Quarry-v2/sdks/typescript/"]
 RUN --mount=type=cache,target=/home/node/.local/share/pnpm/store,uid=1000,gid=1000 \
     pnpm install --frozen-lockfile
 

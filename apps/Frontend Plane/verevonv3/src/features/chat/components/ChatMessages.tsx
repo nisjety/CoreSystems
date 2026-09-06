@@ -40,6 +40,7 @@ import {
   parseUnifiedDiff,
   toolPresentation,
   type AnswerState,
+  type ConversationNode,
   type ConversationNodeContext,
   type DiffResult,
   type PlanApprovalStatus,
