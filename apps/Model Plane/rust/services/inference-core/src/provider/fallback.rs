@@ -10,10 +10,11 @@ use tracing::{info, warn};
 use super::policy_client::PolicyClient;
 use super::routing_policy::RoutingPolicy;
 use super::{
-    anthropic::AnthropicProvider, endpoint_region_is_non_eu, intent, is_eu_region,
-    normalize_region_token, openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk,
-    InferRequest, InferResponse, ModelFamily, ModelInfo, PrivacyTier, ProviderCapabilities,
-    ProviderError, ProviderRouter, Residency,
+    anthropic::AnthropicProvider, codex_subscription::CodexSubscriptionProvider,
+    endpoint_region_is_non_eu, intent, is_eu_region, normalize_region_token,
+    openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse,
+    ModelFamily, ModelInfo, PrivacyTier, ProviderCapabilities, ProviderError, ProviderRouter,
+    Residency,
 };
 use crate::cache::PromptCache;
 use crate::config::InferenceConfig;
@@ -131,6 +132,7 @@ struct DeployedModels {
 pub struct ProviderDefaults {
     azure_openai: String,
     azure_anthropic: String,
+    codex_subscription: String,
 }
 
 impl Default for ProviderDefaults {
@@ -138,6 +140,7 @@ impl Default for ProviderDefaults {
         Self {
             azure_openai: AZURE_MODEL_ROUTER.to_owned(),
             azure_anthropic: super::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL.to_owned(),
+            codex_subscription: String::new(),
         }
     }
 }
@@ -153,6 +156,11 @@ impl ProviderDefaults {
                 &cfg.azure_anthropic_deployments,
                 super::anthropic::DEFAULT_AZURE_ANTHROPIC_MODEL,
             ),
+            codex_subscription: cfg
+                .codex_subscription_models
+                .first()
+                .cloned()
+                .unwrap_or_default(),
         }
     }
 }
@@ -519,6 +527,13 @@ impl FallbackChain {
         let azure_cohere_residency = classify(cfg.azure_cohere_region.as_deref(), false);
 
         for name in &cfg.provider_order {
+            if matches!(name.as_str(), "codex-subscription" | "chatgpt-codex")
+                && providers
+                    .iter()
+                    .any(|(registered, _)| registered == "openai-codex-subscription")
+            {
+                continue;
+            }
             match name.as_str() {
                 "azure" | "azure-openai" => {
                     if let (Some(endpoint), Some(key)) =
@@ -636,6 +651,39 @@ impl FallbackChain {
                                 info!(provider = "openai", "provider registered");
                             }
                         }
+                    }
+                }
+                "openai-codex-subscription" | "codex-subscription" | "chatgpt-codex" => {
+                    if let (Some(url), Some(key)) = (
+                        &cfg.codex_subscription_integration_core_url,
+                        &cfg.codex_subscription_internal_api_key,
+                    ) {
+                        match CodexSubscriptionProvider::new(
+                            url.clone(),
+                            key.clone(),
+                            cfg.codex_subscription_models.clone(),
+                        ) {
+                            Ok(provider) => {
+                                providers.push((
+                                    "openai-codex-subscription".to_owned(),
+                                    Arc::new(provider),
+                                ));
+                                info!(
+                                    provider = "openai-codex-subscription",
+                                    "subscription provider registered"
+                                );
+                            }
+                            Err(error) => warn!(
+                                provider = "openai-codex-subscription",
+                                error = %error,
+                                "subscription provider configuration rejected"
+                            ),
+                        }
+                    } else {
+                        warn!(
+                            provider = "openai-codex-subscription",
+                            "subscription provider requested but Integration Core URL or service key is absent"
+                        );
                     }
                 }
                 other => {
@@ -992,6 +1040,7 @@ impl FallbackChain {
         match provider_name {
             "azure-openai" => &self.defaults.azure_openai,
             "azure-anthropic" => &self.defaults.azure_anthropic,
+            "openai-codex-subscription" => &self.defaults.codex_subscription,
             "anthropic" => super::anthropic::DEFAULT_ANTHROPIC_MODEL,
             _ => super::openai::DEFAULT_OPENAI_MODEL,
         }
@@ -3313,6 +3362,7 @@ mod resolution_tests {
         chain.defaults = ProviderDefaults {
             azure_openai: "gpt-4o-mini".to_owned(),
             azure_anthropic: "claude-haiku-4-5".to_owned(),
+            codex_subscription: String::new(),
         };
         let req = InferRequest {
             thinking_budget_tokens: 0,

@@ -1052,6 +1052,7 @@ fn to_internal_request(
         tools,
         tool_choice: req.tool_choice.clone(),
         min_residency: req.min_residency.clone(),
+        subscription_connection_id: req.subscription_connection_id.clone(),
         org_id: principal.org_id.clone(),
         user_id: principal.budget_user_id(),
         // The verified caller's own token, forwarded so the intent layer's

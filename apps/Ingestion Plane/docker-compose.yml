@@ -356,6 +356,8 @@ services:
       context: ./integration-corev2
       dockerfile: Dockerfile
       target: api
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.153.4}
     container_name: integration-api
     restart: unless-stopped
     env_file:
@@ -406,6 +408,11 @@ services:
       INTEGRATION_WEBHOOK_HOTPATH_URL: ${INTEGRATION_WEBHOOK_HOTPATH_URL:-http://integration-webhook-normalizer:3036}
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      # Optional ChatGPT subscription broker configuration is supplied by the
+      # integration-corev2 env file so its dedicated model-plane credential is
+      # not expanded from Compose's project-wide environment. The API image
+      # installs the reviewed, pinned Codex CLI release selected by CODEX_VERSION.
+      # The named volume keeps Codex-managed login state out of the database.
       META_JS_SDK_APP_ID: ${META_JS_SDK_APP_ID:-${META_APP_CLIENT_ID:-${FACEBOOK_CLIENT_ID:-${INSTAGRAM_CLIENT_ID:-}}}}
       META_JS_SDK_API_VERSION: ${META_JS_SDK_API_VERSION:-v23.0}
       META_JS_SDK_LOCALE: ${META_JS_SDK_LOCALE:-en_US}
@@ -463,6 +470,8 @@ services:
     networks:
       - ingestion-net
       - inter-plane-bus
+    volumes:
+      - integration-codex-subscription-home:/var/lib/integration-core/codex-subscriptions
     logging:
       driver: json-file
       options:
@@ -1392,6 +1401,10 @@ configs:
       max_words = 250000
 
 volumes:
+  # Isolated Codex-managed ChatGPT login state for enabled subscription broker
+  # connections. Back this with encrypted persistent storage in production.
+  integration-codex-subscription-home:
+    driver: local
   ingestion-postgres-data:
     driver: local
   # G50 (verevon-gap.md §8.33): dedicated volume for the Temporal-only

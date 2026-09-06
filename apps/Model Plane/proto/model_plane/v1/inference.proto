@@ -156,6 +156,12 @@ message InferRequest {
   // does not is a hard provider error, not a silent no-op. A budget set for a
   // model that cannot think is dropped and the request proceeds normally.
   int32 thinking_budget_tokens = 13;
+
+  // Opaque, user-owned subscription connection selected in Integration Core.
+  // It is meaningful only with provider_hint "openai-codex-subscription";
+  // Model Plane forwards it to the broker but never receives a ChatGPT OAuth
+  // access or refresh token.
+  string subscription_connection_id = 15;
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).

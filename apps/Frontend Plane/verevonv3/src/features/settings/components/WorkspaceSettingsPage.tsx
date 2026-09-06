@@ -10,6 +10,7 @@ import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
 import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
+import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
 import { reserveDirectOauthWindow, runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
@@ -1716,6 +1717,7 @@ function IntegrationsSection() {
           </div>
         )}
       </Show>
+      <ChatGptSubscriptionPanel orgId={orgId()} onConnectionChange={() => void refresh()} />
       <section class="verevon-settings-social-layer" aria-labelledby="verevon-settings-social-title">
         <div class="verevon-settings-social-layer__header">
           <div>
@@ -2023,6 +2025,10 @@ function buildIntegrationRows(summary: IntegrationSettingsSummary | null, i18n: 
     connectionsByProvider.set(connection.providerKey, providerConnections)
   }
   return summary.providers.flatMap((provider) => {
+    // ChatGPT subscription access is an inference entitlement, not an
+    // ingestion source. It has a dedicated device-code panel above so this
+    // generic OAuth/source row cannot offer the wrong connect or sync actions.
+    if (provider.key === 'openai-codex-subscription') return []
     // Superseded providers are capabilities of the unified Meta integration,
     // not separate operator-facing products. Existing standalone connections
     // remain active in integration-core but are summarized by the Meta card.

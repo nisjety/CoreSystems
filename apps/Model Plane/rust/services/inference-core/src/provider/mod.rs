@@ -4,6 +4,7 @@ use tracing::warn;
 
 pub mod anthropic;
 pub mod artifact_ref;
+pub mod codex_subscription;
 pub mod doc_intel;
 pub mod fallback;
 pub mod intent;
@@ -146,6 +147,11 @@ pub struct InferRequest {
     /// not is a hard 400 rather than a silent no-op. See
     /// `anthropic::supports_extended_thinking`.
     pub thinking_budget_tokens: i32,
+    /// Opaque Integration Core connection id for a user-owned subscription.
+    /// This is a routing reference, never a ChatGPT OAuth credential. It is
+    /// included in the prompt-cache scope so two connections cannot share a
+    /// cached response or bypass the broker's per-connection audit boundary.
+    pub subscription_connection_id: String,
     /// Tenant scope for the Verevon intent layer's budget check (from gRPC
     /// metadata `x-org-id`; empty when the caller doesn't forward it).
     pub org_id: String,

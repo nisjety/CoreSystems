@@ -66,7 +66,11 @@ impl PromptCache {
     /// collide with `("a", "bc")`.
     fn cache_key(req: &InferRequest) -> String {
         let mut hasher = blake3::Hasher::new();
-        for scope in [req.org_id.as_str(), req.user_id.as_str()] {
+        for scope in [
+            req.org_id.as_str(),
+            req.user_id.as_str(),
+            req.subscription_connection_id.as_str(),
+        ] {
             hasher.update(&(scope.len() as u64).to_le_bytes());
             hasher.update(scope.as_bytes());
         }
@@ -365,6 +369,27 @@ mod tests {
 
         assert!(cache.get(&mine).is_some());
         assert!(cache.get(&theirs).is_none());
+    }
+
+    /// A user may have multiple subscription connections. A response generated
+    /// under one plan/account must not be served as a cache hit for another.
+    #[test]
+    fn an_identical_prompt_from_another_subscription_connection_does_not_hit() {
+        let cache = PromptCache::new(300);
+        let mut first = sample_request();
+        first.org_id = "org-a".to_owned();
+        first.user_id = "user-1".to_owned();
+        first.subscription_connection_id = "conn-a".to_owned();
+        let mut second = first.clone();
+        second.subscription_connection_id = "conn-b".to_owned();
+
+        cache.put(&first, &sample_response());
+
+        assert!(cache.get(&first).is_some());
+        assert!(
+            cache.get(&second).is_none(),
+            "a second subscription connection must not share cached output"
+        );
     }
 
     /// The same caller re-asking must still hit — this is the cache's real

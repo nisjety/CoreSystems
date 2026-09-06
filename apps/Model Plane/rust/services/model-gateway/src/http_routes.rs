@@ -1599,6 +1599,10 @@ struct AiChatRequest {
     #[serde(default)]
     model: String,
     #[serde(default)]
+    provider: String,
+    #[serde(default, alias = "subscriptionConnectionId")]
+    subscription_connection_id: String,
+    #[serde(default)]
     #[allow(dead_code)] // accepted on the wire but not yet acted upon
     stream: bool,
     #[serde(default)]
@@ -2112,7 +2116,8 @@ async fn ai_chat(
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: req.model,
-                provider_hint: String::new(),
+                provider_hint: req.provider,
+                subscription_connection_id: req.subscription_connection_id,
                 messages,
                 temperature: 0.7,
                 max_tokens: 4096,
@@ -6042,6 +6047,15 @@ async fn ingest_feedback(
 pub struct InvokeRequest {
     pub content: String,
     pub model: Option<String>,
+    /// Provider selection. `openai-codex-subscription` requires the opaque
+    /// `subscription_connection_id` below; neither field contains user auth.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Opaque Integration Core connection selected by the user. Integration
+    /// Core verifies that it belongs to the authenticated org/user on every
+    /// invocation. Browser cookies and OAuth tokens are never accepted here.
+    #[serde(default, alias = "subscriptionConnectionId")]
+    pub subscription_connection_id: Option<String>,
     pub session_key: Option<String>,
     pub thread_id: Option<String>,
     /// Server-injected, fresh Control decision for a message appended to an
@@ -7425,24 +7439,23 @@ async fn list_thread_messages(
         .map_err(|e| session_thread_error("session-core list_conversation failed", &e))?
         .into_inner();
 
-    let messages = response
-        .messages
-        .into_iter()
-        .map(|m| ThreadMessage {
-            message_id: m.message_id,
-            role: m.role,
-            content: m.content,
-            agent_name: m.agent_name,
-            metadata: m
-                .metadata
-                .as_ref()
-                .map(prost_struct_to_json)
-                .and_then(|value| match value {
-                    Value::Object(map) if !map.is_empty() => Some(map),
-                    _ => None,
-                }),
-        })
-        .collect();
+    let messages =
+        response
+            .messages
+            .into_iter()
+            .map(|m| ThreadMessage {
+                message_id: m.message_id,
+                role: m.role,
+                content: m.content,
+                agent_name: m.agent_name,
+                metadata: m.metadata.as_ref().map(prost_struct_to_json).and_then(
+                    |value| match value {
+                        Value::Object(map) if !map.is_empty() => Some(map),
+                        _ => None,
+                    },
+                ),
+            })
+            .collect();
 
     Ok(Json(ListThreadMessagesResponse {
         thread_id: trimmed.to_owned(),
@@ -7779,7 +7792,8 @@ async fn invoke(
                     request_id: request_id.clone(),
                     org_id: claims.org_id.clone(),
                     model: normalized.model.clone(),
-                    provider_hint: String::new(),
+                    provider_hint: normalized.provider_hint.clone(),
+                    subscription_connection_id: normalized.subscription_connection_id.clone(),
                     messages: vec![mp_contracts::model_plane::v1::ChatMessage {
                         role: "user".to_owned(),
                         content: user_content,
@@ -8020,7 +8034,8 @@ async fn invoke(
                     request_id: request_id.clone(),
                     org_id: claims.org_id.clone(),
                     model: normalized.model.clone(),
-                    provider_hint: String::new(),
+                    provider_hint: normalized.provider_hint.clone(),
+                    subscription_connection_id: normalized.subscription_connection_id.clone(),
                     messages: vec![ChatMessage {
                         role: "user".to_owned(),
                         content: user_content,

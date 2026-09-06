@@ -1157,6 +1157,7 @@ export default function OnboardingPage() {
           <ConnectStepContent
             connectedSources={state.connectors}
             connectingId={connectingId()}
+            orgId={state.organization.id ?? ''}
             onConnect={connectSource}
             onContinue={() => setState((s) => { s.step = 'social-proof' })}
             onSkip={() => setState((s) => { s.step = 'social-proof' })}

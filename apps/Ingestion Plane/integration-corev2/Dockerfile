@@ -28,7 +28,9 @@ LABEL org.opencontainers.image.title="CoreSystem integration-corev2" \
       org.opencontainers.image.created="${BUILD_DATE}"
 RUN --mount=type=cache,target=/var/cache/apk \
     apk add --no-cache ca-certificates wget && \
-    addgroup -S app && adduser -S app -G app
+    addgroup -S app && adduser -S app -G app && \
+    mkdir -p /var/lib/integration-core/codex-subscriptions && \
+    chown -R app:app /var/lib/integration-core
 USER app
 WORKDIR /app
 
@@ -43,6 +45,15 @@ ENTRYPOINT ["/app/email-worker"]
 # Keep the HTTP API last so a direct `docker build` retains the historical
 # default target, while Compose workers select their single-binary targets.
 FROM runtime-base AS api
+USER root
+# Pin the official Codex CLI used by the ChatGPT subscription broker. Build
+# automation may override this only after reviewing the release.
+ARG CODEX_VERSION=0.153.4
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add --no-cache nodejs npm && \
+    npm install --global --omit=dev "@openai/codex@${CODEX_VERSION}" && \
+    codex --version
+USER app
 COPY --from=build /out/integration-corev2 /app/integration-corev2
 EXPOSE 3026
 ENTRYPOINT ["/app/integration-corev2"]
