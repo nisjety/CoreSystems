@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
 import { useI18n } from '@/shared/i18n'
@@ -137,6 +137,28 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
   const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_TAB)
   const tabButtons: Partial<Record<SpaceTabId, HTMLButtonElement>> = {}
 
+  /**
+   * Read `props.tabs` through this memo, never directly.
+   *
+   * Callers write the obvious thing — `tabs={{ chat: <Panel />, ... }}` — and
+   * Solid's JSX compiler wraps a dynamic prop expression in a getter, so that
+   * literal arrives here as `get tabs() { return { chat: createComponent(Panel) } }`.
+   * It is a factory, not a value: every *read* rebuilds every panel the caller
+   * supplied.
+   *
+   * Each panel below reads the prop twice — once for `<Show>`'s `when`, once
+   * for its `children` — so six tabs carrying four supplied panels read it ten
+   * times, and built all four panels ten times over. For the Space cockpit that
+   * meant ten mounts of the Agent tab's instructions section (ten identical
+   * `GET /spaces/{ref}/instructions` in one burst) and ten room composers, nine
+   * of them discarded along with anything typed into them.
+   *
+   * Memoizing collapses that to a single read, so a caller is not punished for
+   * passing an inline object. Panels stay reactive either way: their props are
+   * getters, so they keep re-reading the caller's live state.
+   */
+  const tabs = createMemo(() => props.tabs)
+
   createEffect(
     () => undefined,
     () => {
@@ -203,7 +225,7 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
 
       <For each={SPACE_TABS}>
         {(tab) => {
-          const content = () => props.tabs?.[tab.id]
+          const content = () => tabs()?.[tab.id]
           return (
             <section
               role="tabpanel"

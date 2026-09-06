@@ -1,4 +1,4 @@
-import { createEffect, createSignal, type Accessor } from 'solid-js'
+import { createEffect, createMemo, createSignal, type Accessor } from 'solid-js'
 
 /**
  * Solid 2 removes createResource entirely (replaced by async createMemo read
@@ -74,8 +74,26 @@ export function createResource(
       })
   }
 
+  // Memoized, so the fetcher re-runs when the source *value* changes rather
+  // than whenever any signal the accessor happens to touch is written.
+  //
+  // A source accessor is tracked, not compared. Without this, a source like
+  // `() => context()?.space_ref` refetched every time `context` resolved a
+  // fresh-but-equivalent object — a periodic authority recheck, say — even
+  // though the ref string never changed. Callers had no way to opt out short
+  // of memoizing at each call site.
+  //
+  // This only ever removes redundant fetches. Equality is `===`, so the
+  // deliberate re-keying patterns in this codebase are untouched: sources that
+  // return an object or array literal (`() => [orgId, refreshKey] as const`,
+  // `() => ({ runId, tick: planTick() })`) allocate a fresh value per read and
+  // still refetch, and sources that fold a revision into a string key still
+  // refetch exactly when that key changes — which is what those call sites
+  // already document themselves as doing.
+  const trackedSource = createMemo(() => source())
+
   createEffect(
-    () => source(),
+    () => trackedSource(),
     (sourceValue) => {
       lastSourceValue = sourceValue
       // `run` rethrows so that an awaited `refetch()` can observe the failure,

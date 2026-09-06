@@ -418,6 +418,9 @@ const MAX_SPACE_INSTRUCTIONS_LENGTH = 4000
  */
 function SpaceInstructionsSection(props: { readonly spaceRef: string; readonly role: string }) {
   const i18n = useI18n()
+  // This ref is read out of the Space context, which the 30s membership
+  // recheck replaces with a fresh-but-equivalent object. `createResource`
+  // compares the source value, so an unchanged ref does not refetch.
   const [saved, { refetch }] = createResource(
     () => props.spaceRef,
     (spaceRef) => getSpaceInstructions(spaceRef),
