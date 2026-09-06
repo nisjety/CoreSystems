@@ -1,0 +1,542 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>266</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>266</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>634</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>654</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>698</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>830</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.spec.ts</file>
+  <line>140</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.spec.ts</file>
+  <line>140</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/nats-auth.controller.ts</file>
+  <line>189</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/nats-auth.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>556</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>556</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>567</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>567</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>782</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>782</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>888</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>888</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>1016</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>1016</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>2475</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>2680</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>2968</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>3673</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/plane-service-principal.ts</file>
+  <line>81</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/plane-service-principal.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/plane-service-principal.ts</file>
+  <line>86</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/plane-service-principal.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/plane-service-principal.ts</file>
+  <line>98</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/plane-service-principal.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/plane-service-principal.ts</file>
+  <line>117</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/plane-service-principal.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts</file>
+  <line>258</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts</file>
+  <line>258</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts</file>
+  <line>295</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts</file>
+  <line>295</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts</file>
+  <line>311</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts</file>
+  <line>311</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts</file>
+  <line>334</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts</file>
+  <line>334</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc-service-auth.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.spec.ts</file>
+  <line>65</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.spec.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.ts</file>
+  <line>188</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.ts</file>
+  <line>217</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.ts</file>
+  <line>263</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts</file>
+  <line>140</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts</file>
+  <line>195</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts</file>
+  <line>225</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/shared-nats.service.ts</file>
+  <line>64</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/shared-nats.service.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts</file>
+  <line>139</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts</file>
+  <line>144</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts" />
+  <problem_class id="ExceptionCaughtLocallyJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Exception used for local control-flow</problem_class>
+  <description>'throw' of exception caught locally</description>
+  <highlighted_element>throw</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+</problems>

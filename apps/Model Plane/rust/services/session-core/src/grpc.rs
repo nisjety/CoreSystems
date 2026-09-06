@@ -4379,14 +4379,22 @@ impl SessionCore for SessionService {
             }
             caller.authorize_org(&req.org_id)?;
             authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
-            let rows: Vec<(String, String, Option<String>, Option<serde_json::Value>)> =
-                sqlx::query_as(
-                    "SELECT m.role, m.content, m.agent_name, m.metadata
+            let rows: Vec<(
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<serde_json::Value>,
+            )> = sqlx::query_as(
+                // `m.id` is selected so a caller can name one earlier turn
+                // durably (message pinning). It was always in the table; this
+                // read simply never returned it.
+                "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata
                  FROM messages m
                  JOIN threads t ON t.id = m.thread_id
                  WHERE m.thread_id = $1 AND t.org_id = $2
                  ORDER BY m.sequence",
-                )
+            )
                 .bind(&req.thread_id)
                 .bind(&req.org_id)
                 .fetch_all(&self.pool)
@@ -4397,7 +4405,8 @@ impl SessionCore for SessionService {
                 })?;
             let messages = rows
                 .into_iter()
-                .map(|(role, content, agent_name, metadata)| pb::SessionMessage {
+                .map(|(message_id, role, content, agent_name, metadata)| pb::SessionMessage {
+                    message_id,
                     role,
                     content,
                     agent_name: agent_name.unwrap_or_default(),

@@ -660,6 +660,10 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         // registered provider served), not by the raw adapter.
         provider_used: String::new(),
         residency: String::new(),
+        // Anthropic does not report token logprobs on any endpoint, so
+        // there is no model-certainty signal to carry here; `None` reads as
+        // "unknown" downstream, never as low confidence.
+        token_confidence: None,
     }
 }
 
@@ -895,6 +899,7 @@ impl ProviderRouter for AnthropicProvider {
                                 output_tokens,
                                 provider_used: String::new(),
                                 residency: String::new(),
+                                token_confidence: None,
                                 stop_reason: if stop_reason.is_empty() {
                                     "end_turn".to_owned()
                                 } else {
@@ -940,6 +945,7 @@ impl ProviderRouter for AnthropicProvider {
                                     output_tokens: 0,
                                     provider_used: String::new(),
                                     residency: String::new(),
+                                    token_confidence: None,
                                     stop_reason: String::new(),
                                     reasoning_delta,
                                 };
@@ -957,6 +963,7 @@ impl ProviderRouter for AnthropicProvider {
                                     output_tokens,
                                     provider_used: String::new(),
                                     residency: String::new(),
+                                    token_confidence: None,
                                     stop_reason: if stop_reason.is_empty() {
                                         "end_turn".to_owned()
                                     } else {
@@ -986,6 +993,7 @@ impl ProviderRouter for AnthropicProvider {
                 output_tokens,
                 provider_used: String::new(),
                 residency: String::new(),
+                token_confidence: None,
                 stop_reason: if stop_reason.is_empty() {
                     "stream_incomplete".to_owned()
                 } else {

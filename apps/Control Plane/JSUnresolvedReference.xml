@@ -1,0 +1,386 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>3</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;require&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>require</highlighted_element>
+  <language>JavaScript</language>
+  <offset>15</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;require&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>require</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>5</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;require&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>require</highlighted_element>
+  <language>JavaScript</language>
+  <offset>25</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;require&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>require</highlighted_element>
+  <language>JavaScript</language>
+  <offset>31</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>32</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;require&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>require</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;require&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>require</highlighted_element>
+  <language>JavaScript</language>
+  <offset>32</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>37</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;require&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>require</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;require&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>require</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>78</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>142</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable fixture_id</description>
+  <highlighted_element>fixture_id</highlighted_element>
+  <language>JavaScript</language>
+  <offset>23</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>476</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable durable</description>
+  <highlighted_element>durable</highlighted_element>
+  <language>JavaScript</language>
+  <offset>21</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>489</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable durable</description>
+  <highlighted_element>durable</highlighted_element>
+  <language>JavaScript</language>
+  <offset>21</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>1424</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>1425</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>35</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>1425</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable CONTROL_LIFECYCLE_PHASE</description>
+  <highlighted_element>CONTROL_LIFECYCLE_PHASE</highlighted_element>
+  <language>JavaScript</language>
+  <offset>47</offset>
+  <length>23</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>1430</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>4</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>1438</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>&lt;html&gt;Unresolved function or method &lt;code&gt;&lt;span style=&quot;&quot;&gt;quit&lt;/span&gt;&lt;span style=&quot;&quot;&gt;()&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>quit</highlighted_element>
+  <language>JavaScript</language>
+  <offset>37</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>1441</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>6</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>1441</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>19</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.mjs</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>32</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.mjs</file>
+  <line>14</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>26</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.mjs</file>
+  <line>15</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type Buffer</description>
+  <highlighted_element>Buffer</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.mjs</file>
+  <line>15</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type Buffer</description>
+  <highlighted_element>Buffer</highlighted_element>
+  <language>JavaScript</language>
+  <offset>50</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.mjs</file>
+  <line>24</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type Buffer</description>
+  <highlighted_element>Buffer</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.mjs</file>
+  <line>77</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type Buffer</description>
+  <highlighted_element>Buffer</highlighted_element>
+  <language>JavaScript</language>
+  <offset>16</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.mjs</file>
+  <line>81</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>0</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs</file>
+  <line>35</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>27</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs</file>
+  <line>39</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>9</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type Buffer</description>
+  <highlighted_element>Buffer</highlighted_element>
+  <language>JavaScript</language>
+  <offset>12</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs</file>
+  <line>57</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>27</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs</file>
+  <line>68</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>27</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs</file>
+  <line>72</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/redact-container-logs.test.mjs" />
+  <problem_class id="JSUnresolvedReference" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved reference</problem_class>
+  <description>Unresolved variable or type process</description>
+  <highlighted_element>process</highlighted_element>
+  <language>JavaScript</language>
+  <offset>9</offset>
+  <length>7</length>
+</problem>
+</problems>

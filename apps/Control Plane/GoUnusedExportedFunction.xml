@@ -1,0 +1,62 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go</file>
+  <line>112</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go" />
+  <problem_class id="GoUnusedExportedFunction" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused exported function</problem_class>
+  <description>Unused function &lt;code&gt;IsProduction&lt;/code&gt;</description>
+  <highlighted_element>IsProduction</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go</file>
+  <line>149</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go" />
+  <problem_class id="GoUnusedExportedFunction" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused exported function</problem_class>
+  <description>Unused function &lt;code&gt;AssertFromEnv&lt;/code&gt;</description>
+  <highlighted_element>AssertFromEnv</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go</file>
+  <line>112</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go" />
+  <problem_class id="GoUnusedExportedFunction" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused exported function</problem_class>
+  <description>Unused function &lt;code&gt;IsProduction&lt;/code&gt;</description>
+  <highlighted_element>IsProduction</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go</file>
+  <line>149</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go" />
+  <problem_class id="GoUnusedExportedFunction" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused exported function</problem_class>
+  <description>Unused function &lt;code&gt;AssertFromEnv&lt;/code&gt;</description>
+  <highlighted_element>AssertFromEnv</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/nats/auth_validator.go</file>
+  <line>30</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/nats/auth_validator.go" />
+  <problem_class id="GoUnusedExportedFunction" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused exported function</problem_class>
+  <description>Unused function &lt;code&gt;NewAuthValidator&lt;/code&gt;</description>
+  <highlighted_element>NewAuthValidator</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>16</length>
+</problem>
+</problems>

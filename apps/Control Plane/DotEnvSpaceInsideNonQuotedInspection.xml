@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/.env.sso.template</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/.env.sso.template" />
+  <problem_class id="DotEnvSpaceInsideNonQuotedInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Space inside non-quoted value</problem_class>
+  <description>Space inside is allowed only for quoted values</description>
+  <highlighted_element>openid profile email User.Read</highlighted_element>
+  <language>DotEnv</language>
+  <offset>16</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>156</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvSpaceInsideNonQuotedInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Space inside non-quoted value</problem_class>
+  <description>Space inside is allowed only for quoted values</description>
+  <highlighted_element>Aquatiq Tools</highlighted_element>
+  <language>DotEnv</language>
+  <offset>16</offset>
+  <length>13</length>
+</problem>
+</problems>

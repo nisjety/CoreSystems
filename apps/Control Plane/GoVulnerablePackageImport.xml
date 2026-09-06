@@ -1,0 +1,184 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server.go</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>grpcpkg &quot;google.golang.org/grpc&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>32</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>&quot;google.golang.org/grpc/health&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server.go</file>
+  <line>12</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>healthpb &quot;google.golang.org/grpc/health/grpc_health_v1&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server.go</file>
+  <line>13</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>&quot;google.golang.org/grpc/reflection&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>grpcpkg &quot;google.golang.org/grpc&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>32</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>&quot;google.golang.org/grpc/credentials/insecure&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>45</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go</file>
+  <line>12</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>healthpb &quot;google.golang.org/grpc/health/grpc_health_v1&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server.go</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>grpcpkg &quot;google.golang.org/grpc&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>32</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server.go</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>&quot;google.golang.org/grpc/health&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>healthpb &quot;google.golang.org/grpc/health/grpc_health_v1&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server.go</file>
+  <line>12</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>&quot;google.golang.org/grpc/reflection&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>&quot;google.golang.org/grpc&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>24</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>&quot;google.golang.org/grpc/credentials/insecure&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>45</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go</file>
+  <line>12</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go" />
+  <problem_class id="GoVulnerablePackageImport" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Vulnerable API usage</problem_class>
+  <description>&lt;html&gt;&lt;body&gt;Vulnerable dependency usage
+&lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>healthpb &quot;google.golang.org/grpc/health/grpc_health_v1&quot;</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+</problems>

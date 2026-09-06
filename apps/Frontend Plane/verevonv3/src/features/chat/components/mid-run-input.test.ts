@@ -21,10 +21,23 @@ import { describe, expect, it } from 'vitest'
 const CONTROLLER = 'src/features/chat/components/use-chat-controller.ts'
 const PAGE = 'src/features/chat/components/ChatPage.tsx'
 
+/**
+ * Read a source file with its line endings normalised to LF.
+ *
+ * The guards below search for multi-line anchors written as LF string
+ * literals. `use-chat-controller.ts` is checked out with CRLF (2,813 pairs,
+ * not one bare LF), so every multi-line anchor silently failed to match and
+ * the guard reported the effect it was protecting as "gone". Normalising
+ * here makes these tests work under either convention instead of depending
+ * on how git happened to materialise the file.
+ */
 async function source(relative: string): Promise<string> {
   const { readFileSync } = await import('node:fs')
   const { resolve } = await import('node:path')
+  const carriageReturn = String.fromCharCode(13)
   return readFileSync(resolve(process.cwd(), relative), 'utf8')
+    .split(carriageReturn)
+    .join('')
 }
 
 describe('mid-run input is never dropped', () => {

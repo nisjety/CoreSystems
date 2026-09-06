@@ -68,6 +68,12 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     createdAt: msg.createdAt || '',
     streaming: false,
     model: msg.model,
+    // Persisted answer quality, so a thread opened on a device that never saw
+    // the stream shows the same score the stream reported. Absent for turns
+    // recorded before the score was persisted — which stays distinguishable
+    // from "scored zero", because the field is simply missing.
+    confidence: msg.confidence,
+    verification: msg.verification,
     tools: [],
     attachments: [],
   }
@@ -94,6 +100,7 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       costUsd: turn.costUsd,
       effectClass: turn.effectClass,
       confidence: turn.confidence,
+      verification: turn.verification,
       reasoning: turn.reasoning,
       citations: turn.citations,
       toolCalls: turn.toolCalls,
@@ -146,6 +153,7 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     costUsd: turn.costUsd,
     effectClass: turn.effectClass,
     confidence: turn.confidence,
+      verification: turn.verification,
     reasoning: turn.reasoning,
     citations: (turn.citations ?? []).filter(isCitation),
     toolCalls: (turn.toolCalls ?? []).filter(isChatToolCall),

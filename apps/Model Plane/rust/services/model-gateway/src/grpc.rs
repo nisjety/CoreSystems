@@ -2899,6 +2899,7 @@ mod tests {
                 output_tokens: 1,
                 provider_used: String::new(),
                 residency: String::new(),
+                token_confidence: None,
                 tool_calls: Vec::new(),
             }))
         }
@@ -2919,6 +2920,7 @@ mod tests {
                     reasoning_delta: String::new(),
                     provider_used: String::new(),
                     residency: String::new(),
+                    token_confidence: None,
                 }),
                 Ok(InferChunk {
                     request_id: "req-stream".to_owned(),
@@ -2931,6 +2933,7 @@ mod tests {
                     reasoning_delta: String::new(),
                     provider_used: String::new(),
                     residency: String::new(),
+                    token_confidence: None,
                 }),
             ]))))
         }

@@ -24,6 +24,13 @@ type Config struct {
 	AuthCoreURL                      string
 	AuthCoreInternalAPIKey           string
 	AuthCoreJWKSURL                  string
+	// AuthCoreOAuth* identify integration-corev2 to auth-core's scoped
+	// `/internal/oauth/*` surface (principal registry
+	// AUTH_INTERNAL_SERVICE_CREDENTIALS). Used to re-mint a Microsoft
+	// sign-in credential that Control Plane owns. Empty token = disabled.
+	AuthCoreOAuthCredentialID        string
+	AuthCoreOAuthPrincipal           string
+	AuthCoreOAuthServiceToken        string
 	PlaneTokenIssuer                 string
 	IngestionAuthAudience            string
 	ProviderWriteAttestationKeysJSON string
@@ -226,6 +233,9 @@ func Load() (Config, error) {
 		AuthCoreURL:                      envOr("AUTH_CORE_URL", "http://auth-core:3011"),
 		AuthCoreInternalAPIKey:           strings.TrimSpace(envOr("AUTH_CORE_INTERNAL_API_KEY", strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")))),
 		AuthCoreJWKSURL:                  strings.TrimSpace(os.Getenv("AUTH_CORE_JWKS_URL")),
+		AuthCoreOAuthCredentialID:        envOr("AUTH_CORE_OAUTH_CREDENTIAL_ID", "integration-core-primary"),
+		AuthCoreOAuthPrincipal:           envOr("AUTH_CORE_OAUTH_PRINCIPAL", "integration-core"),
+		AuthCoreOAuthServiceToken:        strings.TrimSpace(os.Getenv("AUTH_CORE_OAUTH_SERVICE_TOKEN")),
 		PlaneTokenIssuer:                 strings.TrimSpace(os.Getenv("PLANE_TOKEN_ISSUER")),
 		IngestionAuthAudience:            envOr("INGESTION_AUTH_AUDIENCE", "ingestion"),
 		ProviderWriteAttestationKeysJSON: strings.TrimSpace(os.Getenv("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON")),

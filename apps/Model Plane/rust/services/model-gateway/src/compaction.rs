@@ -276,6 +276,131 @@ pub fn apply_head_summary(
     messages
 }
 
+/// One loaded conversation message together with the durable id session-core
+/// returned for it (`SessionMessage.message_id`).
+///
+/// The id exists only on the read path; `ChatMessage` — what goes to the
+/// provider — has no field for it and should not gain one, because a provider
+/// payload is not the place to carry our identifiers.
+#[derive(Clone, Debug)]
+pub struct IdentifiedMessage {
+    pub id: String,
+    pub message: ChatMessage,
+}
+
+/// Preamble on a hoisted pinned message.
+///
+/// Phrased so the model does not misread a hoisted turn as something the user
+/// is saying *now*: it says what the block is, who chose it, and that it comes
+/// from earlier in the same conversation. Without that, a pinned question read
+/// as the current question.
+const PINNED_MESSAGE_PREAMBLE: &str =
+    "[Pinned by the user from earlier in this conversation. It is repeated here      verbatim, out of order, because the user marked it as context that must not      be dropped. Treat it as background, not as the current request.]";
+
+/// Most pinned messages one turn may carry.
+///
+/// A client-declared list has to be bounded: without a cap, pinning fifty turns
+/// would push the live conversation out of the context window through the one
+/// path built to protect against exactly that.
+pub const MAX_PINNED_MESSAGES: usize = 5;
+
+/// Total characters of pinned content one turn may carry. A single pinned
+/// message longer than this is truncated rather than dropped, with the notice
+/// below, because silently ignoring a pin the user can see in the UI is worse
+/// than shortening it.
+pub const MAX_PINNED_CHARS: usize = 8_000;
+
+/// Left where a pinned message was shortened to fit the budget.
+const PINNED_TRUNCATION_NOTICE: &str =
+    "\n[This pinned message was shortened to fit the context budget.]";
+
+/// Re-express the user's pinned messages as protected leading `system` context.
+///
+/// Returns the messages to send, in order: the hoisted pins first (inside the
+/// leading system block, where neither shedder reaches), then everything else
+/// with the pinned entries removed so nothing is duplicated.
+///
+/// Ignores an id that matches nothing. A pin is a SELECTOR, never content: the
+/// client names a message that already exists in the durable thread, so a
+/// browser cannot use this to inject text it invented as though the user had
+/// said it earlier. An id from a locally-created turn that session-core has not
+/// persisted yet simply does not match, and the pin starts working once it has.
+#[must_use]
+pub fn hoist_pinned_messages(
+    loaded: Vec<IdentifiedMessage>,
+    pinned_ids: &[String],
+) -> Vec<ChatMessage> {
+    if pinned_ids.is_empty() {
+        return loaded.into_iter().map(|entry| entry.message).collect();
+    }
+    // Preserve the caller's pin order, not conversation order: the user chose
+    // which to pin, and with a cap in play the earliest choices are the ones
+    // that must survive.
+    let mut wanted: Vec<&String> = Vec::new();
+    for id in pinned_ids {
+        if id.trim().is_empty() || wanted.iter().any(|seen| *seen == id) {
+            continue;
+        }
+        wanted.push(id);
+        if wanted.len() >= MAX_PINNED_MESSAGES {
+            break;
+        }
+    }
+
+    let mut hoisted: Vec<ChatMessage> = Vec::new();
+    let mut body: Vec<ChatMessage> = Vec::with_capacity(loaded.len());
+    let mut pinned_by_id: Vec<(usize, ChatMessage)> = Vec::new();
+
+    for entry in loaded {
+        // A `system` message is already protected by both shedders, so hoisting
+        // one would duplicate it for no gain.
+        let position = if entry.message.role == "system" || entry.id.trim().is_empty() {
+            None
+        } else {
+            wanted.iter().position(|id| **id == entry.id)
+        };
+        match position {
+            Some(rank) => pinned_by_id.push((rank, entry.message)),
+            None => body.push(entry.message),
+        }
+    }
+
+    pinned_by_id.sort_by_key(|(rank, _)| *rank);
+
+    let mut budget = MAX_PINNED_CHARS;
+    for (_, message) in pinned_by_id {
+        if budget == 0 {
+            // Out of budget: the message stays in the body where it was, rather
+            // than vanishing. It is then droppable like any other turn, which is
+            // honest — it was not protected.
+            body.insert(0, message);
+            continue;
+        }
+        let trimmed = message.content.trim();
+        let (content, shortened) = if trimmed.chars().count() > budget {
+            (
+                trimmed.chars().take(budget).collect::<String>(),
+                true,
+            )
+        } else {
+            (trimmed.to_owned(), false)
+        };
+        budget = budget.saturating_sub(content.chars().count());
+        let mut block = format!("{PINNED_MESSAGE_PREAMBLE}\n{}: {content}", message.role);
+        if shortened {
+            block.push_str(PINNED_TRUNCATION_NOTICE);
+        }
+        hoisted.push(ChatMessage {
+            role: "system".to_owned(),
+            content: block,
+            name: String::new(),
+        });
+    }
+
+    hoisted.extend(body);
+    hoisted
+}
+
 /// Drop the oldest droppable group after a provider rejected the prompt for
 /// length.
 ///
@@ -691,5 +816,171 @@ mod tests {
                 "should NOT detect: {message}"
             );
         }
+    }
+
+    fn identified(id: &str, role: &str, content: &str) -> IdentifiedMessage {
+        IdentifiedMessage {
+            id: id.to_owned(),
+            message: message(role, content),
+        }
+    }
+
+    /// A conversation long enough for `plan_head_summary` to want to compact it.
+    fn long_conversation() -> Vec<IdentifiedMessage> {
+        let mut out = vec![identified("", "system", "You are Verevon")];
+        for index in 0..40 {
+            out.push(identified(
+                &format!("m{index}"),
+                if index % 2 == 0 { "user" } else { "assistant" },
+                &format!("turn {index}"),
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn no_pins_leaves_the_conversation_untouched() {
+        let loaded = long_conversation();
+        let expected: Vec<ChatMessage> =
+            loaded.iter().map(|entry| entry.message.clone()).collect();
+        assert_eq!(hoist_pinned_messages(loaded, &[]), expected);
+    }
+
+    #[test]
+    fn a_pin_moves_its_message_into_the_leading_system_block() {
+        let out = hoist_pinned_messages(long_conversation(), &["m7".to_owned()]);
+        // Hoisted to the front, as `system`, carrying the original text and its
+        // original role.
+        assert_eq!(out[0].role, "system");
+        assert!(out[0].content.contains("turn 7"));
+        assert!(out[0].content.contains("assistant: "));
+        assert!(out[0].content.contains("Pinned by the user"));
+        // ...and removed from its old position, so the model does not see it twice.
+        assert_eq!(
+            out.iter().filter(|m| m.content.contains("turn 7")).count(),
+            1
+        );
+        // Nothing else was lost.
+        assert_eq!(out.len(), 41);
+    }
+
+    /// The feature's actual claim, exercised through the real load-time shedder.
+    #[test]
+    fn a_pinned_message_survives_head_compaction() {
+        let pinned = hoist_pinned_messages(long_conversation(), &["m2".to_owned()]);
+        let head = plan_head_summary(&pinned, 20, 6).expect("this thread needs compacting");
+        let compacted = apply_head_summary(pinned, head, Some("summary of the head"));
+
+        assert!(
+            compacted.iter().any(|m| m.content.contains("turn 2")),
+            "the pinned turn was summarised away, which is the whole thing a pin prevents"
+        );
+        // The unpinned head really did go, so the test is not passing because
+        // compaction did nothing.
+        assert!(!compacted.iter().any(|m| m.content.contains("turn 4")));
+    }
+
+    /// The same claim against the provider-rejection shedder.
+    #[test]
+    fn a_pinned_message_survives_dropping_the_oldest_group() {
+        let mut messages = hoist_pinned_messages(long_conversation(), &["m1".to_owned()]);
+        // Shed until it refuses, the way the retry loop does.
+        let mut drops = 0;
+        while drop_oldest_group(&mut messages, 8, 4) {
+            drops += 1;
+            assert!(drops < 20, "drop_oldest_group never terminated");
+        }
+        assert!(drops > 0, "nothing was dropped, so nothing was proven");
+        assert!(
+            messages.iter().any(|m| m.content.contains("turn 1")),
+            "the pinned turn was shed for length"
+        );
+    }
+
+    #[test]
+    fn an_unknown_id_is_ignored_rather_than_invented() {
+        let out = hoist_pinned_messages(long_conversation(), &["not-a-message".to_owned()]);
+        assert_eq!(out.len(), 41);
+        assert!(!out[0].content.contains("Pinned by the user"));
+    }
+
+    #[test]
+    fn pin_order_is_the_users_order_not_conversation_order() {
+        let out = hoist_pinned_messages(
+            long_conversation(),
+            &["m9".to_owned(), "m3".to_owned()],
+        );
+        assert!(out[0].content.contains("turn 9"));
+        assert!(out[1].content.contains("turn 3"));
+    }
+
+    #[test]
+    fn the_pin_count_is_capped() {
+        let ids: Vec<String> = (0..MAX_PINNED_MESSAGES + 4)
+            .map(|index| format!("m{index}"))
+            .collect();
+        let out = hoist_pinned_messages(long_conversation(), &ids);
+        let hoisted = out
+            .iter()
+            .filter(|m| m.content.contains("Pinned by the user"))
+            .count();
+        assert_eq!(hoisted, MAX_PINNED_MESSAGES);
+        // The ones over the cap are still in the conversation, just unprotected.
+        assert_eq!(out.len(), 41);
+    }
+
+    #[test]
+    fn an_oversized_pin_is_shortened_rather_than_dropped() {
+        let huge = "x".repeat(MAX_PINNED_CHARS + 500);
+        let loaded = vec![
+            identified("", "system", "You are Verevon"),
+            identified("big", "user", &huge),
+            identified("m1", "user", "later turn"),
+        ];
+        let out = hoist_pinned_messages(loaded, &["big".to_owned()]);
+        assert!(out[0].content.contains("Pinned by the user"));
+        assert!(out[0].content.contains("was shortened"));
+        assert!(out[0].content.chars().count() < MAX_PINNED_CHARS + 500);
+    }
+
+    #[test]
+    fn a_duplicate_id_is_pinned_once() {
+        let out = hoist_pinned_messages(
+            long_conversation(),
+            &["m5".to_owned(), "m5".to_owned()],
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|m| m.content.contains("Pinned by the user"))
+                .count(),
+            1
+        );
+    }
+
+    /// A `system` turn is already protected by both shedders, so hoisting one
+    /// would duplicate it and buy nothing.
+    #[test]
+    fn pinning_a_system_message_is_a_no_op() {
+        let loaded = vec![
+            identified("sys", "system", "You are Verevon"),
+            identified("m1", "user", "hello"),
+        ];
+        let out = hoist_pinned_messages(loaded, &["sys".to_owned()]);
+        assert_eq!(out.len(), 2);
+        assert!(!out[0].content.contains("Pinned by the user"));
+    }
+
+    /// An id is a SELECTOR. A message with no durable id yet (a turn
+    /// session-core has not persisted) cannot be pinned by sending an empty id,
+    /// and an empty id must not match the empty-id rows either.
+    #[test]
+    fn an_empty_id_matches_nothing() {
+        let loaded = vec![
+            identified("", "user", "not yet persisted"),
+            identified("m1", "user", "persisted"),
+        ];
+        let out = hoist_pinned_messages(loaded, &[String::new(), "  ".to_owned()]);
+        assert_eq!(out.len(), 2);
+        assert!(!out[0].content.contains("Pinned by the user"));
     }
 }

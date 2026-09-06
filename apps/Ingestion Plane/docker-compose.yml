@@ -394,6 +394,14 @@ services:
       DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-${DATA_PLANE_URL:-http://dpv2-documents-api:8010}}
       INTEGRATION_SERVICE_ID: ${INTEGRATION_SERVICE_ID:-integration-corev2}
       INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
+      # Scoped principal on auth-core's /internal/oauth/* (registry entry
+      # `integration-core-primary` in the Control Plane compose): lets a
+      # Microsoft connection adopted from a Better Auth sign-in be re-minted
+      # through Control Plane when this service's own refresh token is absent
+      # or dead. An empty token disables the fallback.
+      AUTH_CORE_OAUTH_CREDENTIAL_ID: ${AUTH_CORE_OAUTH_CREDENTIAL_ID:-integration-core-primary}
+      AUTH_CORE_OAUTH_PRINCIPAL: ${AUTH_CORE_OAUTH_PRINCIPAL:-integration-core}
+      AUTH_CORE_OAUTH_SERVICE_TOKEN: ${AUTH_CORE_OAUTH_SERVICE_TOKEN:-}
       DATA_PLANE_GRAPH_INDEX_URL: ${DATA_PLANE_GRAPH_INDEX_URL:-${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}}
       INTEGRATION_WEBHOOK_HOTPATH_URL: ${INTEGRATION_WEBHOOK_HOTPATH_URL:-http://integration-webhook-normalizer:3036}
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
@@ -635,6 +643,13 @@ services:
       # Manual Support refreshes are claimed through integration-api so the
       # queue transition and operator audit event remain authoritative.
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      # Same Control Plane re-mint principal as integration-api: the mail lane
+      # refreshes provider tokens in this worker, and a connection adopted from
+      # a Microsoft sign-in has no refresh token of its own.
+      AUTH_CORE_OAUTH_CREDENTIAL_ID: ${AUTH_CORE_OAUTH_CREDENTIAL_ID:-integration-core-primary}
+      AUTH_CORE_OAUTH_PRINCIPAL: ${AUTH_CORE_OAUTH_PRINCIPAL:-integration-core}
+      AUTH_CORE_OAUTH_SERVICE_TOKEN: ${AUTH_CORE_OAUTH_SERVICE_TOKEN:-}
       # Discord inbound reads use the app bot credential, not the OAuth
       # user's access token. Keep this explicit so a local secret supplied via
       # the compose env files reaches the email worker.

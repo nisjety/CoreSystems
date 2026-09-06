@@ -1,0 +1,223 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go</file>
+  <line>139</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>out[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go</file>
+  <line>147</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>out[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/past_due.go</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/past_due.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>out[k]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>481</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>next.Entitlements[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>484</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>next.QuotaLimits[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>530</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>cloned[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>70</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>payload[key]</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>80</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>invalidTimestamp[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go</file>
+  <line>99</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>enriched[k]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>enriched[k]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox.go</file>
+  <line>72</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>details[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox_test.go</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox_test.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>copied[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/plan_change_postgres_test.go</file>
+  <line>50</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/plan_change_postgres_test.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>copied[key]</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>139</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>metadata[key]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>enriched[k]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>651</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>merged[k]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>654</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixMapsLoop" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Map loop can be replaced with the 'maps' function</problem_class>
+  <hints />
+  <description>Replace m[k]=v loop with maps.Copy</description>
+  <highlighted_element>merged[k]</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>9</length>
+</problem>
+</problems>

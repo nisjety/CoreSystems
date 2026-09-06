@@ -63,6 +63,17 @@ export type ChatInvokeRequest = {
   /** Deep research mode: gateway runs plan -> concurrent searches -> page reads -> a cited report. */
   deepResearch?: boolean
   /**
+   * Durable ids of earlier messages the user pinned into context.
+   *
+   * Ids only — never the pinned text. model-gateway resolves each one
+   * against the durable thread and re-expresses the match as leading
+   * `system` context, where neither history shedder reaches it. Sending
+   * content instead would let this browser assert that the user said
+   * something earlier; sending an id can only ever SELECT a message that
+   * already exists.
+   */
+  pinnedMessageIds?: string[]
+  /**
    * Extended-thinking effort: `quick` | `standard` | `deep`.
    *
    * The gateway derives the token budget from this profile — the client picks an
@@ -179,6 +190,24 @@ export type ChatMemoryRecallEvent = {
   latencyMs?: number
   /** What was recalled. Empty when the backend reported only a count. */
   memories: RecalledMemory[]
+}
+
+/** What the sources said about a low-scoring answer. */
+export type VerificationVerdict = 'supports' | 'contradicts' | 'unrelated'
+
+/**
+ * The backend went looking for backing after scoring this answer low, and this
+ * is what it found. Emitted only for turns that actually ran the check, so its
+ * absence means "not checked" — which is why the verdict is worth showing at
+ * all: a score that moved silently cannot be told apart from one that never
+ * had anything behind it.
+ */
+export type ChatVerificationEvent = {
+  verdict: VerificationVerdict
+  kbCitations: number
+  webCitations: number
+  /** Whether the check was allowed to escalate past the knowledge base. */
+  webAllowed: boolean
 }
 
 /** Mid-run user messages the agent has just been handed. */
@@ -312,6 +341,7 @@ export type ChatStreamHandlers = {
   onFollowUps?: (event: ChatFollowUpsEvent) => void
   onStopped?: (event: ChatStoppedEvent) => void
   onMemoryRecall?: (event: ChatMemoryRecallEvent) => void
+  onVerification?: (event: ChatVerificationEvent) => void
   /**
    * A message the user sent mid-run has reached the agent. Emitted at delivery
    * rather than at enqueue: the POST already confirmed acceptance, and what the
@@ -345,6 +375,15 @@ export type ChatMessage = {
   content: string
   model?: string
   createdAt: string
+  /**
+   * The answer's persisted confidence score, flattened onto the message from
+   * session-core's turn metadata. Absent for a user message, and for assistant
+   * turns recorded before the score was persisted — which must stay
+   * distinguishable from a score of 0.
+   */
+  confidence?: number
+  /** What the backend's verification pass found, when it ran on this turn. */
+  verification?: ChatVerificationEvent
 }
 
 export type ChatThreadSession = {
@@ -634,6 +673,14 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
       ? { verbosity: request.verbosity }
       : {}),
     attachments: request.attachments ?? [],
+    // Opt-in only, like `min_privacy_tier` below: omitted entirely when
+    // nothing is pinned, so an ordinary turn's body is byte-identical to
+    // what it was before pinning existed. Support threads have this
+    // stripped at the gateway regardless (their history is customer text
+    // this surface may only read).
+    ...((request.pinnedMessageIds ?? []).length > 0
+      ? { pinned_message_ids: request.pinnedMessageIds }
+      : {}),
     ...(supportContextQuery ? { support_context_query: supportContextQuery } : {}),
     features: [...features],
     tools,
@@ -1092,6 +1139,21 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         : []
       if (suggestions.length > 0) {
         handlers.onFollowUps?.({ suggestions, requestId: str(payload.request_id) })
+      }
+      break
+    }
+    case 'verification': {
+      // Only the three verdicts the backend defines. An unrecognized one is a
+      // contract drift, and rendering "checked" from a value we cannot read
+      // would be worse than rendering nothing.
+      const verdict = payload.verdict
+      if (verdict === 'supports' || verdict === 'contradicts' || verdict === 'unrelated') {
+        handlers.onVerification?.({
+          verdict,
+          kbCitations: num(payload.kb_citations) ?? 0,
+          webCitations: num(payload.web_citations) ?? 0,
+          webAllowed: payload.web_allowed === true,
+        })
       }
       break
     }
@@ -1572,7 +1634,32 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       content: str(item.content) ?? '',
       model: str(item.model) ?? str(item.model_used),
       createdAt: str(item.created_at) ?? str(item.createdAt) ?? '',
+      // Turn metadata the backend flattens onto the message. Present only for
+      // assistant turns recorded since the score became durable, so a missing
+      // field means "not recorded" — never a score of zero.
+      confidence: num(item.confidence),
+      verification: normalizeVerification(item.verification),
     }))
+}
+
+/**
+ * Read a persisted verification record. Anything that is not one of the three
+ * verdicts the backend defines is dropped: rendering "checked" from a value we
+ * cannot interpret would be a claim the data does not support.
+ */
+function normalizeVerification(raw: unknown): ChatVerificationEvent | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const record = raw as Record<string, unknown>
+  const verdict = record.verdict
+  if (verdict !== 'supports' && verdict !== 'contradicts' && verdict !== 'unrelated') {
+    return undefined
+  }
+  return {
+    verdict,
+    kbCitations: num(record.kbCitations) ?? num(record.kb_citations) ?? 0,
+    webCitations: num(record.webCitations) ?? num(record.web_citations) ?? 0,
+    webAllowed: record.webAllowed === true || record.web_allowed === true,
+  }
 }
 
 function normalizeChatThreadSessions(raw: unknown): ChatThreadSession[] {

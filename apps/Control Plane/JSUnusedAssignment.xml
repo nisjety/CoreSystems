@@ -1,0 +1,14 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/interactive-retention-policy.ts</file>
+  <line>160</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/interactive-retention-policy.ts" />
+  <problem_class id="JSUnusedAssignment" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused assignment</problem_class>
+  <description>Variable initializer is redundant</description>
+  <highlighted_element>DEFAULT_POSTURE</highlighted_element>
+  <language>TypeScript</language>
+  <offset>16</offset>
+  <length>15</length>
+</problem>
+</problems>

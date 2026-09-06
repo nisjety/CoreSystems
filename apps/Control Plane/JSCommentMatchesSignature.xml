@@ -1,0 +1,14 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/shared-nats.service.ts</file>
+  <line>106</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/shared-nats.service.ts" />
+  <problem_class id="JSCommentMatchesSignature" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Mismatched JSDoc and function signature</problem_class>
+  <description>Parameter options is not described in JSDoc</description>
+  <highlighted_element>options?: { msgID?: string }</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>28</length>
+</problem>
+</problems>

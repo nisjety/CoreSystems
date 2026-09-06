@@ -42,6 +42,15 @@ const STORAGE_STATE = 'tests/e2e/.auth/state.json'
 const LOCAL_BASE_URL = process.env.LOCAL_E2E_BASE_URL || 'http://localhost:5173'
 const LOCAL_STORAGE_STATE = 'tests/e2e/.auth/local-state.json'
 const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
+/**
+ * The chat-workspace suite (phase 10 evaluation suites 1 and 12) runs against
+ * the same dockerized DEV stack as the browser-workspace family, for the same
+ * reason: that is the stack this checkout actually runs, and `local@verevon.dev`
+ * is the account the dev seed provisions. If the :5199 stack is brought up,
+ * move this regex out of the `e2e` project's testIgnore and drop the `chat`
+ * project — the specs themselves are stack-agnostic.
+ */
+const CHAT_WORKSPACE_SPECS = /chat-workspace\.spec\.ts/
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -67,7 +76,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: BROWSER_WORKSPACE_SPECS,
+      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -79,6 +88,12 @@ export default defineConfig({
     {
       name: 'local',
       testMatch: BROWSER_WORKSPACE_SPECS,
+      dependencies: ['local-setup'],
+      use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
+    },
+    {
+      name: 'chat',
+      testMatch: CHAT_WORKSPACE_SPECS,
       dependencies: ['local-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
     },

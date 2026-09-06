@@ -1,0 +1,782 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/events/events.go</file>
+  <line>21</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/events/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;MaxUsageEventIDLength&lt;/code&gt;</description>
+  <highlighted_element>MaxUsageEventIDLength</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;auditSubject&lt;/code&gt;</description>
+  <highlighted_element>auditSubject</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;auditSubject&lt;/code&gt;</description>
+  <highlighted_element>auditSubject</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go</file>
+  <line>28</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;usageSubject&lt;/code&gt;</description>
+  <highlighted_element>usageSubject</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go</file>
+  <line>28</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;usageSubject&lt;/code&gt;</description>
+  <highlighted_element>usageSubject</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/types.go</file>
+  <line>22</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;RetryJobStatusPending&lt;/code&gt;</description>
+  <highlighted_element>RetryJobStatusPending</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/types.go</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;RetryJobStatusProcessing&lt;/code&gt;</description>
+  <highlighted_element>RetryJobStatusProcessing</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>24</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/types.go</file>
+  <line>24</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;RetryJobStatusSucceeded&lt;/code&gt;</description>
+  <highlighted_element>RetryJobStatusSucceeded</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>23</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/types.go</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;RetryJobStatusDeadLetter&lt;/code&gt;</description>
+  <highlighted_element>RetryJobStatusDeadLetter</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>24</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SubjectOrganizationUpdated&lt;/code&gt;</description>
+  <highlighted_element>SubjectOrganizationUpdated</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>12</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SubjectOrganizationDeleted&lt;/code&gt;</description>
+  <highlighted_element>SubjectOrganizationDeleted</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>15</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SubjectOrganizationPlanChanged&lt;/code&gt;</description>
+  <highlighted_element>SubjectOrganizationPlanChanged</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>24</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SubjectOrganizationMemberUpdated&lt;/code&gt;</description>
+  <highlighted_element>SubjectOrganizationMemberUpdated</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>32</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SessionStatusPaused&lt;/code&gt;</description>
+  <highlighted_element>SessionStatusPaused</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>19</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SessionStatusCompleted&lt;/code&gt;</description>
+  <highlighted_element>SessionStatusCompleted</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>20</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SessionStatusFailed&lt;/code&gt;</description>
+  <highlighted_element>SessionStatusFailed</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>21</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SessionStatusCancelled&lt;/code&gt;</description>
+  <highlighted_element>SessionStatusCancelled</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>36</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalPending&lt;/code&gt;</description>
+  <highlighted_element>ApprovalPending</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>111</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;AgentTaskPending&lt;/code&gt;</description>
+  <highlighted_element>AgentTaskPending</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>112</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;AgentTaskRunning&lt;/code&gt;</description>
+  <highlighted_element>AgentTaskRunning</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>113</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;AgentTaskDone&lt;/code&gt;</description>
+  <highlighted_element>AgentTaskDone</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>114</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;AgentTaskFailed&lt;/code&gt;</description>
+  <highlighted_element>AgentTaskFailed</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>178</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateDraft&lt;/code&gt;</description>
+  <highlighted_element>PlanStateDraft</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>179</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateProposed&lt;/code&gt;</description>
+  <highlighted_element>PlanStateProposed</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>180</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateApproved&lt;/code&gt;</description>
+  <highlighted_element>PlanStateApproved</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>181</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateRejected&lt;/code&gt;</description>
+  <highlighted_element>PlanStateRejected</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>182</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateExecuting&lt;/code&gt;</description>
+  <highlighted_element>PlanStateExecuting</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>183</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateCompleted&lt;/code&gt;</description>
+  <highlighted_element>PlanStateCompleted</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>184</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateFailed&lt;/code&gt;</description>
+  <highlighted_element>PlanStateFailed</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>185</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateSuperseded&lt;/code&gt;</description>
+  <highlighted_element>PlanStateSuperseded</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>186</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStateArchived&lt;/code&gt;</description>
+  <highlighted_element>PlanStateArchived</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>205</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStepStatePending&lt;/code&gt;</description>
+  <highlighted_element>PlanStepStatePending</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>206</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStepStateRunning&lt;/code&gt;</description>
+  <highlighted_element>PlanStepStateRunning</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>207</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStepStateDone&lt;/code&gt;</description>
+  <highlighted_element>PlanStepStateDone</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>208</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStepStateSkipped&lt;/code&gt;</description>
+  <highlighted_element>PlanStepStateSkipped</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>209</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;PlanStepStateFailed&lt;/code&gt;</description>
+  <highlighted_element>PlanStepStateFailed</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>228</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalKindPlan&lt;/code&gt;</description>
+  <highlighted_element>ApprovalKindPlan</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>229</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalKindToolCall&lt;/code&gt;</description>
+  <highlighted_element>ApprovalKindToolCall</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>230</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalKindPermission&lt;/code&gt;</description>
+  <highlighted_element>ApprovalKindPermission</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>231</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalKindDestructive&lt;/code&gt;</description>
+  <highlighted_element>ApprovalKindDestructive</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>23</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>232</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalKindCost&lt;/code&gt;</description>
+  <highlighted_element>ApprovalKindCost</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>238</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalStateRequested&lt;/code&gt;</description>
+  <highlighted_element>ApprovalStateRequested</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>239</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalStateGranted&lt;/code&gt;</description>
+  <highlighted_element>ApprovalStateGranted</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>240</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalStateDenied&lt;/code&gt;</description>
+  <highlighted_element>ApprovalStateDenied</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>241</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;ApprovalStateTimedOut&lt;/code&gt;</description>
+  <highlighted_element>ApprovalStateTimedOut</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>264</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoStatePending&lt;/code&gt;</description>
+  <highlighted_element>TodoStatePending</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>265</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoStateInProgress&lt;/code&gt;</description>
+  <highlighted_element>TodoStateInProgress</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>266</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoStateBlocked&lt;/code&gt;</description>
+  <highlighted_element>TodoStateBlocked</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>267</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoStateCompleted&lt;/code&gt;</description>
+  <highlighted_element>TodoStateCompleted</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>268</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoStateCancelled&lt;/code&gt;</description>
+  <highlighted_element>TodoStateCancelled</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>274</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoPriorityLow&lt;/code&gt;</description>
+  <highlighted_element>TodoPriorityLow</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>275</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoPriorityNormal&lt;/code&gt;</description>
+  <highlighted_element>TodoPriorityNormal</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>276</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoPriorityHigh&lt;/code&gt;</description>
+  <highlighted_element>TodoPriorityHigh</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>277</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;TodoPriorityUrgent&lt;/code&gt;</description>
+  <highlighted_element>TodoPriorityUrgent</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>301</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;LineageRoleCoder&lt;/code&gt;</description>
+  <highlighted_element>LineageRoleCoder</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>302</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;LineageRoleReviewer&lt;/code&gt;</description>
+  <highlighted_element>LineageRoleReviewer</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>303</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;LineageRoleResearcher&lt;/code&gt;</description>
+  <highlighted_element>LineageRoleResearcher</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>304</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;LineageRoleExplorer&lt;/code&gt;</description>
+  <highlighted_element>LineageRoleExplorer</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/domain/types.go</file>
+  <line>305</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/domain/types.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;LineageRoleGeneric&lt;/code&gt;</description>
+  <highlighted_element>LineageRoleGeneric</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>24</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SubjectUserUnblocked&lt;/code&gt;</description>
+  <highlighted_element>SubjectUserUnblocked</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SubjectUserUnsuspended&lt;/code&gt;</description>
+  <highlighted_element>SubjectUserUnsuspended</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>31</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SubjectSessionInvalidated&lt;/code&gt;</description>
+  <highlighted_element>SubjectSessionInvalidated</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>36</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;SubjectDeviceDeactivated&lt;/code&gt;</description>
+  <highlighted_element>SubjectDeviceDeactivated</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>24</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>41</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;StreamAuthEvents&lt;/code&gt;</description>
+  <highlighted_element>StreamAuthEvents</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>42</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoUnusedConst" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused constant</problem_class>
+  <description>Unused constant &lt;code&gt;StreamUserEvents&lt;/code&gt;</description>
+  <highlighted_element>StreamUserEvents</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+</problems>

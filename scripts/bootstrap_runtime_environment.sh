@@ -710,6 +710,12 @@ user_gateway_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_GATEWAY_TOKEN)"
 user_session_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_SESSION_TOKEN)"
 user_org_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_ORG_TOKEN)"
 user_auth_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_AUTH_TOKEN)"
+# integration-corev2's scoped principal on auth-core's /internal/oauth/*
+# (Microsoft sign-in hand-off re-mint). Control Plane owns it because auth-core
+# validates it (registry entry `integration-core-primary` in the Control Plane
+# compose); Ingestion mirrors it under the name integration-api reads.
+integration_auth_internal_token="$(ensure_secret "$CONTROL_ENV" INTEGRATION_AUTH_INTERNAL_SERVICE_TOKEN)"
+sync_value AUTH_CORE_OAUTH_SERVICE_TOKEN "$integration_auth_internal_token" "$INGESTION_ENV"
 user_documents_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_DOCUMENTS_TOKEN)"
 user_retrieval_token="$(ensure_secret "$CONTROL_ENV" USER_CORE_RETRIEVAL_TOKEN)"
 # Dedicated per-caller token for the auth-core -> user-core membership projection

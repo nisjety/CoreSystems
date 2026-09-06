@@ -1,0 +1,14 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/eslint.config.mjs</file>
+  <line>12</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/eslint.config.mjs" />
+  <problem_class id="JSCheckFunctionSignatures" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Signature mismatch</problem_class>
+  <description>&lt;html&gt;Argument type &lt;code&gt;&lt;span style=&quot;&quot;&gt;CompatibleConfig&lt;/span&gt;&lt;/code&gt; is not assignable to parameter type &lt;code&gt;&lt;span style=&quot;&quot;&gt;InfiniteDepthConfigWithExtends&lt;/span&gt;&lt;/code&gt;&lt;br/&gt;...&lt;br/&gt;&amp;nbsp;&amp;nbsp;Type &lt;code&gt;&lt;span style=&quot;&quot;&gt;CompatibleConfig&lt;/span&gt;&lt;/code&gt; is not assignable to type &lt;pre&gt;&lt;code&gt;&lt;span style=&quot;&quot;&gt;ConfigWithExtends&amp;#32;&lt;/span&gt;&lt;span style=&quot;&quot;&gt;|&amp;#32;InfiniteDepthConfigWithExtends[]&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;br/&gt;&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;Type &lt;code&gt;&lt;span style=&quot;&quot;&gt;CompatibleConfig&lt;/span&gt;&lt;/code&gt; is not assignable to type &lt;code&gt;&lt;span style=&quot;&quot;&gt;InfiniteDepthConfigWithExtends&lt;/span&gt;&lt;span style=&quot;&quot;&gt;[]&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>...tseslint.configs.recommendedTypeChecked</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>2</offset>
+  <length>42</length>
+</problem>
+</problems>

@@ -2330,6 +2330,7 @@ mod resolution_tests {
                 reasoning_delta: String::new(),
                 provider_used: String::new(),
                 residency: String::new(),
+                token_confidence: None,
             };
             tokio::spawn(async move {
                 let _ = tx.send(chunk).await;
@@ -3019,6 +3020,7 @@ mod resolution_tests {
                         reasoning_delta: String::new(),
                         provider_used: String::new(),
                         residency: String::new(),
+                        token_confidence: None,
                     })
                     .await;
                 let _ = tx
@@ -3033,6 +3035,7 @@ mod resolution_tests {
                         reasoning_delta: String::new(),
                         provider_used: String::new(),
                         residency: String::new(),
+                        token_confidence: None,
                     })
                     .await;
             });

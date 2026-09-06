@@ -804,6 +804,13 @@ message SessionMessage {
   // role/content and every evidence surface renders empty away from the
   // browser that created the turn. Absent for turns appended without metadata.
   google.protobuf.Struct metadata = 4;
+  // Durable id of this message, the same one the thread-messages read path
+  // returns as `ThreadMessage.message_id`. Present so a caller can refer to
+  // one specific earlier turn — message pinning needs to name a message that
+  // survives a gateway restart, and until this field existed the durable
+  // conversation read returned role/content only, leaving nothing to name.
+  // Empty for rows written before ids were selected on this path.
+  string message_id = 5;
 }
 
 message ListConversationResponse {

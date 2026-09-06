@@ -154,6 +154,74 @@ pub fn global() -> Option<&'static SemanticCache> {
     GLOBAL.get_or_init(SemanticCache::from_env).as_ref()
 }
 
+/// A cached answer together with the score it earned when it was generated.
+///
+/// The score travels with the text because it is a property of that answer, not
+/// of the request that replays it. A replay has no tokens, no fresh retrieval
+/// and no provider logprobs, so re-deriving a score from the text alone
+/// produced a DIFFERENT number for the identical answer — a near-certain reply
+/// scored 0.88 when generated and 0.72 when replayed, which is precisely the
+/// "the confidence keeps changing" complaint the score exists to avoid.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedAnswer {
+    pub answer: String,
+    /// `None` for entries written before the score was stored, or when the turn
+    /// itself produced no score. Callers fall back to their own reckoning.
+    pub confidence: Option<f64>,
+}
+
+/// Envelope marker. Entries are JSON so the score can ride along, and `v`
+/// distinguishes an envelope from a legacy plain-text answer — including the
+/// pathological case of an answer that is itself a JSON object. (Structured
+/// output is excluded from caching by `TurnCacheability`, so the collision is
+/// already improbable; this makes it decidable rather than likely-fine.)
+const ENVELOPE_VERSION: u8 = 1;
+
+impl CachedAnswer {
+    #[must_use]
+    pub fn new(answer: impl Into<String>, confidence: Option<f64>) -> Self {
+        Self {
+            answer: answer.into(),
+            // A non-finite score is not a score; drop it rather than serialize
+            // a `null`-shaped NaN and read it back as meaningful.
+            confidence: confidence.filter(|value| value.is_finite()),
+        }
+    }
+
+    /// Serialize for the backends, which store opaque strings.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        serde_json::json!({
+            "v": ENVELOPE_VERSION,
+            "answer": self.answer,
+            "confidence": self.confidence,
+        })
+        .to_string()
+    }
+
+    /// Parse a stored entry. Anything that is not a recognized envelope is a
+    /// legacy plain-text answer with no score — the cache must keep serving
+    /// entries written before this format existed, not evict them.
+    #[must_use]
+    pub fn decode(raw: &str) -> Self {
+        let envelope = serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .filter(|value| value.get("v").and_then(serde_json::Value::as_u64) == Some(u64::from(ENVELOPE_VERSION)))
+            .and_then(|value| {
+                let answer = value.get("answer")?.as_str()?.to_owned();
+                let confidence = value
+                    .get("confidence")
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|score| score.is_finite());
+                Some(Self { answer, confidence })
+            });
+        envelope.unwrap_or_else(|| Self {
+            answer: raw.to_owned(),
+            confidence: None,
+        })
+    }
+}
+
 /// The active cache backend behind one `lookup`/`store` seam. Selection
 /// precedence (first match wins): local Dragonfly exact-match → Data Plane v2
 /// semantic → disabled. No backend here leaves the trust boundary.
@@ -193,9 +261,29 @@ impl SemanticCache {
         }
     }
 
-    /// Look up a cached response for `prompt`, scoped to org + model. A miss or
+    /// Look up a cached answer for `prompt`, scoped to org + model. A miss or
     /// any error yields `None` so the caller falls through to inference.
-    pub async fn lookup(&self, prompt: &str, scope: CacheScope<'_>, zdr: bool) -> Option<String> {
+    pub async fn lookup(
+        &self,
+        prompt: &str,
+        scope: CacheScope<'_>,
+        zdr: bool,
+    ) -> Option<CachedAnswer> {
+        Some(CachedAnswer::decode(&self.lookup_raw(prompt, scope, zdr).await?))
+    }
+
+    /// Store an answer and its score for future hits. Best-effort; never panics.
+    pub async fn store(
+        &self,
+        prompt: &str,
+        scope: CacheScope<'_>,
+        answer: &CachedAnswer,
+        zdr: bool,
+    ) {
+        self.store_raw(prompt, scope, &answer.encode(), zdr).await;
+    }
+
+    async fn lookup_raw(&self, prompt: &str, scope: CacheScope<'_>, zdr: bool) -> Option<String> {
         if !cache_io_allowed(zdr) {
             return None;
         }
@@ -216,8 +304,7 @@ impl SemanticCache {
         }
     }
 
-    /// Store a prompt/response pair for future hits. Best-effort; never panics.
-    pub async fn store(&self, prompt: &str, scope: CacheScope<'_>, response: &str, zdr: bool) {
+    async fn store_raw(&self, prompt: &str, scope: CacheScope<'_>, response: &str, zdr: bool) {
         if !cache_io_allowed(zdr) {
             return;
         }
@@ -434,6 +521,65 @@ fn env_flag(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The score is part of the cached answer, so a replay reports the number
+    /// the answer actually earned instead of one re-derived from its text.
+    #[test]
+    fn an_answer_round_trips_with_its_score() {
+        let stored = CachedAnswer::new("Hovedstaden i Norge er Oslo.", Some(0.88));
+        let read_back = CachedAnswer::decode(&stored.encode());
+        assert_eq!(read_back, stored);
+        assert_eq!(read_back.confidence, Some(0.88));
+
+        // A turn that produced no score stays scoreless rather than gaining one.
+        let unscored = CachedAnswer::new("ok", None);
+        assert_eq!(CachedAnswer::decode(&unscored.encode()).confidence, None);
+    }
+
+    /// Entries written before the envelope existed must keep serving. Evicting
+    /// them on deploy would turn a format change into a cache stampede.
+    #[test]
+    fn a_legacy_plain_text_entry_still_reads_as_an_answer() {
+        let legacy = CachedAnswer::decode("Oslo er hovedstaden.");
+        assert_eq!(legacy.answer, "Oslo er hovedstaden.");
+        assert_eq!(legacy.confidence, None);
+    }
+
+    /// An answer that happens to be JSON is answer text, not an envelope. The
+    /// `v` marker is what makes the two decidable.
+    #[test]
+    fn an_answer_that_looks_like_json_is_not_mistaken_for_an_envelope() {
+        for text in [
+            r#"{"answer":"noe annet","confidence":0.99}"#,
+            r#"{"v":2,"answer":"fra en nyere versjon"}"#,
+            "[1, 2, 3]",
+            "null",
+        ] {
+            let decoded = CachedAnswer::decode(text);
+            assert_eq!(decoded.answer, text, "{text} was swallowed as an envelope");
+            assert_eq!(decoded.confidence, None);
+        }
+    }
+
+    /// Answer text is preserved byte for byte through the envelope — quotes,
+    /// newlines and non-ASCII included, since it is JSON now.
+    #[test]
+    fn answer_text_survives_the_envelope_intact() {
+        let awkward = "Han sa \"hei\".\n\nLinje 2 — æøå 😊\t{\"v\":1}";
+        let decoded = CachedAnswer::decode(&CachedAnswer::new(awkward, Some(0.5)).encode());
+        assert_eq!(decoded.answer, awkward);
+    }
+
+    /// A non-finite score is not a score.
+    #[test]
+    fn a_nonsense_score_is_dropped_rather_than_stored() {
+        assert_eq!(CachedAnswer::new("x", Some(f64::NAN)).confidence, None);
+        assert_eq!(CachedAnswer::new("x", Some(f64::INFINITY)).confidence, None);
+        assert_eq!(
+            CachedAnswer::decode(r#"{"v":1,"answer":"x","confidence":"høy"}"#).confidence,
+            None
+        );
+    }
 
     /// The failure this policy exists to prevent: replaying answer TEXT for a
     /// turn that also emitted citations or a tool timeline, leaving the user

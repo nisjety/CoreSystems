@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/scripts/add-password-to-user.js</file>
+  <line>2</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/scripts/add-password-to-user.js" />
+  <problem_class id="NpmUsedModulesInstalled" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing module dependency</problem_class>
+  <description>Module is not installed</description>
+  <highlighted_element>'bcrypt'</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>23</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/scripts/create-admin-user.js</file>
+  <line>8</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/scripts/create-admin-user.js" />
+  <problem_class id="NpmUsedModulesInstalled" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing module dependency</problem_class>
+  <description>Module is not installed</description>
+  <highlighted_element>'node-fetch'</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>22</offset>
+  <length>12</length>
+</problem>
+</problems>

@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/config/config.go</file>
+  <line>166</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/config/config.go" />
+  <problem_class id="GoSnakeCaseUsage" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Usage of Snake_Case</problem_class>
+  <description>Use camel case instead of snake case</description>
+  <highlighted_element>URL_DSN</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/service/session_service_test.go</file>
+  <line>99</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/service/session_service_test.go" />
+  <problem_class id="GoSnakeCaseUsage" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Usage of Snake_Case</problem_class>
+  <description>Use camel case instead of snake case</description>
+  <highlighted_element>import_json_members</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>19</length>
+</problem>
+</problems>

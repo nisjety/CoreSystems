@@ -73,7 +73,7 @@ describe('deriveConversationNodes', () => {
       followUps: ['og videre?'],
     })
     const shown = kinds(streaming)
-    for (const suppressed of ['low-confidence', 'memory-recall', 'truncated']) {
+    for (const suppressed of ['confidence', 'memory-recall', 'truncated']) {
       expect(shown).not.toContain(suppressed)
     }
 
@@ -83,7 +83,7 @@ describe('deriveConversationNodes', () => {
       stopReason: 'max_tokens',
       followUps: ['og videre?'],
     })
-    for (const shownAfter of ['low-confidence', 'memory-recall', 'truncated']) {
+    for (const shownAfter of ['confidence', 'memory-recall', 'truncated']) {
       expect(kinds(settled)).toContain(shownAfter)
     }
     // Follow-ups are not derived in either state: section 5 of the design doc
@@ -113,7 +113,7 @@ describe('deriveConversationNodes', () => {
       'reasoning',
       'answer',
       'grounding',
-      'low-confidence',
+      'confidence',
       'memory-recall',
       'truncated',
       'tool-chips',
@@ -146,7 +146,10 @@ describe('three-path equivalence', () => {
   it('a full load, a transcript rehydrate, and a live append derive the same nodes', () => {
     const live = assistantTurn({
       content: 'Bergen er regnfullt i dag.',
-      confidence: 0.9,
+      // No `confidence` here on purpose — see the test below. It is a
+      // usage-derived field the server's message shape cannot carry, so
+      // including it would assert an equivalence that is not achievable and
+      // hide the two paths that DO agree.
       // Transport-only fields differ per path by design.
       requestId: 'req-live',
       lastFrameId: '42',
@@ -183,6 +186,57 @@ describe('three-path equivalence', () => {
 
     expect(fullLoadNodes.map((n) => n.kind)).toEqual(liveNodes.map((n) => n.kind))
     expect(rehydratedNodes.map((n) => n.kind)).toEqual(liveNodes.map((n) => n.kind))
+  })
+
+  /**
+   * The score reaches the renderer by all three routes.
+   *
+   * It arrives on the `usage` SSE event, so it used to live only in the
+   * browser that watched the turn stream and in the local transcript: a thread
+   * opened on another device replayed the answer with no score at all, and
+   * "unscored" is indistinguishable from "nothing was ever checked". The
+   * backend now persists it in the turn's metadata, which the messages
+   * endpoint flattens onto the message — so a cold load carries it too.
+   *
+   * A row written before that persistence still has none, and must stay
+   * distinguishable from a score of zero.
+   */
+  it('confidence reaches the renderer from a rehydrate and from a cold load', () => {
+    const scored = assistantTurn({ content: 'Oslo.', confidence: 0.88 })
+    const [persisted] = turnsToTranscript([scored])
+    const rehydrated = transcriptTurnToChatTurn(persisted!)
+    expect(deriveConversationNodes(rehydrated).map((n) => n.kind)).toContain('confidence')
+
+    const coldLoad = messageToTurn({
+      id: 'a1',
+      role: 'assistant',
+      content: scored.content,
+      createdAt: scored.createdAt,
+      confidence: 0.88,
+      verification: {
+        verdict: 'unrelated',
+        kbCitations: 0,
+        webCitations: 0,
+        webAllowed: false,
+      },
+    } as unknown as Parameters<typeof messageToTurn>[0])
+    expect(coldLoad.confidence).toBe(0.88)
+    const coldNodes = deriveConversationNodes(coldLoad)
+    expect(coldNodes.map((n) => n.kind)).toContain('confidence')
+    // ...and it carries what verification found, so the renderer can say
+    // "checked and found nothing" rather than implying nobody looked.
+    const node = coldNodes.find((n) => n.kind === 'confidence')
+    expect(node).toMatchObject({ verification: { verdict: 'unrelated' } })
+
+    // A pre-persistence row has no score and derives no node.
+    const legacy = messageToTurn({
+      id: 'a0',
+      role: 'assistant',
+      content: scored.content,
+      createdAt: scored.createdAt,
+    } as unknown as Parameters<typeof messageToTurn>[0])
+    expect(legacy.confidence).toBeUndefined()
+    expect(deriveConversationNodes(legacy).map((n) => n.kind)).not.toContain('confidence')
   })
 
   it('a partial live turn and its persisted form agree once it settles', () => {

@@ -31,6 +31,9 @@ pub fn bridge_to_grpc(
                 // exactly where the tokens were served from.
                 provider_used: chunk.provider_used,
                 residency: chunk.residency,
+                // Present on the final chunk only, and only for providers that
+                // report logprobs; `None` reaches consumers as "unknown".
+                token_confidence: chunk.token_confidence.map(Into::into),
             };
             if tx.send(Ok(proto_chunk)).await.is_err() {
                 break;

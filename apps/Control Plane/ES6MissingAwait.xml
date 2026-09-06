@@ -1,0 +1,218 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/scripts/test-nats-direct.ts</file>
+  <line>35</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/scripts/test-nats-direct.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>(async () =&gt; { for await (const msg of sub) { console.log('\n📨 Received message:'); ...</highlighted_element>
+  <language>TypeScript</language>
+  <offset>2</offset>
+  <length>672</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>42</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>42</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts</file>
+  <line>56</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>42</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance-repair.postgres.spec.ts</file>
+  <line>30</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance-repair.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance-repair.postgres.spec.ts</file>
+  <line>119</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance-repair.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>42</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts</file>
+  <line>292</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>42</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts</file>
+  <line>292</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>42</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>373</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>sqlClient.json</highlighted_element>
+  <language>TypeScript</language>
+  <offset>86</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts</file>
+  <line>373</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-events.plugin.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>sqlClient.json</highlighted_element>
+  <language>TypeScript</language>
+  <offset>86</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/owner-invariant-preflight.postgres.spec.ts</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/owner-invariant-preflight.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/owner-invariant-preflight.postgres.spec.ts</file>
+  <line>99</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/owner-invariant-preflight.postgres.spec.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>TypeScript</language>
+  <offset>42</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service.client.ts</file>
+  <line>55</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service.client.ts" />
+  <problem_class id="ES6MissingAwait" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Missing await for an async function call</problem_class>
+  <description>Missing await for an async function call</description>
+  <highlighted_element>response.json</highlighted_element>
+  <language>TypeScript</language>
+  <offset>11</offset>
+  <length>13</length>
+</problem>
+</problems>

@@ -38,6 +38,7 @@ import { userServiceIntegrationPlugin } from './user-service-integration.plugin'
 import { organizationEventsPlugin } from './organization-events.plugin';
 import { normalizeIdentityEmail } from './account-linking.policy';
 import { withSoleOrganizationActivated } from './sole-org-auto-activation';
+import { pushMicrosoftSignInHandoff } from './microsoft-signin-handoff';
 import {
   buildInvitationLink,
   canonicalPublicOrigin,
@@ -754,6 +755,16 @@ const authOptions: BetterAuthOptions = {
         async before(session) {
           return { data: await withSoleOrganizationActivated(session) };
         },
+        // Hand the signed-in user's Microsoft token to integration-corev2 so
+        // the org's Microsoft connection is created/refreshed by the login
+        // itself. Same hook class as the activation above, for the same
+        // reason: it runs for every session-creation path, Microsoft OAuth
+        // included. Best-effort — never allowed to fail the sign-in.
+        async after(session) {
+          await pushMicrosoftSignInHandoff(
+            session as { userId: string } & Record<string, unknown>,
+          );
+        },
       },
     },
     account: {
@@ -1425,12 +1436,31 @@ const authOptions: BetterAuthOptions = {
             // `User.Read` lets user-core call Microsoft Graph `/me` and
             // `/me/photo/$value` for the zero-input enrichment described in
             // docs/zero-input-enterprise-onboarding-roadmap.md (Phase 2).
+            //
+            // The remaining scopes are the READ side of integration-corev2's
+            // Microsoft catalog (internal/providers/catalog.go): sharepoint.read,
+            // teams.read, teams.messages.read and mail.read. Requesting them at
+            // sign-in lets microsoft-signin-handoff.ts hand the login token to
+            // integration-core so the org's Microsoft connection is created or
+            // refreshed on every login instead of decaying between manual
+            // reconnects. Write scopes (Mail.Send, Files.ReadWrite.All) stay
+            // with the explicit Settings/Support connect flow: a send grant is
+            // not something a login screen should ask for, and integration-core
+            // only ever widens a connection from this hand-off, so an existing
+            // mail.send grant is never lost.
             scope: [
               'openid',
               'profile',
               'email',
               'offline_access',
               'User.Read',
+              'Files.Read.All',
+              'Sites.Read.All',
+              'Team.ReadBasic.All',
+              'Channel.ReadBasic.All',
+              'ChannelMessage.Read.All',
+              'Chat.Read',
+              'Mail.Read',
             ],
           },
         }

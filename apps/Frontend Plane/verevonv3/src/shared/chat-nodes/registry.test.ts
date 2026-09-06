@@ -14,7 +14,7 @@ const ALL_KINDS: ConversationNodeKind[] = [
   'reasoning',
   'answer',
   'grounding',
-  'low-confidence',
+  'confidence',
   'memory-recall',
   'truncated',
   'tool-chips',

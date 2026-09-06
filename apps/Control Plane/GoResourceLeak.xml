@@ -1,0 +1,38 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/redis/client.go</file>
+  <line>28</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/redis/client.go" />
+  <problem_class id="GoResourceLeak" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Potential resource leak</problem_class>
+  <description>Potential resource leak: ensure the resource is closed on all execution paths</description>
+  <highlighted_element>NewClient</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/redis/client.go</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/redis/client.go" />
+  <problem_class id="GoResourceLeak" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Potential resource leak</problem_class>
+  <description>Potential resource leak: ensure the resource is closed on all execution paths</description>
+  <highlighted_element>NewClient</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/redis/client.go</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/redis/client.go" />
+  <problem_class id="GoResourceLeak" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Potential resource leak</problem_class>
+  <description>Potential resource leak: ensure the resource is closed on all execution paths</description>
+  <highlighted_element>NewClient</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>9</length>
+</problem>
+</problems>

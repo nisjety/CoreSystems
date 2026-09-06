@@ -25393,6 +25393,23 @@ body.verevon-chat-canvas-resizing * {
   background: var(--verevon-surface-soft);
 }
 
+/* The pinned marker sits in the message action row, but reads as a state
+   rather than a control: no hover affordance, no pointer. A pin steers every
+   later turn in the thread, so it has to be visible while reading. */
+.verevon-chat-message-pinned {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--verevon-chat-accent-strong, #2b5cd9);
+  background-color: var(--verevon-chat-accent-soft, rgba(43, 92, 217, 0.1));
+  white-space: nowrap;
+}
+
 .verevon-chat-message-actions {
   display: flex;
   align-items: center;
@@ -25789,6 +25806,26 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-chat-low-confidence-notice svg {
   flex-shrink: 0;
+}
+
+/* The same score at or above the threshold. Quiet on purpose: a confident
+   answer is the normal case, so this reports the number without claiming any
+   of the caveat's urgency — no warning tint, no icon, muted ink. It exists
+   because a score that only ever appeared when low read as a missing signal
+   rather than a good one. */
+.verevon-chat-confidence-note {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  margin-top: 8px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--verevon-text-muted) 10%, transparent);
+  padding: 5px 12px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Memory-recall indicator: memory was genuinely used on this turn. Neutral

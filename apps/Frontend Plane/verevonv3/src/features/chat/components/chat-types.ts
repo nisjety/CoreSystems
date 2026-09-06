@@ -4,6 +4,7 @@ import {
 import {
   type AutonomyRung,
   type ChatAction,
+  type ChatVerificationEvent,
   type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
@@ -206,6 +207,13 @@ export type ChatTurn = {
   latencyMs?: number
   costUsd?: number
   confidence?: number
+  /**
+   * What the backend's verification pass found after scoring this answer low.
+   * Absent when the pass did not run — which is itself the point: a reader can
+   * otherwise not tell "we checked and found nothing" from "we never looked",
+   * and those justify very different trust in the same number.
+   */
+  verification?: ChatVerificationEvent
   reasoning?: string
   citations?: Citation[]
   toolCalls?: ChatToolCall[]

@@ -1,0 +1,14 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/repository.go</file>
+  <line>112</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/repository.go" />
+  <problem_class id="GoRedundantElseInIf" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant 'else' in 'if'</problem_class>
+  <description>Redundant 'else' in 'if'</description>
+  <highlighted_element>else</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>4</length>
+</problem>
+</problems>

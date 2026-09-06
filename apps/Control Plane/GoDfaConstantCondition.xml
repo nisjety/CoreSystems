@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>605</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoDfaConstantCondition" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Constant condition</problem_class>
+  <description>Condition is always false</description>
+  <highlighted_element>clampedLimit &lt;= 0</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>349</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoDfaConstantCondition" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Constant condition</problem_class>
+  <description>Condition is always true</description>
+  <highlighted_element>name != &quot;&quot;</highlighted_element>
+  <language>go</language>
+  <offset>40</offset>
+  <length>10</length>
+</problem>
+</problems>

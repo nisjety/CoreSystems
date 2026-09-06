@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/triodelab/integration-corev2/internal/config"
+	"github.com/triodelab/integration-corev2/internal/controlplane"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
 	"github.com/triodelab/integration-corev2/internal/db"
 	"github.com/triodelab/integration-corev2/internal/egress"
@@ -73,6 +74,13 @@ func main() {
 		GraphBaseURL:     cfg.MicrosoftGraphBaseURL,
 		HTTPClient:       egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second}),
 	}))
+	// The mail lane refreshes provider tokens here, not through the API, so it
+	// needs the same Control Plane re-mint fallback cmd/api wires: a Microsoft
+	// connection adopted from a Better Auth sign-in has no refresh token of its
+	// own. Nil when AUTH_CORE_OAUTH_SERVICE_TOKEN is unset (see cmd/api/main.go).
+	if authOAuth := controlplane.NewAuthOAuthClient(cfg, &http.Client{Timeout: 15 * time.Second}); authOAuth != nil {
+		tokens.SetControlPlaneTokenSource(authOAuth)
+	}
 
 	// Shared across every inbound-message provider fetcher below. Graph's
 	// delta sync in particular follows @odata.nextLink/@odata.deltaLink

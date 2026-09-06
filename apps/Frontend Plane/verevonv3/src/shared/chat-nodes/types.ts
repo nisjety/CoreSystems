@@ -63,7 +63,23 @@ export type ConversationNode =
   | { kind: 'reasoning'; text: string; streaming: boolean }
   | { kind: 'answer'; answer: AnswerState }
   | { kind: 'grounding'; grounding: ChatKnowledgeGrounding }
-  | { kind: 'low-confidence'; confidence: number; hasEvidence: boolean }
+  | {
+      kind: 'confidence'
+      confidence: number
+      hasEvidence: boolean
+      low: boolean
+      /**
+       * What the backend's verification pass found, when it ran. Absent means
+       * it did not run, which the renderer must not present as "found
+       * nothing" — those are different claims about the same score.
+       */
+      verification?: {
+        verdict: 'supports' | 'contradicts' | 'unrelated'
+        kbCitations: number
+        webCitations: number
+        webAllowed: boolean
+      }
+    }
   | { kind: 'memory-recall'; count: number; memories: RecalledMemory[] }
   | { kind: 'truncated'; stopReason: string }
   | { kind: 'tool-chips'; tools: ComposerToolId[] }

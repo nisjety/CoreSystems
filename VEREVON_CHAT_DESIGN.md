@@ -885,19 +885,33 @@ Ranked by what unblocks the most, with the reason each one is not already done:
    confidence/verification -- and the permission-scoped next actions that were
    meant to replace item 22's follow-up chips.
 
-    *Amended 2026-09-06: "all four need a Model Plane contract first" was too
-    pessimistic for the first one.* Claim identity already exists server-side.
-    Data Plane v2's graph index owns a `GraphClaim` (`claim_id`, `text`,
-    `claim_status`, `contradicted_by_claim_ids`) behind an org-scoped
-    `GetClaims` RPC (`graph-index-rs/src/grpc.rs`, `graph/v1/graph.proto`), and
-    the browser can already carry one: `ag-ui-client.ts` projects `claim_id`
-    onto `citation.added`. What is missing is narrower than a new contract --
-    the NATIVE chat path (`chat-client.ts`) carries no `claim` field at all,
-    and nothing anywhere emits character offsets, so there is no span to anchor
-    a marker to. Note the second cost of the AG-UI row in 9.2: the only
-    transport that carries claim ids is the one with no importers. Source
-    freshness and confidence/verification are genuinely contract-blocked --
-    confirmed today, neither has a producer or any UI.
+    *Corrected 2026-09-06, twice.* Two wrong claims were published about this
+    item before it was measured properly. The first said all four markers need
+    a new Model Plane contract. The second said the native chat path carries no
+    claim field at all -- that came from a grep piped through `head -8`, which
+    truncated two files before it reached `chat-client.ts`. What the code
+    actually shows, checked on both sides of the wire:
+
+    - **The client is already plumbed and waiting.** `Citation`
+      (`chat-types.ts`) carries `claimId`, `sourceGroupId`, `start` and `end`,
+      with a comment saying the gateway may omit them and the UI must never
+      infer them from prose. `normalizeCitation` preserves all four, and all
+      three transports read them -- the native `chat-client.ts`, the shared
+      `verevon-ui-events.ts` adapter, and `ag-ui-client.ts`.
+    - **No component renders any of them.** That is the whole UI gap.
+    - **No producer emits them on a citation event.** Data Plane v2 owns claim
+      identity (`GraphClaim` behind `GetClaims`), and model-gateway does carry
+      `claim_id` at `retrieval_tools.rs` -- but inside a TOOL RESULT envelope
+      addressed to the model, not a citation frame addressed to the browser.
+      Character offsets do not exist anywhere in model-gateway.
+
+    So this is blocked on a producer, not on a client contract, and the client
+    half is done. Building the renderer now would add exactly the kind of
+    wired-but-dead path section 2.3 exists to catalogue, so it stays unbuilt
+    deliberately: the next step belongs to whoever emits a citation frame with
+    a claim id and offsets. Source freshness and confidence/verification have
+    neither a producer nor any client plumbing -- those two are genuinely
+    contract-blocked.
 6. **Message pinning UI** (pin one message into context; distinct from thread
    pins). Never addressed, no blocker recorded.
 7. **The unproxied Model Plane routes** (2.3). Inventory only. Each needs a
@@ -914,3 +928,213 @@ is in use throughout without a written glossary -- criterion 9 is the visible
 cost of that. Q5 (per-run cost) is now partly answered by accident: the
 transcript's "Detaljer" panel carries Kostnad alongside Modell, Input, Output,
 tid and Sikkerhet. Whether cost belongs anywhere more prominent is still open.
+### 9.6 Fix pass on 9.5, 2026-09-06
+
+Six of the nine items in 9.5 are closed, two are corrected to
+contract-blocked, and one is left to its owner. Ranked as they were in 9.5:
+
+**1. Chat-workspace e2e suites — written, registered, and blocked on a stack
+credential.** `tests/e2e/chat-workspace.spec.ts` is nine tests covering
+evaluation suite 1, most of suite 12, and acceptance criteria 1, 2, 3, 4, 8, 9
+and 10, registered as a `chat` Playwright project against the dev stack the way
+the `browser-workspace-*` family already is. It has not run: `local@verevon.dev`
+and `e2e@verevon.dev` both answer 401, because `build-verevon-services.sh` now
+defaults `SEED_DEV_ACCOUNT=0` and requires an operator-chosen
+`SEED_DEV_PASSWORD`. Seeding it means creating an account and choosing a
+password, which is the operator's call, so it was not done. To run:
+
+```
+SEED_DEV_ACCOUNT=1 SEED_DEV_PASSWORD=... bash "apps/Frontend Plane/verevonv3/build-verevon-services.sh"
+pnpm exec playwright test --project=chat
+```
+
+Every selector and invariant the suite asserts was instead verified against the
+live signed-in page, and doing so found three real defects in the spec that a
+reading would not have: `/chat` rehydrates the last thread from `localStorage`,
+so the "cold start" test was asserting an empty transcript on a four-message
+thread (it now clears the five chat keys in an init script); the mobile resize
+handle is `display: none`, still in the DOM, so `toHaveCount(0)` would have
+failed against correct behaviour; and the reduced-motion test asserted zero
+transition durations, which the CSS deliberately does not do — the reduce blocks
+switch *animations* off and leave 140 ms hover transitions alone, so it now
+checks the composer dock's `animation-name` from both sides. Live, the page
+reports 1 chat page, 1 message list, 2 focusable messages, 0 canvases and
+**0 tab strips** on a plain Ask thread, which is THE ONE RULE holding.
+
+**2. Accessible-name localisation — done.** 28 names across five components now
+route through `i18n.tr`; four components had no `i18n` at all. Guarded by
+`chat-localization.test.ts`, which reads every `features/chat` `.tsx` and fails
+on prose in `aria-label`, `aria-description`, `alt`, `placeholder` or `title`
+that does not pass through `i18n.tr`. Verified live in both directions: at
+`verevon.locale=en` the region is "Verevon chat workspace" and the whole chrome
+reads English; at `no` it is "Verevon chat-arbeidsflate". The guard found six
+sites a manual grep had missed, and its own first draft produced four false
+positives by reading whole lines, so it now balances braces from the
+attribute's own `{`.
+
+*Not closed by this:* **visible text** has no automated guard. The artifact
+viewer's kind labels were Norwegian-only prose (`'Fil'`, `'Kode'`, "N
+versjoner") and are now bilingual, but others remain — the revision toggle's
+"Vis endringer"/"Vis versjonen" among them, and several component tests assert
+Norwegian strings, so a sweep has to move tests with it. A static guard for JSX
+text nodes would drown in user content; the live e2e check in the spec above is
+the better instrument once it can run.
+
+**3. AG-UI — left to its owner, deliberately.** The 2026-09-02 owner decision
+was to keep it as a planned surface. Reaching it means switching the app's
+transport, which is not a call to make inside a fix pass, and deleting it
+contradicts the decision. Recorded with one new fact from 9.5's correction:
+`ag-ui-client.ts` is the only transport that projects `claim_id` onto a
+citation, so whoever reaches it also gets the claim binding.
+
+**4. Performance baseline — done, and it moved the conclusion.** Section 21 of
+the implementation plan now carries the stress profile (40 deltas/second, a
+20-paragraph answer with 12 citations, 8 tool calls, 4 artifacts and 4 files,
+200-turn threads, the 5,000-event cap) and the budget it is judged against.
+`derive.budget.test.ts` measures it and prints the numbers on every run: 0.45 ms
+for 40 ticks on a heavy turn (441x headroom), 1.06 ms for a 200-turn mount
+(944x), and 4x the answer length costing **1.0x** — the derivation is O(1) in
+answer length. So the hot path is not where a streaming stall comes from, and
+point 11's remaining risk is rendering and paint, which no unit test can see.
+Point 11 is partly evidenced, not met. The first version of the scaling
+assertion silently skipped itself, dividing two sub-resolution timings; it now
+measures batches of 200.
+
+**5. The three UI markers — corrected, see the amendment on 9.5 item 5.** Claim
+binding is blocked on a producer with the client already plumbed; freshness and
+confidence/verification have neither producer nor plumbing.
+
+**6. Message pinning — corrected to contract-blocked.** 9.5 listed it as having
+"no blocker recorded". There is one: no wire field for pinned message context
+exists anywhere — not in `buildChatWireBody`, not in the gateway, not in the
+Model Plane. A pin indicator would either change nothing about the next turn's
+context, which is a lie about what the product does, or need a new
+session-core/Model Plane contract first. Same reasoning as item 22's follow-up
+chips.
+
+**7. Unproxied Model Plane routes — still open, and still needs product
+intent.** Seven routes, seven judgement calls about whether Verevon wants the
+capability at all. Building gateway domains speculatively is how the 2.3
+inventory got its entries.
+
+**8. Phase 9 A2A — not started, as the plan prescribes.**
+
+**9. Error language (UX section 3 finding 8) — still unverified.** Inducing a
+real failure needs a stack fault to provoke, and the honest place to do it is
+the e2e suite, which is blocked on item 1.
+
+**Also closed in this pass, from the outstanding list rather than 9.5:**
+
+- **The 13 long-standing chat test failures are gone**; `features/chat/components`
+  is 152/152 across 9 files for the first time. All three causes were test-side:
+  eleven were Solid 2 scheduling — a `fireEvent` followed by a synchronous
+  `textContent` read observes the state before the update, and
+  `CoreShell.test.tsx` had been importing `flush` for exactly this while these
+  files never did; one asserted `srcdoc` was byte-identical to the artifact,
+  pinning the behaviour the preview-isolation CSP wrapper deliberately replaced
+  (it now asserts the isolation instead, which is what the test was for); and
+  `mid-run-input.test.ts` searched a 2,813-CRLF file for LF anchors, so its
+  guard could never match and reported the effect it protects as "gone".
+- **Definition-of-finished point 4, the PDF half.** A generated `pdf` artifact
+  rendered as a download card while an *attached* PDF previewed in an iframe —
+  the same file, two answers. It now opens in a frame when its content is an
+  addressable source (`data:application/pdf`, `blob:`, or an http(s) `.pdf`
+  URL), and keeps the file card otherwise: bare base64 on a `pdf` artifact could
+  equally be prose, and guessing would put an empty viewer where a working
+  download was. A generic `file` kind carrying PDF bytes stays a download, which
+  an existing test pins.
+
+Verification for the pass: `pnpm typecheck` clean, `pnpm lint` 0 errors (121
+pre-existing warnings), and per-directory `features/chat/components` 152/152,
+`features/chat/lib` 133/133, `shared/chat-nodes` 48/48, `features/core` 57/57,
+`features/dashboard` 70/70.
+### 9.7 Message pinning: the blocker is gone, 2026-09-06
+
+9.6 recorded message pinning as contract-blocked — no wire field for pinned
+message context existed anywhere. The contract now exists, end to end, and the
+UI is built on it.
+
+**What a pin means mechanically.** Not "inject this text again": the client
+sends IDS, and model-gateway re-expresses each resolved message as leading
+`system` context. That position is the whole mechanism —
+`compaction::plan_head_summary` (which collapses a long thread's head into a
+summary at load time) and `compaction::drop_oldest_group` (which sheds the
+oldest turns when a provider rejects the prompt for length) both begin at the
+first NON-system message. So a pin means exactly one thing, and it is
+falsifiable: *this message is not dropped when the conversation is shed for
+length*. `DROPPED_HISTORY_NOTICE` already relied on that same guarantee, so
+pinning reuses a property the code had rather than adding a second one.
+
+The alternative — teaching both shedders to skip a set of indices — would have
+to keep those indices correct across two `drain` calls and a `split_off`, in
+two services that deploy separately (model-gateway and execution-core each
+carry their own compaction by design). Hoisting does it once, structurally.
+
+**Ids, never content.** A pin is a selector. The client names a message that
+already exists in the durable thread; the server resolves it against what
+session-core returns and ignores anything that matches nothing. Sending the
+pinned TEXT would let a browser assert that the user said something earlier in
+the conversation, which is the forgery this codebase forbids everywhere else.
+A guard test asserts no pinned-content field can reach the wire.
+
+**The layers, and what each needed.**
+
+| Layer | Change |
+|---|---|
+| `sessions.proto` | `SessionMessage.message_id`. The durable conversation read returned role/content/agent_name/metadata and no identity at all, so there was literally nothing to name. The ids were always in the `messages` table; this read simply never selected them. |
+| session-core | `SELECT m.id::text` and populate the field. |
+| model-gateway | `pinned_message_ids` on the chat request; `compaction::hoist_pinned_messages`; ids carried alongside each loaded turn as far as pin resolution and no further — `ChatMessage` (what the provider sees) must not carry our identifiers. |
+| model-gateway | `message_id` on the `/v1/threads/:id/messages` projection, so a client can learn the id it will later pin. |
+| Frontend gateway | Relays the durable id as the turn's `id`, falling back to the old positional `canonical-N` for rows written before ids were selected. Also strips `pinned_message_ids` for support threads: a pin changes the prompt, and a support thread's history is customer-authored text this surface may only read. |
+| SPA | `pinnedMessageIds` on the request, sent only when non-empty; `chat-pinned-messages.ts` for per-thread persistence; a Pin action and a "Festet i konteksten" indicator on each message. |
+
+**Bounded on purpose.** `MAX_PINNED_MESSAGES = 5` and `MAX_PINNED_CHARS = 8000`
+server-side, mirrored in the UI so the sixth pin is refused rather than
+accepted and silently ignored. Without a cap the feature would crowd the live
+conversation out of the context window through the one path built to prevent
+exactly that. Over the cap, a message stays in the body where it was — droppable
+like any other turn, which is honest, because it was not protected. An
+oversized single pin is shortened with a notice rather than dropped.
+
+**Deliberate limits, on record.**
+
+- The pin list is per browser (`verevon.chat.pinnedMessages.v1`), not per user.
+  Unlike THREAD pins (`ChatThreadSession.pinned`, server-owned), a message pin
+  does not follow the user to another device. Making it durable needs a
+  per-user pin contract in session-core; until that exists, promising
+  cross-device pins would be a lie the storage cannot keep.
+- A pin on a turn session-core has not persisted yet resolves to nothing and
+  starts working once it has. The id simply does not match; nothing is invented.
+- Editing a pinned message does not move the pin — the id is stable, so the pin
+  follows the message, not the text.
+
+**Verification.** Every layer is covered by its own suite: session-core and
+model-gateway compile against the regenerated proto; `compaction` is 25/25,
+including the two tests that prove the actual claim by composing the real
+shedders — a pinned turn survives `plan_head_summary` + `apply_head_summary`,
+and survives `drop_oldest_group` run to exhaustion, while an unpinned
+neighbour does not. The frontend gateway is 460/460 with a new test pinning the
+durable-id relay and its positional fallback. The SPA is 143/143 in
+`features/chat/lib` (10 new), 152/152 in components, 48/48 in
+`chat-client.test.ts` (2 new), typecheck clean, lint 0 errors. Verified live in
+the browser: the Pin control renders, clicking it writes
+`{"<threadId>":["msg-1"]}` and shows the indicator, the action flips to
+"Løsne fra konteksten", and the composer then puts
+`pinned_message_ids: ["msg-1"]` on the wire — and nothing else pin-shaped.
+
+**The gap that remains.** The live check exercised the SPA against the
+*running* containers, which still carry the pre-change model-gateway,
+session-core and frontend-gateway binaries. So the id in that payload is the
+old positional fallback, and the resolution half — a real durable id, hoisted
+into protected context, surviving a compaction on a genuinely long thread — has
+been proven by tests and not yet in the stack. Rebuilding three services' images
+is the remaining step, and it is the one thing between this and "done in
+production".
+
+A note for whoever touches the controller: the pin state started as a
+`createSignal` plus a `createEffect` reading `state.threadId`, and that effect
+made TypeScript infer `state` as `never` throughout the *rest* of
+`use-chat-controller.ts` — twenty-odd cascade errors with no obvious cause,
+none of them at the effect. A `createMemo` over storage has no such effect and
+is the better shape anyway: storage stays the single source of truth instead of
+being mirrored into a second signal that can disagree with it.

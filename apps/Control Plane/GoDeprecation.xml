@@ -1,0 +1,50 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go</file>
+  <line>49</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go" />
+  <problem_class id="GoDeprecation" severity="WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated element</problem_class>
+  <description>&lt;code&gt;DialContext&lt;/code&gt; is deprecated</description>
+  <highlighted_element>DialContext</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go</file>
+  <line>53</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go" />
+  <problem_class id="GoDeprecation" severity="WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated element</problem_class>
+  <description>&lt;code&gt;WithBlock&lt;/code&gt; is deprecated</description>
+  <highlighted_element>WithBlock</highlighted_element>
+  <language>go</language>
+  <offset>11</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go" />
+  <problem_class id="GoDeprecation" severity="WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated element</problem_class>
+  <description>&lt;code&gt;DialContext&lt;/code&gt; is deprecated</description>
+  <highlighted_element>DialContext</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go</file>
+  <line>49</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go" />
+  <problem_class id="GoDeprecation" severity="WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated element</problem_class>
+  <description>&lt;code&gt;WithBlock&lt;/code&gt; is deprecated</description>
+  <highlighted_element>WithBlock</highlighted_element>
+  <language>go</language>
+  <offset>8</offset>
+  <length>9</length>
+</problem>
+</problems>

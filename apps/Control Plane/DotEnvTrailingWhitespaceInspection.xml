@@ -1,0 +1,278 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/.env.sso.template</file>
+  <line>20</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/.env.sso.template" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>26</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/.env.sso.template</file>
+  <line>36</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/.env.sso.template" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>24</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>115</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>25</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>116</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>23</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>117</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>21</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>119</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>33</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>122</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>26</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>123</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>34</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>222</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>37</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>100</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>25</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>23</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>102</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>21</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>104</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>33</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>26</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>34</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>202</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>37</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>106</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>25</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>23</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>21</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>110</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>33</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>113</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>26</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>114</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>34</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>207</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvTrailingWhitespaceInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Value has trailing whitespace</problem_class>
+  <description>Line has trailing whitespace.</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>37</offset>
+  <length>2</length>
+</problem>
+</problems>

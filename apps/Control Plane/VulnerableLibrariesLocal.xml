@@ -1,0 +1,119 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/go.mod</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:golang.org/x/crypto:v0.32.0 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-22869?utm_source=JetBrains&quot;&gt;CVE-2025-22869&lt;/a&gt; 7.5 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-47913?utm_source=Jetbrains&quot;&gt;CVE-2025-47913&lt;/a&gt; 7.5 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-58181?utm_source=Jetbrains&quot;&gt;CVE-2025-58181&lt;/a&gt; 5.3 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-47914?utm_source=Jetbrains&quot;&gt;CVE-2025-47914&lt;/a&gt; 5.3 Insufficient Information &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>golang.org/x/crypto v0.32.0 // indirect</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>39</length>
+  <fingerprint sourcePackage="go:golang.org/x/crypto:v0.32.0" vulnerabilityIds="9cf7b448-339e-427a-9370-cd118d1495af,1b71956d-94be-47df-acc2-392b7cb93a97,2d3740ba-f34f-49f2-a6dc-7e90e4908900,03ba8978-4738-410b-8c72-dc116287b78b" />
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/go.mod</file>
+  <line>14</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:google.golang.org/grpc:v1.75.1 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>google.golang.org/grpc v1.75.1</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>30</length>
+  <fingerprint sourcePackage="go:google.golang.org/grpc:v1.75.1" vulnerabilityIds="8e52434a-4f1e-44e0-867b-5666b06f87c8" />
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/go.mod</file>
+  <line>53</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:github.com/quic-go/quic-go:v0.54.0 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-59530?utm_source=Jetbrains&quot;&gt;CVE-2025-59530&lt;/a&gt; 7.5 quic-go has Client Crash Due to Premature HANDSHAKE_DONE Frame &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>github.com/quic-go/quic-go v0.54.0 // indirect</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>46</length>
+  <fingerprint sourcePackage="go:github.com/quic-go/quic-go:v0.54.0" vulnerabilityIds="ff1345d3-6656-409e-a7ac-9a7f433949c1" />
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/go.mod</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:golang.org/x/crypto:v0.41.0 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-47913?utm_source=Jetbrains&quot;&gt;CVE-2025-47913&lt;/a&gt; 7.5 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-58181?utm_source=Jetbrains&quot;&gt;CVE-2025-58181&lt;/a&gt; 5.3 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-47914?utm_source=Jetbrains&quot;&gt;CVE-2025-47914&lt;/a&gt; 5.3 Insufficient Information &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>golang.org/x/crypto v0.41.0 // indirect</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>39</length>
+  <fingerprint sourcePackage="go:golang.org/x/crypto:v0.41.0" vulnerabilityIds="1b71956d-94be-47df-acc2-392b7cb93a97,2d3740ba-f34f-49f2-a6dc-7e90e4908900,03ba8978-4738-410b-8c72-dc116287b78b" />
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/go.mod</file>
+  <line>12</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:google.golang.org/grpc:v1.75.1 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2026-33186?utm_source=Jetbrains&quot;&gt;CVE-2026-33186&lt;/a&gt; 9.1 gRPC-Go has an authorization bypass via missing leading slash in :path &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>google.golang.org/grpc v1.75.1</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>30</length>
+  <fingerprint sourcePackage="go:google.golang.org/grpc:v1.75.1" vulnerabilityIds="8e52434a-4f1e-44e0-867b-5666b06f87c8" />
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/go.mod</file>
+  <line>48</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:github.com/quic-go/quic-go:v0.54.0 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-59530?utm_source=Jetbrains&quot;&gt;CVE-2025-59530&lt;/a&gt; 7.5 quic-go has Client Crash Due to Premature HANDSHAKE_DONE Frame &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>github.com/quic-go/quic-go v0.54.0 // indirect</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>46</length>
+  <fingerprint sourcePackage="go:github.com/quic-go/quic-go:v0.54.0" vulnerabilityIds="ff1345d3-6656-409e-a7ac-9a7f433949c1" />
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/go.mod</file>
+  <line>54</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:golang.org/x/crypto:v0.41.0 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-47913?utm_source=Jetbrains&quot;&gt;CVE-2025-47913&lt;/a&gt; 7.5 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-58181?utm_source=Jetbrains&quot;&gt;CVE-2025-58181&lt;/a&gt; 5.3 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-47914?utm_source=Jetbrains&quot;&gt;CVE-2025-47914&lt;/a&gt; 5.3 Insufficient Information &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>golang.org/x/crypto v0.41.0 // indirect</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>39</length>
+  <fingerprint sourcePackage="go:golang.org/x/crypto:v0.41.0" vulnerabilityIds="1b71956d-94be-47df-acc2-392b7cb93a97,2d3740ba-f34f-49f2-a6dc-7e90e4908900,03ba8978-4738-410b-8c72-dc116287b78b" />
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/go.mod</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:github.com/quic-go/quic-go:v0.54.0 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-59530?utm_source=Jetbrains&quot;&gt;CVE-2025-59530&lt;/a&gt; 7.5 quic-go has Client Crash Due to Premature HANDSHAKE_DONE Frame &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>github.com/quic-go/quic-go v0.54.0 // indirect</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>46</length>
+  <fingerprint sourcePackage="go:github.com/quic-go/quic-go:v0.54.0" vulnerabilityIds="ff1345d3-6656-409e-a7ac-9a7f433949c1" />
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/go.mod</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/go.mod" />
+  <problem_class id="VulnerableLibrariesLocal" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Vulnerable declared dependency</problem_class>
+  <description>&lt;html&gt;&lt;body&gt; Dependency go:golang.org/x/crypto:v0.41.0 is vulnerable &lt;ul&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-47913?utm_source=Jetbrains&quot;&gt;CVE-2025-47913&lt;/a&gt; 7.5 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-58181?utm_source=Jetbrains&quot;&gt;CVE-2025-58181&lt;/a&gt; 5.3 Insufficient Information &lt;/li&gt;&lt;li&gt;&lt;a href=&quot;https://www.mend.io/vulnerability-database/CVE-2025-47914?utm_source=Jetbrains&quot;&gt;CVE-2025-47914&lt;/a&gt; 5.3 Insufficient Information &lt;/li&gt;&lt;/ul&gt; Results powered by &lt;a href=&quot;https://www.mend.io/jetbrains-lp/?utm_source=JetBrains&quot;&gt;Mend.io&lt;/a&gt;&lt;/body&gt; &lt;/html&gt;</description>
+  <highlighted_element>golang.org/x/crypto v0.41.0 // indirect</highlighted_element>
+  <language>vgo</language>
+  <offset>1</offset>
+  <length>39</length>
+  <fingerprint sourcePackage="go:golang.org/x/crypto:v0.41.0" vulnerabilityIds="1b71956d-94be-47df-acc2-392b7cb93a97,2d3740ba-f34f-49f2-a6dc-7e90e4908900,03ba8978-4738-410b-8c72-dc116287b78b" />
+</problem>
+</problems>

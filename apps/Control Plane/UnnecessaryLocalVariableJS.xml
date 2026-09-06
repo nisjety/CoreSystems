@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/direct-nats.service.ts</file>
+  <line>269</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/direct-nats.service.ts" />
+  <problem_class id="UnnecessaryLocalVariableJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Redundant local variable</problem_class>
+  <description>&lt;html&gt;Local variable &lt;code&gt;&lt;span style=&quot;color:#a9b7c6;&quot;&gt;decoded&lt;/span&gt;&lt;/code&gt; is redundant&lt;/html&gt;</description>
+  <highlighted_element>decoded</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/openapi.controller.ts</file>
+  <line>42</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/openapi.controller.ts" />
+  <problem_class id="UnnecessaryLocalVariableJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Redundant local variable</problem_class>
+  <description>&lt;html&gt;Local variable &lt;code&gt;&lt;span style=&quot;color:#a9b7c6;&quot;&gt;spec&lt;/span&gt;&lt;/code&gt; is redundant&lt;/html&gt;</description>
+  <highlighted_element>spec</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>4</length>
+</problem>
+</problems>

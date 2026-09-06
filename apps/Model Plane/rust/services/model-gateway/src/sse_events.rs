@@ -97,6 +97,23 @@ pub enum ChatEvent {
     /// the `memory` feature family: the injection itself is unconditional
     /// (prompt quality is not a client choice), only this VISIBILITY signal
     /// is gated, so older clients and plain chat are byte-identical.
+    /// What the low-confidence verification pass did and what it found.
+    ///
+    /// The score moving without explanation is worse than no score: a reader
+    /// cannot tell "we checked and found nothing" from "we never looked",
+    /// and those justify very different trust. Emitted only for turns that
+    /// actually ran the pass.
+    Verification {
+        /// `supports` | `contradicts` | `unrelated` — see
+        /// `verification::SourceVerdict`.
+        verdict: &'static str,
+        /// Knowledge-base sources the pass confirmed against.
+        kb_citations: u32,
+        /// Web sources it confirmed against, when the turn allowed the web.
+        web_citations: u32,
+        /// Whether the pass was permitted to escalate past the knowledge base.
+        web_allowed: bool,
+    },
     MemoryRecall {
         count: u32,
         latency_ms: u64,
@@ -133,7 +150,9 @@ impl ChatEvent {
             ChatEvent::ReasoningDelta { .. } => Some("reasoning"),
             ChatEvent::StepUpdate { .. } => Some("steps"),
             ChatEvent::ToolCall { .. } | ChatEvent::ToolResult { .. } => Some("tools"),
-            ChatEvent::Citation { .. } | ChatEvent::Grounding { .. } => Some("citations"),
+            ChatEvent::Citation { .. }
+            | ChatEvent::Grounding { .. }
+            | ChatEvent::Verification { .. } => Some("citations"),
             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
             ChatEvent::Usage { .. } => Some("usage"),
             ChatEvent::MemoryRecall { .. } => Some("memory"),
@@ -176,6 +195,7 @@ impl ChatEvent {
             ChatEvent::Artifact { .. } => "artifact",
             ChatEvent::Attachment { .. } => "attachment",
             ChatEvent::Usage { .. } => "usage",
+            ChatEvent::Verification { .. } => "verification",
             ChatEvent::MemoryRecall { .. } => "memory_recall",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
@@ -252,6 +272,18 @@ impl ChatEvent {
                 "cost_usd": cost_usd,
                 "latency_ms": latency_ms,
                 "confidence": confidence,
+            }),
+            ChatEvent::Verification {
+                verdict,
+                kb_citations,
+                web_citations,
+                web_allowed,
+            } => json!({
+                "verdict": verdict,
+                "kb_citations": kb_citations,
+                "web_citations": web_citations,
+                "web_allowed": web_allowed,
+                "request_id": request_id,
             }),
             ChatEvent::MemoryRecall {
                 count,

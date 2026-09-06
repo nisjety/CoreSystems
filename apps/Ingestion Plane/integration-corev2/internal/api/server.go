@@ -758,6 +758,62 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return nil
 	})
 
+	// Control Plane hands a user's fresh Microsoft (or other OAuth) sign-in
+	// token to this service after every login. The org's connection is created
+	// or widened from it — never narrowed — and remembers the Better Auth
+	// account row so the token can be re-minted through auth-core later. See
+	// oauth/delegated.go. Internal-only: the caller is auth-core, and the body
+	// carries a live access token that must never come from a browser.
+	app.Post("/internal/providers/:provider/sign-in-handoff", chainHandlers(rateLimited, internalAuth, func(c *fiber.Ctx) error {
+		var body signInHandoffBody
+		if err := c.BodyParser(&body); err != nil {
+			return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
+		}
+		providerKey := providers.NormalizeKey(c.Params("provider"))
+		if _, ok := providers.FindOAuth(providerKey); !ok {
+			return apiError(c, fiber.StatusNotFound, "provider_not_found", "Provider is not an OAuth provider.")
+		}
+		if strings.TrimSpace(body.OrganizationID) == "" || strings.TrimSpace(body.AccessToken) == "" {
+			return apiError(c, fiber.StatusBadRequest, "handoff_incomplete", "organizationId and accessToken are required.")
+		}
+		var expiresAt time.Time
+		if raw := strings.TrimSpace(body.ExpiresAt); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return apiError(c, fiber.StatusBadRequest, "invalid_expires_at", "expiresAt must be RFC 3339.")
+			}
+			expiresAt = parsed
+		}
+		connection, created, err := cfg.OAuth.AdoptDelegatedToken(c.UserContext(), oauth.DelegatedTokenInput{
+			ProviderKey:       providerKey,
+			OrganizationID:    body.OrganizationID,
+			WorkspaceID:       body.WorkspaceID,
+			UserID:            body.UserID,
+			UserEmail:         body.UserEmail,
+			ProviderAccountID: body.ProviderAccountID,
+			AccessToken:       body.AccessToken,
+			ExpiresAt:         expiresAt,
+			Scopes:            body.Scopes,
+			TokenRef:          body.TokenRef,
+		})
+		if err != nil {
+			return apiError(c, fiber.StatusBadGateway, "handoff_failed", err.Error())
+		}
+		recordUsage(cfg, connection.OrganizationID, "connection_signin_adopted", 1, map[string]any{
+			"providerKey":  connection.ProviderKey,
+			"connectionId": connection.ID,
+			"created":      created,
+		})
+		status := fiber.StatusOK
+		if created {
+			status = fiber.StatusCreated
+		}
+		return c.Status(status).JSON(fiber.Map{"success": true, "data": fiber.Map{
+			"connection": connectionView1(c.UserContext(), cfg.Repo, connection),
+			"created":    created,
+		}})
+	})...)
+
 	app.Post("/internal/sync-jobs/claim", chainHandlers(rateLimited, internalAuth, func(c *fiber.Ctx) error {
 		var body syncClaimBody
 		if err := c.BodyParser(&body); err != nil {
@@ -1326,6 +1382,21 @@ type syncJobBody struct {
 
 type inboxSyncBody struct {
 	Channel string `json:"channel"`
+}
+
+// signInHandoffBody is the Control Plane → integration-core sign-in hand-off
+// (auth-core `microsoft-signin-handoff.ts`). `scopes` are the granted scopes
+// as auth-core stored them; `tokenRef` is the Better Auth account row id.
+type signInHandoffBody struct {
+	OrganizationID    string   `json:"organizationId"`
+	WorkspaceID       string   `json:"workspaceId"`
+	UserID            string   `json:"userId"`
+	UserEmail         string   `json:"userEmail"`
+	ProviderAccountID string   `json:"providerAccountId"`
+	AccessToken       string   `json:"accessToken"`
+	ExpiresAt         string   `json:"expiresAt"`
+	Scopes            []string `json:"scopes"`
+	TokenRef          string   `json:"tokenRef"`
 }
 
 type syncCancelBody struct {

@@ -76,6 +76,8 @@ const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   document: FileText,
   html: Globe,
   image: ImageIcon,
+  // A previewable PDF reads as a document, not as an opaque file.
+  pdf: FileText,
   text: FileCode2,
 }
 
@@ -127,7 +129,8 @@ export function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
 function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; onSelect: () => void }) {
   const renderKind = createMemo(() => artifactRenderKind(props.item.artifact))
   const versionCount = createMemo(() => artifactVersions(props.item.artifact).length)
-  const title = createMemo(() => artifactDisplayTitle(props.item, renderKind()))
+  const i18n = useI18n()
+  const title = createMemo(() => artifactDisplayTitle(props.item, renderKind(), i18n.tr))
 
   return (
     <button
@@ -144,9 +147,9 @@ function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; 
       <span class="verevon-chat-artifact-list__copy">
         <strong>{title()}</strong>
         <span>
-          <em>{artifactRenderKindLabel(renderKind())}</em>
+          <em>{artifactRenderKindLabel(renderKind(), i18n.tr)}</em>
           <Show when={versionCount() > 1}>
-            <small>{versionCount()} versjoner</small>
+            <small>{i18n.tr(`${versionCount()} versjoner`, `${versionCount()} versions`)}</small>
           </Show>
         </span>
       </span>
@@ -199,7 +202,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
   const renderKind = createMemo(() => artifactRenderKind(displayed()))
   const missing = createMemo(() => artifactContentMissing(displayed().content))
   const fileMeta = createMemo(() => artifactFileMeta(displayed(), renderKind(), props.item.file))
-  const title = createMemo(() => artifactDisplayTitle({ ...props.item, artifact: displayed() }, renderKind()))
+  const title = createMemo(() => artifactDisplayTitle({ ...props.item, artifact: displayed() }, renderKind(), i18n.tr))
 
   // Reset the revision cursor, the HTML source toggle, and any image failure
   // when the panel switches to a different artifact — a new selection must open
@@ -381,6 +384,22 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
                 />
               </Show>
             </Match>
+            {/*
+                Point 4 of the definition of finished: a generated PDF opens in a
+                viewer, the same way an attached one already did. `artifactRenderKind`
+                only returns 'pdf' for an addressable source, so `content` is safe to
+                use as a frame `src` — an unopenable body still routes to 'binary'
+                below and keeps its download card.
+            */}
+            <Match when={renderKind() === 'pdf'}>
+              <div class="verevon-chat-artifact-frame">
+                <iframe
+                  src={artifact().content.trim()}
+                  title={i18n.tr(`Forhåndsvisning av ${title()}`, `Preview of ${title()}`)}
+                  referrerpolicy="no-referrer"
+                />
+              </div>
+            </Match>
             <Match when={renderKind() === 'binary'}>
               <Show when={fileMeta()} fallback={<ArtifactLoadFailure kind={artifact().kind} />}>
                 {(meta) => <ArtifactFileCard meta={meta()} title={title()} />}
@@ -546,9 +565,13 @@ function kindIcon(kind: ArtifactRenderKind) {
  * Images keep the prompt-derived title the inline previews already use; every
  * other kind shows its own title, falling back to the kind label.
  */
-function artifactDisplayTitle(item: ArtifactPanelItem, kind: ArtifactRenderKind): string {
+function artifactDisplayTitle(
+  item: ArtifactPanelItem,
+  kind: ArtifactRenderKind,
+  tr: (noText: string, enText: string) => string,
+): string {
   if (kind === 'image') {
     return generatedImageTitle(item.artifact.title, item.turn.content, item.file?.name)
   }
-  return item.artifact.title.trim() || item.artifact.kind || artifactRenderKindLabel(kind)
+  return item.artifact.title.trim() || item.artifact.kind || artifactRenderKindLabel(kind, tr)
 }

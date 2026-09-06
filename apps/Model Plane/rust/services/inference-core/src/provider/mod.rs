@@ -8,6 +8,7 @@ pub mod doc_intel;
 pub mod fallback;
 pub mod intent;
 pub mod language;
+pub mod logprobs;
 pub mod openai;
 pub mod overflow;
 pub mod policy_client;
@@ -189,6 +190,28 @@ pub struct ChatMessage {
     pub name: String,
 }
 
+/// How sure the serving model itself was, token by token.
+///
+/// Summarized from provider logprobs by [`logprobs`]. `None` on a response or
+/// final chunk means the provider does not report them (Anthropic never does)
+/// or the model rejects the request parameter — "unknown", never "low".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TokenConfidence {
+    /// Answer tokens the summary covers. Never 0 in a constructed value.
+    pub token_count: u32,
+    /// Mean natural-log probability over those tokens; `exp()` gives the
+    /// geometric-mean per-token probability. Always <= 0.
+    pub mean_logprob: f64,
+    /// Tokens that carry a claim: content tokens which do not echo the
+    /// question. 0 when the answer was entirely framing.
+    pub claim_token_count: u32,
+    /// The same mean over claim tokens only. Meaningless when
+    /// `claim_token_count` is 0. See the proto field's doc for why this
+    /// separates a fabrication from confident framing and the whole-answer
+    /// mean does not.
+    pub claim_mean_logprob: f64,
+}
+
 /// Unified inference response.
 #[derive(Debug, Clone, Default)]
 pub struct InferResponse {
@@ -207,6 +230,8 @@ pub struct InferResponse {
     /// Disclosure only — reports the posture that was actually met. Empty when
     /// undeclared.
     pub residency: String,
+    /// The serving model's own token-level certainty, when it reports logprobs.
+    pub token_confidence: Option<TokenConfidence>,
 }
 
 /// A single streaming chunk.
@@ -234,6 +259,11 @@ pub struct InferChunk {
     pub provider_used: String,
     /// Residency label of the serving deployment (see [`InferResponse::residency`]).
     pub residency: String,
+    /// Token-level certainty for the whole streamed answer, accumulated across
+    /// the stream and populated on the FINAL chunk only — the same rule the
+    /// token counts and provenance above follow, and for the same reason: it
+    /// is a property of the completed answer, not of one delta.
+    pub token_confidence: Option<TokenConfidence>,
 }
 
 /// A unified embedding request used internally across providers.

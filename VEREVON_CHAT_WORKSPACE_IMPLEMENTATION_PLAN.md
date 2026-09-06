@@ -768,3 +768,70 @@ files layered by the launcher. Both the default `dev` target and the
 production override (`target: production`, with non-secret image metadata
 provided) completed successfully without starting or mutating the service
 stack.
+## 21. Streaming stress profile and performance baseline (2026-09-06)
+
+Definition-of-finished point 11 says Solid's fine-grained rendering "meets
+performance targets under heavy streaming", and phase 0's exit gate asks for
+reproducible baseline measurements. Neither existed: there was no written
+target, no stress profile, and no measurement anywhere in the chat feature, so
+point 11 could be asserted but never checked. This section is the missing
+artefact.
+
+### 21.1 The profile
+
+"Heavy streaming" means all of the following at once, which is what a long
+grounded research answer actually looks like:
+
+| Dimension | Figure | Why this figure |
+|---|---|---|
+| Delta rate | 40 frames/second | A fast provider stream. The per-message memo recomputes once per delta, so this is the recompute rate. |
+| Answer length | ~20 paragraphs, growing | The turn accumulates; per-token work proportional to accumulated size is the shape that stalls a tab. |
+| Evidence on the turn | 12 citations, 8 tool calls, 4 artifacts, 4 generated files, reasoning present, a confidence score | Every optional branch of the derivation populated at once, so nothing is measured on a fast path a real heavy turn would not take. |
+| Long thread | 200 turns | The reload case: a whole thread derived once on mount. |
+| UI event buffer | 5,000 events | The existing cap in `appendUiEvent`, with its visible truncation notice. |
+
+### 21.2 The budget
+
+- **200 ms of CPU per streamed second** for one turn's node derivation — a 20%
+  duty cycle, leaving the rest of the frame budget to Solid's own rendering.
+- **1,000 ms for a 200-turn mount**, five streamed seconds' worth, because it
+  happens once.
+
+Both are deliberately loose. They are not tuned to catch a 20% slowdown and
+should not be: a wall-clock assertion in a unit test cannot do that without
+becoming flaky. They exist to catch an *algorithmic* regression — the accidental
+O(n²) that makes a 4× longer answer 16× dearer. The scaling assertion is the
+real guard, because a ratio survives a slow CI box where a millisecond count
+does not.
+
+### 21.3 Measured baseline
+
+`src/shared/chat-nodes/derive.budget.test.ts`, run on a 2026 developer laptop
+(Windows 11, Node under vitest 4.1.11). The test prints these on every run —
+`npx vitest run src/shared/chat-nodes --disable-console-intercept`:
+
+| Measurement | Result | Headroom |
+|---|---|---|
+| 40 ticks on a heavy turn | 0.45 ms | 441× |
+| 4× answer length, over 200 derivations | **1.0×** cost | — |
+| 200-turn thread mount | 1.06 ms | 944× |
+
+The 1.0× is the useful number: `deriveConversationNodes` is O(1) in answer
+length, because it passes `content` through rather than scanning it. Quadratic
+behaviour would have to be introduced deliberately.
+
+### 21.4 What this does and does not prove
+
+It proves the hot path is not the risk, and it will fail loudly if that
+changes. `ChatMessages` wraps `deriveConversationNodes` in a `createMemo` per
+message; only the streaming turn's memo invalidates on a delta, but it
+invalidates on *every* delta, so this was the one place in the chat path where
+per-token work scaled with accumulated turn size. At 441× headroom it is not
+where a streaming stall will come from.
+
+It does **not** prove point 11. Rendering, layout and paint are the remaining
+unknown, and a unit test cannot see them. Closing point 11 needs a browser-side
+measurement — long tasks and frame timing during a real streamed turn — which
+belongs in the chat-workspace e2e suite (`tests/e2e/chat-workspace.spec.ts`)
+once that suite can authenticate. Until then point 11 is *partly* evidenced,
+not met, and this section is the target it will be judged against.

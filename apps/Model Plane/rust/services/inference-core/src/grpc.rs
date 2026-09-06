@@ -206,6 +206,7 @@ impl InferenceCore for InferenceService {
             output_tokens: result.output_tokens,
             provider_used: result.provider_used,
             residency: result.residency,
+            token_confidence: result.token_confidence.map(Into::into),
             tool_calls: result
                 .tool_calls
                 .into_iter()

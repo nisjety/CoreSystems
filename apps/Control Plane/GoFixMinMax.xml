@@ -1,0 +1,28 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_audit_outbox.go</file>
+  <line>136</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_audit_outbox.go" />
+  <problem_class id="GoFixMinMax" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Conditional assignment can be replaced with 'min' or 'max'</problem_class>
+  <hints />
+  <description>if statement can be modernized using min</description>
+  <highlighted_element>seconds &gt; 300</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go</file>
+  <line>366</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go" />
+  <problem_class id="GoFixMinMax" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Conditional assignment can be replaced with 'min' or 'max'</problem_class>
+  <hints />
+  <description>if statement can be modernized using min</description>
+  <highlighted_element>seconds &gt; 300</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>13</length>
+</problem>
+</problems>

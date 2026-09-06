@@ -1,0 +1,2628 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go</file>
+  <line>441</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go</file>
+  <line>599</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go</file>
+  <line>792</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/past_due.go</file>
+  <line>56</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/past_due.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/past_due.go</file>
+  <line>56</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/past_due.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>56</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/past_due.go</file>
+  <line>57</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/past_due.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/past_due_test.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/past_due_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>19</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/past_due_test.go</file>
+  <line>31</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/past_due_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/past_due_test.go</file>
+  <line>54</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/past_due_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/past_due_test.go</file>
+  <line>63</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/past_due_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/plan_revision_test.go</file>
+  <line>39</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/plan_revision_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/plan_revision_test.go</file>
+  <line>65</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/plan_revision_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/repository.go</file>
+  <line>451</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/repository.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>34</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/repository.go</file>
+  <line>554</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/repository.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>114</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/repository.go</file>
+  <line>691</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/repository.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go</file>
+  <line>137</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>41</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go</file>
+  <line>164</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go</file>
+  <line>166</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>35</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go</file>
+  <line>182</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>43</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go</file>
+  <line>204</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go</file>
+  <line>206</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/retry_processor.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>35</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>176</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>247</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>354</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>395</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>574</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>779</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>916</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>948</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>52</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>949</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>19</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>961</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/types.go</file>
+  <line>39</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>31</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/types.go</file>
+  <line>53</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/types.go</file>
+  <line>123</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/types.go</file>
+  <line>132</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>26</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage.go</file>
+  <line>79</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>47</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage.go</file>
+  <line>92</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>15</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage.go</file>
+  <line>103</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>37</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage.go</file>
+  <line>112</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage.go</file>
+  <line>121</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>8</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>68</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>78</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>37</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>96</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>115</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>31</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>118</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>13</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>120</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>122</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>31</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>146</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>148</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>169</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>170</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>178</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>34</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>184</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>18</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>188</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>31</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go</file>
+  <line>211</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/handlers.go</file>
+  <line>100</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/handlers.go</file>
+  <line>204</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/lifecycle_postgres_test.go</file>
+  <line>64</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/lifecycle_postgres_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>248</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>283</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>46</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>284</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>297</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>46</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>303</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>42</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>322</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>35</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>333</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>342</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>342</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>68</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>343</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>42</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go</file>
+  <line>346</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>19</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/redis/client.go</file>
+  <line>73</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/redis/client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>60</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>291</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>37</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>42</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>49</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>63</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>69</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>85</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>338</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>64</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>399</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>50</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>746</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>50</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>996</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>99</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/redis/client.go</file>
+  <line>75</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/redis/client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>60</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/handlers_test.go</file>
+  <line>56</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/handlers_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/handlers_test.go</file>
+  <line>69</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/handlers_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/handlers_test.go</file>
+  <line>86</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/handlers_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/handlers_test.go</file>
+  <line>119</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/handlers_test.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>83</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>26</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>94</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>26</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>122</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>256</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>84</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>256</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>106</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>412</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go</file>
+  <line>154</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/server.go</file>
+  <line>127</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/server.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/server.go</file>
+  <line>130</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/server.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/server.go</file>
+  <line>139</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/server.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/server.go</file>
+  <line>161</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/server.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/server.go</file>
+  <line>164</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/server.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>137</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>206</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>218</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>246</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>352</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>399</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>606</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>61</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>610</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>273</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>453</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>522</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>583</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>617</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>779</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>818</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>820</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>37</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>893</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>34</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>894</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>28</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>895</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>895</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>176</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>923</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>936</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>28</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>988</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>101</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>995</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>26</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1009</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1028</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>100</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1089</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>19</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1089</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>44</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1094</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>18</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1099</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1099</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>45</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1142</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1194</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1246</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1299</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1302</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1364</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1428</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1493</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1557</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1618</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1728</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>31</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1756</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1768</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>51</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go</file>
+  <line>82</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>103</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go</file>
+  <line>83</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go</file>
+  <line>84</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go</file>
+  <line>113</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>104</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go</file>
+  <line>114</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go</file>
+  <line>115</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go</file>
+  <line>134</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/inbox_workspace_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>103</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>62</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>45</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>72</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>47</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>96</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>109</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>139</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>96</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>140</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>141</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>174</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>95</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>205</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>96</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>206</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>207</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>235</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>95</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>267</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>95</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>268</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>16</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go</file>
+  <line>291</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/navbar_handlers.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>94</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/client.go</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>46</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/client.go</file>
+  <line>105</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>76</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/client.go</file>
+  <line>156</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>46</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>91</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>158</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>167</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>194</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>216</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/publisher.go</file>
+  <line>22</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/publisher.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>116</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/publisher.go</file>
+  <line>43</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/publisher.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>101</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/publisher.go</file>
+  <line>102</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/publisher.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>97</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/publisher.go</file>
+  <line>142</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/publisher.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>137</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go</file>
+  <line>297</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go</file>
+  <line>303</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>42</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go</file>
+  <line>316</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/redis/client.go</file>
+  <line>75</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/redis/client.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>60</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/repository.go</file>
+  <line>280</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/repository.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>11</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>76</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>18</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>77</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>18</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>51</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>79</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>637</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>96</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>637</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>121</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>649</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>660</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>99</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>660</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>124</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>784</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>18</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>44</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>128</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>140</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>149</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>171</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>188</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>230</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>241</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GoFixAny" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'interface{}' can be replaced with 'any'</problem_class>
+  <hints />
+  <description>interface{} can be replaced by any</description>
+  <highlighted_element>interface{}</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>11</length>
+</problem>
+</problems>

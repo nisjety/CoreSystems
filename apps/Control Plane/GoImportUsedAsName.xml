@@ -1,0 +1,74 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>802</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="GoImportUsedAsName" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Imported package name as a name identifier</problem_class>
+  <description>Variable &lt;code&gt;subscriber&lt;/code&gt; collides with imported package name</description>
+  <highlighted_element>subscriber</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>1969</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="GoImportUsedAsName" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Imported package name as a name identifier</problem_class>
+  <description>Variable &lt;code&gt;provisioner&lt;/code&gt; collides with imported package name</description>
+  <highlighted_element>provisioner</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go" />
+  <problem_class id="GoImportUsedAsName" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Imported package name as a name identifier</problem_class>
+  <description>Variable &lt;code&gt;status&lt;/code&gt; collides with imported package name</description>
+  <highlighted_element>status</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go</file>
+  <line>200</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go" />
+  <problem_class id="GoImportUsedAsName" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Imported package name as a name identifier</problem_class>
+  <description>Variable &lt;code&gt;users&lt;/code&gt; collides with imported package name</description>
+  <highlighted_element>users</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>150</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GoImportUsedAsName" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Imported package name as a name identifier</problem_class>
+  <description>Variable &lt;code&gt;users&lt;/code&gt; collides with imported package name</description>
+  <highlighted_element>users</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>312</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GoImportUsedAsName" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Imported package name as a name identifier</problem_class>
+  <description>Variable &lt;code&gt;spaces&lt;/code&gt; collides with imported package name</description>
+  <highlighted_element>spaces</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>6</length>
+</problem>
+</problems>

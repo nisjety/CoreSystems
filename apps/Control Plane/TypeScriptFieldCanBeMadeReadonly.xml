@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts</file>
+  <line>243</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts" />
+  <problem_class id="TypeScriptFieldCanBeMadeReadonly" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Field can be readonly</problem_class>
+  <description>Field can be readonly</description>
+  <highlighted_element>private</highlighted_element>
+  <language>TypeScript</language>
+  <offset>2</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/sms/twilio-verify.service.ts</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/sms/twilio-verify.service.ts" />
+  <problem_class id="TypeScriptFieldCanBeMadeReadonly" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Field can be readonly</problem_class>
+  <description>Field can be readonly</description>
+  <highlighted_element>private</highlighted_element>
+  <language>TypeScript</language>
+  <offset>2</offset>
+  <length>7</length>
+</problem>
+</problems>

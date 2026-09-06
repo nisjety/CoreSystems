@@ -1,0 +1,86 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store.go</file>
+  <line>116</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store.go" />
+  <problem_class id="GoUnusedParameter" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused parameter</problem_class>
+  <description>Unused parameter &lt;code&gt;sourceSubject&lt;/code&gt;</description>
+  <highlighted_element>sourceSubject</highlighted_element>
+  <language>go</language>
+  <offset>12</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/adapters/hyperswitch/adapter.go</file>
+  <line>81</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/adapters/hyperswitch/adapter.go" />
+  <problem_class id="GoUnusedParameter" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused parameter</problem_class>
+  <description>Unused parameter &lt;code&gt;ctx&lt;/code&gt;</description>
+  <highlighted_element>ctx</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/nats/auth_validator.go</file>
+  <line>38</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/nats/auth_validator.go" />
+  <problem_class id="GoUnusedParameter" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused parameter</problem_class>
+  <description>Unused parameter &lt;code&gt;ctx context.Context&lt;/code&gt;</description>
+  <highlighted_element>ctx context.Context</highlighted_element>
+  <language>go</language>
+  <offset>40</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/nats_auth_client.go</file>
+  <line>93</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/nats_auth_client.go" />
+  <problem_class id="GoUnusedParameter" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused parameter</problem_class>
+  <description>Unused parameter &lt;code&gt;ctx context.Context&lt;/code&gt;</description>
+  <highlighted_element>ctx context.Context</highlighted_element>
+  <language>go</language>
+  <offset>38</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go</file>
+  <line>768</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go" />
+  <problem_class id="GoUnusedParameter" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused parameter</problem_class>
+  <description>Unused parameter &lt;code&gt;ctx&lt;/code&gt;</description>
+  <highlighted_element>ctx</highlighted_element>
+  <language>go</language>
+  <offset>41</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go</file>
+  <line>768</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go" />
+  <problem_class id="GoUnusedParameter" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused parameter</problem_class>
+  <description>Unused parameter &lt;code&gt;req&lt;/code&gt;</description>
+  <highlighted_element>req</highlighted_element>
+  <language>go</language>
+  <offset>62</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go</file>
+  <line>41</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" />
+  <problem_class id="GoUnusedParameter" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused parameter</problem_class>
+  <description>Unused parameter &lt;code&gt;ctx context.Context&lt;/code&gt;</description>
+  <highlighted_element>ctx context.Context</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>19</length>
+</problem>
+</problems>

@@ -1,0 +1,758 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/auth-schema.ts</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/auth-schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant ssoProvider</description>
+  <highlighted_element>ssoProvider</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/auth-schema.ts</file>
+  <line>128</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/auth-schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant oauthAccessToken</description>
+  <highlighted_element>oauthAccessToken</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/auth-schema.ts</file>
+  <line>143</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/auth-schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant oauthConsent</description>
+  <highlighted_element>oauthConsent</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/auth-schema.ts</file>
+  <line>155</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/auth-schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant privacyConsent</description>
+  <highlighted_element>privacyConsent</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/auth-schema.ts</file>
+  <line>195</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/auth-schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant twoFactor</description>
+  <highlighted_element>twoFactor</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/auth-schema.ts</file>
+  <line>268</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/auth-schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant orgGroupGrant</description>
+  <highlighted_element>orgGroupGrant</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/auth-schema.ts</file>
+  <line>305</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/auth-schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant rateLimit</description>
+  <highlighted_element>rateLimit</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>952</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused function sendInvitationEmail</description>
+  <highlighted_element>sendInvitationEmail</highlighted_element>
+  <language>JavaScript</language>
+  <offset>18</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>952</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused function sendInvitationEmail</description>
+  <highlighted_element>sendInvitationEmail</highlighted_element>
+  <language>JavaScript</language>
+  <offset>18</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1011</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused property provisionUser</description>
+  <highlighted_element>provisionUser</highlighted_element>
+  <language>JavaScript</language>
+  <offset>12</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1011</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused property provisionUser</description>
+  <highlighted_element>provisionUser</highlighted_element>
+  <language>JavaScript</language>
+  <offset>12</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1023</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused property getRole</description>
+  <highlighted_element>getRole</highlighted_element>
+  <language>JavaScript</language>
+  <offset>14</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1023</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused property getRole</description>
+  <highlighted_element>getRole</highlighted_element>
+  <language>JavaScript</language>
+  <offset>14</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1170</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused function onUserCreate</description>
+  <highlighted_element>onUserCreate</highlighted_element>
+  <language>JavaScript</language>
+  <offset>12</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1170</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused function onUserCreate</description>
+  <highlighted_element>onUserCreate</highlighted_element>
+  <language>JavaScript</language>
+  <offset>12</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-hooks.ts</file>
+  <line>43</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-hooks.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused function publishOrganizationMemberAdded</description>
+  <highlighted_element>publishOrganizationMemberAdded</highlighted_element>
+  <language>JavaScript</language>
+  <offset>22</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/organization-hooks.ts</file>
+  <line>62</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/organization-hooks.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused function publishOrganizationMemberRemoved</description>
+  <highlighted_element>publishOrganizationMemberRemoved</highlighted_element>
+  <language>JavaScript</language>
+  <offset>22</offset>
+  <length>32</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>4253</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused type alias ORPCRouter</description>
+  <highlighted_element>ORPCRouter</highlighted_element>
+  <language>JavaScript</language>
+  <offset>12</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/redis.ts</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/redis.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused property increment</description>
+  <highlighted_element>increment</highlighted_element>
+  <language>JavaScript</language>
+  <offset>2</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/redis.ts</file>
+  <line>160</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/redis.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused property setSession</description>
+  <highlighted_element>setSession</highlighted_element>
+  <language>JavaScript</language>
+  <offset>2</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/redis.ts</file>
+  <line>235</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/redis.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused property setState</description>
+  <highlighted_element>setState</highlighted_element>
+  <language>JavaScript</language>
+  <offset>2</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/redis.ts</file>
+  <line>264</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/redis.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused property getAndDeleteState</description>
+  <highlighted_element>getAndDeleteState</highlighted_element>
+  <language>JavaScript</language>
+  <offset>2</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/schema.ts</file>
+  <line>91</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant twoFactor</description>
+  <highlighted_element>twoFactor</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/schema.ts</file>
+  <line>120</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant rateLimit</description>
+  <highlighted_element>rateLimit</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/schema.ts</file>
+  <line>254</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant teamMember</description>
+  <highlighted_element>teamMember</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/schema.ts</file>
+  <line>266</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant ssoProvider</description>
+  <highlighted_element>ssoProvider</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/schema.ts</file>
+  <line>295</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant oauthAccessToken</description>
+  <highlighted_element>oauthAccessToken</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/schema.ts</file>
+  <line>309</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/schema.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant oauthConsent</description>
+  <highlighted_element>oauthConsent</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts</file>
+  <line>60</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method sendPasswordResetEmail</description>
+  <highlighted_element>sendPasswordResetEmail</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts</file>
+  <line>98</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method sendOTPEmail</description>
+  <highlighted_element>sendOTPEmail</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts</file>
+  <line>15</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant protobufPackage</description>
+  <highlighted_element>protobufPackage</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts</file>
+  <line>345</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant AUTH_V1_PACKAGE_NAME</description>
+  <highlighted_element>AUTH_V1_PACKAGE_NAME</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts</file>
+  <line>351</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused interface AuthServiceClient</description>
+  <highlighted_element>AuthServiceClient</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts</file>
+  <line>487</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused interface AuthServiceController</description>
+  <highlighted_element>AuthServiceController</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts</file>
+  <line>684</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused function AuthServiceControllerMethods</description>
+  <highlighted_element>AuthServiceControllerMethods</highlighted_element>
+  <language>JavaScript</language>
+  <offset>16</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts</file>
+  <line>729</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth/v1/auth.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant AUTH_SERVICE_NAME</description>
+  <highlighted_element>AUTH_SERVICE_NAME</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/struct.ts</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/struct.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant protobufPackage</description>
+  <highlighted_element>protobufPackage</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant protobufPackage</description>
+  <highlighted_element>protobufPackage</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>13</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant protobufPackage</description>
+  <highlighted_element>protobufPackage</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>13</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused constant protobufPackage</description>
+  <highlighted_element>protobufPackage</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5603</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused type alias UserServiceDefinition</description>
+  <highlighted_element>UserServiceDefinition</highlighted_element>
+  <language>JavaScript</language>
+  <offset>12</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5603</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused type alias UserServiceDefinition</description>
+  <highlighted_element>UserServiceDefinition</highlighted_element>
+  <language>JavaScript</language>
+  <offset>12</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5843</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused interface UserServiceImplementation</description>
+  <highlighted_element>UserServiceImplementation</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5843</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused interface UserServiceImplementation</description>
+  <highlighted_element>UserServiceImplementation</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5957</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused interface UserServiceClient</description>
+  <highlighted_element>UserServiceClient</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5957</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused interface UserServiceClient</description>
+  <highlighted_element>UserServiceClient</highlighted_element>
+  <language>JavaScript</language>
+  <offset>17</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts</file>
+  <line>755</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method publishOrganizationUpdated</description>
+  <highlighted_element>publishOrganizationUpdated</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts</file>
+  <line>769</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method publishOrganizationPlanChanged</description>
+  <highlighted_element>publishOrganizationPlanChanged</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/auth-integration.service.ts</file>
+  <line>287</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/auth-integration.service.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method handleUserDeletion</description>
+  <highlighted_element>handleUserDeletion</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/scoped-user-service-grpc.client.ts</file>
+  <line>122</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/scoped-user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method syncUser</description>
+  <highlighted_element>syncUser</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/scoped-user-service-grpc.client.ts</file>
+  <line>154</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/scoped-user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method updateUserSession</description>
+  <highlighted_element>updateUserSession</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/scoped-user-service-grpc.client.ts</file>
+  <line>177</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/scoped-user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method getUserProfile</description>
+  <highlighted_element>getUserProfile</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/scoped-user-service-grpc.client.ts</file>
+  <line>194</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/scoped-user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method deleteUser</description>
+  <highlighted_element>deleteUser</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts</file>
+  <line>238</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method getUserProfile</description>
+  <highlighted_element>getUserProfile</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts</file>
+  <line>305</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method deleteUser</description>
+  <highlighted_element>deleteUser</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service.client.ts</file>
+  <line>125</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service.client.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method updateUserSession</description>
+  <highlighted_element>updateUserSession</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service.client.ts</file>
+  <line>160</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service.client.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method getUserProfile</description>
+  <highlighted_element>getUserProfile</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/direct-nats.service.ts</file>
+  <line>187</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/direct-nats.service.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method publishPlain</description>
+  <highlighted_element>publishPlain</highlighted_element>
+  <language>JavaScript</language>
+  <offset>2</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/shared-publisher.ts</file>
+  <line>37</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/shared-publisher.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method publishUserRegistered</description>
+  <highlighted_element>publishUserRegistered</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/shared-publisher.ts</file>
+  <line>54</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/shared-publisher.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method publishUserCreated</description>
+  <highlighted_element>publishUserCreated</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/shared-publisher.ts</file>
+  <line>70</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/shared-publisher.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method publishOAuthCallback</description>
+  <highlighted_element>publishOAuthCallback</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/services/session-cleanup.service.ts</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/services/session-cleanup.service.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method manualCleanup</description>
+  <highlighted_element>manualCleanup</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/sms/twilio-verify.service.ts</file>
+  <line>194</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/sms/twilio-verify.service.ts" />
+  <problem_class id="JSUnusedGlobalSymbols" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global symbol</problem_class>
+  <description>Unused method cancelVerification</description>
+  <highlighted_element>cancelVerification</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>18</length>
+</problem>
+</problems>

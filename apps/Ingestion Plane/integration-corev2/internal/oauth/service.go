@@ -28,6 +28,9 @@ type Service struct {
 	now       func() time.Time
 	refreshMu sync.Mutex
 	refreshes map[string]*refreshCall
+	// controlPlane re-mints Control Plane-owned sign-in tokens; nil disables
+	// the fallback (see delegated.go).
+	controlPlane ControlPlaneTokenSource
 }
 
 type refreshCall struct {
@@ -723,13 +726,31 @@ func (s *Service) refreshIfStillExpired(ctx context.Context, connectionID string
 		return connection, accessToken, nil
 	}
 	if connection.EncryptedRefreshToken == "" {
+		// A connection adopted from a Control Plane sign-in has no refresh
+		// token of its own (it belongs to auth-core's Azure app); ask
+		// auth-core to re-mint instead.
+		if refreshed, token, applies, cpErr := s.refreshFromControlPlane(ctx, connection); applies {
+			return refreshed, token, cpErr
+		}
 		return store.Connection{}, "", fmt.Errorf("connection has no refresh token")
 	}
 	refreshToken, err := s.vault.Decrypt(connection.EncryptedRefreshToken, []byte(connection.ID))
 	if err != nil {
 		return store.Connection{}, "", err
 	}
-	return s.refresh(ctx, connection, refreshToken)
+	refreshed, token, err := s.refresh(ctx, connection, refreshToken)
+	if err != nil {
+		// Our own refresh token can die while the user keeps signing in
+		// (public-client refresh tokens expire after 24 idle hours —
+		// AADSTS70008). If Control Plane holds a live credential for this
+		// account, recover with it rather than parking the connection in
+		// needs_refresh until someone clicks reconnect.
+		if cpRefreshed, cpToken, applies, cpErr := s.refreshFromControlPlane(ctx, connection); applies && cpErr == nil {
+			return cpRefreshed, cpToken, nil
+		}
+		return store.Connection{}, "", err
+	}
+	return refreshed, token, nil
 }
 
 func reconnectProviderContext(existing, session map[string]string) map[string]string {

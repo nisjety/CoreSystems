@@ -273,6 +273,24 @@ impl OpenAiProvider {
         self
     }
 
+    /// Whether to ask this deployment for token logprobs.
+    ///
+    /// Three gates, all of which must hold, because a deployment that rejects
+    /// the parameter fails the completion outright rather than ignoring it:
+    /// the operator kill-switch, the model (reasoning models reject it), and
+    /// the endpoint flavor. `UnifiedAzureAi` is excluded deliberately — the
+    /// MaaS catalog behind it (Cohere Command A, DeepSeek, …) is
+    /// OpenAI-*shaped* but not OpenAI, and none of it is verified to honor
+    /// `logprobs`; an unverified 400 there would take out chat for those
+    /// models to gain a quality signal.
+    fn wants_logprobs(&self, model: &str) -> bool {
+        matches!(
+            self.flavor,
+            OpenAiFlavor::OpenAi { .. } | OpenAiFlavor::Azure { .. }
+        ) && super::logprobs::model_supports_logprobs(model)
+            && super::logprobs::logprobs_enabled()
+    }
+
     fn chat_completions_url(&self, model: &str) -> String {
         match &self.flavor {
             OpenAiFlavor::OpenAi { api_base } => {
@@ -360,7 +378,11 @@ fn openai_stream_finish_reason(json: &serde_json::Value) -> Option<&str> {
 }
 
 /// Build the `OpenAI` chat completions request body.
-fn build_request_body(req: &InferRequest, stream: bool) -> serde_json::Value {
+fn build_request_body(
+    req: &InferRequest,
+    stream: bool,
+    request_logprobs: bool,
+) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = req
         .messages
         .iter()
@@ -394,6 +416,18 @@ fn build_request_body(req: &InferRequest, stream: bool) -> serde_json::Value {
     } else {
         body["max_tokens"] = serde_json::json!(req.max_tokens);
         body["temperature"] = serde_json::json!(req.temperature);
+    }
+
+    // Ask for the per-token probabilities of the answer, which the caller turns
+    // into a `TokenConfidence` — the only signal in the stack that reports how
+    // sure the MODEL was rather than how well-backed the answer was. Whether it
+    // is safe to ask is the caller's call (`wants_logprobs`): a deployment that
+    // rejects the parameter 400s the whole completion. `top_logprobs` is
+    // deliberately not requested — the alternatives the model considered are
+    // far more data than the aggregate needs, and cost response size on every
+    // turn.
+    if request_logprobs {
+        body["logprobs"] = serde_json::json!(true);
     }
 
     if let Some(schema) = &req.structured_output_schema {
@@ -593,7 +627,7 @@ impl ProviderRouter for OpenAiProvider {
     }
 
     async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
-        let body = build_request_body(req, false);
+        let body = build_request_body(req, false, self.wants_logprobs(&req.model));
         let url = self.chat_completions_url(&req.model);
 
         let response = self
@@ -648,6 +682,14 @@ impl ProviderRouter for OpenAiProvider {
         let input_tokens = to_i32_or_max(json["usage"]["prompt_tokens"].as_i64().unwrap_or(0));
         let output_tokens = to_i32_or_max(json["usage"]["completion_tokens"].as_i64().unwrap_or(0));
         let tool_calls = parse_tool_calls(&json);
+        // `None` whenever we did not ask, the deployment ignored the parameter,
+        // or the field was unusable — never a fabricated value. The question is
+        // passed so the summary can separate the answer's claims from the part
+        // that merely restates the prompt.
+        let token_confidence = super::logprobs::from_completion(
+            &json,
+            super::logprobs::question_from_messages(&req.messages),
+        );
 
         info!(model = %req.model, provider = "openai", "infer completed");
 
@@ -662,6 +704,7 @@ impl ProviderRouter for OpenAiProvider {
             // Provenance is stamped by the fallback chain, not the raw adapter.
             provider_used: String::new(),
             residency: String::new(),
+            token_confidence,
         })
     }
 
@@ -669,7 +712,7 @@ impl ProviderRouter for OpenAiProvider {
         &self,
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
-        let body = build_request_body(req, true);
+        let body = build_request_body(req, true, self.wants_logprobs(&req.model));
         let url = self.chat_completions_url(&req.model);
 
         let response = self
@@ -704,6 +747,10 @@ impl ProviderRouter for OpenAiProvider {
 
         let request_id = req.request_id.clone();
         let model = req.model.clone();
+        let requested_logprobs = self.wants_logprobs(&req.model);
+        // Cloned in so the streamed summary can tell the answer's claims apart
+        // from the framing that restates the question.
+        let question = super::logprobs::question_from_messages(&req.messages).to_owned();
         let strip_text_sentinels = matches!(self.flavor, OpenAiFlavor::UnifiedAzureAi { .. });
         let (tx, rx) = mpsc::channel(64);
 
@@ -722,6 +769,11 @@ impl ProviderRouter for OpenAiProvider {
             // exits without ever seeing one -- the tail-chunk fallback below
             // treats that as an incomplete stream, not a natural completion.
             let mut stop_reason = String::new();
+            // Token logprobs arrive the way content does — a few per chunk — so
+            // the answer-level summary only exists once the stream ends. Fed
+            // unconditionally: when we did not request them, every chunk
+            // contributes nothing and the summary stays `None`.
+            let mut token_logprobs = super::logprobs::LogprobAccumulator::for_question(&question);
 
             while let Some(chunk_result) = bytes_stream.next().await {
                 let bytes = match chunk_result {
@@ -740,6 +792,15 @@ impl ProviderRouter for OpenAiProvider {
 
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" {
+                            // Operating this signal means being able to see
+                            // which half is missing when it is absent: did we
+                            // ask, and did the provider answer.
+                            info!(
+                                request_id = %request_id,
+                                requested_logprobs,
+                                token_certainty_tokens = token_logprobs.summarize().map_or(0, |s| s.token_count),
+                                "stream token certainty"
+                            );
                             let _ = tx
                                 .send(InferChunk {
                                     reasoning_delta: String::new(),
@@ -758,12 +819,14 @@ impl ProviderRouter for OpenAiProvider {
                                     // chain, not the raw adapter.
                                     provider_used: String::new(),
                                     residency: String::new(),
+                                    token_confidence: token_logprobs.summarize(),
                                 })
                                 .await;
                             return;
                         }
 
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                            token_logprobs.absorb(&json);
                             if let Some(usage) = json["usage"].as_object() {
                                 if let Some(p) = usage
                                     .get("prompt_tokens")
@@ -814,6 +877,8 @@ impl ProviderRouter for OpenAiProvider {
                                     reasoning_delta: String::new(),
                                     provider_used: String::new(),
                                     residency: String::new(),
+                                    // Answer-level; carried on the final chunk.
+                                    token_confidence: None,
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -848,6 +913,10 @@ impl ProviderRouter for OpenAiProvider {
                     // adapter.
                     provider_used: String::new(),
                     residency: String::new(),
+                    // Whatever the truncated stream did deliver. The summary
+                    // covers the tokens that actually arrived, which is what
+                    // the caller scored.
+                    token_confidence: token_logprobs.summarize(),
                 })
                 .await;
         });
@@ -1021,7 +1090,7 @@ mod tests {
             parameters_json: r#"{"type":"object","properties":{"q":{"type":"string"}}}"#.to_owned(),
         }];
         req.tool_choice = "auto".to_owned();
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, false);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "search_web");
         assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
@@ -1030,7 +1099,7 @@ mod tests {
 
     #[test]
     fn build_request_body_omits_tools_when_empty() {
-        let body = build_request_body(&make_request("gpt-4o"), false);
+        let body = build_request_body(&make_request("gpt-4o"), false, false);
         assert!(body.get("tools").is_none());
     }
 
@@ -1192,7 +1261,7 @@ mod tests {
 
     #[test]
     fn gpt5_uses_completion_token_limit_shape() {
-        let body = build_request_body(&make_request("gpt-5-mini"), false);
+        let body = build_request_body(&make_request("gpt-5-mini"), false, false);
 
         assert_eq!(body["max_completion_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
@@ -1201,12 +1270,33 @@ mod tests {
 
     #[test]
     fn standard_models_use_chat_completion_shape() {
-        let body = build_request_body(&make_request("gpt-4o-mini"), false);
+        let body = build_request_body(&make_request("gpt-4o-mini"), false, false);
 
         assert_eq!(body["max_tokens"], 1024);
         let temperature = body["temperature"].as_f64().expect("temperature");
         assert!((temperature - 0.7).abs() < 0.0001);
         assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    /// The request-side half of the token-certainty signal. Opt-in per call
+    /// because a deployment that does not support the parameter fails the whole
+    /// completion — the gating lives in `wants_logprobs`, and the body builder
+    /// only obeys.
+    #[test]
+    fn logprobs_are_requested_only_when_asked_for() {
+        let with = build_request_body(&make_request("gpt-4o-mini"), false, true);
+        assert_eq!(with["logprobs"], true);
+        // The alternatives the model considered are far more data than the
+        // aggregate needs, on every turn.
+        assert!(with.get("top_logprobs").is_none());
+
+        let without = build_request_body(&make_request("gpt-4o-mini"), false, false);
+        assert!(without.get("logprobs").is_none());
+
+        // Streaming asks the same way; the summary is accumulated across chunks.
+        let streamed = build_request_body(&make_request("gpt-4o-mini"), true, true);
+        assert_eq!(streamed["logprobs"], true);
+        assert_eq!(streamed["stream"], true);
     }
 
     #[test]

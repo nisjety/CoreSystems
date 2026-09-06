@@ -1,0 +1,1490 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/README.md</file>
+  <line>132</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/README.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>If a new sentence starts here, add a space and start with an uppercase letter.</description>
+  <highlighted_element>created</highlighted_element>
+  <language>Markdown</language>
+  <offset>47</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/README.md</file>
+  <line>146</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/README.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>If a new sentence starts here, add a space and start with an uppercase letter.</description>
+  <highlighted_element>changed</highlighted_element>
+  <language>Markdown</language>
+  <offset>57</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Do not use 's with a verb.</description>
+  <highlighted_element>migrate's</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api.go</file>
+  <line>276</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The verb 'normalise' is plural. Did you mean: 'normalises'? Did you use a verb instead of a noun?</description>
+  <highlighted_element>normalise</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>726</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Two consecutive dots</description>
+  <highlighted_element>..</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>726</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Two consecutive dots</description>
+  <highlighted_element>..</highlighted_element>
+  <language>go</language>
+  <offset>41</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>451</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>already-</highlighted_element>
+  <language>go</language>
+  <offset>67</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>452</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>broken</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/docs/DNS_CONFIGURATION.md</file>
+  <line>118</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/docs/DNS_CONFIGURATION.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean 'form'?</description>
+  <highlighted_element>from</highlighted_element>
+  <language>Markdown</language>
+  <offset>72</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/migrations/017_invitation_acceptance_repair.sql</file>
+  <line>76</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/migrations/017_invitation_acceptance_repair.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The usual collocation for &quot;independent&quot; is &quot;of&quot;, not &quot;from&quot;. Did you mean 'independent of'?</description>
+  <highlighted_element>independent from</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>31</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/migrations/025_gdpr_outbox_publish_fence.sql</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/migrations/025_gdpr_outbox_publish_fence.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>A comma may be missing after the conjunctive/linking adverb 'Therefore'.</description>
+  <highlighted_element>Therefore</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>31</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/migrations/027_membership_mutation_intents.sql</file>
+  <line>2</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/migrations/027_membership_mutation_intents.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Is a comma missing, or did you mean to write &quot;now&quot;?</description>
+  <highlighted_element>No</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>16</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/audit-plugin.ts</file>
+  <line>35</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/audit-plugin.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean the noun 'publishing'?</description>
+  <highlighted_element>publish</highlighted_element>
+  <language>TypeScript</language>
+  <offset>59</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.ts</file>
+  <line>245</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>direct-</highlighted_element>
+  <language>TypeScript</language>
+  <offset>67</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.ts</file>
+  <line>246</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>membership</highlighted_element>
+  <language>TypeScript</language>
+  <offset>5</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts</file>
+  <line>121</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Consider adding a comma here to clarify the structure of the sentence.</description>
+  <highlighted_element>it</highlighted_element>
+  <language>TypeScript</language>
+  <offset>46</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/org-group-grant.controller.ts</file>
+  <line>22</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/org-group-grant.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word is normally spelled as one.</description>
+  <highlighted_element>hand-written</highlighted_element>
+  <language>TypeScript</language>
+  <offset>13</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/org-group-grant.controller.ts</file>
+  <line>260</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/org-group-grant.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean the noun 'publishing'?</description>
+  <highlighted_element>publish</highlighted_element>
+  <language>TypeScript</language>
+  <offset>58</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>3453</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Unpaired symbol: '{' seems to be missing</description>
+  <highlighted_element>}</highlighted_element>
+  <language>TypeScript</language>
+  <offset>5</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/common/net/ipv4-rescue-dns.ts</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/common/net/ipv4-rescue-dns.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean 'who's'?</description>
+  <highlighted_element>whose</highlighted_element>
+  <language>TypeScript</language>
+  <offset>3</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.ts</file>
+  <line>288</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/auth-grpc.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word is normally spelled as one.</description>
+  <highlighted_element>proto types</highlighted_element>
+  <language>JavaScript</language>
+  <offset>48</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>31</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Possible typo: you repeated a word.</description>
+  <highlighted_element>Timestamp timestamp</highlighted_element>
+  <language>TypeScript</language>
+  <offset>7</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>37</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean television?</description>
+  <highlighted_element>tv</highlighted_element>
+  <language>TypeScript</language>
+  <offset>22</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>40</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Possible typo: you repeated a word.</description>
+  <highlighted_element>Timestamp timestamp</highlighted_element>
+  <language>TypeScript</language>
+  <offset>7</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>41</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean television?</description>
+  <highlighted_element>tv</highlighted_element>
+  <language>TypeScript</language>
+  <offset>29</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>41</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean television?</description>
+  <highlighted_element>tv</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>42</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean television?</description>
+  <highlighted_element>tv</highlighted_element>
+  <language>TypeScript</language>
+  <offset>27</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>42</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean television?</description>
+  <highlighted_element>tv</highlighted_element>
+  <language>TypeScript</language>
+  <offset>30</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Possible typo: you repeated a word.</description>
+  <highlighted_element>Timestamp timestamp</highlighted_element>
+  <language>TypeScript</language>
+  <offset>7</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>60</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Possible typo: you repeated a word.</description>
+  <highlighted_element>Timestamp timestamp</highlighted_element>
+  <language>TypeScript</language>
+  <offset>7</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts</file>
+  <line>67</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/google/protobuf/timestamp.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Possible typo: you repeated a word.</description>
+  <highlighted_element>Timestamp timestamp</highlighted_element>
+  <language>TypeScript</language>
+  <offset>7</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts</file>
+  <line>373</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>If a new sentence starts here, add a space and start with an uppercase letter.</description>
+  <highlighted_element>registered</highlighted_element>
+  <language>TypeScript</language>
+  <offset>34</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts</file>
+  <line>374</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/auth-event.publisher.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>If a new sentence starts here, add a space and start with an uppercase letter.</description>
+  <highlighted_element>created</highlighted_element>
+  <language>TypeScript</language>
+  <offset>47</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts</file>
+  <line>133</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Loose punctuation mark.</description>
+  <highlighted_element>}</highlighted_element>
+  <language>JavaScript</language>
+  <offset>46</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/main.ts</file>
+  <line>259</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/main.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>In American English, 'afterward' is the preferred variant. 'Afterwards' is more commonly used in British English and other dialects.</description>
+  <highlighted_element>afterwards</highlighted_element>
+  <language>TypeScript</language>
+  <offset>23</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/direct-nats.service.ts</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/direct-nats.service.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>If a new sentence starts here, add a space and start with an uppercase letter.</description>
+  <highlighted_element>authenticate</highlighted_element>
+  <language>TypeScript</language>
+  <offset>32</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/nats/direct-nats.service.ts</file>
+  <line>204</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/nats/direct-nats.service.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>In American English, 'afterward' is the preferred variant. 'Afterwards' is more commonly used in British English and other dialects.</description>
+  <highlighted_element>afterwards</highlighted_element>
+  <language>TypeScript</language>
+  <offset>58</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts</file>
+  <line>155</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use a comma before 'and' if it connects two independent clauses (unless they are closely connected and short).</description>
+  <highlighted_element>and</highlighted_element>
+  <language>JavaScript</language>
+  <offset>33</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts</file>
+  <line>1571</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Loose punctuation mark.</description>
+  <highlighted_element>}</highlighted_element>
+  <language>TypeScript</language>
+  <offset>47</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test/http-smoke.e2e-spec.ts</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test/http-smoke.e2e-spec.ts" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>File types are usually capitalized</description>
+  <highlighted_element>json</highlighted_element>
+  <language>JavaScript</language>
+  <offset>43</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/cmd/server/main.go</file>
+  <line>102</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/cmd/server/main.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The usual collocation for &quot;independently&quot; is &quot;of&quot;, not &quot;from&quot;. Did you mean 'independently of'?</description>
+  <highlighted_element>independently from</highlighted_element>
+  <language>go</language>
+  <offset>53</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/adapters/nexi/adapter.go</file>
+  <line>174</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/adapters/nexi/adapter.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The word 'deploy' is a verb. Did you mean the noun 'deployment' (= release, placement)?</description>
+  <highlighted_element>deploy</highlighted_element>
+  <language>go</language>
+  <offset>18</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/repository.go</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/repository.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'health check'</description>
+  <highlighted_element>healthcheck</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/correlation.go</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/correlation.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'an' instead of 'a' if the following word starts with a vowel sound, e.g. 'an article', 'an hour'.</description>
+  <highlighted_element>a</highlighted_element>
+  <language>go</language>
+  <offset>60</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/handlers.go</file>
+  <line>21</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/handlers.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'health check'</description>
+  <highlighted_element>healthcheck</highlighted_element>
+  <language>go</language>
+  <offset>28</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>production-</highlighted_element>
+  <language>go</language>
+  <offset>62</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go</file>
+  <line>109</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>like</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/config/README.md</file>
+  <line>64</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/config/README.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Consider using the plural form here.</description>
+  <highlighted_element>Control's</highlighted_element>
+  <language>Markdown</language>
+  <offset>22</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docker-compose.yml</file>
+  <line>338</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docker-compose.yml" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'health check'</description>
+  <highlighted_element>healthcheck</highlighted_element>
+  <language>yaml</language>
+  <offset>46</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docker-compose.yml</file>
+  <line>404</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docker-compose.yml" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>A period is misplaced or missing.</description>
+  <highlighted_element>et al</highlighted_element>
+  <language>yaml</language>
+  <offset>59</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/PROGRESS.md</file>
+  <line>193</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/PROGRESS.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>If a new sentence starts here, add a space and start with an uppercase letter.</description>
+  <highlighted_element>mod</highlighted_element>
+  <language>Markdown</language>
+  <offset>19</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/control-shared-nats-credential-rollout-2026-07-15.md</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/control-shared-nats-credential-rollout-2026-07-15.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean 'it's' (short for 'it is') instead of 'its' (possessive pronoun)?</description>
+  <highlighted_element>its</highlighted_element>
+  <language>Markdown</language>
+  <offset>40</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/audit-core.md</file>
+  <line>54</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/audit-core.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>A comma may be missing after the conjunctive/linking adverb 'Therefore'.</description>
+  <highlighted_element>Therefore</highlighted_element>
+  <language>Markdown</language>
+  <offset>208</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/auth-core.md</file>
+  <line>88</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/auth-core.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Make sure that the adjective 'strict' is correct. Possibly, it should be an adverb (typically ~ly) that modifies 'versioned'. Possibly, it should be the first word in a compound adjective (hyphenated adjective). Possibly, it is correct.</description>
+  <highlighted_element>strict versioned</highlighted_element>
+  <language>Markdown</language>
+  <offset>67</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/auth-core.md</file>
+  <line>230</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/auth-core.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean '?'?</description>
+  <highlighted_element>.</highlighted_element>
+  <language>Markdown</language>
+  <offset>19</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/auth-core.md</file>
+  <line>497</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/auth-core.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>A comma may be missing after the conjunctive/linking adverb 'Likewise'.</description>
+  <highlighted_element>Likewise</highlighted_element>
+  <language>Markdown</language>
+  <offset>59</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/billing-core.md</file>
+  <line>71</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/billing-core.md" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>A comma may be missing after the conjunctive/linking adverb 'Currently'.</description>
+  <highlighted_element>Currently</highlighted_element>
+  <language>Markdown</language>
+  <offset>4</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/config/config.go</file>
+  <line>70</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/config/config.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'a' instead of 'an' if the following word doesn't start with a vowel sound, e.g. 'a sentence', 'a university'.</description>
+  <highlighted_element>an</highlighted_element>
+  <language>go</language>
+  <offset>18</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/config/config.go</file>
+  <line>80</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/config/config.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'a' instead of 'an' if the following word doesn't start with a vowel sound, e.g. 'a sentence', 'a university'.</description>
+  <highlighted_element>an</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/config/config.go</file>
+  <line>146</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/config/config.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'a' instead of 'an' if the following word doesn't start with a vowel sound, e.g. 'a sentence', 'a university'.</description>
+  <highlighted_element>an</highlighted_element>
+  <language>go</language>
+  <offset>46</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/config/config.go</file>
+  <line>153</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/config/config.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'Docker Compose'</description>
+  <highlighted_element>Docker-compose</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/correlation.go</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/correlation.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'an' instead of 'a' if the following word starts with a vowel sound, e.g. 'an article', 'an hour'.</description>
+  <highlighted_element>a</highlighted_element>
+  <language>go</language>
+  <offset>60</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/gdpr_deletion_postgres_test.go</file>
+  <line>80</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/gdpr_deletion_postgres_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The word 'confirm' is not a noun. Did you mean 'confirmation'?</description>
+  <highlighted_element>confirm</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/gdpr_handlers.go</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/gdpr_handlers.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The word 'confirm' is not a noun. Did you mean 'confirmation'?</description>
+  <highlighted_element>confirm</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/gdpr_handlers_test.go</file>
+  <line>35</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/gdpr_handlers_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The conjunction &quot;when&quot; requires the past participle 'confirmed'. Or did you mean 'you confirm'?</description>
+  <highlighted_element>confirm</highlighted_element>
+  <language>go</language>
+  <offset>26</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'health check'</description>
+  <highlighted_element>healthcheck</highlighted_element>
+  <language>go</language>
+  <offset>28</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go</file>
+  <line>162</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The verb 'write' does not usually follow articles like 'a'. Check that 'write' is spelled correctly; using 'write' as a noun may be non-standard.</description>
+  <highlighted_element>a write</highlighted_element>
+  <language>go</language>
+  <offset>43</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>production-</highlighted_element>
+  <language>go</language>
+  <offset>62</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go</file>
+  <line>109</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>like</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger.go</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>operator-</highlighted_element>
+  <language>go</language>
+  <offset>66</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>tunable</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/gdpr_deletion_service.go</file>
+  <line>13</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/gdpr_deletion_service.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>typed-</highlighted_element>
+  <language>go</language>
+  <offset>70</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/gdpr_deletion_service.go</file>
+  <line>14</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/gdpr_deletion_service.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>error</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go</file>
+  <line>119</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean the noun 'publishing'?</description>
+  <highlighted_element>publish</highlighted_element>
+  <language>go</language>
+  <offset>6</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/repository.go</file>
+  <line>119</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/repository.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'health check'</description>
+  <highlighted_element>healthcheck</highlighted_element>
+  <language>go</language>
+  <offset>13</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/repository.go</file>
+  <line>338</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/repository.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The verb 'write' does not usually follow articles like 'The'. Check that 'write' is spelled correctly; using 'write' as a noun may be non-standard.</description>
+  <highlighted_element>The write</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>611</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean the noun 'publishing'?</description>
+  <highlighted_element>publish</highlighted_element>
+  <language>go</language>
+  <offset>60</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>666</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean the noun 'publishing'?</description>
+  <highlighted_element>publish</highlighted_element>
+  <language>go</language>
+  <offset>41</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>668</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean the noun 'publishing'?</description>
+  <highlighted_element>publish</highlighted_element>
+  <language>go</language>
+  <offset>15</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/rbac/effective_capabilities.go</file>
+  <line>54</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/rbac/effective_capabilities.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>A comma may be missing after the conjunctive/linking adverb 'Otherwise'.</description>
+  <highlighted_element>Otherwise</highlighted_element>
+  <language>go</language>
+  <offset>46</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/migrations/009_rls_enforce_tenant_isolation.up.sql</file>
+  <line>67</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/migrations/009_rls_enforce_tenant_isolation.up.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use a comma before 'or' if it connects two independent clauses (unless they are closely connected and short).</description>
+  <highlighted_element>or</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>17</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/migrations/020_interactive_retention_outbox_org_id_check.up.sql</file>
+  <line>8</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/migrations/020_interactive_retention_outbox_org_id_check.up.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Unpaired symbol: ''' seems to be missing</description>
+  <highlighted_element>'</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>52</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/migrations/020_interactive_retention_outbox_org_id_check.up.sql</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/migrations/020_interactive_retention_outbox_org_id_check.up.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Do not mix variants of the same word ('organisation' and 'organization') within a single text.</description>
+  <highlighted_element>organisation</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>55</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/org_client.go</file>
+  <line>95</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/org_client.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The article &quot;A&quot; is not needed here.</description>
+  <highlighted_element>A 404</highlighted_element>
+  <language>go</language>
+  <offset>59</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/org_client.go</file>
+  <line>134</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/org_client.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The article &quot;A&quot; is not needed here.</description>
+  <highlighted_element>A 404</highlighted_element>
+  <language>go</language>
+  <offset>66</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/correlation.go</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/correlation.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'an' instead of 'a' if the following word starts with a vowel sound, e.g. 'an article', 'an hour'.</description>
+  <highlighted_element>a</highlighted_element>
+  <language>go</language>
+  <offset>60</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>production-</highlighted_element>
+  <language>go</language>
+  <offset>62</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go</file>
+  <line>109</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>like</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/redis/client.go</file>
+  <line>98</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/redis/client.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'Redis'</description>
+  <highlighted_element>redis</highlighted_element>
+  <language>go</language>
+  <offset>7</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/service/control_session_service.go</file>
+  <line>217</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/service/control_session_service.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean the noun 'publishing'?</description>
+  <highlighted_element>publish</highlighted_element>
+  <language>go</language>
+  <offset>40</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>110</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The word 'create' is a verb. Did you mean the noun 'creation'?</description>
+  <highlighted_element>create</highlighted_element>
+  <language>go</language>
+  <offset>35</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/microsoft_graph_client.go</file>
+  <line>118</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/microsoft_graph_client.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>If 'type' is a classification term, 'a' is not necessary. Use 'type of'. (The phrases 'kind of' and 'sort of' are informal if they mean 'to some extent'.)</description>
+  <highlighted_element>type of a</highlighted_element>
+  <language>go</language>
+  <offset>37</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/server.go</file>
+  <line>34</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/server.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean 'maybe' (= perhaps)?</description>
+  <highlighted_element>may be</highlighted_element>
+  <language>go</language>
+  <offset>66</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>51</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'Microsoft'</description>
+  <highlighted_element>microsoft</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>51</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The official name of this software platform is spelled with a capital &quot;H&quot;.</description>
+  <highlighted_element>github</highlighted_element>
+  <language>go</language>
+  <offset>36</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go</file>
+  <line>14</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word is normally spelled with a hyphen.</description>
+  <highlighted_element>fail safe</highlighted_element>
+  <language>go</language>
+  <offset>65</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go</file>
+  <line>28</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word is normally spelled with a hyphen.</description>
+  <highlighted_element>fail safe</highlighted_element>
+  <language>go</language>
+  <offset>47</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers_test.go</file>
+  <line>38</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers_test.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The word 'confirm' is not a noun. Did you mean 'confirmation'?</description>
+  <highlighted_element>confirm</highlighted_element>
+  <language>go</language>
+  <offset>41</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>390</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'health check'</description>
+  <highlighted_element>healthCheck</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>392</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'health check'</description>
+  <highlighted_element>healthcheck</highlighted_element>
+  <language>go</language>
+  <offset>66</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>444</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'an' instead of 'a' if the following word starts with a vowel sound, e.g. 'an article', 'an hour'.</description>
+  <highlighted_element>a</highlighted_element>
+  <language>go</language>
+  <offset>60</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>539</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'an' instead of 'a' if the following word starts with a vowel sound, e.g. 'an article', 'an hour'.</description>
+  <highlighted_element>a</highlighted_element>
+  <language>go</language>
+  <offset>18</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>242</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean 'are'? Alternatively, check whether the singular of 'answers' should be used.</description>
+  <highlighted_element>is</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>317</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean the noun 'publishing'?</description>
+  <highlighted_element>publish</highlighted_element>
+  <language>go</language>
+  <offset>11</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>466</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'an' instead of 'a' if the following word starts with a vowel sound, e.g. 'an article', 'an hour'.</description>
+  <highlighted_element>a</highlighted_element>
+  <language>go</language>
+  <offset>44</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>production-</highlighted_element>
+  <language>go</language>
+  <offset>62</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go</file>
+  <line>109</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word seems to be formatted incorrectly. Consider fixing the spacing or removing the hyphen completely.</description>
+  <highlighted_element>like</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go</file>
+  <line>248</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The verb 'write' does not usually follow articles like 'the'. Check that 'write' is spelled correctly; using 'write' as a noun may be non-standard.</description>
+  <highlighted_element>the write</highlighted_element>
+  <language>go</language>
+  <offset>40</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/owner_grant_decision.go</file>
+  <line>66</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/owner_grant_decision.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use a comma before 'and' if it connects two independent clauses (unless they are closely connected and short).</description>
+  <highlighted_element>and</highlighted_element>
+  <language>go</language>
+  <offset>15</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>212</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The usual collocation for &quot;independent&quot; is &quot;of&quot;, not &quot;from&quot;. Did you mean 'independent of'?</description>
+  <highlighted_element>independent from</highlighted_element>
+  <language>go</language>
+  <offset>43</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>246</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Use 'an' instead of 'a' if the following word starts with a vowel sound, e.g. 'an article', 'an hour'.</description>
+  <highlighted_element>a</highlighted_element>
+  <language>go</language>
+  <offset>74</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>502</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Did you mean 'are'? Alternatively, check whether the singular of 'lists' should be used.</description>
+  <highlighted_element>is</highlighted_element>
+  <language>go</language>
+  <offset>28</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>618</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The verb 'delete' does not usually follow articles like 'a'. Check that 'delete' is spelled correctly; using 'delete' as a noun may be non-standard.</description>
+  <highlighted_element>a delete</highlighted_element>
+  <language>go</language>
+  <offset>35</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/repository.go</file>
+  <line>28</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/repository.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'health check'</description>
+  <highlighted_element>healthcheck</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>710</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The verb 'set up' is spelled as two words. The noun 'setup' is spelled as one.</description>
+  <highlighted_element>setup</highlighted_element>
+  <language>go</language>
+  <offset>64</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>847</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>Possible typo detected.</description>
+  <highlighted_element>first8hex</highlighted_element>
+  <language>go</language>
+  <offset>47</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>943</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The verb 'set up' is spelled as two words. The noun 'setup' is spelled as one.</description>
+  <highlighted_element>setup</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>968</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The verb 'set up' is spelled as two words. The noun 'setup' is spelled as one.</description>
+  <highlighted_element>setup</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>157</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'GitHub'</description>
+  <highlighted_element>github</highlighted_element>
+  <language>go</language>
+  <offset>45</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/types.go</file>
+  <line>161</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/types.go" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The official name of this software platform is spelled with a capital &quot;H&quot;.</description>
+  <highlighted_element>github</highlighted_element>
+  <language>go</language>
+  <offset>55</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/migrations/002_user_settings_providers.up.sql</file>
+  <line>22</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/migrations/002_user_settings_providers.up.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The official name of this software platform is spelled with a capital &quot;H&quot;.</description>
+  <highlighted_element>github</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>72</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/migrations/010_onboarding_state.up.sql</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/migrations/010_onboarding_state.up.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>This word is normally spelled as one.</description>
+  <highlighted_element>multi-step</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>3</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/migrations/011_users_password_hash_avatar_not_null.up.sql</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/migrations/011_users_password_hash_avatar_not_null.up.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'Band-Aid'</description>
+  <highlighted_element>band-aid</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>19</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/migrations/011_users_password_hash_avatar_not_null.up.sql</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/migrations/011_users_password_hash_avatar_not_null.up.sql" />
+  <problem_class id="GrazieInspection" severity="GRAMMAR_ERROR" attribute_key="GRAMMAR_ERROR">Grammar</problem_class>
+  <description>The standard spelling is 'Band-Aid'</description>
+  <highlighted_element>band-aid</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>50</offset>
+  <length>8</length>
+</problem>
+</problems>

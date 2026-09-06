@@ -1,0 +1,574 @@
+<root>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/control-event-bridge/main_test.go" line="16" start="347" end="690" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go" line="26" start="792" end="1132" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="87" start="4120" end="4464" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="168" start="6662" end="7006" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="221" start="8315" end="8655" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="454" start="19896" end="20236" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="545" start="23268" end="23608" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="587" start="24577" end="24917" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="655" start="27562" end="27902" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="688" start="28668" end="29008" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="743" start="30671" end="31011" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go" line="26" start="792" end="1299" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="87" start="4120" end="4632" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="168" start="6662" end="7174" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="221" start="8315" end="8822" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="454" start="19896" end="20403" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="545" start="23268" end="23775" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="587" start="24577" end="25084" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="655" start="27562" end="28069" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="688" start="28668" end="29175" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="743" start="30671" end="31178" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go" line="31" start="954" end="1299" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="92" start="4282" end="4632" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="173" start="6824" end="7174" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="226" start="8477" end="8822" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="459" start="20058" end="20403" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="550" start="23430" end="23775" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="592" start="24739" end="25084" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="660" start="27724" end="28069" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="693" start="28830" end="29175" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="748" start="30833" end="31178" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="39" start="1310" end="1633" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="105" start="3961" end="4276" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="1290" start="53075" end="53390" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="277" start="10997" end="11331" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="838" start="35351" end="35687" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="1122" start="46193" end="46539" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="1379" start="56807" end="57141" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="279" start="11120" end="11428" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="527" start="21587" end="21895" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="698" start="29651" end="30011" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="758" start="32315" end="32686" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="968" start="39661" end="40174" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="1020" start="41717" end="42304" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" line="1679" start="66901" end="67339" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/subscriber/scoped_acl_integration_test.go" line="207" start="6789" end="7217" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/api.go" line="120" start="3628" end="4023" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/api.go" line="279" start="9393" end="9798" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" line="118" start="4343" end="4772" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" line="159" start="5843" end="6272" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" line="317" start="10418" end="10787" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" line="340" start="11089" end="11458" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" line="362" start="11756" end="12125" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go" line="292" start="9633" end="10098" />
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go" line="74" start="1778" end="2278" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go" line="363" start="11968" end="12265" />
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="385" start="13460" end="13771" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="488" start="17891" end="18202" />
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go" line="127" start="3961" end="4272" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go" line="385" start="12612" end="12967" />
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go" line="158" start="4903" end="5258" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/metrics/server.go" line="130" start="3532" end="4066" />
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/metrics/server.go" line="25" start="521" end="1055" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/metrics/server.go" line="21" start="255" end="789" />
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/metrics/server.go" line="25" start="543" end="1077" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/metrics/server.go" line="25" start="521" end="1055" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" line="491" start="23582" end="24665" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" line="517" start="24667" end="25753" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" line="896" start="44221" end="45106" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" line="974" start="48282" end="49056" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="545" start="23268" end="23976" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" line="587" start="24577" end="25285" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="75" start="2647" end="3061" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="172" start="5928" end="6340" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="244" start="8727" end="9139" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="319" start="11480" end="11892" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="382" start="13925" end="14337" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="75" start="2647" end="3085" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="172" start="5928" end="6364" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="244" start="8727" end="9163" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="319" start="11480" end="11916" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="244" start="8727" end="9193" />
+  <fragment file="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" line="319" start="11480" end="11946" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts" line="18" start="610" end="1027" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts" line="18" start="613" end="1030" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance-repair.postgres.spec.ts" line="23" start="790" end="1207" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/owner-invariant-preflight.postgres.spec.ts" line="19" start="673" end="1090" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" line="332" start="9628" end="9962" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts" line="448" start="13107" end="13400" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" line="760" start="24162" end="24586" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" line="772" start="24594" end="25018" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/convex-auth.controller.ts" line="14" start="301" end="1128" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance.controller.ts" line="88" start="2238" end="2597" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts" line="62" start="2364" end="3020" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/nats-auth.controller.ts" line="11" start="415" end="1138" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/plane-token.controller.ts" line="69" start="2537" end="2896" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" line="433" start="14544" end="14943" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" line="508" start="17521" end="17920" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" line="588" start="20447" end="20846" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" line="472" start="16036" end="16521" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" line="555" start="19170" end="19655" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts" line="60" start="2297" end="3020" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/plane-token.controller.ts" line="67" start="2477" end="2896" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts" line="211" start="7456" end="7884" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/auth/plane-token.controller.ts" line="245" start="8780" end="9208" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/internal/auth-identity-outbox.spec.ts" line="103" start="3199" end="3673" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/internal/auth-identity-outbox.spec.ts" line="151" start="4845" end="5319" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts" line="90" start="2048" end="2633" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts" line="146" start="3503" end="4088" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts" line="1625" start="45444" end="45775" />
+  <fragment file="file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts" line="40" start="949" end="1280" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/cmd/server/main.go" line="54" start="1894" end="2312" />
+  <fragment file="file://$PROJECT_DIR$/org-core/cmd/server/main.go" line="51" start="1610" end="2028" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/cmd/server/main.go" line="183" start="6076" end="6369" />
+  <fragment file="file://$PROJECT_DIR$/org-core/cmd/server/main.go" line="171" start="6026" end="6319" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go" line="61" start="1762" end="2310" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/types.go" line="286" start="11420" end="11981" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" line="82" start="2257" end="2962" />
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/lifecycle_postgres_test.go" line="19" start="417" end="1122" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" line="266" start="9493" end="10217" />
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" line="410" start="15587" end="16311" />
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" line="706" start="27059" end="27783" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/config/config_test.go" line="132" start="4464" end="5064" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/config/config_test.go" line="173" start="4443" end="5043" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/database/database.go" line="31" start="659" end="1555" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/database/database.go" line="32" start="730" end="1622" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/database/migrate.go" line="28" start="1022" end="2144" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/database/migrate.go" line="27" start="960" end="2082" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/database/migrate.go" line="94" start="2793" end="3252" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/database/migrate.go" line="99" start="2915" end="3374" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go" line="44" start="907" end="1728" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go" line="40" start="725" end="1537" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/correlation.go" line="1" start="0" end="1081" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/correlation.go" line="1" start="0" end="1081" />
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/http/correlation.go" line="1" start="0" end="1081" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/correlation.go" line="28" start="698" end="1078" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/correlation.go" line="28" start="698" end="1078" />
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/http/correlation.go" line="28" start="698" end="1078" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/server.go" line="446" start="18840" end="19220" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/lifecycle_postgres_test.go" line="69" start="2229" end="2717" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/lifecycle_postgres_test.go" line="54" start="1598" end="2086" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/succession_postgres_test.go" line="54" start="1989" end="2477" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="53" start="1348" end="2652" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="56" start="1378" end="2683" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="101" start="3037" end="5031" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="105" start="3068" end="5058" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="159" start="5391" end="5706" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="163" start="5418" end="5733" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="298" start="10253" end="10625" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="396" start="14595" end="14967" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="317" start="10761" end="11880" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="415" start="15103" end="16223" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="352" start="12243" end="13135" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="455" start="16674" end="17566" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="415" start="14395" end="14787" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="528" start="19078" end="19470" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/delegated_user_proof.go" line="106" start="3603" end="3959" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" line="439" start="15116" end="16837" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" line="552" start="19758" end="21481" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go" line="52" start="1371" end="1966" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/gdpr_deletion_postgres_test.go" line="187" start="7194" end="7750" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go" line="52" start="1335" end="1922" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go" line="107" start="5432" end="5808" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go" line="107" start="5139" end="5515" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go" line="154" start="7836" end="8243" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go" line="200" start="11835" end="12242" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go" line="1" start="0" end="6085" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go" line="1" start="0" end="6085" />
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go" line="1" start="0" end="6085" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go" line="1" start="0" end="6085" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/nats/client.go" line="31" start="487" end="938" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/nats/client.go" line="40" start="790" end="1241" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/nats/runtime_auth.go" line="1" start="0" end="1420" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/nats/runtime_auth.go" line="1" start="0" end="1420" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/nats/runtime_auth.go" line="1" start="0" end="1420" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/nats/runtime_auth.go" line="18" start="256" end="715" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/nats/runtime_auth.go" line="18" start="256" end="715" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/clients/nats_auth_client.go" line="29" start="489" end="951" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/nats/runtime_auth.go" line="18" start="256" end="715" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/nats/runtime_auth_test.go" line="1" start="0" end="1262" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/nats/runtime_auth_test.go" line="1" start="0" end="1262" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/nats/runtime_auth_test.go" line="1" start="0" end="1262" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go" line="57" start="1634" end="2410" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go" line="59" start="1674" end="2450" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go" line="64" start="1847" end="2623" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go" line="93" start="3039" end="3768" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go" line="95" start="3067" end="3796" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/redis/client.go" line="27" start="451" end="978" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/redis/client.go" line="27" start="451" end="979" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/redis/client.go" line="27" start="451" end="979" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/billing-core/internal/testfixture/lifecycle.go" line="1" start="0" end="1563" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/testfixture/lifecycle.go" line="1" start="0" end="1563" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/database/rls_migration_test.go" line="34" start="999" end="1469" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/database/rls_migration_test.go" line="149" start="5451" end="5920" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/gdpr_deletion_postgres_test.go" line="88" start="3261" end="3950" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/lifecycle_postgres_test.go" line="20" start="422" end="1119" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/succession_postgres_test.go" line="23" start="681" end="1370" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger_postgres_test.go" line="23" start="818" end="1507" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/lifecycle_postgres_test.go" line="82" start="3070" end="3768" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/succession_postgres_test.go" line="24" start="830" end="1519" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/lifecycle_postgres_test.go" line="51" start="1494" end="2086" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/succession_postgres_test.go" line="51" start="1885" end="2477" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go" line="92" start="2619" end="2995" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go" line="134" start="3819" end="4185" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go" line="111" start="3121" end="3469" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go" line="149" start="4236" end="4584" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger_postgres_test.go" line="23" start="818" end="1535" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/lifecycle_postgres_test.go" line="82" start="3070" end="3796" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/succession_postgres_test.go" line="24" start="830" end="1547" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox_postgres_test.go" line="23" start="522" end="1023" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go" line="54" start="2037" end="2538" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go" line="196" start="8053" end="8554" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/plan_change_postgres_test.go" line="64" start="2043" end="2544" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox_test.go" line="134" start="5235" end="5638" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_test.go" line="38" start="1023" end="1448" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go" line="48" start="1827" end="2538" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go" line="190" start="7843" end="8554" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/plan_change_postgres_test.go" line="58" start="1833" end="2544" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/repository.go" line="518" start="17239" end="17646" />
+  <fragment file="file://$PROJECT_DIR$/org-core/internal/org/repository.go" line="705" start="23574" end="23981" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/clients/billing_client_test.go" line="14" start="331" end="647" />
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/clients/org_client_test.go" line="27" start="645" end="961" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go" line="100" start="2714" end="3178" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/service_delegation.go" line="180" start="5658" end="6127" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" line="142" start="4692" end="5032" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" line="403" start="12534" end="12874" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/authz_facade.go" line="102" start="4524" end="5178" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/authz_facade.go" line="210" start="8807" end="9461" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go" line="460" start="17867" end="18309" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go" line="482" start="18767" end="19209" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers.go" line="192" start="6715" end="7461" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers.go" line="252" start="8749" end="9353" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="377" start="12249" end="12720" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="731" start="22055" end="22521" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="1161" start="36934" end="37377" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="1213" start="38737" end="39178" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="1266" start="40587" end="41027" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="1320" start="42527" end="42972" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="1384" start="44779" end="45220" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="1448" start="47034" end="47480" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="1513" start="49317" end="49752" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" line="1577" start="51465" end="51905" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/model_action_decision.go" line="60" start="2515" end="2984" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/model_action_decision.go" line="129" start="5370" end="5839" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="482" start="20608" end="21354" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="681" start="29757" end="30509" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="502" start="21481" end="21978" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="566" start="24378" end="24875" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="640" start="28127" end="28624" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="701" start="30646" end="31143" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="766" start="33605" end="34102" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="837" start="36611" end="37108" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="893" start="39056" end="39553" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1019" start="43753" end="44250" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1078" start="46282" end="46779" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1140" start="48954" end="49451" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1224" start="53002" end="53499" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1300" start="56225" end="56722" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="503" start="21534" end="22221" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="894" start="39109" end="39790" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="538" start="22995" end="24251" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="738" start="32222" end="33487" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="547" start="23427" end="24875" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="621" start="27176" end="28624" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="562" start="24253" end="24875" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="636" start="28002" end="28624" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="833" start="36477" end="37108" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1015" start="43619" end="44250" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="889" start="38924" end="39553" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1296" start="56093" end="56722" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1019" start="43753" end="44357" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1078" start="46282" end="46886" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1224" start="53002" end="53607" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1300" start="56225" end="56840" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1069" start="45849" end="46779" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1131" start="48521" end="49451" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1198" start="51566" end="51886" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" line="203" start="8390" end="8774" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" line="1155" start="55936" end="56340" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" line="1198" start="51566" end="51930" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" line="1155" start="55936" end="56399" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" line="56" start="1817" end="2705" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" line="91" start="2746" end="3688" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" line="98" start="2949" end="3857" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/membership_owner_live_test.go" line="41" start="1257" end="2055" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/membership_owner_live_test.go" line="181" start="7052" end="7850" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/model_action_view.go" line="134" start="6180" end="6827" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/run_action_decision.go" line="188" start="8635" end="9282" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/model_action_view.go" line="154" start="7547" end="8610" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/run_action_decision.go" line="211" start="10203" end="11270" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/model_action_view.go" line="154" start="7555" end="8610" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/run_action_decision.go" line="211" start="10211" end="11270" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go" line="89" start="2973" end="4210" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_retrieval_decision.go" line="68" start="2258" end="3487" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="323" start="12519" end="13560" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="409" start="17031" end="18292" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="458" start="19826" end="21087" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" line="102" start="3996" end="5037" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/shared_retrieval_decision.go" line="29" start="877" end="2106" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go" line="97" start="3463" end="4210" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go" line="191" start="8099" end="8845" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_retrieval_decision.go" line="76" start="2740" end="3487" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="326" start="12884" end="13560" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="417" start="17545" end="18292" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="466" start="20340" end="21087" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" line="105" start="4361" end="5037" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go" line="124" start="5071" end="5746" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_run_decision.go" line="150" start="6408" end="7083" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_step_decision.go" line="193" start="7301" end="8047" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/shared_retrieval_decision.go" line="37" start="1359" end="2106" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go" line="108" start="4264" end="5039" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go" line="202" start="8898" end="9672" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_retrieval_decision.go" line="67" start="2239" end="4308" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/shared_retrieval_decision.go" line="28" start="858" end="2927" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_retrieval_decision.go" line="87" start="3539" end="4246" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="332" start="13597" end="14159" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="428" start="18343" end="19050" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="477" start="21138" end="21845" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" line="111" start="5072" end="5634" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go" line="130" start="5779" end="6341" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/shared_retrieval_decision.go" line="48" start="2158" end="2865" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_retrieval_decision.go" line="87" start="3539" end="4300" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="332" start="13597" end="14193" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="428" start="18343" end="19104" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="477" start="21138" end="21899" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" line="111" start="5072" end="5668" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/shared_retrieval_decision.go" line="48" start="2158" end="2919" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="408" start="17012" end="19112" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" line="457" start="19807" end="21907" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" line="63" start="2299" end="2955" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go" line="69" start="2580" end="3236" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_run_decision.go" line="77" start="2922" end="3578" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go" line="121" start="4723" end="5746" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_step_decision.go" line="188" start="6924" end="8047" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/users/acl_repository.go" line="346" start="12780" end="13174" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/users/acl_repository.go" line="388" start="14738" end="15132" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/users/gdpr_audit_outbox_postgres_test.go" line="29" start="616" end="1210" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga_postgres_test.go" line="30" start="645" end="1239" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/users/repository.go" line="118" start="3035" end="3488" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/users/repository.go" line="151" start="3825" end="4281" />
+</duplicate>
+<duplicate cost="1" hash="0">
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/users/service.go" line="249" start="7050" end="7411" />
+  <fragment file="file://$PROJECT_DIR$/user-core/internal/users/service.go" line="296" start="8262" end="8634" />
+</duplicate>
+</root>

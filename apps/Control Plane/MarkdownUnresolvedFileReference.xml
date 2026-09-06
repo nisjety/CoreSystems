@@ -1,0 +1,338 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>505</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'auth-core'</description>
+  <highlighted_element>auth-core</highlighted_element>
+  <language>Markdown</language>
+  <offset>24</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>505</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'src'</description>
+  <highlighted_element>src</highlighted_element>
+  <language>Markdown</language>
+  <offset>34</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>505</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'db'</description>
+  <highlighted_element>db</highlighted_element>
+  <language>Markdown</language>
+  <offset>38</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>505</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file 'schema.ts'</description>
+  <highlighted_element>schema.ts</highlighted_element>
+  <language>Markdown</language>
+  <offset>41</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>506</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'org-core'</description>
+  <highlighted_element>org-core</highlighted_element>
+  <language>Markdown</language>
+  <offset>22</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>506</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'internal'</description>
+  <highlighted_element>internal</highlighted_element>
+  <language>Markdown</language>
+  <offset>31</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>506</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'org'</description>
+  <highlighted_element>org</highlighted_element>
+  <language>Markdown</language>
+  <offset>40</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>506</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file 'types.go'</description>
+  <highlighted_element>types.go</highlighted_element>
+  <language>Markdown</language>
+  <offset>44</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>507</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'org-core'</description>
+  <highlighted_element>org-core</highlighted_element>
+  <language>Markdown</language>
+  <offset>27</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>507</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'migrations'</description>
+  <highlighted_element>migrations</highlighted_element>
+  <language>Markdown</language>
+  <offset>36</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>507</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file ''</description>
+  <highlighted_element />
+  <language>Markdown</language>
+  <offset>47</offset>
+  <length>0</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>508</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'org-core'</description>
+  <highlighted_element>org-core</highlighted_element>
+  <language>Markdown</language>
+  <offset>19</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>508</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'internal'</description>
+  <highlighted_element>internal</highlighted_element>
+  <language>Markdown</language>
+  <offset>28</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>508</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'nats'</description>
+  <highlighted_element>nats</highlighted_element>
+  <language>Markdown</language>
+  <offset>37</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>508</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file 'events.go'</description>
+  <highlighted_element>events.go</highlighted_element>
+  <language>Markdown</language>
+  <offset>42</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>509</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'auth-core'</description>
+  <highlighted_element>auth-core</highlighted_element>
+  <language>Markdown</language>
+  <offset>23</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>509</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'src'</description>
+  <highlighted_element>src</highlighted_element>
+  <language>Markdown</language>
+  <offset>33</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>509</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'internal'</description>
+  <highlighted_element>internal</highlighted_element>
+  <language>Markdown</language>
+  <offset>37</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>509</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file 'auth-event.publisher.ts'</description>
+  <highlighted_element>auth-event.publisher.ts</highlighted_element>
+  <language>Markdown</language>
+  <offset>46</offset>
+  <length>23</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/README.md</file>
+  <line>361</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/README.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'Org-core'</description>
+  <highlighted_element>Org-core</highlighted_element>
+  <language>Markdown</language>
+  <offset>27</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/README.md</file>
+  <line>361</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/README.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file 'AQUATIQ_INTEGRATION.md'</description>
+  <highlighted_element>AQUATIQ_INTEGRATION.md</highlighted_element>
+  <language>Markdown</language>
+  <offset>36</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/README.md</file>
+  <line>362</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/README.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'admin'</description>
+  <highlighted_element>admin</highlighted_element>
+  <language>Markdown</language>
+  <offset>32</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/README.md</file>
+  <line>362</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/README.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file 'AQUATIQ_INTEGRATION.md'</description>
+  <highlighted_element>AQUATIQ_INTEGRATION.md</highlighted_element>
+  <language>Markdown</language>
+  <offset>38</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md</file>
+  <line>347</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'auth'</description>
+  <highlighted_element>auth</highlighted_element>
+  <language>Markdown</language>
+  <offset>36</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md</file>
+  <line>347</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'src'</description>
+  <highlighted_element>src</highlighted_element>
+  <language>Markdown</language>
+  <offset>41</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md</file>
+  <line>347</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve directory 'auth'</description>
+  <highlighted_element>auth</highlighted_element>
+  <language>Markdown</language>
+  <offset>45</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md</file>
+  <line>347</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file 'auth.ts'</description>
+  <highlighted_element>auth.ts</highlighted_element>
+  <language>Markdown</language>
+  <offset>50</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md</file>
+  <line>470</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md" />
+  <problem_class id="MarkdownUnresolvedFileReference" severity="WARNING" attribute_key="INFO_ATTRIBUTES">Unresolved file references</problem_class>
+  <description>Cannot resolve file 'Implementation-Plan.md'</description>
+  <highlighted_element>Implementation-Plan.md</highlighted_element>
+  <language>Markdown</language>
+  <offset>62</offset>
+  <length>22</length>
+</problem>
+</problems>

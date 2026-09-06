@@ -77,7 +77,16 @@ describe('ArtifactsPanel', () => {
     expect(frame).toBeTruthy()
     expect(frame?.getAttribute('sandbox')).toBe('allow-scripts')
     expect(frame?.getAttribute('sandbox')).not.toContain('allow-same-origin')
-    expect(frame?.getAttribute('srcdoc')).toBe(page.content)
+    // The generated page is wrapped in a CSP shell before it is framed (the
+    // preview-isolation follow-up), so byte equality with the artifact is the
+    // wrong assertion — it pinned the behaviour that change removed. What this
+    // test protects is the isolation, so assert that instead: the content is
+    // carried verbatim INSIDE the wrapper, and the wrapper denies the network.
+    const srcdoc = frame?.getAttribute('srcdoc') ?? ''
+    expect(srcdoc).toContain(page.content)
+    expect(srcdoc).toContain("default-src 'none'")
+    expect(srcdoc).toContain("connect-src 'none'")
+    expect(srcdoc).toContain("form-action 'none'")
     expect(frame?.getAttribute('referrerpolicy')).toBe('no-referrer')
   })
 
@@ -251,6 +260,7 @@ describe('artifact revision diff', () => {
       button.textContent?.includes('Vis endringer'),
     )!
     fireEvent.click(toggle)
+    flush()
     expect(container.querySelector('.verevon-chat-diff')).toBeTruthy()
     expect(container.textContent).toContain('Ny setning')
     expect(container.textContent).toContain('Gammel setning')
@@ -260,6 +270,7 @@ describe('artifact revision diff', () => {
         button.textContent?.includes('Vis versjonen'),
       )!,
     )
+    flush()
     expect(container.querySelector('.verevon-chat-diff')).toBeNull()
     unmount()
   })

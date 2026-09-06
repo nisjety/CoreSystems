@@ -146,6 +146,7 @@ impl InferenceCore for MockOk {
             output_tokens: 1,
             provider_used: String::new(),
             residency: String::new(),
+            token_confidence: None,
             tool_calls: Vec::new(),
         }))
     }
@@ -167,6 +168,7 @@ impl InferenceCore for MockOk {
                 stop_reason: String::new(),
                 provider_used: String::new(),
                 residency: String::new(),
+                token_confidence: None,
             }),
             Ok(InferChunk {
                 reasoning_delta: String::new(),
@@ -179,6 +181,7 @@ impl InferenceCore for MockOk {
                 stop_reason: "end_turn".to_owned(),
                 provider_used: String::new(),
                 residency: String::new(),
+                token_confidence: None,
             }),
         ]))))
     }
@@ -642,6 +645,7 @@ impl InferenceCore for MockStreamDown {
             output_tokens: 1,
             provider_used: String::new(),
             residency: String::new(),
+            token_confidence: None,
             tool_calls: Vec::new(),
         }))
     }
@@ -981,6 +985,7 @@ impl SessionCore for MockSessionCore {
             .iter()
             .filter(|(_, thread_id, _)| thread_id == &req.thread_id)
             .map(|(role, _, content)| SessionMessage {
+                message_id: String::new(),
                 role: role.clone(),
                 content: content.clone(),
                 agent_name: String::new(),

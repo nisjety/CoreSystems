@@ -8,6 +8,7 @@ import {
   Brain,
   Check,
   ChevronLeft,
+  Pin,
   ChevronRight,
   Copy,
   Download,
@@ -99,6 +100,15 @@ import { useI18n } from '@/shared/i18n'
 export function MessageBlock(props: {
   copied: boolean
   message: ChatTurn
+  /**
+   * Message pinning. Absent when the surface does not offer it (a foreign-origin
+   * or read-only thread), which is what hides the control entirely rather than
+   * showing a dead one.
+   */
+  pinned?: boolean
+  /** The thread already holds the maximum number of pins. */
+  pinDisabled?: boolean
+  onTogglePin?: () => void
   onBranch: () => void
   onCopy: () => void
   onEdit: (text: string) => void
@@ -153,10 +163,15 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
     kind: 'grounding',
     render: (node) => <GroundingInlineSummary grounding={node.grounding} />,
   },
-  'low-confidence': {
-    kind: 'low-confidence',
+  confidence: {
+    kind: 'confidence',
     render: (node) => (
-      <LowConfidenceNotice confidence={node.confidence} hasEvidence={node.hasEvidence} />
+      <ConfidenceNotice
+        confidence={node.confidence}
+        hasEvidence={node.hasEvidence}
+        low={node.low}
+        verification={node.verification}
+      />
     ),
   },
   'memory-recall': {
@@ -286,6 +301,15 @@ function AnswerRegion(props: {
 export function AssistantMessage(props: {
   copied: boolean
   message: ChatTurn
+  /**
+   * Message pinning. Absent when the surface does not offer it (a foreign-origin
+   * or read-only thread), which is what hides the control entirely rather than
+   * showing a dead one.
+   */
+  pinned?: boolean
+  /** The thread already holds the maximum number of pins. */
+  pinDisabled?: boolean
+  onTogglePin?: () => void
   onBranch: () => void
   onCopy: () => void
   onFeedback: (rating: 'positive' | 'negative', note?: string) => Promise<boolean>
@@ -390,6 +414,27 @@ export function AssistantMessage(props: {
         </For>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
+            <Show when={props.pinned}>
+              {/* Not only a changed action label: a pin steers every later
+                  turn, so it has to be visible while reading rather than
+                  discoverable by hovering. */}
+              <span class="verevon-chat-message-pinned">
+                <Pin size={11} />
+                {i18n.tr('Festet i konteksten', 'Pinned into the context')}
+              </span>
+            </Show>
+            <Show when={props.onTogglePin}>
+              <MessageAction
+                label={props.pinned
+                  ? i18n.tr('Løsne fra konteksten', 'Unpin from the context')
+                  : props.pinDisabled
+                    ? i18n.tr('Maks antall festede meldinger', 'Pin limit reached')
+                    : i18n.tr('Fest i konteksten', 'Pin into the context')}
+                onClick={() => props.onTogglePin?.()}
+              >
+                <Pin size={14} />
+              </MessageAction>
+            </Show>
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
@@ -1665,30 +1710,86 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
 }
 
 /**
- * Visible, inline caveat for an answer scored below
- * `LOW_CONFIDENCE_ANSWER_THRESHOLD` (see chat-types.ts for the threshold
- * rationale). Rendered directly on the message bubble — unlike the
+ * The answer's confidence, inline on the message bubble — unlike the
  * `ReasoningPopover`'s "Sikkerhet" metric, this does not require the user to
- * open anything to see it. Independent of `message.grounding`: an answer can
- * be low-confidence with no grounding object at all (an ungrounded guess),
- * which is exactly the case this notice exists to catch.
+ * open anything to see it.
+ *
+ * Below `LOW_CONFIDENCE_ANSWER_THRESHOLD` (see chat-types.ts for the threshold
+ * rationale) it is a caveat, worded to point only at a verification path that
+ * exists. At or above it, the same number is still shown, quietly: while only
+ * the caveat rendered, the score appeared on one answer and vanished on the
+ * next, which reads as a missing signal rather than a good one, and left the
+ * user unable to tell a confident answer from an unscored one without opening
+ * Detaljer.
+ *
+ * Independent of `message.grounding`: an answer can be low-confidence with no
+ * grounding object at all (an ungrounded guess), which is exactly the case the
+ * caveat exists to catch.
  */
-export function LowConfidenceNotice(props: { confidence: number; hasEvidence: boolean }) {
+export function ConfidenceNotice(props: {
+  confidence: number
+  hasEvidence: boolean
+  low: boolean
+  verification?: Extract<ConversationNode, { kind: 'confidence' }>['verification']
+}) {
   const i18n = useI18n()
+  const percent = () => Math.round(props.confidence * 100)
+  // What the backend actually did, when it did anything. Absent is NOT "found
+  // nothing": the pass only runs on low-scoring, unevidenced, short answers, so
+  // saying "we checked" for a turn that was never checked would be a claim the
+  // system cannot back.
+  const checked = () => {
+    const verification = props.verification
+    if (!verification) return undefined
+    const sources = verification.kbCitations + verification.webCitations
+    if (verification.verdict === 'supports') {
+      return i18n.tr(
+        `bekreftet mot ${sources} ${sources === 1 ? 'kilde' : 'kilder'}`,
+        `confirmed against ${sources} ${sources === 1 ? 'source' : 'sources'}`,
+      )
+    }
+    if (verification.verdict === 'contradicts') {
+      return i18n.tr('kildene sier noe annet', 'the sources say otherwise')
+    }
+    return verification.webAllowed
+      ? i18n.tr(
+          'sjekket dokumentene og nettet — fant ingen dekning',
+          'checked the documents and the web — found no backing',
+        )
+      : i18n.tr(
+          'sjekket dokumentene — fant ingen dekning',
+          'checked the documents — found no backing',
+        )
+  }
   // Point only at a verification path that exists. "Check the sources" on a
   // turn with no sources sends the reader after nothing, which is how a
-  // caveat trains people to ignore caveats (audit item 23).
-  const advice = () => (props.hasEvidence
-    ? i18n.tr('sjekk kildene før du stoler på dette', 'check the sources before relying on this')
-    : i18n.tr('ingen kilder ble brukt, så bekreft det selv', 'no sources were used, so verify it yourself'))
+  // caveat trains people to ignore caveats (audit item 23). When the system
+  // has already checked, saying what it found beats telling the reader to go
+  // and repeat the work.
+  const advice = () => checked()
+    ?? (props.hasEvidence
+      ? i18n.tr('sjekk kildene før du stoler på dette', 'check the sources before relying on this')
+      : i18n.tr('ingen kilder ble brukt, så bekreft det selv', 'no sources were used, so verify it yourself'))
   return (
-    <p class="verevon-chat-low-confidence-notice" role="note">
-      <AlertCircle size={12} />
-      {i18n.tr(
-        `Usikkert svar (${Math.round(props.confidence * 100)}% sikkerhet) — ${advice()}.`,
-        `Uncertain answer (${Math.round(props.confidence * 100)}% confidence) — ${advice()}.`,
-      )}
-    </p>
+    <Show
+      when={props.low}
+      fallback={
+        <p class="verevon-chat-confidence-note" role="note">
+          {i18n.tr(`${percent()}% sikkerhet`, `${percent()}% confidence`)}
+          <Show when={checked()}>
+            {(note) => <span> — {note()}</span>}
+          </Show>
+        </p>
+      }
+    >
+      <p class="verevon-chat-low-confidence-notice" role="note">
+        <AlertCircle size={12} />
+        {i18n.tr(
+          `Usikkert svar (${percent()}% sikkerhet) — ${advice()}.`,
+          `Uncertain answer (${percent()}% confidence) — ${advice()}.`,
+        )}
+      </p>
+    </Show>
   )
 }
 

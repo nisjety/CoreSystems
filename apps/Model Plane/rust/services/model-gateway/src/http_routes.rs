@@ -5971,6 +5971,18 @@ async fn ingest_feedback(
     })?;
     let target = resolve_feedback_target(crate::chat_turn_registry::global(), &claims, &body)?;
     require_durable_run_owner(&state, &claims, &target.run_id, &session_bearer).await?;
+    // The rating is the label this turn's confidence inputs were missing.
+    // Emitted after ownership is proven, so a row can only ever describe a
+    // turn its own tenant rated, and only for a chat turn (an operator grading
+    // a run by id names no scored answer).
+    if let Some(request_id) = body
+        .request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        crate::calibration::emit_sample(request_id, rating.as_str());
+    }
     let note = body
         .note
         .as_deref()
@@ -6081,6 +6093,22 @@ pub struct InvokeRequest {
     /// cannot do more than nudge one skill's score.
     #[serde(default, alias = "regenerate")]
     pub regenerated: bool,
+    /// Durable ids of earlier messages in this thread that the user pinned into
+    /// context.
+    ///
+    /// A SELECTOR, not content: each id names a message that already exists in
+    /// the durable thread, and the server resolves it against what session-core
+    /// returns. An id matching nothing is ignored, so a client cannot use this to
+    /// inject text it invented as though the user had said it earlier, and a
+    /// locally-created turn that is not persisted yet simply has no effect until
+    /// it is.
+    ///
+    /// Bounded server-side (`compaction::MAX_PINNED_MESSAGES`,
+    /// `MAX_PINNED_CHARS`): the mechanism protects messages from being shed for
+    /// length, so an unbounded list would crowd out the live conversation
+    /// through the very path meant to prevent that.
+    #[serde(default, alias = "pinnedMessageIds")]
+    pub pinned_message_ids: Vec<String>,
     /// The client resubmitted an EDITED version of the previous question.
     ///
     /// Also client-declared, and for the same reason: the edit happened in the
@@ -6789,6 +6817,15 @@ async fn create_document(
 
 #[derive(Debug, Serialize)]
 struct ThreadMessage {
+    /// Durable id of this message, straight from session-core.
+    ///
+    /// Exposed so a client can name one earlier turn: message pinning sends
+    /// ids, and a positional index would point at a different message as soon
+    /// as the thread grew. Omitted for rows written before the conversation
+    /// read returned ids, which is why the field is skipped when empty rather
+    /// than sent as "".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    message_id: String,
     role: String,
     content: String,
     /// The persona this turn answered as, when it had one. Identity history
@@ -7392,6 +7429,7 @@ async fn list_thread_messages(
         .messages
         .into_iter()
         .map(|m| ThreadMessage {
+            message_id: m.message_id,
             role: m.role,
             content: m.content,
             agent_name: m.agent_name,

@@ -70,6 +70,7 @@ impl ProviderRouterDyn for MockProvider {
                     stop_reason: "end_turn".to_owned(),
                     provider_used: String::new(),
                     residency: String::new(),
+                    token_confidence: None,
                 })
                 .await;
         });

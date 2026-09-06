@@ -1,0 +1,398 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/debug-api.js</file>
+  <line>2</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/debug-api.js" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;auth&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>auth</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>33</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/debug-api.js</file>
+  <line>2</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/debug-api.js" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve file &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;auth.js&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>auth.js</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>38</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;app&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>app</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>27</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;node_modules&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>node_modules</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>31</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve file &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;postgres&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>postgres</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>44</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>5</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;app&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>app</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>35</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>5</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;node_modules&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>node_modules</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>39</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>5</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve file &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;redis&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>redis</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>52</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;app&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>app</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>41</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;dist&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>dist</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>45</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;src&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>src</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>50</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;db&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>db</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>54</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve file &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;index.js&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>index.js</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>57</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>32</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;app&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>app</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>14</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>32</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;dist&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>dist</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>18</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>32</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;src&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>src</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>23</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>32</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;auth&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>auth</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>27</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>32</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve file &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;invitation-acceptance.controller.js&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>invitation-acceptance.controller.js</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>32</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;app&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>app</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>42</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;dist&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>dist</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>46</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;src&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>src</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>51</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;auth&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>auth</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>55</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve file &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;auth.js&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>auth.js</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>60</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>37</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;app&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>app</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>14</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>37</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;dist&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>dist</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>18</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>37</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;src&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>src</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>23</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>37</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;auth&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>auth</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>27</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>37</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve file &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;invitation-acceptance-repair.js&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>invitation-acceptance-repair.js</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>32</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;app&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>app</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>14</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;dist&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>dist</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>18</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;src&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>src</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>23</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve directory &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;auth&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>auth</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>27</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/fixtures/control-lifecycle-container-driver.cjs" />
+  <problem_class id="JSFileReferences" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unresolved file reference</problem_class>
+  <description>&lt;html&gt;Cannot resolve file &lt;code&gt;&lt;span style=&quot;color:#6aab73;&quot;&gt;organization-events.plugin.js&lt;/span&gt;&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>organization-events.plugin.js</highlighted_element>
+  <language>ECMAScript 6</language>
+  <offset>32</offset>
+  <length>29</length>
+</problem>
+</problems>

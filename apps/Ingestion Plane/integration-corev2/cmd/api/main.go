@@ -112,6 +112,14 @@ func main() {
 	}
 	defer eventCleanup()
 	controlPlaneClient := &http.Client{Timeout: 5 * time.Second}
+	// Let the OAuth service re-mint Control Plane-owned Microsoft sign-in
+	// tokens through auth-core when its own refresh token is absent or dead.
+	// NewAuthOAuthClient returns a nil *pointer* when AUTH_CORE_OAUTH_SERVICE_TOKEN
+	// is unset; only a non-nil client may be stored in the interface, or the
+	// nil-interface check in the service would silently pass.
+	if authOAuth := controlplane.NewAuthOAuthClient(cfg, controlPlaneClient); authOAuth != nil {
+		service.SetControlPlaneTokenSource(authOAuth)
+	}
 	hotPathClient := &http.Client{Timeout: 2 * time.Second}
 	auditClient := controlplane.NewAuditClient(cfg, controlPlaneClient)
 	auditOutbox := api.NewAuditOutbox(repo, auditClient, &logger)

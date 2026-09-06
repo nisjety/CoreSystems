@@ -55,6 +55,7 @@ import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailab
 import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
 import { useI18n } from '@/shared/i18n'
+import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -69,6 +70,8 @@ export default function ChatPage() {
     liveRunId,
     runPanelCollapsed,
     toggleRunPanel,
+    pinnedMessages,
+    togglePin,
     title,
     handleScroll,
     scrollToBottom,
@@ -653,6 +656,9 @@ export default function ChatPage() {
                         onApprovePlan={(rung, justification) =>
                           void approveTurnPlan(row.turn.id, rung, justification)
                         }
+                        pinned={pinnedMessages().includes(row.turn.id)}
+                        pinDisabled={pinnedMessagesFull(pinnedMessages())}
+                        onTogglePin={() => togglePin(row.turn.id)}
                         planApproval={row.planApproval}
                         onSelectFollowUp={setInput}
                         onViewSteps={() => setActiveTab('steps')}

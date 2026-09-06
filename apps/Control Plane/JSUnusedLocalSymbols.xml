@@ -1,0 +1,110 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/scripts/add-password-to-user.js</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/scripts/add-password-to-user.js" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused constant hash</description>
+  <highlighted_element>hash</highlighted_element>
+  <language>JavaScript</language>
+  <offset>8</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts</file>
+  <line>94</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused parameter reject</description>
+  <highlighted_element>reject</highlighted_element>
+  <language>JavaScript</language>
+  <offset>35</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts</file>
+  <line>119</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused parameter updateResponse</description>
+  <highlighted_element>updateResponse</highlighted_element>
+  <language>JavaScript</language>
+  <offset>37</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts</file>
+  <line>166</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused parameter response</description>
+  <highlighted_element>response</highlighted_element>
+  <language>JavaScript</language>
+  <offset>23</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts</file>
+  <line>218</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused parameter response</description>
+  <highlighted_element>response</highlighted_element>
+  <language>JavaScript</language>
+  <offset>23</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts</file>
+  <line>285</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/user-service-grpc.client.ts" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused parameter response</description>
+  <highlighted_element>response</highlighted_element>
+  <language>JavaScript</language>
+  <offset>23</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts</file>
+  <line>22</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused constant orgCreatePath</description>
+  <highlighted_element>orgCreatePath</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused constant orgInvitePath</description>
+  <highlighted_element>orgInvitePath</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts</file>
+  <line>24</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts" />
+  <problem_class id="JSUnusedLocalSymbols" severity="WARNING" attribute_key="NOT_USED_ELEMENT_ATTRIBUTES">Unused local symbol</problem_class>
+  <description>Unused constant orgRemovePath</description>
+  <highlighted_element>orgRemovePath</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>13</length>
+</problem>
+</problems>

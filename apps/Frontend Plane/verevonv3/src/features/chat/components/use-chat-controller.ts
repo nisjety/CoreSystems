@@ -155,6 +155,7 @@ import type {
 } from './chat-types'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
+import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
 
 function safeBranchBoundary(turns: readonly ChatTurn[], requestedIndex: number): number {
@@ -251,6 +252,29 @@ export function useChatController() {
    * tree (the first design's fatal flaw) is structurally impossible.
    */
   const [versionState, setVersionState] = createSignal<ExchangeVersionState | null>(null)
+  /**
+   * Messages the user pinned into context for the active thread.
+   *
+   * Read from storage rather than held only in memory so a pin survives a
+   * reload — the whole promise of a pin is that it keeps steering later
+   * turns. Ids only: the server resolves them against the durable thread, so
+   * this list cannot assert content (see `chat-pinned-messages.ts`).
+   */
+  const [pinRevision, setPinRevision] = createSignal(0)
+  const pinnedMessages = createMemo(() => {
+    // Re-read on a thread change and after any toggle. A memo rather than a
+    // signal-plus-effect: storage is the source of truth, so mirroring it
+    // into a second signal would just be state that can disagree.
+    pinRevision()
+    const threadId = state.threadId
+    return threadId ? readPinnedMessages(threadId) : []
+  })
+  const togglePin = (messageId: string) => {
+    const threadId = state.threadId
+    if (!threadId) return
+    togglePinnedMessage(threadId, messageId)
+    setPinRevision((revision) => revision + 1)
+  }
   /** Chat split view: whether the live agent panel is folded to its rail. */
   const [runPanelCollapsed, setRunPanelCollapsed] = createSignal(readChatRunPanelCollapsed())
   const toggleRunPanel = () => {
@@ -1782,6 +1806,10 @@ export function useChatController() {
           editResubmit: options.editResubmit,
           // Opt-in only: set just when the user picked a tiered catalog model.
           minPrivacyTier: options.minPrivacyTier,
+          // Read at send time rather than captured earlier: the user may pin
+          // or unpin while composing, and the turn should carry whatever is
+          // pinned when it is actually sent.
+          pinnedMessageIds: pinnedMessages(),
         },
         {
           onUiEvent: (event) => {
@@ -2419,6 +2447,14 @@ export function useChatController() {
           turnTitle,
         })
       },
+      onVerification: (
+        verification: Parameters<NonNullable<ChatStreamHandlers['onVerification']>>[0],
+      ) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.verification = verification
+        })
+      },
       onUsage: (usage: Parameters<NonNullable<ChatStreamHandlers['onUsage']>>[0]) => {
         setState((s) => {
           const turn = s.turns.find((t) => t.id === assistantId)
@@ -2763,6 +2799,8 @@ export function useChatController() {
     liveRunId,
     runPanelCollapsed,
     toggleRunPanel,
+    pinnedMessages,
+    togglePin,
     title,
     handleScroll,
     scrollToBottom,

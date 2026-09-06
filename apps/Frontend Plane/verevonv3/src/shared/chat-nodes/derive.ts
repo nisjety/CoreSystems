@@ -78,17 +78,21 @@ export function deriveConversationNodes(
   if (turn.grounding) {
     nodes.push({ kind: 'grounding', grounding: turn.grounding })
   }
-  // Low confidence is suppressed while waiting or errored: a partial answer has
+  // Confidence is suppressed while waiting or errored: a partial answer has
   // no meaningful score yet, and an error's score describes nothing.
-  if (
-    !waiting &&
-    !errored &&
-    turn.confidence != null &&
-    turn.confidence < LOW_CONFIDENCE_ANSWER_THRESHOLD
-  ) {
+  //
+  // Emitted for EVERY scored answer, not only low ones. While the node existed
+  // solely below the threshold, the score appeared on some answers and silently
+  // vanished on the next — the same answer quality reading as "no signal" —
+  // and readers had to open Detaljer to find out whether a number existed at
+  // all. `low` carries the threshold verdict so the renderer picks a caveat or
+  // a quiet chip without re-deriving the rule.
+  if (!waiting && !errored && turn.confidence != null) {
     nodes.push({
-      kind: 'low-confidence',
+      kind: 'confidence',
       confidence: turn.confidence,
+      low: turn.confidence < LOW_CONFIDENCE_ANSWER_THRESHOLD,
+      verification: turn.verification,
       // Whether there is anything to check. The notice used to say "sjekk
       // kilder" on turns with no sources at all -- a verification path that
       // does not exist (audit item 23). The hedge itself stays ungated: the

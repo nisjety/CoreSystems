@@ -2,7 +2,7 @@
 
 import { fireEvent, render } from '@solidjs/testing-library'
 import { describe, expect, it, vi } from 'vitest'
-import { createSignal } from 'solid-js'
+import { flush, createSignal } from 'solid-js'
 import { ContextWindowPanel, RunPlanPanel } from './ChatPanels'
 import * as orchestration from '@/shared/api/orchestration-client'
 import {
@@ -48,6 +48,7 @@ function open(container: HTMLElement) {
   const toggle = container.querySelector('button')
   expect(toggle).toBeTruthy()
   fireEvent.click(toggle!)
+  flush()
 }
 
 describe('ContextWindowPanel', () => {
@@ -211,6 +212,7 @@ describe('ToolCallCard diff intent', () => {
       />
     ))
     fireEvent.click(container.querySelector('button')!)
+    flush()
     expect(container.querySelector('.verevon-chat-diff')).toBeTruthy()
     expect(parseUnifiedDiff(patch).stat).toEqual({ added: 1, removed: 1 })
     unmount()
@@ -228,6 +230,7 @@ describe('ToolCallCard diff intent', () => {
       />
     ))
     fireEvent.click(container.querySelector('button')!)
+    flush()
     expect(container.querySelector('.verevon-chat-diff')).toBeNull()
     expect(container.querySelector('pre')?.textContent).toContain('total 4')
     unmount()
@@ -259,6 +262,7 @@ describe('MemoryRecallNotice disclosure', () => {
       <MemoryRecallNotice count={1} memories={[memory()]} />
     ))
     fireEvent.click(container.querySelector('button')!)
+    flush()
     expect(container.textContent).toContain('Foretrekker metriske enheter')
     expect(container.textContent).toContain('USER')
     unmount()
@@ -276,6 +280,7 @@ describe('MemoryRecallNotice disclosure', () => {
       />
     ))
     fireEvent.click(container.querySelector('button')!)
+    flush()
     const text = container.textContent ?? ''
     expect(text).toContain('ukjent kilde')
     expect(text).not.toContain('du ba meg huske')
@@ -290,6 +295,7 @@ describe('MemoryRecallNotice disclosure', () => {
       />
     ))
     fireEvent.click(container.querySelector('button')!)
+    flush()
     const text = container.textContent ?? ''
     expect(text).toContain('du ba meg huske')
     expect(text).toContain('utledet')
@@ -304,6 +310,7 @@ describe('MemoryRecallNotice disclosure', () => {
       />
     ))
     fireEvent.click(container.querySelector('button')!)
+    flush()
     expect(container.textContent).toContain('organisasjon')
     unmount()
   })
@@ -396,6 +403,7 @@ describe('PlanApprovalControl', () => {
     const approve = container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!
     expect(approve.disabled).toBe(true)
     fireEvent.click(approve)
+    flush()
     expect(onApprove).not.toHaveBeenCalled()
 
     // And the minimum is STATED, not enforced silently — a disabled button with
@@ -411,10 +419,13 @@ describe('PlanApprovalControl', () => {
     ))
     const reason = container.querySelector('textarea')!
     fireEvent.input(reason, { target: { value: 'planen skriver rapporten til arbeidsområdet' } })
+    flush()
     const rungs = container.querySelectorAll<HTMLButtonElement>('.verevon-chat-plan__rung')
     // The widest rung, explicitly chosen.
     fireEvent.click(rungs[rungs.length - 1]!)
+    flush()
     fireEvent.click(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!)
+    flush()
 
     expect(onApprove).toHaveBeenCalledWith(
       'danger_full_access',

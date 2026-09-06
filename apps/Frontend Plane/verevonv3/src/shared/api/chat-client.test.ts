@@ -111,6 +111,35 @@ describe('chat-client stream-event coverage', () => {
     expect(buildChatWireBody({ content: 'hi' }).features).toContain('memory')
   })
 
+  /**
+   * Pinned messages ride the wire as IDS. Sending the pinned text instead would
+   * let this browser assert that the user said something earlier in the thread;
+   * an id can only ever select a message the durable thread already holds, and
+   * model-gateway ignores one that resolves to nothing.
+   */
+  it('sends pinned message ids, and omits the field entirely when nothing is pinned', () => {
+    const plain = buildChatWireBody({ content: 'hi' })
+    // Absent, not an empty array: an ordinary turn's body stays byte-identical
+    // to what it was before pinning existed.
+    expect('pinned_message_ids' in plain).toBe(false)
+
+    const pinned = buildChatWireBody({ content: 'hi', pinnedMessageIds: ['m1', 'm2'] })
+    expect(pinned.pinned_message_ids).toEqual(['m1', 'm2'])
+
+    expect('pinned_message_ids' in buildChatWireBody({ content: 'hi', pinnedMessageIds: [] })).toBe(
+      false,
+    )
+  })
+
+  it('never puts pinned message CONTENT on the wire', () => {
+    const body = buildChatWireBody({ content: 'hi', pinnedMessageIds: ['m1'] })
+    const serialized = JSON.stringify(body)
+    expect(serialized).toContain('"m1"')
+    // Only the id travels; there is no field carrying a pinned message's text.
+    expect(serialized).not.toContain('pinned_messages')
+    expect(serialized).not.toContain('pinnedMessages')
+  })
+
   it('separates a server-side stop from a normal completion', async () => {
     vi.stubGlobal(
       'fetch',

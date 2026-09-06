@@ -1,0 +1,3110 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/control-event-bridge/main_test.go</file>
+  <line>16</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/control-event-bridge/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 16-24</description>
+  <highlighted_element>instance, err := server.NewServer(&amp;server.Options{JetStream: jetStream, StoreDir: t.TempDir(), Port:...</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>105</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go</file>
+  <line>31</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 31-43</description>
+  <highlighted_element>if !natsServer.ReadyForConnections(10 * time.Second) {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>54</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>39</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 39-48</description>
+  <highlighted_element>_, file, _, ok := runtime.Caller(0)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>105</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 105-114</description>
+  <highlighted_element>_, file, _, ok := runtime.Caller(0)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>277</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 277-289</description>
+  <highlighted_element>setScopedBrokerPasswords(t, password, modelBrokerConfig)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>56</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>527</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 527-540</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>698</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 698-707</description>
+  <highlighted_element>_, file, _, ok := runtime.Caller(0)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>758</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 758-767</description>
+  <highlighted_element>_, file, _, ok := runtime.Caller(0)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>838</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 838-850</description>
+  <highlighted_element>setScopedBrokerPasswords(t, password, sharedBrokerConfig)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>57</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>968</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 968-986</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>1020</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,020-1,038</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>1122</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,122-1,134</description>
+  <highlighted_element>setScopedBrokerPasswords(t, password, applicationBrokerConfig)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>62</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>1290</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,290-1,299</description>
+  <highlighted_element>_, file, _, ok := runtime.Caller(0)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>1379</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,379-1,391</description>
+  <highlighted_element>setScopedBrokerPasswords(t, password, controlBrokerConfig)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>58</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>1679</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,679-1,691</description>
+  <highlighted_element>t.Helper()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api.go</file>
+  <line>120</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 120-130</description>
+  <highlighted_element>body, err := io.ReadAll(io.LimitReader(r.Body, 1&lt;&lt;20))</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>54</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api.go</file>
+  <line>279</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 279-289</description>
+  <highlighted_element>body, err := io.ReadAll(io.LimitReader(r.Body, 1&lt;&lt;20)) // 1 MiB cap</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>67</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api_test.go</file>
+  <line>118</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 118-127</description>
+  <highlighted_element>req.Header.Set(&quot;Content-Type&quot;, &quot;application/json&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>50</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api_test.go</file>
+  <line>317</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 317-328</description>
+  <highlighted_element>payload, _ := json.Marshal(ev)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api_test.go</file>
+  <line>340</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 340-351</description>
+  <highlighted_element>payload, _ := json.Marshal(ev)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api_test.go</file>
+  <line>362</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 362-373</description>
+  <highlighted_element>payload, _ := json.Marshal(ev)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go</file>
+  <line>292</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 292-303</description>
+  <highlighted_element>timestamp, err := time.Parse(time.RFC3339, timestampValue)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>58</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go</file>
+  <line>363</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 363-371</description>
+  <highlighted_element>if request.Body == nil || request.Body == http.NoBody {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go</file>
+  <line>385</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 385-399</description>
+  <highlighted_element>if c == nil || c.capacity &lt; 1 || key == &quot;&quot; || !expiry.After(now) {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>66</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/metrics/server.go</file>
+  <line>130</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/metrics/server.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 130-147</description>
+  <highlighted_element>mux := http.NewServeMux()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>491</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 491-516</description>
+  <highlighted_element>for _, consumer := range convexControlConsumerConfigs() {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>57</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>517</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 517-542</description>
+  <highlighted_element>for _, consumer := range notificationOrgDeletionConsumerConfigs() {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>67</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>896</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 896-915</description>
+  <highlighted_element>info, err := js.ConsumerInfo(ControlEventsStreamName, BillingPlanConsumerName)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>78</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>974</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 974-990</description>
+  <highlighted_element>info, err := js.ConsumerInfo(StreamName, name)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>46</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>87</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 87-108</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>168</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 168-189</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>221</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 221-238</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>454</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 454-471</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>545</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 545-569</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>587</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 587-611</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>655</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 655-672</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>688</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 688-705</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>743</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 743-760</description>
+  <highlighted_element>natsServer, err := server.NewServer(&amp;server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>75</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 75-93</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>75</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 75-93</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>172</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 172-188</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>172</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 172-188</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>244</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 244-261</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>244</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 244-261</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>319</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 319-336</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>319</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 319-336</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>382</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 382-396</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/store/store_test.go</file>
+  <line>382</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/store/store_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 382-396</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/scoped_acl_integration_test.go</file>
+  <line>207</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/scoped_acl_integration_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 207-219</description>
+  <highlighted_element>t.Helper()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 18-30</description>
+  <highlighted_element>admin = postgres(testDatabaseUrl!, { max: 1, prepare: false });</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>63</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth-identity-outbox.postgres.spec.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 18-30</description>
+  <highlighted_element>admin = postgres(testDatabaseUrl!, { max: 1, prepare: false });</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>63</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>332</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 332-337</description>
+  <highlighted_element>const iv = randomBytes(12);</highlighted_element>
+  <language>TypeScript</language>
+  <offset>2</offset>
+  <length>27</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>332</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 332-337</description>
+  <highlighted_element>const iv = randomBytes(12);</highlighted_element>
+  <language>TypeScript</language>
+  <offset>2</offset>
+  <length>27</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>760</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 760-771</description>
+  <highlighted_element>create: {</highlighted_element>
+  <language>TypeScript</language>
+  <offset>6</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>760</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 760-771</description>
+  <highlighted_element>create: {</highlighted_element>
+  <language>TypeScript</language>
+  <offset>6</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>772</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 772-783</description>
+  <highlighted_element>update: {</highlighted_element>
+  <language>TypeScript</language>
+  <offset>6</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>772</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 772-783</description>
+  <highlighted_element>update: {</highlighted_element>
+  <language>TypeScript</language>
+  <offset>6</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-auth.controller.ts</file>
+  <line>14</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-auth.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 14-35</description>
+  <highlighted_element>/**</highlighted_element>
+  <language>JavaScript</language>
+  <offset>0</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>433</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 433-444</description>
+  <highlighted_element>const encodedHeader = this.encodeSegment({</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>42</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>472</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 472-483</description>
+  <highlighted_element>const principalType = claims.principalType ?? 'user';</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>53</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>508</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 508-519</description>
+  <highlighted_element>const encodedHeader = this.encodeSegment({</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>42</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>555</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 555-566</description>
+  <highlighted_element>const principalType = claims.principalType ?? 'user';</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>53</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>588</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 588-599</description>
+  <highlighted_element>const encodedHeader = this.encodeSegment({</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>42</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 18-30</description>
+  <highlighted_element>admin = postgres(testDatabaseUrl!, { max: 1, prepare: false });</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>63</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance-repair.postgres.spec.ts</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance-repair.postgres.spec.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 23-35</description>
+  <highlighted_element>admin = postgres(testDatabaseUrl!, { max: 1, prepare: false });</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>63</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance.controller.ts</file>
+  <line>88</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/invitation-acceptance.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 88-100</description>
+  <highlighted_element>function toWebHeaders(</highlighted_element>
+  <language>TypeScript</language>
+  <offset>0</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts</file>
+  <line>60</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 60-80</description>
+  <highlighted_element>import { modelGatewayScopesForRole } from './plane-token-scopes';</highlighted_element>
+  <language>TypeScript</language>
+  <offset>0</offset>
+  <length>65</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts</file>
+  <line>211</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 211-222</description>
+  <highlighted_element>if (</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/nats-auth.controller.ts</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/nats-auth.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 11-30</description>
+  <highlighted_element>/**</highlighted_element>
+  <language>JavaScript</language>
+  <offset>0</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/owner-invariant-preflight.postgres.spec.ts</file>
+  <line>19</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/owner-invariant-preflight.postgres.spec.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 19-31</description>
+  <highlighted_element>admin = postgres(testDatabaseUrl!, { max: 1, prepare: false });</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>63</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/plane-token.controller.ts</file>
+  <line>67</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/plane-token.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 67-81</description>
+  <highlighted_element>import { planeScopesForRole } from './plane-token-scopes';</highlighted_element>
+  <language>TypeScript</language>
+  <offset>0</offset>
+  <length>58</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/plane-token.controller.ts</file>
+  <line>245</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/plane-token.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 245-256</description>
+  <highlighted_element>if (</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/auth-identity-outbox.spec.ts</file>
+  <line>103</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/auth-identity-outbox.spec.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 103-116</description>
+  <highlighted_element>const executed: string[] = [];</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/auth-identity-outbox.spec.ts</file>
+  <line>151</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/auth-identity-outbox.spec.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 151-164</description>
+  <highlighted_element>const executed: string[] = [];</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 90-108</description>
+  <highlighted_element>if (rows.length === 0) {</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>24</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts</file>
+  <line>146</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 146-164</description>
+  <highlighted_element>if (rows.length === 0) {</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>24</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts</file>
+  <line>448</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/internal-oauth.service.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 448-452</description>
+  <highlighted_element>const iv = randomBytes(12);</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>27</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts</file>
+  <line>1625</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,625-1,633</description>
+  <highlighted_element>if (request.get('authorization')) {</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts</file>
+  <line>40</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 40-48</description>
+  <highlighted_element>if (request.get('authorization')) {</highlighted_element>
+  <language>TypeScript</language>
+  <offset>4</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/cmd/server/main.go</file>
+  <line>54</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/cmd/server/main.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 54-70</description>
+  <highlighted_element>cfg, err := config.Load()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/cmd/server/main.go</file>
+  <line>183</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/cmd/server/main.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 183-193</description>
+  <highlighted_element>errCh := make(chan error, 3)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go</file>
+  <line>61</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 61-92</description>
+  <highlighted_element>defaultQuotaLimitsByPlan = map[string]map[string]float64{</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>57</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go</file>
+  <line>82</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 82-105</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go</file>
+  <line>266</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 266-285</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go</file>
+  <line>410</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 410-429</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go</file>
+  <line>706</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 706-725</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/config/config_test.go</file>
+  <line>132</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/config/config_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 132-147</description>
+  <highlighted_element>clearEnv(t)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/database/database.go</file>
+  <line>31</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/database/database.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 31-54</description>
+  <highlighted_element>cfg, err := pgxpool.ParseConfig(dsn)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>36</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/database/migrate.go</file>
+  <line>28</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/database/migrate.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 28-72</description>
+  <highlighted_element>if _, err := db.Pool.Exec(ctx, `</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>32</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/database/migrate.go</file>
+  <line>94</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/database/migrate.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 94-107</description>
+  <highlighted_element>durationMs := int(time.Since(start).Milliseconds())</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>51</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go</file>
+  <line>44</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 44-69</description>
+  <highlighted_element>t.Helper()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/correlation.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/correlation.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-41</description>
+  <highlighted_element>package http</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/lifecycle_postgres_test.go</file>
+  <line>19</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 19-42</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/lifecycle_postgres_test.go</file>
+  <line>69</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 69-84</description>
+  <highlighted_element>request := func(method, path, body, principal, token string) *httptest.ResponseRecorder {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>89</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>53</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 53-86</description>
+  <highlighted_element>if strings.TrimSpace(raw) == &quot;&quot; {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>33</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 101-142</description>
+  <highlighted_element>if credential.Principal != strings.TrimSpace(credential.Principal) || !validPrincipal(credential.Pri...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>109</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>159</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 159-169</description>
+  <highlighted_element>if len(value) &lt; 1 || len(value) &gt; 128 {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>39</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>298</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 298-313</description>
+  <highlighted_element>canonical := strings.Join([]string{</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>317</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 317-345</description>
+  <highlighted_element>version, ok := singleTrimmedHeader(request, &quot;X-Delegation-Version&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>67</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>352</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 352-373</description>
+  <highlighted_element>body, ok := delegationRequestBody(request)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>42</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>385</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 385-393</description>
+  <highlighted_element>if request.Body == nil || request.Body == http.NoBody {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>415</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 415-429</description>
+  <highlighted_element>if cache == nil || strings.TrimSpace(key) == &quot;&quot; || !expiry.After(now) {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>71</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>439</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 439-483</description>
+  <highlighted_element>if len(credentials) == 0 {</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 52-61</description>
+  <highlighted_element>request.Header.Set(&quot;X-Service-Id&quot;, claims.Principal)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>52</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 107-116</description>
+  <highlighted_element>for _, test := range tests {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go</file>
+  <line>154</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 154-165</description>
+  <highlighted_element>for _, test := range tests {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-178</description>
+  <highlighted_element>// Package internalkey enforces a boot-time format check on the cluster-wide</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>76</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/metrics/server.go</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/metrics/server.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 25-42</description>
+  <highlighted_element>mux := http.NewServeMux()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/client.go</file>
+  <line>31</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/client.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 31-48</description>
+  <highlighted_element>authOptions, err := runtimeAuthOptions(cfg.Token)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>49</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/runtime_auth.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/runtime_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-52</description>
+  <highlighted_element>package nats</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/runtime_auth_test.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/runtime_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-39</description>
+  <highlighted_element>package nats</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go</file>
+  <line>57</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 57-75</description>
+  <highlighted_element>user, password, token := strings.TrimSpace(credentials.User), strings.TrimSpace(credentials.Password...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>139</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go</file>
+  <line>93</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 93-115</description>
+  <highlighted_element>if sp == nil || sp.conn == nil || !sp.conn.IsConnected() {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>58</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/redis/client.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/redis/client.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 27-44</description>
+  <highlighted_element>addr := fmt.Sprintf(&quot;%s:%s&quot;, cfg.Host, cfg.Port)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>48</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/testfixture/lifecycle.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/testfixture/lifecycle.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-54</description>
+  <highlighted_element>package testfixture</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/cmd/server/main.go</file>
+  <line>51</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/cmd/server/main.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 51-67</description>
+  <highlighted_element>cfg, err := config.Load()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/cmd/server/main.go</file>
+  <line>171</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/cmd/server/main.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 171-181</description>
+  <highlighted_element>errCh := make(chan error, 3)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/config/config_test.go</file>
+  <line>173</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/config/config_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 173-188</description>
+  <highlighted_element>clearEnv(t)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/database/database.go</file>
+  <line>32</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/database/database.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 32-55</description>
+  <highlighted_element>cfg, err := pgxpool.ParseConfig(dsn)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>36</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/database/migrate.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/database/migrate.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 27-71</description>
+  <highlighted_element>if _, err := db.Pool.Exec(ctx, `</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>32</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/database/migrate.go</file>
+  <line>99</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/database/migrate.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 99-112</description>
+  <highlighted_element>durationMs := int(time.Since(start).Milliseconds())</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>51</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/database/rls_migration_test.go</file>
+  <line>34</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/database/rls_migration_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 34-50</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/database/rls_migration_test.go</file>
+  <line>149</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/database/rls_migration_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 149-164</description>
+  <highlighted_element>dsn := os.Getenv(&quot;TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go</file>
+  <line>40</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 40-65</description>
+  <highlighted_element>t.Helper()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/correlation.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/correlation.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-41</description>
+  <highlighted_element>package http</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/gdpr_deletion_postgres_test.go</file>
+  <line>88</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/gdpr_deletion_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 88-107</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/gdpr_deletion_postgres_test.go</file>
+  <line>187</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/gdpr_deletion_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 187-196</description>
+  <highlighted_element>req.Header.Set(&quot;X-Service-Id&quot;, claims.Principal)</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>48</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/lifecycle_postgres_test.go</file>
+  <line>20</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 20-43</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/lifecycle_postgres_test.go</file>
+  <line>51</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 51-69</description>
+  <highlighted_element>repo := orgcore.NewRepository(db)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>33</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go</file>
+  <line>92</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 92-103</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go</file>
+  <line>111</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 111-120</description>
+  <highlighted_element>if s.rbacRepo == nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go</file>
+  <line>134</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 134-145</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go</file>
+  <line>149</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/rbac_handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 149-158</description>
+  <highlighted_element>if s.rbacRepo == nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>56</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 56-90</description>
+  <highlighted_element>if strings.TrimSpace(raw) == &quot;&quot; {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>33</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>105</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 105-146</description>
+  <highlighted_element>if credential.Principal != strings.TrimSpace(credential.Principal) || !validPrincipal(credential.Pri...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>109</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>163</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 163-173</description>
+  <highlighted_element>if len(value) &lt; 1 || len(value) &gt; 128 {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>39</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>396</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 396-411</description>
+  <highlighted_element>canonical := strings.Join([]string{</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>415</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 415-444</description>
+  <highlighted_element>version, ok := singleTrimmedHeader(request, &quot;X-Delegation-Version&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>67</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>455</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 455-476</description>
+  <highlighted_element>body, ok := delegationRequestBody(request)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>42</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>488</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 488-496</description>
+  <highlighted_element>if request.Body == nil || request.Body == http.NoBody {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>528</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 528-542</description>
+  <highlighted_element>if cache == nil || strings.TrimSpace(key) == &quot;&quot; || !expiry.After(now) {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>71</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>552</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 552-598</description>
+  <highlighted_element>if len(credentials) == 0 {</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 52-61</description>
+  <highlighted_element>request.Header.Set(&quot;X-Service-Id&quot;, claims.Principal)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>52</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 107-116</description>
+  <highlighted_element>for _, test := range tests {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go</file>
+  <line>200</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 200-211</description>
+  <highlighted_element>for _, test := range tests {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/succession_postgres_test.go</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/succession_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 23-42</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/succession_postgres_test.go</file>
+  <line>51</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/succession_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 51-69</description>
+  <highlighted_element>repo := orgcore.NewRepository(db)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>33</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-178</description>
+  <highlighted_element>// Package internalkey enforces a boot-time format check on the cluster-wide</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>76</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/metrics/server.go</file>
+  <line>21</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/metrics/server.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 21-38</description>
+  <highlighted_element>mux := http.NewServeMux()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/client.go</file>
+  <line>40</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/client.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 40-57</description>
+  <highlighted_element>authOptions, err := runtimeAuthOptions(cfg.Token)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>49</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/runtime_auth.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/runtime_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-52</description>
+  <highlighted_element>package nats</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/runtime_auth_test.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/runtime_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-39</description>
+  <highlighted_element>package nats</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 59-77</description>
+  <highlighted_element>user, password, token := strings.TrimSpace(credentials.User), strings.TrimSpace(credentials.Password...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>139</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go</file>
+  <line>95</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 95-117</description>
+  <highlighted_element>if sp == nil || sp.conn == nil || !sp.conn.IsConnected() {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>58</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger_postgres_test.go</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 23-44</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox_postgres_test.go</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 23-36</description>
+  <highlighted_element>defer cancel()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox_test.go</file>
+  <line>134</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/gdpr_audit_outbox_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 134-140</description>
+  <highlighted_element>service := NewService(&amp;Repository{}, nil)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>41</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go</file>
+  <line>48</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 48-67</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go</file>
+  <line>190</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 190-209</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_test.go</file>
+  <line>38</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/interactive_retention_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 38-44</description>
+  <highlighted_element>service := NewService(&amp;Repository{}, nil)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>41</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/lifecycle_postgres_test.go</file>
+  <line>82</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/lifecycle_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 82-108</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/plan_change_postgres_test.go</file>
+  <line>58</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/plan_change_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 58-77</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/repository.go</file>
+  <line>518</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/repository.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 518-537</description>
+  <highlighted_element>plan := organization.Plan</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/repository.go</file>
+  <line>705</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/repository.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 705-724</description>
+  <highlighted_element>plan := organization.Plan</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/succession_postgres_test.go</file>
+  <line>24</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/succession_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 24-45</description>
+  <highlighted_element>dsn := os.Getenv(&quot;CONTROL_LIFECYCLE_TEST_DATABASE_URL&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/types.go</file>
+  <line>286</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/types.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 286-317</description>
+  <highlighted_element>defaultQuotas = map[string]map[string]int64{</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>44</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/redis/client.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/redis/client.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 27-45</description>
+  <highlighted_element>addr := fmt.Sprintf(&quot;%s:%s&quot;, cfg.Host, cfg.Port)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>48</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/testfixture/lifecycle.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/testfixture/lifecycle.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-54</description>
+  <highlighted_element>package testfixture</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/billing_client_test.go</file>
+  <line>14</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/billing_client_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 14-22</description>
+  <highlighted_element>if got := r.Header.Get(&quot;X-Service-Id&quot;); got != &quot;session-core&quot; {</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>63</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/org_client_test.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/org_client_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 27-35</description>
+  <highlighted_element>if got := r.Header.Get(&quot;X-Service-Id&quot;); got != &quot;session-core&quot; {</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>63</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/correlation.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/correlation.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-41</description>
+  <highlighted_element>package http</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go</file>
+  <line>74</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 74-85</description>
+  <highlighted_element>timestamp, err := time.Parse(time.RFC3339, timestampValue)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>58</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go</file>
+  <line>100</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 100-108</description>
+  <highlighted_element>: nonce,</highlighted_element>
+  <language>go</language>
+  <offset>7</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go</file>
+  <line>127</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 127-135</description>
+  <highlighted_element>if request.Body == nil || request.Body == http.NoBody {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go</file>
+  <line>158</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/service_delegation.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 158-172</description>
+  <highlighted_element>if c == nil || c.capacity &lt; 1 || key == &quot;&quot; || !expiry.After(now) {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>66</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-178</description>
+  <highlighted_element>// Package internalkey enforces a boot-time format check on the cluster-wide</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>76</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/metrics/server.go</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/metrics/server.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 25-42</description>
+  <highlighted_element>mux := http.NewServeMux()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/nats_auth_client.go</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/nats_auth_client.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 29-39</description>
+  <highlighted_element>user := strings.TrimSpace(os.Getenv(&quot;NATS_USER&quot;))</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>49</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>142</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 142-150</description>
+  <highlighted_element>if avatar := strings.TrimSpace(event.ProfileHints.Avatar); avatar != &quot;&quot; {</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>73</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go</file>
+  <line>403</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/handlers/event_handler.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 403-411</description>
+  <highlighted_element>if avatar := strings.TrimSpace(event.ProfileHints.Avatar); avatar != &quot;&quot; {</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>73</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/authz_facade.go</file>
+  <line>102</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/authz_facade.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 102-117</description>
+  <highlighted_element>orgID := strings.TrimSpace(c.Query(&quot;org_id&quot;))</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>45</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/authz_facade.go</file>
+  <line>210</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/authz_facade.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 210-225</description>
+  <highlighted_element>orgID := strings.TrimSpace(c.Query(&quot;org_id&quot;))</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>45</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go</file>
+  <line>460</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 460-470</description>
+  <highlighted_element>c.Set(&quot;auth_method&quot;, &quot;service_principal&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>41</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go</file>
+  <line>482</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/authz_facade_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 482-492</description>
+  <highlighted_element>c.Set(&quot;auth_method&quot;, &quot;service_principal&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>41</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/delegated_user_proof.go</file>
+  <line>106</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/delegated_user_proof.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 106-120</description>
+  <highlighted_element>if c == nil || strings.TrimSpace(key) == &quot;&quot; || !expiry.After(now) {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>67</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers.go</file>
+  <line>192</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 192-209</description>
+  <highlighted_element>if !s.userService.ErasureAvailable() {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>38</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers.go</file>
+  <line>252</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 252-267</description>
+  <highlighted_element>if !s.userService.ErasureAvailable() {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>38</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>377</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 377-399</description>
+  <highlighted_element>userID, exists := c.Get(&quot;user_id&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>34</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>731</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 731-753</description>
+  <highlighted_element>userID, exists := c.Get(&quot;user_id&quot;)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>34</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1161</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,161-1,175</description>
+  <highlighted_element>userID, ok := getUserIDFromContext(c)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1213</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,213-1,227</description>
+  <highlighted_element>userID, ok := getUserIDFromContext(c)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1266</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,266-1,280</description>
+  <highlighted_element>userID, ok := getUserIDFromContext(c)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1320</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,320-1,334</description>
+  <highlighted_element>userID, ok := getUserIDFromContext(c)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1384</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,384-1,398</description>
+  <highlighted_element>userID, ok := getUserIDFromContext(c)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1448</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,448-1,462</description>
+  <highlighted_element>userID, ok := getUserIDFromContext(c)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1513</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,513-1,527</description>
+  <highlighted_element>userID, ok := getUserIDFromContext(c)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1577</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,577-1,591</description>
+  <highlighted_element>userID, ok := getUserIDFromContext(c)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/model_action_decision.go</file>
+  <line>60</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/model_action_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 60-69</description>
+  <highlighted_element>evidence, err := s.spaceRepo.ResolveAgentActionDecisionEvidence(c.Request.Context(), authority.Space...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>142</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/model_action_decision.go</file>
+  <line>129</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/model_action_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 129-138</description>
+  <highlighted_element>evidence, err := s.spaceRepo.ResolveAgentActionDecisionEvidence(c.Request.Context(), authority.Space...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>142</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>446</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 446-457</description>
+  <highlighted_element>b := make([]byte, 16)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>482</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 482-497</description>
+  <highlighted_element>if s.spaceRepo == nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>23</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>503</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 503-519</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>538</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 538-561</description>
+  <highlighted_element>if s.spaceRepo == nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>23</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>562</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 562-580</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>621</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 621-654</description>
+  <highlighted_element>membership, err := s.spaceRepo.ResolveCurrentUserMembership(c.Request.Context(), request.SpaceRef, c...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>145</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>681</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 681-696</description>
+  <highlighted_element>if s.spaceRepo == nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>23</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>701</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 701-715</description>
+  <highlighted_element>key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>51</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>738</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 738-761</description>
+  <highlighted_element>if s.spaceRepo == nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>23</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>766</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 766-780</description>
+  <highlighted_element>key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>51</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>833</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 833-851</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>889</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 889-907</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>1015</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,015-1,033</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>1069</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,069-1,092</description>
+  <highlighted_element>evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), intent.Space...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>136</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>1131</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,131-1,154</description>
+  <highlighted_element>evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), intent.Space...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>136</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>1198</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,198-1,202</description>
+  <highlighted_element>prepared.OrgID != intent.OrgID || prepared.SpaceRef != intent.SpaceRef ||</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>73</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>1224</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,224-1,239</description>
+  <highlighted_element>key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>51</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>1296</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,296-1,314</description>
+  <highlighted_element>if err != nil {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-178</description>
+  <highlighted_element>// Package internalkey enforces a boot-time format check on the cluster-wide</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>76</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/metrics/server.go</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/metrics/server.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 25-42</description>
+  <highlighted_element>mux := http.NewServeMux()</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/runtime_auth.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/runtime_auth.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-52</description>
+  <highlighted_element>package nats</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/runtime_auth_test.go</file>
+  <line>1</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/runtime_auth_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1-39</description>
+  <highlighted_element>package nats</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go</file>
+  <line>64</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 64-82</description>
+  <highlighted_element>user, password, token := strings.TrimSpace(credentials.User), strings.TrimSpace(credentials.Password...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>139</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go</file>
+  <line>56</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 56-88</description>
+  <highlighted_element>sub1, err := s.client.Subscribe(SubjectAuthUserRegistered, s.handleUserRegistered)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>82</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go</file>
+  <line>91</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/subscriber.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 91-121</description>
+  <highlighted_element>sub6, err := s.client.Subscribe(SubjectAuthSessionEnded, s.handleSessionEnded)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>78</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/redis/client.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/redis/client.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 27-45</description>
+  <highlighted_element>addr := fmt.Sprintf(&quot;%s:%s&quot;, cfg.Host, cfg.Port)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>48</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>203</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 203-205</description>
+  <highlighted_element>decision.OrgID != expected.OrgID || decision.SpaceRef != expected.SpaceRef || decision.SubjectID != ...</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>177</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/membership_owner_live_test.go</file>
+  <line>41</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/membership_owner_live_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 41-57</description>
+  <highlighted_element>t.Cleanup(func() {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/membership_owner_live_test.go</file>
+  <line>181</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/membership_owner_live_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 181-197</description>
+  <highlighted_element>t.Cleanup(func() {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/model_action_view.go</file>
+  <line>134</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/model_action_view.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 134-141</description>
+  <highlighted_element>authority.OrgID != evidence.Membership.OrgID || authority.SubjectID != evidence.Membership.SubjectID...</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>103</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/model_action_view.go</file>
+  <line>154</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/model_action_view.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 154-171</description>
+  <highlighted_element>: evidence.RecipientAudienceRef,</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>38</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go</file>
+  <line>89</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 89-107</description>
+  <highlighted_element>DecisionRef: strings.TrimSpace(request.DecisionRef),</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>66</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 108-119</description>
+  <highlighted_element>: strings.TrimSpace(evidence.Privacy.Purpose),</highlighted_element>
+  <language>go</language>
+  <offset>9</offset>
+  <length>64</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go</file>
+  <line>202</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_import_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 202-213</description>
+  <highlighted_element>: strings.TrimSpace(evidence.Privacy.Purpose),</highlighted_element>
+  <language>go</language>
+  <offset>9</offset>
+  <length>64</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_retrieval_decision.go</file>
+  <line>67</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_retrieval_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 67-98</description>
+  <highlighted_element>return Decision{</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>323</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 323-331</description>
+  <highlighted_element>DecisionRef: strings.TrimSpace(request.DecisionRef), OrgID: evidence.Membership.OrgID, SpaceRef: evi...</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>126</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>332</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 332-336</description>
+  <highlighted_element>: strings.TrimSpace(evidence.Privacy.Purpose), LawfulBasis: strings.TrimSpace(evidence.Privacy.Lawfu...</highlighted_element>
+  <language>go</language>
+  <offset>9</offset>
+  <length>108</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>408</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 408-439</description>
+  <highlighted_element>return Decision{</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>457</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 457-488</description>
+  <highlighted_element>return Decision{</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>1155</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 1,155-1,159</description>
+  <highlighted_element>current.PrivacyPolicyRef != policy.PrivacyPolicyRef || current.Purpose != policy.Purpose ||</highlighted_element>
+  <language>go</language>
+  <offset>19</offset>
+  <length>91</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/run_action_decision.go</file>
+  <line>188</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/run_action_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 188-195</description>
+  <highlighted_element>authority.OrgID != evidence.Membership.OrgID || authority.SubjectID != evidence.Membership.SubjectID...</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>103</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/run_action_decision.go</file>
+  <line>211</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/run_action_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 211-228</description>
+  <highlighted_element>evidence.RecipientAudienceRef,</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go</file>
+  <line>63</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 63-79</description>
+  <highlighted_element>for _, revision := range []struct {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go</file>
+  <line>102</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 102-110</description>
+  <highlighted_element>DecisionRef: strings.TrimSpace(request.DecisionRef), OrgID: evidence.Membership.OrgID, SpaceRef: evi...</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>126</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go</file>
+  <line>111</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 111-115</description>
+  <highlighted_element>: strings.TrimSpace(evidence.Privacy.Purpose), LawfulBasis: strings.TrimSpace(evidence.Privacy.Lawfu...</highlighted_element>
+  <language>go</language>
+  <offset>9</offset>
+  <length>108</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go</file>
+  <line>69</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 69-85</description>
+  <highlighted_element>for _, revision := range []struct {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go</file>
+  <line>121</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 121-129</description>
+  <highlighted_element>DecisionRef: strings.TrimSpace(decisionRef), OrgID: evidence.Membership.OrgID, SpaceRef: evidence.Me...</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>118</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go</file>
+  <line>130</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 130-134</description>
+  <highlighted_element>: strings.TrimSpace(evidence.Privacy.Purpose), LawfulBasis: strings.TrimSpace(evidence.Privacy.Lawfu...</highlighted_element>
+  <language>go</language>
+  <offset>9</offset>
+  <length>108</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_run_decision.go</file>
+  <line>77</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_run_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 77-93</description>
+  <highlighted_element>for _, revision := range []struct {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_run_decision.go</file>
+  <line>150</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_run_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 150-155</description>
+  <highlighted_element>: strings.TrimSpace(intent.IdempotencyKey),</highlighted_element>
+  <language>go</language>
+  <offset>128</offset>
+  <length>43</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_step_decision.go</file>
+  <line>188</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_step_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 188-203</description>
+  <highlighted_element>DecisionRef: strings.TrimSpace(decisionRef), OrgID: evidence.Membership.OrgID,</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>78</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/shared_retrieval_decision.go</file>
+  <line>28</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/shared_retrieval_decision.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 28-59</description>
+  <highlighted_element>return Decision{</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>16</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/acl_repository.go</file>
+  <line>346</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/acl_repository.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 346-354</description>
+  <highlighted_element>g := &amp;ResourceGrant{}</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/acl_repository.go</file>
+  <line>388</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/acl_repository.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 388-396</description>
+  <highlighted_element>g := &amp;ResourceGrant{}</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>21</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_audit_outbox_postgres_test.go</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_audit_outbox_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 29-45</description>
+  <highlighted_element>if !regexp.MustCompile(`^[a-z0-9_]+$`).MatchString(schema) {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>60</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga_postgres_test.go</file>
+  <line>30</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga_postgres_test.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 30-46</description>
+  <highlighted_element>if !regexp.MustCompile(`^[a-z0-9_]+$`).MatchString(schema) {</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>60</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/repository.go</file>
+  <line>118</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/repository.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 118-140</description>
+  <highlighted_element>user := &amp;User{}</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/repository.go</file>
+  <line>151</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/repository.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 151-173</description>
+  <highlighted_element>user := &amp;User{}</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>249</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 249-262</description>
+  <highlighted_element>if name != &quot;&quot; {</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>296</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="DuplicatedCode" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Duplicated code fragment</problem_class>
+  <description>Duplicate code: lines 296-308</description>
+  <highlighted_element>if name != &quot;&quot; {</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>15</length>
+</problem>
+</problems>

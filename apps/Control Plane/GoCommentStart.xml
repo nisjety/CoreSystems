@@ -1,0 +1,146 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>93</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'LegacyGDPRErasureRequestedSubject ...' (with an optional leading article)</description>
+  <highlighted_element>// TEMPORARY rename-migration compatibility (added 2026-08-05, remove once // every publisher AND e...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>1919</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'SubjectUserCreated ...' (with an optional leading article)</description>
+  <highlighted_element>// User events</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'SubjectOrganizationCreated ...' (with an optional leading article)</description>
+  <highlighted_element>// Organization events</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>14</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'SubjectOrganizationPlanChanged ...' (with an optional leading article)</description>
+  <highlighted_element>// Organization plan events</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>27</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>17</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'SubjectBillingAccountUpdated ...' (with an optional leading article)</description>
+  <highlighted_element>// Billing-originated events consumed (not published) by org-core to // mirror billing-core's accou...</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>137</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>21</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'SubjectOrganizationMemberAdded ...' (with an optional leading article)</description>
+  <highlighted_element>// Organization member events</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>29</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/events.go</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'SubjectSessionCreated ...' (with an optional leading article)</description>
+  <highlighted_element>// Session events</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go</file>
+  <line>752</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/handlers.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'RegisterDevice ...' (with an optional leading article)</description>
+  <highlighted_element>// RegisterDevice, ListDevices, UpdateDevice, DeactivateDevice are not implemented. // Device tracki...</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>172</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'SubjectAuthUserRegistered ...' (with an optional leading article)</description>
+  <highlighted_element>// Auth event subjects</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>22</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>19</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'SubjectUserCreated ...' (with an optional leading article)</description>
+  <highlighted_element>// User service event subjects</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/events.go</file>
+  <line>40</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/events.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'StreamAuthEvents ...' (with an optional leading article)</description>
+  <highlighted_element>// Stream names</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/authority.go</file>
+  <line>183</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/authority.go" />
+  <problem_class id="GoCommentStart" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Comment of exported element starts with the incorrect name</problem_class>
+  <description>Comment should have the following format 'RosterMember ...' (with an optional leading article)</description>
+  <highlighted_element>// CurrentMembership is a current Control-owned membership fact. It is useful // to a resolver only ...</highlighted_element>
+  <language>go</language>
+  <offset>0</offset>
+  <length>725</length>
+</problem>
+</problems>
