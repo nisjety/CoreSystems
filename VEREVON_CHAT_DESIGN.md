@@ -883,8 +883,21 @@ Ranked by what unblocks the most, with the reason each one is not already done:
    Cannot be "met" until someone writes down the target.
 5. **The three UI markers** -- claim-level span binding, source freshness,
    confidence/verification -- and the permission-scoped next actions that were
-   meant to replace item 22's follow-up chips. All four need a Model Plane
-   contract first; that is the blocker, not the UI.
+   meant to replace item 22's follow-up chips.
+
+    *Amended 2026-09-06: "all four need a Model Plane contract first" was too
+    pessimistic for the first one.* Claim identity already exists server-side.
+    Data Plane v2's graph index owns a `GraphClaim` (`claim_id`, `text`,
+    `claim_status`, `contradicted_by_claim_ids`) behind an org-scoped
+    `GetClaims` RPC (`graph-index-rs/src/grpc.rs`, `graph/v1/graph.proto`), and
+    the browser can already carry one: `ag-ui-client.ts` projects `claim_id`
+    onto `citation.added`. What is missing is narrower than a new contract --
+    the NATIVE chat path (`chat-client.ts`) carries no `claim` field at all,
+    and nothing anywhere emits character offsets, so there is no span to anchor
+    a marker to. Note the second cost of the AG-UI row in 9.2: the only
+    transport that carries claim ids is the one with no importers. Source
+    freshness and confidence/verification are genuinely contract-blocked --
+    confirmed today, neither has a producer or any UI.
 6. **Message pinning UI** (pin one message into context; distinct from thread
    pins). Never addressed, no blocker recorded.
 7. **The unproxied Model Plane routes** (2.3). Inventory only. Each needs a
