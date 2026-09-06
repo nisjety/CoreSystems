@@ -125,10 +125,20 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
     moduleLabel: pickLocaleText(locale, moduleNo, moduleEn),
     tabLabel: pickLocaleText(locale, tabNo, tabEn),
   })
+  /** A route whose breadcrumb has one destination, not two. */
+  const only = (moduleNo: string, moduleEn: string) => ({
+    moduleLabel: pickLocaleText(locale, moduleNo, moduleEn),
+    tabLabel: '',
+  })
 
   switch (activeRoute) {
     case '/chat':
-      return labels('Chat', 'Chat', 'Oppgaver', 'Tasks')
+      // Both breadcrumb links take `activeRoute` as their href, so a second
+      // label here rendered "Chat / Oppgaver" as two links to /chat -- the
+      // duplicate destination the design doc's open list records (audit
+      // item 25). The conversation owns its own header; the breadcrumb needs
+      // only the module.
+      return only('Chat', 'Chat')
     case '/spaces':
       return labels('Rom', 'Space', 'Oversikt', 'Overview')
     case '/studio':

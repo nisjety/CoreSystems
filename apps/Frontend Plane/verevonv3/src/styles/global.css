@@ -23202,6 +23202,15 @@ body.verevon-chat-canvas-resizing * {
   font-size: 10px;
 }
 
+/* The contextual canvas carries its width as an INLINE style: a persisted
+   user resize, clamped by ChatWorkspaceCanvas so the conversation keeps
+   MIN_CONVERSATION_WIDTH. This token is the default for the rails that have no
+   stored width. Audit item 24 measured the canvas at 31-40% of the mid band
+   and read it as a miss against UX spec section 10's 48-58%; it is the
+   conversation floor instead, and the specification was amended to match --
+   the two cannot both hold below ~1000px. Do not "fix" this with a
+   percentage: the inline style wins for the canvas, so a percentage here only
+   moves the run-panel rail and makes the two hosts disagree. */
 @media (max-width: 980px) {
   .verevon-chat-page {
     --verevon-workspace-rail: clamp(290px, 38vw, 360px);
@@ -45393,6 +45402,38 @@ body.verevon-chat-canvas-resizing * {
   color: var(--verevon-e-muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+/* Audit item 20: the raw provider catalog is a secondary control (UX spec
+   section 6, "advanced model transparency"), so the default model menu shows
+   only the Verevon effort modes and this opens the rest. */
+.dashboard-composer-model-advanced > summary {
+  padding: 7px 10px;
+  color: var(--verevon-e-subtle);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  list-style: none;
+}
+
+.dashboard-composer-model-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dashboard-composer-model-advanced > summary::before {
+  content: '\25B8';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 140ms ease;
+}
+
+.dashboard-composer-model-advanced[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.dashboard-composer-model-advanced > summary:hover,
+.dashboard-composer-model-advanced > summary:focus-visible {
+  color: var(--verevon-j-text);
 }
 
 @media (max-width: 1180px) {

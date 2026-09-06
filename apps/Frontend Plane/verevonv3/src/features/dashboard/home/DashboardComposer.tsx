@@ -1717,6 +1717,17 @@ export function DashboardComposer(props: {
 									</For>
 								</div>
 
+								{/* Design section 3.5: the composer offers an effort dial and
+								    nothing else, and the pinned Verevon modes above "just need to
+								    stop exposing the raw provider catalog underneath". UX spec
+								    section 6 keeps advanced model transparency as a secondary
+								    control, so the catalog is one deliberate click away rather
+								    than deleted -- picking a tiered model is how a privacy tier
+								    reaches the payload (audit item 20). */}
+								<details class="dashboard-composer-model-advanced">
+									<summary>
+										{i18n.tr('Velg modell selv', 'Choose a model yourself')}
+									</summary>
 								<For each={chatModelGroups()}>
 									{(group) => (
 										<div class="dashboard-composer-model-group">
@@ -1799,6 +1810,7 @@ export function DashboardComposer(props: {
 										</div>
 									)}
 								</For>
+								</details>
 								<Show when={selectedPrivacyTier() === "sovereign"}>
 									<p class="dashboard-composer-model-tier-note" role="note">
 										{sovereignCatalogNotice(i18n)}

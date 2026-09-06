@@ -63,7 +63,7 @@ export type ConversationNode =
   | { kind: 'reasoning'; text: string; streaming: boolean }
   | { kind: 'answer'; answer: AnswerState }
   | { kind: 'grounding'; grounding: ChatKnowledgeGrounding }
-  | { kind: 'low-confidence'; confidence: number }
+  | { kind: 'low-confidence'; confidence: number; hasEvidence: boolean }
   | { kind: 'memory-recall'; count: number; memories: RecalledMemory[] }
   | { kind: 'truncated'; stopReason: string }
   | { kind: 'tool-chips'; tools: ComposerToolId[] }

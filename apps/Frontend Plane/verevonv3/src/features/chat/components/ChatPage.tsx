@@ -510,6 +510,38 @@ export default function ChatPage() {
   const liveRailWorkContent = createMemo(() => (workCanvasActive() ? contextualPanel() : undefined))
   const liveRailNavigation = createMemo(() => (workCanvasActive() ? workspaceNavigation() : undefined))
 
+  /**
+   * Arrow keys move between messages (audit item 26 / plan item 14).
+   *
+   * Scoped hard: it acts only on a bare ArrowUp/ArrowDown whose target is not
+   * a control that owns arrows itself. The composer textarea, the model menu,
+   * the workspace tab strip's roving tabindex and the canvas resize handle all
+   * bind arrows, and stealing them here would break each one.
+   */
+  const handleTranscriptArrowKeys = (event: KeyboardEvent & { currentTarget: HTMLDivElement }) => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    if (event.defaultPrevented) return
+    const target = event.target as HTMLElement | null
+    if (!target) return
+    if (target.closest('input, textarea, select, [contenteditable="true"], [role="tablist"], [role="listbox"], [role="menu"], [role="separator"]')) {
+      return
+    }
+    const list = event.currentTarget
+    const messages = Array.from(list.querySelectorAll<HTMLElement>('.verevon-chat-message'))
+    if (messages.length === 0) return
+    const current = target.closest<HTMLElement>('.verevon-chat-message')
+    const index = current ? messages.indexOf(current) : -1
+    // Entering the transcript from elsewhere lands on the newest message going
+    // up, and the oldest going down, rather than jumping to an arbitrary end.
+    const next = index < 0
+      ? (event.key === 'ArrowUp' ? messages.length - 1 : 0)
+      : Math.min(messages.length - 1, Math.max(0, index + (event.key === 'ArrowDown' ? 1 : -1)))
+    if (next === index) return
+    event.preventDefault()
+    messages[next]?.focus()
+  }
+
   const workspaceNavigation = () => (
     <ChatTabs
       active={activeTab()}
@@ -589,6 +621,7 @@ export default function ChatPage() {
               ref={setMessageListRef}
               class="verevon-chat-message-list"
               onScroll={handleScroll}
+              onKeyDown={handleTranscriptArrowKeys}
             >
               <ThreadVisibilityBanners
                 temporary={isActiveThreadTemporary}
@@ -641,8 +674,16 @@ export default function ChatPage() {
                   only the live status of a delivery in flight.
                 */}
                 <QueuedInputStrip entries={state.queuedInputs} />
+                {/* Focus follows the error. `role="alert"` announces it, but a
+                    keyboard user was left wherever they were -- the open half of
+                    plan item 16. `tabindex=-1` keeps it out of the Tab order. */}
                 <Show when={state.error && state.status === 'error'}>
-                  <div class="verevon-chat-error" role="alert">{state.error}</div>
+                  <div
+                    class="verevon-chat-error"
+                    role="alert"
+                    tabindex={-1}
+                    ref={(element: HTMLDivElement) => { requestAnimationFrame(() => element.focus()) }}
+                  >{state.error}</div>
                 </Show>
                 {/*
                   A rating that did not persist must say so. Deliberately its own

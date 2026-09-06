@@ -86,7 +86,15 @@ export function deriveConversationNodes(
     turn.confidence != null &&
     turn.confidence < LOW_CONFIDENCE_ANSWER_THRESHOLD
   ) {
-    nodes.push({ kind: 'low-confidence', confidence: turn.confidence })
+    nodes.push({
+      kind: 'low-confidence',
+      confidence: turn.confidence,
+      // Whether there is anything to check. The notice used to say "sjekk
+      // kilder" on turns with no sources at all -- a verification path that
+      // does not exist (audit item 23). The hedge itself stays ungated: the
+      // 2026-07-20 incident it exists for was an uncited answer.
+      hasEvidence: (turn.citations?.length ?? 0) > 0 || turn.grounding != null,
+    })
   }
   // Falsy count is dropped, not rendered as "recalled 0": the backend emits the
   // event only when memory genuinely contributed.
@@ -132,8 +140,15 @@ export function deriveConversationNodes(
   if (visibleArtifacts.length > 0) {
     nodes.push({ kind: 'artifacts', artifacts: visibleArtifacts })
   }
-  if (!waiting && !errored && (turn.followUps?.length ?? 0) > 0) {
-    nodes.push({ kind: 'follow-ups', suggestions: turn.followUps ?? [] })
-  }
+  // Follow-ups are deliberately NOT derived. VEREVON_CHAT_DESIGN.md section 5
+  // lists "Perplexity's generic curiosity follow-up chips" under Explicitly
+  // rejected, to be replaced with permission-scoped next actions -- and what
+  // the model returns here is exactly a curiosity question ("Hva er
+  // befolkningen i Oslo?" under the answer "Oslo.", live 2026-09-04, audit
+  // item 22). The node kind, its renderer and `FollowUpChips` stay in place:
+  // the replacement needs a server-side action-suggestion contract (scoped to
+  // what this user may actually do), and inferring one from free text in the
+  // browser would be the fabrication this codebase forbids. Restore the push
+  // below when that contract exists, feeding it actions rather than questions.
   return nodes
 }

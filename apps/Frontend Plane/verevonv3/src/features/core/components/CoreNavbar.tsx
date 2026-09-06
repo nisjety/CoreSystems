@@ -549,8 +549,12 @@ function Breadcrumb(props: {
       </button>
       <BreadcrumbSeparator />
       <a href={props.moduleHref} link>{props.moduleLabel}</a>
-      <BreadcrumbSeparator />
-      <a href={props.tabHref} link class="core-breadcrumb__muted">{props.tabLabel}</a>
+      {/* A route with no second level renders one destination, not the same
+          one twice: both links share `activeRoute` as their href. */}
+      <Show when={props.tabLabel}>
+        <BreadcrumbSeparator />
+        <a href={props.tabHref} link class="core-breadcrumb__muted">{props.tabLabel}</a>
+      </Show>
     </div>
   )
 }

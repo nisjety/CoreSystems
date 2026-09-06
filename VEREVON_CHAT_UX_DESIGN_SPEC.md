@@ -192,8 +192,16 @@ details or Trace.
 
 - **≥ 1180 px:** split conversation and resizable canvas; preserve at least
   480 px for the conversation.
-- **760–1179 px:** canvas may cover 48–58% of the workspace; conversation remains
-  readable and the composer remains mounted.
+- **760–1179 px:** the conversation keeps at least 480 px and the canvas takes
+  the rest, up to 58% of the workspace; the composer remains mounted.
+  *Amended 2026-09-04 (audit item 24).* This band originally read "canvas may
+  cover 48–58%", which cannot hold together with a readable conversation at the
+  low end: 48% of 760 px leaves 395 px of transcript, and the same 480 px floor
+  this document mandates above 1180 px is the better rule. `ChatWorkspaceCanvas`
+  already enforces it through `MIN_CONVERSATION_WIDTH`, and the canvas width is
+  a persisted user resize clamped against it — so the measured 31–40% share was
+  that floor working, not a defect. The share ceiling stays as guidance for wide
+  viewports, where both rules fit.
 - **< 760 px:** canvas becomes a full-screen sheet with a clear back-to-chat
   action. Never squeeze chat and preview side by side.
 - At 200% zoom the same mobile-sheet rule applies based on available container

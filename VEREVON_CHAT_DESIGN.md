@@ -542,6 +542,18 @@ split-pane case, where UX 10 only requires 480px for the conversation.
     "Claude Sonnet · 5 tokens"; it is the trigger for the reasoning popover, so
     the detail is disclosed, but the provider name and output-token count sit in
     the reading flow, which is UX finding 7.
+
+    **Done 2026-09-04.** The catalog became a secondary control rather than
+    being deleted: UX spec section 6 lists "advanced model transparency" among
+    the controls revealed only when needed, and picking a tiered model is how a
+    privacy tier reaches the payload. It now sits behind a closed "Velg modell
+    selv" disclosure inside the model menu, so the default menu shows the three
+    Verevon effort modes and nothing else (verified live). The sovereign-tier
+    note stays outside the disclosure -- it describes the current selection. The
+    transcript chip that read "Claude Sonnet · 5 tokens" now reads "Detaljer";
+    the panel it opens already carried Modell, Input, Output, tid, Sikkerhet and
+    Kostnad, which is where UX finding 7 puts them.
+
 21. **Mixed-language chrome.** Acceptance criterion 9 rejects it outright. 42
     Norwegian strings in `src/features/chat` bypass `i18n.tr` (visible text plus
     `aria-label`/`title`), against 44 that use it, so roughly half the chat
@@ -577,6 +589,16 @@ split-pane case, where UX 10 only requires 480px for the conversation.
     Oslo?", "Hvilke kjente severdigheter finnes i Oslo?", "Hva er klimaet som
     vanligvis er i Oslo?" -- rendered by `FollowUpChips` from model-suggested
     text.
+
+    **Done 2026-09-04.** `deriveChatNodes` no longer emits the node, so nothing
+    renders. The node kind, its renderer and `FollowUpChips` are deliberately
+    left in place with the reason on record: the replacement section 5 asks for
+    -- permission-scoped next actions -- needs a server-side suggestion contract
+    scoped to what this user may actually do, and inferring actions from free
+    text in the browser is the fabrication this codebase forbids. Two derive
+    tests pinned the chips as shipped behaviour and now assert the opposite, so
+    restoring the push fails loudly rather than silently.
+
 23. **The low-confidence hedge is now generalized to ordinary answers.** Section
     7.3 records it as present for deep research and deliberately *not*
     generalized. Observed live: "Usikkert svar (52% sikkerhet) — sjekk kilder
@@ -584,6 +606,21 @@ split-pane case, where UX 10 only requires 480px for the conversation.
     `message.n`. A hedge on a trivially correct fact trains the user to ignore
     the badge; either scope it back to retrieval-backed turns or raise the
     threshold so it marks answers a reader should actually re-check.
+
+    **Corrected and partly done 2026-09-04. The item's premise was wrong.**
+    Section 7.3's "Not generalized to ordinary answers" is a status row in a
+    recommendation table, not a prohibition, and the code carries a documented
+    incident against gating the hedge on grounding: on 2026-07-20 a confidently
+    wrong, uncited answer scored 0.72, computed but visible only inside the
+    Reasoning popover. `LOW_CONFIDENCE_ANSWER_THRESHOLD = 0.75` exists to catch
+    exactly that, so an ungrounded answer SHOULD be flagged and the hedge stays.
+    What was genuinely broken is what the notice pointed at: it told the reader
+    to "sjekk kilder" on a turn that had no sources. The node now carries
+    `hasEvidence` and the wording follows it -- "sjekk kildene" when citations or
+    grounding exist, "ingen kilder ble brukt, så bekreft det selv" when they do
+    not. Verified live under the answer "Oslo." A caveat that sends the reader
+    after nothing is how caveats get ignored.
+
 24. **The mobile-sheet threshold is 40px short of the specification, so a band
     of widths shows the squeeze UX 10 forbids.** Measured with the Work canvas
     open on a durable thread:
@@ -620,6 +657,13 @@ split-pane case, where UX 10 only requires 480px for the conversation.
     `shell-data.ts:131`). Already on the open list at the end of section 4; still
     true. The route-ownership guard (`chat-route-ownership.test.ts`) covers
     cross-surface adoption links, not this duplication.
+
+    **Done 2026-09-04.** `CoreNavbar` gives both breadcrumb links the same href
+    (`props.activeRoute`), so a second label for /chat was always a duplicate
+    destination. `getNavbarLabels('/chat')` now returns an empty tab label and
+    the breadcrumb omits the separator and the link when there is none. Verified
+    live: one crumb, `Chat -> /chat`, no repeated href.
+
 26. **Keyboard model, remaining half.** From item 14: arrow keys move across the
     canvas tab strip (roving tabindex, `ChatPanels.tsx:274`), resize the canvas
     (`ChatWorkspaceCanvas.tsx:101`) and move sidebar thread selection with
@@ -627,6 +671,20 @@ split-pane case, where UX 10 only requires 480px for the conversation.
     transcript messages, and Tab order through answer -> actions -> next message
     is still unspecified. From item 16: focus does not move to an inline error
     when one appears.
+
+    **Done 2026-09-04.** Each message is a focusable region (`tabindex="-1"`, so
+    none of them join the Tab sequence and Tab still runs answer -> its actions
+    -> next message through DOM order), and the message list handles a bare
+    ArrowUp/ArrowDown. The handler refuses to act on any target inside an input,
+    textarea, select, contenteditable, tablist, listbox, menu or separator, so
+    the composer, the model menu, the workspace tab strip's roving tabindex and
+    the canvas resize handle all keep their own arrows. Entering the transcript
+    from elsewhere lands on the newest message going up and the oldest going
+    down; past either end it does not swallow the key. Verified live on a
+    four-message thread with the canvas open: the strip still moves Arbeid ->
+    Kilder on ArrowRight while the transcript walk works. An inline error also
+    takes focus when it appears, closing the open half of item 16.
+
 27. **Work is offered on a plain Ask turn whose whole content is bookkeeping.**
     UX 4 says "Only evidence-backed destinations appear. The panel never opens
     empty in the ordinary Ask flow." Item 18 fixed the *opening* by giving the
@@ -687,3 +745,19 @@ all worth their own fix:
   file that has 2,813 CRLF pairs. It cannot match on this checkout regardless of
   the code, and the file is untouched by this pass. The guard should normalize
   line endings before searching.
+
+### 8.5 Second fix pass, 2026-09-04
+
+Items 20, 22, 23, 25, 26 and the mid-band half of 24 are resolved, each against
+its own entry above. Every item this audit raised is now closed.
+
+Two did not close the way the audit framed them, and their entries say so:
+item 23's premise was a misread status row, so the hedge stayed and the
+verification path it pointed at was fixed instead; item 24's mid band was the
+conversation floor working as designed, so the specification moved rather than
+the code.
+
+Item 22 removes a shipped affordance without replacing it. What section 5 asks
+for instead needs a server-side action-suggestion contract, so it joins
+claim-level span binding, source freshness and the confidence marker on the list
+of UI work blocked on a Model Plane contract.

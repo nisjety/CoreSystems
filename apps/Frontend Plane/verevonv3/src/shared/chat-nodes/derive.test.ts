@@ -73,7 +73,7 @@ describe('deriveConversationNodes', () => {
       followUps: ['og videre?'],
     })
     const shown = kinds(streaming)
-    for (const suppressed of ['low-confidence', 'memory-recall', 'truncated', 'follow-ups']) {
+    for (const suppressed of ['low-confidence', 'memory-recall', 'truncated']) {
       expect(shown).not.toContain(suppressed)
     }
 
@@ -83,9 +83,13 @@ describe('deriveConversationNodes', () => {
       stopReason: 'max_tokens',
       followUps: ['og videre?'],
     })
-    for (const shownAfter of ['low-confidence', 'memory-recall', 'truncated', 'follow-ups']) {
+    for (const shownAfter of ['low-confidence', 'memory-recall', 'truncated']) {
       expect(kinds(settled)).toContain(shownAfter)
     }
+    // Follow-ups are not derived in either state: section 5 of the design doc
+    // rejects generic curiosity chips, and what the model returns here is one
+    // (audit item 22). Asserted so restoring the push fails loudly.
+    expect(kinds(settled)).not.toContain('follow-ups')
   })
 
   it('drops a zero memory-recall count instead of rendering "recalled 0"', () => {
@@ -116,8 +120,9 @@ describe('deriveConversationNodes', () => {
       'attachments',
       'steps',
       'approvals',
-      'follow-ups',
     ])
+    // No 'follow-ups' tail: see the suppression test above.
+    expect(kinds(rich)).not.toContain('follow-ups')
   })
 })
 

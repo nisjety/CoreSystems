@@ -155,7 +155,9 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   },
   'low-confidence': {
     kind: 'low-confidence',
-    render: (node) => <LowConfidenceNotice confidence={node.confidence} />,
+    render: (node) => (
+      <LowConfidenceNotice confidence={node.confidence} hasEvidence={node.hasEvidence} />
+    ),
   },
   'memory-recall': {
     kind: 'memory-recall',
@@ -364,7 +366,10 @@ export function AssistantMessage(props: {
   })
 
   return (
-    <article class="verevon-chat-message verevon-chat-message--assistant">
+    // `tabindex=-1`: focusable for the arrow-key walk in ChatPage, but never
+    // in the Tab sequence, which still runs answer -> actions -> next message
+    // through DOM order (audit item 26).
+    <article class="verevon-chat-message verevon-chat-message--assistant" tabindex={-1}>
       <div class="verevon-chat-message__avatar">
         <span class="verevon-chat-message__logo" aria-hidden="true" />
       </div>
@@ -537,7 +542,7 @@ export function UserMessage(props: {
   }
 
   return (
-    <article class="verevon-chat-message verevon-chat-message--user">
+    <article class="verevon-chat-message verevon-chat-message--user" tabindex={-1}>
       <div class="verevon-chat-user-meta">
         <span>Meg</span>
         <time>{formatRelative(props.message.createdAt)}</time>
@@ -914,10 +919,13 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
   return (
     <Show when={hasMetrics()}>
       <div ref={ref} class="verevon-chat-reasoning-popover">
+        {/* The trigger used to read "Claude Sonnet · 5 tokens". UX spec finding
+            7: raw model labels and per-turn tokens belong in details or Trace,
+            not in the reading flow (audit item 20). The panel below already
+            lists Modell, Input, Output, tid, Sikkerhet and Kostnad. */}
         <button type="button" aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
           <Sparkles size={12} />
-          <Show when={model()}><span>{prettyModel(model() ?? '')}</span></Show>
-          <Show when={props.message.outputTokens}><em>{props.message.outputTokens} tokens</em></Show>
+          <span>{i18n.tr('Detaljer', 'Details')}</span>
         </button>
         <Show when={open()}>
           <div class="verevon-chat-reasoning-popover__panel">
@@ -1659,11 +1667,21 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
  * be low-confidence with no grounding object at all (an ungrounded guess),
  * which is exactly the case this notice exists to catch.
  */
-export function LowConfidenceNotice(props: { confidence: number }) {
+export function LowConfidenceNotice(props: { confidence: number; hasEvidence: boolean }) {
+  const i18n = useI18n()
+  // Point only at a verification path that exists. "Check the sources" on a
+  // turn with no sources sends the reader after nothing, which is how a
+  // caveat trains people to ignore caveats (audit item 23).
+  const advice = () => (props.hasEvidence
+    ? i18n.tr('sjekk kildene før du stoler på dette', 'check the sources before relying on this')
+    : i18n.tr('ingen kilder ble brukt, så bekreft det selv', 'no sources were used, so verify it yourself'))
   return (
     <p class="verevon-chat-low-confidence-notice" role="note">
       <AlertCircle size={12} />
-      Usikkert svar ({Math.round(props.confidence * 100)}% sikkerhet) — sjekk kilder før du stoler på dette.
+      {i18n.tr(
+        `Usikkert svar (${Math.round(props.confidence * 100)}% sikkerhet) — ${advice()}.`,
+        `Uncertain answer (${Math.round(props.confidence * 100)}% confidence) — ${advice()}.`,
+      )}
     </p>
   )
 }
