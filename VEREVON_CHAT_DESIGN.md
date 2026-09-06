@@ -761,3 +761,143 @@ Item 22 removes a shipped affordance without replacing it. What section 5 asks
 for instead needs a server-side action-suggestion contract, so it joins
 claim-level span binding, source freshness and the confidence marker on the list
 of UI work blocked on a Model Plane contract.
+---
+
+## 9. Cross-document completion check (2026-09-06)
+
+Section 8 audited the chat page. This section audits the three documents
+themselves: what each one asks for, and whether the code actually does it.
+Method: every claim below was checked against the code in this checkout, not
+against the documents' own status lines. Where a document claimed something was
+done and the code disagreed, the code wins and the row says so.
+
+### 9.1 Design doc — items 1-27
+
+All 27 are closed. Items 1-13 were verified against code on 2026-09-02 (the
+table in section 4), items 14-18 in section 7.4, items 19-27 in sections 8.2,
+8.4 and 8.5. Two spot-checks of the oldest claims held up:
+
+- Item 4 (collapse the two pin systems): one system remains. The pin is
+  server-owned (`ChatThreadSession.pinned`, written by `PUT`), and
+  `withPinnedCarry` now preserves it across a snapshot upsert that omits it,
+  guarded by a named regression test.
+- Item 5 (`Last-Event-Id`): genuinely wired both ways.
+  `use-chat-controller.ts` records every frame id onto the turn through
+  `onFrameId` and passes `turn.lastFrameId` back as `streamChat`'s resume
+  cursor; `ChatLiveRunPanel` does the same for the durable run stream.
+
+### 9.2 Design doc — section 2.3 wired-but-dead inventory
+
+Seven of nine rows are resolved. Two are not:
+
+| Row | State on 2026-09-06 |
+|---|---|
+| `Last-Event-Id` resume | **Closed.** Recorded and passed; see 9.1. |
+| Sidebar pin | **Closed.** One server-owned system. |
+| Plan view | **Closed.** `listPlans` / `listTodos` / `getLineage` all have real callers (`ChatPanels.tsx`, `AgentRunConsole.tsx`). |
+| Non-image attachments | **Closed** (item 7), with the documented async-indexing caveat. |
+| `@`-mention on chat page | **Closed by removal.** `mentionedAgentRef` is sent only from `SpaceRoomComposer` after a roster selection; global Chat treats `@` as text. |
+| `reason` response mode | **Closed by removal.** The composer sends no such tool and `chat-normalizers.ts` carries the reason. |
+| `?space_ref=` | **Closed by removal**, with the reason in `use-chat-controller.ts`. |
+| AG-UI | **Still open, and item 6 said "no third option".** `ag-ui-client.ts` has exactly one importer app-wide: its own test file. The gateway route is live (`/api/v1/ag-ui/stream`), the adapter it shares with the native path (`shared/chat/verevon-ui-events.ts`) is real and used — but by `chat-client.ts`, not by the AG-UI client. So a fully built, fully tested parallel transport ships with no way to reach it. Kept as a planned surface by owner decision on 2026-09-02; that decision is what "delete or fix" was meant to prevent, so it should be either reached or removed, not carried indefinitely. |
+| Unproxied Model Plane | **Still open, untouched inventory.** Gateway route coverage measured today: realtime 0, translate 0, language 0, document-AI 0, `/v1/tasks` 0, `/v1/toon/encode` 0. Only video has any gateway mention. |
+
+### 9.3 UX spec — section 11 acceptance criteria
+
+| # | Criterion | State |
+|---|---|---|
+| 1 | Ask without Work/Output/Trace chrome | **Met** (verified live, 8.1). |
+| 2 | A workspace destination never hides or resets the composer | **Met** (verified live, 8.1). |
+| 3 | No tab strip in the conversation header | **Met** (verified live, 8.1). |
+| 4 | Exactly one tab strip, inside the canvas | **Met** (verified live, 8.1). |
+| 5 | Inspect a result and request a revision without closing it | **Met**, as a consequence of 2: the composer stays mounted and usable with the canvas open. Not separately exercised as a flow. |
+| 6 | Deterministic first-summon precedence, sticky manual choice | **Met** (`chat-surfaces.ts`, 19 assertions). |
+| 7 | Work presents outcomes first, runtime detail second | **Met** by item 19: heading, status line, plan, needs-you callout, then work sections; telemetry, bookkeeping steps and the event log behind one disclosure. |
+| 8 | Resize, close, focus transfer, keyboard tabs, reduced motion, mobile sheet | **Met.** `role="separator"` handle with a persisted width clamped by `MIN_CONVERSATION_WIDTH = 480`; `Lukk arbeidsflate`; focus moves into the mounted tabpanel; roving tabindex on the strip; 8 `prefers-reduced-motion` blocks; the full-screen sheet at `max-width: 760px`. |
+| 9 | Norwegian and English labels switch together | **NOT met.** Verified today by reading the components: the chat feature has 128 `i18n.tr(...)` calls and a residue of single-language literals that cannot follow the locale in either direction. English-only: `aria-label="Answer version"`, `"Previous version"`, `"Next version"`, `title="Open image"`, `"Download image"`, `aria-label="Scroll to bottom"`, `"Chat workspace views"`, `"Verevon chat workspace"`. Norwegian-only: `"Lukk arbeidsflaten"` / `"Vis live-panelet"` / `"Skjul live-panelet"` (`ChatLiveRunPanel.tsx:489-490`), `title="Resultatet ble avkortet"`, `aria-label="Fullmakt"`, `placeholder="Hvorfor trenger agenten denne fullmakten?"`, `` aria-label={`Last ned ${...}`} ``. Most of them are accessible names, which is why the live pass in section 8 did not catch it: the visible chrome does switch. A screen-reader user gets mixed-language chrome in both locales. This is mechanical to close and deserves a guard test, not just a fix. |
+| 10 | No empty canvas for an ordinary Ask turn | **Met** (verified live, 8.1). |
+
+Section 12's recommended implementation order (7 steps) is complete: steps 1-6
+were closed before this pass and step 7 ("finish responsive sheet and
+keyboard/focus behaviour") by items 24 and 26.
+
+Section 3's own audit: 7 of 8 findings closed, finding 3 by item 19. Finding 8
+(error language too close to raw runtime) is **still unverified** -- no failure
+has been induced in the browser in any pass.
+
+### 9.4 Implementation plan — phases and definition of finished
+
+Phases 0-8 are substantially delivered and documented in the 2026-08-30
+checkpoint. The remaining work is concentrated in three places.
+
+- **Phase 9 (A2A) is not started**, exactly as the plan itself says it should
+  not be. Confirmed today: no `a2a`, `agent_card` or agent-card route exists
+  anywhere in the frontend plane or its gateway. The plan's own note is the
+  right instruction -- Application-owned registry and Control authorization
+  first, then the Rust SDK at the Model/Agent boundary. Definition-of-finished
+  point 10 depends entirely on this.
+- **Phase 10 is half delivered.** User-facing Trace is done (item 11, the
+  5,000-event cap, the proof bundle, `effect_class`). The twelve evaluation
+  suites are **not built**: `tests/e2e` holds 13 specs and 32 tests covering
+  browser workspace, inbox/ticketing, spaces, cross-plane smoke and knowledge
+  authority -- and not one of them drives `/chat`. The chat workspace's own
+  coverage is 22 unit and component files, which cannot exercise suites 3, 4,
+  8, 9 or 12 (upload and preview, browser return-after-navigation, reload after
+  every event family, concurrent threads, keyboard/SR/zoom/mobile flows). This
+  is the largest single gap in the plan and it is what the phase 4, 5, 10 and
+  11 gates are all waiting on.
+- **Phase 11 (staged release) has not begun.** Its gate needs replay parity,
+  the accessibility target, and performance budgets on long threads.
+
+Definition of finished, 14 points:
+
+| # | Point | State |
+|---|---|---|
+| 1 | Calm, familiar chat | Done. |
+| 2 | Sources only when evidence exists | Done (`available` / `claimsFocus`). |
+| 3 | Work only on durable multi-step activity | Done (item 18 + item 27). |
+| 4 | Correct native viewer for PDFs, files, tables, HTML | **Mostly.** Attachments cover image, PDF (iframe), sandboxed HTML, CSV table and text. A *generated* PDF artifact classifies as `binary` in `chat-artifacts.ts` -- a download, not a viewer. Worth closing if agents start emitting PDFs. |
+| 5 | Browser sessions persistent, observable, safe to leave | Done (durable browser replay + cursor resume). |
+| 6 | Trace explains work without raw reasoning | Done. |
+| 7 | Ask/Do makes intent explicit | Done. |
+| 8 | Durable, auditable approvals, effects, cancellations | Done (`CancelRun` receipt, `effect_class`). |
+| 9 | Streams resume without loss or duplication | Done in code (id-deduped replay pages, per-run generation guards, resume cursors on both streams). **Not proven** -- that is evaluation suite 8. |
+| 10 | A2A agents collaborate | **Not started** (phase 9). |
+| 11 | Solid rendering meets performance targets under heavy streaming | **Unverified.** No performance measurement, budget or benchmark exists anywhere in the chat feature. There is no agreed stress profile to test against, which is a phase 0 artefact ("baseline measurements are reproducible") that was never produced. |
+| 12 | Keyboard, screen reader, zoom, reduced motion, mobile | **Nearly.** Everything structural is in place after items 24 and 26; the accessible-name gap in 9.3 criterion 9 is the exception, and it is a screen-reader-only defect. |
+| 13 | Tenant policy governs data, grounding, models, tools, agents, retention, effects | **Partly.** ZDR, grounding scope, privacy tier, effort and actions are all governed on the request path, and `TrustCenterSection` / `WorkspaceSettingsPage` expose tenant controls. Agents are not governable because phase 9 does not exist. |
+| 14 | Legacy duplicate chat state and dead integration paths removed | **Open.** The two rows in 9.2 are exactly this point: an unreachable AG-UI client and seven unproxied Model Plane routes. |
+
+### 9.5 What actually needs doing next
+
+Ranked by what unblocks the most, with the reason each one is not already done:
+
+1. **Chat-workspace e2e suites** (phase 10, evaluation suites 1-12). Four gates
+   and three definition-of-finished points wait on this, and the code claims in
+   point 9 are unprovable without it. Nothing blocks it.
+2. **Accessible-name localisation** (criterion 9). Mechanical, plus a guard test
+   so a new literal cannot slip in. Nothing blocks it.
+3. **Resolve AG-UI one way or the other** (item 6, point 14). A decision, not a
+   contract: reach the client from the app or delete it.
+4. **A performance baseline and stress profile** (phase 0 artefact, point 11).
+   Cannot be "met" until someone writes down the target.
+5. **The three UI markers** -- claim-level span binding, source freshness,
+   confidence/verification -- and the permission-scoped next actions that were
+   meant to replace item 22's follow-up chips. All four need a Model Plane
+   contract first; that is the blocker, not the UI.
+6. **Message pinning UI** (pin one message into context; distinct from thread
+   pins). Never addressed, no blocker recorded.
+7. **The unproxied Model Plane routes** (2.3). Inventory only. Each needs a
+   gateway domain and a use case; several may deserve deletion from the
+   inventory instead.
+8. **Phase 9 A2A backend contract spike**, in the order the plan prescribes.
+9. **Induce a real failure and check the error language** (UX section 3
+   finding 8). Never verified in any pass.
+
+Open questions in section 6 stand as follows: Q3 (keyboard) and Q4 (Trace =
+audit) are answered and built. Q1 (mobile) has its recommendation corroborated
+and the sheet implemented, but no recorded decision. Q2 (Norwegian vocabulary)
+is in use throughout without a written glossary -- criterion 9 is the visible
+cost of that. Q5 (per-run cost) is now partly answered by accident: the
+transcript's "Detaljer" panel carries Kostnad alongside Modell, Input, Output,
+tid and Sikkerhet. Whether cost belongs anywhere more prominent is still open.
