@@ -151,7 +151,7 @@ function AttachmentViewer(props: { attachment: ChatTurnAttachment; panelId: stri
           <Show when={previewUrl()}>
             {(url) => (
               <>
-                <a href={url()} download={props.attachment.name} aria-label={`Last ned ${props.attachment.name}`} title="Last ned">
+                <a href={url()} download={props.attachment.name} aria-label={i18n.tr(`Last ned ${props.attachment.name}`, `Download ${props.attachment.name}`)} title={i18n.tr('Last ned', 'Download')}>
                   <Download size={14} />
                 </a>
                 <a href={url()} target="_blank" rel="noopener noreferrer" aria-label={i18n.tr(`Åpne ${props.attachment.name}`, `Open ${props.attachment.name}`)} title={i18n.tr('Åpne i ny fane', 'Open in a new tab')}>

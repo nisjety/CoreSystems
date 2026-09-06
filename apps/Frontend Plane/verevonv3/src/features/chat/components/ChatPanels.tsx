@@ -258,7 +258,7 @@ export function ChatTabs(props: {
 
   return (
     <Show when={tabs().length > (props.includeChat === false ? 0 : 1)}>
-      <div class="verevon-chat-tabs" role="tablist" aria-label="Chat workspace views">
+      <div class="verevon-chat-tabs" role="tablist" aria-label={i18n.tr('Visninger i chat-arbeidsflaten', 'Chat workspace views')}>
         <For each={tabs()}>
           {(item, index) => {
             const Icon = item.icon
@@ -648,8 +648,11 @@ export function StepsPanel(props: {
           <Show when={props.screen}>
             {(screen) => (
               <figure class="verevon-chat-agent-screen">
-                <img src={imageArtifactSrc(screen().content)} alt={screen().title || 'Agent screen'} />
-                <figcaption>{screen().title || 'Live screen'}</figcaption>
+                <img
+                  src={imageArtifactSrc(screen().content)}
+                  alt={screen().title || i18n.tr('Agentskjerm', 'Agent screen')}
+                />
+                <figcaption>{screen().title || i18n.tr('Live-skjerm', 'Live screen')}</figcaption>
               </figure>
             )}
           </Show>

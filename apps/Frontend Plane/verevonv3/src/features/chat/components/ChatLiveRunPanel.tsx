@@ -217,6 +217,13 @@ export function ChatLiveRunPanel(props: {
   onRefreshApprovals?: (runId: string) => void
 }) {
   const i18n = useI18n()
+  // One name for two attributes: the button carries the same text as its
+  // accessible name and its tooltip, and they must not drift apart.
+  const toggleLabel = () => props.workContent
+    ? i18n.tr('Lukk arbeidsflaten', 'Close the workspace')
+    : props.collapsed
+      ? i18n.tr('Vis live-panelet', 'Show the live panel')
+      : i18n.tr('Skjul live-panelet', 'Hide the live panel')
   const [watch, setWatch] = createSignal<ChatRunWatchState | null>(null)
   const [expandedStep, setExpandedStep] = createSignal<number | null>(null)
   const [reconnectVersion, setReconnectVersion] = createSignal(0)
@@ -478,7 +485,9 @@ export function ChatLiveRunPanel(props: {
               'verevon-chat-run-panel--workspace': Boolean(props.workContent),
             },
           ]}
-          aria-label={props.workContent ? 'Arbeidsflate' : 'Live agentkjøring'}
+          aria-label={props.workContent
+            ? i18n.tr('Arbeidsflate', 'Workspace')
+            : i18n.tr('Live agentkjøring', 'Live agent run')}
           style={{ display: props.hidden ? 'none' : undefined }}
         >
           <header class="verevon-chat-run-panel__head">
@@ -486,8 +495,8 @@ export function ChatLiveRunPanel(props: {
               type="button"
               class="verevon-chat-run-panel__toggle"
               aria-expanded={!props.collapsed ? 'true' : 'false'}
-              aria-label={props.workContent ? 'Lukk arbeidsflaten' : props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
-              title={props.workContent ? 'Lukk arbeidsflaten' : props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
+              aria-label={toggleLabel()}
+              title={toggleLabel()}
               onClick={() => props.workContent ? props.onCloseWork?.() : props.onToggleCollapsed()}
             >
               <Show when={props.collapsed} fallback={<PanelRightClose size={15} />}>

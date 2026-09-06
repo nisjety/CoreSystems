@@ -57,6 +57,7 @@ import type { ChatTab } from './chat-types'
 import { useI18n } from '@/shared/i18n'
 
 export default function ChatPage() {
+  const i18n = useI18n()
   const session = getSession()
   const {
     hasMessages,
@@ -582,7 +583,10 @@ export default function ChatPage() {
         {streamAnnouncement()}
       </div>
 
-      <section class="verevon-chat-section" aria-label="Verevon chat workspace">
+      <section
+        class="verevon-chat-section"
+        aria-label={i18n.tr('Verevon chat-arbeidsflate', 'Verevon chat workspace')}
+      >
         <Show when={hasMessages()}>
           <ChatHeader
             active={activeTab()}
@@ -717,7 +721,7 @@ export default function ChatPage() {
               <button
                 type="button"
                 class="verevon-chat-scroll-down"
-                aria-label="Scroll to bottom"
+                aria-label={i18n.tr('Rull til nyeste', 'Scroll to bottom')}
                 onClick={() => scrollToBottom()}
               >
                 <ArrowDown size={16} />

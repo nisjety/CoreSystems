@@ -75,7 +75,11 @@ describe('workspace rail geometry', () => {
 
   it('names the rail for what it is hosting', async () => {
     // "Live agentkjøring" is wrong when the panel is showing the Work tab.
+    // Both names go through `i18n.tr` since acceptance criterion 9; the rule
+    // being guarded is that the name still SWITCHES on `workContent`.
     const panel = await read('src/features/chat/components/ChatLiveRunPanel.tsx')
-    expect(panel).toContain("aria-label={props.workContent ? 'Arbeidsflate' : 'Live agentkjøring'}")
+    expect(panel).toContain('aria-label={props.workContent')
+    expect(panel).toContain("i18n.tr('Arbeidsflate', 'Workspace')")
+    expect(panel).toContain("i18n.tr('Live agentkjøring', 'Live agent run')")
   })
 })

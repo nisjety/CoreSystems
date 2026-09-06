@@ -415,12 +415,12 @@ export function AssistantMessage(props: {
             </MessageAction>
             <Show when={props.version}>
               {(version) => (
-                <div class="verevon-chat-version-switcher" role="group" aria-label="Answer version">
+                <div class="verevon-chat-version-switcher" role="group" aria-label={i18n.tr('Svarversjon', 'Answer version')}>
                   <button
                     type="button"
                     class="verevon-chat-version-switcher__arrow"
                     disabled={version().current <= 1}
-                    aria-label="Previous version"
+                    aria-label={i18n.tr('Forrige versjon', 'Previous version')}
                     onClick={() => props.onSelectVersion?.(version().current - 2)}
                   >
                     <ChevronLeft size={14} />
@@ -432,7 +432,7 @@ export function AssistantMessage(props: {
                     type="button"
                     class="verevon-chat-version-switcher__arrow"
                     disabled={version().current >= version().total}
-                    aria-label="Next version"
+                    aria-label={i18n.tr('Neste versjon', 'Next version')}
                     onClick={() => props.onSelectVersion?.(version().current)}
                   >
                     <ChevronRight size={14} />
@@ -1251,6 +1251,7 @@ function ToolIntentIcon(props: { intent: ToolIntent }) {
  * the payload is the evidence and reshaping it would hide what the model saw.
  */
 export function ToolCallCard(props: { call: ChatToolCall }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const failed = () =>
     Boolean(props.call.error) || props.call.status === 'error'
@@ -1287,7 +1288,7 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
               see it, which matters for any answer built on this. */}
           <em
             class="verevon-chat-tool-call__truncated"
-            title="Resultatet ble avkortet"
+            title={i18n.tr('Resultatet ble avkortet', 'The result was truncated')}
           >
             avkortet
           </em>
@@ -1400,7 +1401,7 @@ export function PlanApprovalControl(props: {
           Dette var en plan – ingenting er utført. Velg hvor mye agenten får gjøre, og skriv
           hvorfor.
         </p>
-        <div class="verevon-chat-plan__rungs" role="radiogroup" aria-label="Fullmakt">
+        <div class="verevon-chat-plan__rungs" role="radiogroup" aria-label={i18n.tr('Fullmakt', 'Authority')}>
           <For each={GRANTABLE_RUNGS}>
             {(option) => (
               <button
@@ -1419,7 +1420,10 @@ export function PlanApprovalControl(props: {
         <textarea
           class="verevon-chat-plan__reason"
           rows={2}
-          placeholder="Hvorfor trenger agenten denne fullmakten?"
+          placeholder={i18n.tr(
+            'Hvorfor trenger agenten denne fullmakten?',
+            'Why does the agent need this authority?',
+          )}
           value={reason()}
           onInput={(event) => setReason(event.currentTarget.value)}
         />
@@ -1518,6 +1522,7 @@ export function AttachmentItem(props: {
   tone: 'assistant' | 'user'
   onOpen?: (attachmentId: string) => void
 }) {
+  const i18n = useI18n()
   const [failed, setFailed] = createSignal(false)
   const previewUrl = () => props.attachment.previewUrl || props.attachment.url
   const isImage = () => Boolean(previewUrl()) && props.attachment.type.startsWith('image/') && !failed()
@@ -1540,7 +1545,7 @@ export function AttachmentItem(props: {
           tabindex={interaction() ? 0 : undefined}
           onClick={open}
           onKeyDown={handleKeyDown}
-          title={interaction() ? 'Åpne i arbeidsflate' : undefined}
+          title={interaction() ? i18n.tr('Åpne i arbeidsflate', 'Open in the workspace') : undefined}
         >
           {props.attachment.name}
         </span>
@@ -1553,7 +1558,7 @@ export function AttachmentItem(props: {
           tabindex={interaction() ? 0 : undefined}
           onClick={open}
           onKeyDown={handleKeyDown}
-          title={interaction() ? 'Åpne i arbeidsflate' : undefined}
+          title={interaction() ? i18n.tr('Åpne i arbeidsflate', 'Open in the workspace') : undefined}
         >
           <img src={url()} alt={props.attachment.name} onError={() => setFailed(true)} />
         </span>
@@ -1563,6 +1568,7 @@ export function AttachmentItem(props: {
 }
 
 export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[] }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-image-previews">
       <For each={props.previews}>
@@ -1581,16 +1587,16 @@ export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[
                   href={preview.src}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label={`Open ${preview.title}`}
-                  title="Open image"
+                  aria-label={i18n.tr(`Åpne ${preview.title}`, `Open ${preview.title}`)}
+                  title={i18n.tr('Åpne bildet', 'Open image')}
                 >
                   <ExternalLink size={14} />
                 </a>
                 <a
                   href={preview.src}
                   download={preview.downloadName}
-                  aria-label={`Download ${preview.title}`}
-                  title="Download image"
+                  aria-label={i18n.tr(`Last ned ${preview.title}`, `Download ${preview.title}`)}
+                  title={i18n.tr('Last ned bildet', 'Download image')}
                 >
                   <Download size={14} />
                 </a>
@@ -1601,7 +1607,7 @@ export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[
               href={preview.src}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label={`Open ${preview.title}`}
+              aria-label={i18n.tr(`Åpne ${preview.title}`, `Open ${preview.title}`)}
             >
               <img src={preview.src} alt={preview.title} loading="lazy" />
             </a>
@@ -1632,7 +1638,7 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
           const remote = () => /^https?:\/\//i.test(file.url)
           return (
             <span class="verevon-chat-generated-file">
-              <a href={file.url} download={file.name} aria-label={`Last ned ${file.name}`}>
+              <a href={file.url} download={file.name} aria-label={i18n.tr(`Last ned ${file.name}`, `Download ${file.name}`)}>
                 <Paperclip size={12} />
                 {file.name}
                 <em>{friendlyMimeLabel(file.mime)}</em>
