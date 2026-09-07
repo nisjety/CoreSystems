@@ -715,6 +715,13 @@ struct RunsQuery {
     status: Option<String>,
     after: Option<String>,
     limit: Option<u32>,
+    /// Control's shared-Space read authority, relayed verbatim. This gateway
+    /// neither mints nor inspects it — session-core is the verifier, and a
+    /// gateway that could interpret it would be a second opinion about who may
+    /// read a room's work.
+    space_id: Option<String>,
+    space_read_decision_ref: Option<String>,
+    space_read_decision_token: Option<String>,
 }
 
 /// Query params for `GET /v1/runs/system`. Deliberately has NO `org_id`: the
@@ -985,9 +992,16 @@ async fn get_subagent_lineage(
 // ============================================================================
 
 /// `GET /v1/runs?thread_id&status&after&limit` — list a thread's runs,
-/// newest-first, for the runs-history rail. `thread_id` is required; `status`
-/// filters by run status, `after` is a ULID cursor, `limit` bounds the page.
-/// The verified claims gate access; session-core owns the run metadata.
+/// newest-first, for the runs-history rail. `status` filters by run status,
+/// `after` is a ULID cursor, `limit` bounds the page. The verified claims gate
+/// access; session-core owns the run metadata.
+///
+/// `thread_id` is required UNLESS a Space read decision
+/// (`space_id` + `space_read_decision_ref` + `space_read_decision_token`) is
+/// supplied, which lists the runs of every thread that decision admits — the
+/// room's own work rather than one conversation's. Session-core decides whether
+/// the decision authorizes anything; this only refuses the request that names
+/// neither a thread nor a Space, which could not be answered either way.
 async fn list_runs(
     State(state): State<AppState>,
     Extension(_claims): Extension<Claims>,
@@ -995,10 +1009,11 @@ async fn list_runs(
     Query(query): Query<RunsQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let thread_id = query.thread_id.unwrap_or_default();
-    if thread_id.is_empty() {
+    let space_id = query.space_id.unwrap_or_default();
+    if thread_id.is_empty() && space_id.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "thread_id is required" })),
+            Json(json!({ "error": "thread_id or space_id is required" })),
         ));
     }
 
@@ -1011,6 +1026,9 @@ async fn list_runs(
                 status_filter: query.status.unwrap_or_default(),
                 after_run_id: query.after.unwrap_or_default(),
                 limit: query.limit.unwrap_or(0),
+                space_id,
+                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
             },
             &bearer,
         )?)
@@ -5048,20 +5066,45 @@ async fn cancel_task_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &format!("tasks/{id}/cancel"), "POST", None).await
 }
 
+/// Optional `space_ref` narrows the org's schedules to one room's.
+///
+/// Forwarded verbatim; capability-core applies it as a filter over rows that
+/// already carry the column, so this can only ever return a subset of what the
+/// unfiltered call returns. The org still comes from the verified claims.
+#[derive(Debug, Default, Deserialize)]
+struct CronListQuery {
+    space_ref: Option<String>,
+}
+
 async fn list_cron_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
+    Query(query): Query<CronListQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(
-        &s,
-        &c,
-        &bearer,
-        &format!("cron?org_id={}", c.org_id),
-        "GET",
-        None,
-    )
-    .await
+    let space_ref = query.space_ref.unwrap_or_default();
+    let space_ref = space_ref.trim();
+    // This crate has no URL-encoder, and half of one is worse than none: a
+    // `space_ref` carrying `&` or `=` would silently become different query
+    // parameters. Space refs are Convex ids, so refusing anything outside the
+    // URL-safe set costs nothing real and cannot mangle a request into a
+    // different one.
+    if !space_ref.is_empty()
+        && !space_ref
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "space_ref must be URL-safe" })),
+        ));
+    }
+    let path = if space_ref.is_empty() {
+        format!("cron?org_id={}", c.org_id)
+    } else {
+        format!("cron?org_id={}&space_ref={space_ref}", c.org_id)
+    };
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
 }
 async fn create_cron_proxy(
     State(s): State<AppState>,
@@ -6846,6 +6889,12 @@ struct ThreadMessage {
     /// from session-core's record — never an authority claim.
     #[serde(skip_serializing_if = "String::is_empty")]
     agent_name: String,
+    /// Which subject wrote this turn, from session-core's at-the-time record.
+    /// Present on user turns in a shared Space; omitted when empty so a reader
+    /// can tell "nobody recorded an author" from "the author is the empty
+    /// string". Presentation identity, never an authority claim.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    author_subject_id: String,
     /// The turn's persisted evidence, flattened so its keys (today
     /// `grounding`) sit directly on the message the way the live SSE path
     /// delivers them. Omitted entirely for turns recorded before metadata was
@@ -6868,6 +6917,12 @@ struct ListThreadsQuery {
     /// surface itself created (e.g. "chat"), rather than every unscoped
     /// thread regardless of which surface created it.
     origin: Option<String>,
+    /// Control's shared-Space read authority, relayed verbatim. The gateway
+    /// does not inspect or mint it: session-core is the verifier, and a
+    /// gateway that could interpret this token would be a second opinion about
+    /// who may read a room.
+    space_read_decision_ref: Option<String>,
+    space_read_decision_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -6880,6 +6935,10 @@ struct ThreadSummaryResponse {
     updated_at: String,
     pinned: bool,
     space_id: String,
+    /// Who owns this thread — in a room, who started the post. Sent so a
+    /// shared listing can attribute a post before its transcript is fetched.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    owner_subject_id: String,
     latest_run_id: String,
     latest_run_status: String,
     latest_run_updated_at: Option<String>,
@@ -7067,6 +7126,8 @@ async fn list_threads(
                 limit: query.limit.unwrap_or(80),
                 space_id: query.space_id.unwrap_or_default(),
                 origin: query.origin.unwrap_or_default(),
+                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
             },
             &bearer,
         )?)
@@ -7092,6 +7153,7 @@ async fn list_threads(
                 .latest_run_updated_at
                 .map(|value| timestamp_to_rfc3339(Some(value))),
             origin: thread.origin,
+            owner_subject_id: thread.owner_subject_id,
         })
         .collect();
 
@@ -7409,11 +7471,25 @@ fn timestamp_to_rfc3339(value: Option<prost_types::Timestamp>) -> String {
 /// resume). Reads from session-core's `ListConversation` (the canonical
 /// conversation store); org scope comes from the authenticated claims so a
 /// caller can never read another org's thread.
+/// Query for a shared-Space transcript read. Absent parameters keep the
+/// historical owner-bound behaviour; session-core, not this handler, decides
+/// whether a supplied decision authorizes anything.
+#[derive(Debug, Deserialize)]
+struct ThreadMessagesQuery {
+    #[serde(default)]
+    space_id: Option<String>,
+    #[serde(default)]
+    space_read_decision_ref: Option<String>,
+    #[serde(default)]
+    space_read_decision_token: Option<String>,
+}
+
 async fn list_thread_messages(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedModelBearer,
     Path(thread_id): Path<String>,
+    Query(query): Query<ThreadMessagesQuery>,
 ) -> Result<Json<ListThreadMessagesResponse>, (StatusCode, Json<serde_json::Value>)> {
     use mp_contracts::model_plane::v1::ListConversationRequest;
 
@@ -7432,6 +7508,9 @@ async fn list_thread_messages(
             ListConversationRequest {
                 org_id: claims.org_id.clone(),
                 thread_id: trimmed.to_owned(),
+                space_id: query.space_id.unwrap_or_default(),
+                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
             },
             &bearer,
         )?)
@@ -7448,6 +7527,7 @@ async fn list_thread_messages(
                 role: m.role,
                 content: m.content,
                 agent_name: m.agent_name,
+                author_subject_id: m.author_subject_id,
                 metadata: m.metadata.as_ref().map(prost_struct_to_json).and_then(
                     |value| match value {
                         Value::Object(map) if !map.is_empty() => Some(map),

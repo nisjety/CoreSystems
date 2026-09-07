@@ -1,9 +1,10 @@
 import { useLocation } from '@solidjs/router'
-import { Hash, MessageCircle, Users } from '@/shared/icons'
+import { Hash, MessageCircle, Plus, Users } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
 import {
+  createRoom,
   getSpaceThreads,
   listSpaces,
   type SpaceSummary,
@@ -25,7 +26,7 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   const location = useLocation()
   const [query, setQuery] = createSignal('')
   const [spacesLoadFailed, setSpacesLoadFailed] = createSignal(false)
-  const [spaces] = createResource(async () => {
+  const [spaces, { refetch: refetchSpaces }] = createResource(async () => {
     setSpacesLoadFailed(false)
     try {
       return await listSpaces()
@@ -34,6 +35,37 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
       return []
     }
   })
+  const [creatingRoom, setCreatingRoom] = createSignal(false)
+  const [createRoomError, setCreateRoomError] = createSignal('')
+  const [roomFormOpen, setRoomFormOpen] = createSignal(false)
+  const [roomName, setRoomName] = createSignal('')
+
+  // A named room, alongside the organization's own channel. Until this existed
+  // the "Channels" heading sat over a list that could only ever hold one entry.
+  async function createNamedRoom(event: Event) {
+    event.preventDefault()
+    const name = roomName().trim()
+    if (creatingRoom() || !name) return
+    setCreatingRoom(true)
+    setCreateRoomError('')
+    try {
+      await createRoom(name)
+      setRoomName('')
+      setRoomFormOpen(false)
+      // The room exists but is not registered yet, so it will not appear in the
+      // listing until Control accepts it. Refetch anyway: when registration is
+      // quick the room shows up, and when it is not the list is simply
+      // unchanged rather than showing a room nothing can be done in.
+      await refetchSpaces()
+    } catch {
+      setCreateRoomError(i18n.tr(
+        'Rommet kunne ikke opprettes. Ingenting ble klargjort.',
+        'The room could not be created. Nothing was provisioned.',
+      ))
+    } finally {
+      setCreatingRoom(false)
+    }
+  }
   const routeSpaceRef = createMemo(() => spaceRefFromPath(location.pathname))
   const selectedSpaceRef = createMemo(() => routeSpaceRef() ?? defaultSpace(spaces())?.space_ref)
   const [threadsLoadFailed, setThreadsLoadFailed] = createSignal(false)
@@ -89,6 +121,64 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
               {(space) => <SpaceLink space={space} active={space.space_ref === selectedSpaceRef()} />}
             </For>
           </SidebarGroup>
+        </Show>
+
+        <Show when={!spaces.loading && !spacesLoadFailed()}>
+          <Show
+            when={roomFormOpen()}
+            fallback={
+              <button
+                type="button"
+                class="core-sidebar-panel-link core-sidebar-new-room"
+                onClick={() => setRoomFormOpen(true)}
+              >
+                <Plus class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
+                <span class="core-sidebar-panel-link__label verevon-sidebar-row-normal">
+                  {i18n.tr('Nytt rom', 'New room')}
+                </span>
+              </button>
+            }
+          >
+            <form class="core-sidebar-new-room-form" onSubmit={(event) => void createNamedRoom(event)}>
+              <input
+                type="text"
+                value={roomName()}
+                aria-label={i18n.tr('Navn på rommet', 'Room name')}
+                placeholder={i18n.tr('Navn på rommet', 'Room name')}
+                maxlength={120}
+                disabled={creatingRoom()}
+                onInput={(event) => setRoomName(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    setRoomFormOpen(false)
+                    setRoomName('')
+                  }
+                }}
+                ref={(element) => queueMicrotask(() => element.focus())}
+              />
+              <div class="core-sidebar-new-room-form__actions">
+                <button type="submit" disabled={creatingRoom() || !roomName().trim()}>
+                  {creatingRoom() ? i18n.tr('Oppretter …', 'Creating…') : i18n.tr('Opprett', 'Create')}
+                </button>
+                <button
+                  type="button"
+                  disabled={creatingRoom()}
+                  onClick={() => {
+                    setRoomFormOpen(false)
+                    setRoomName('')
+                  }}
+                >
+                  {i18n.tr('Avbryt', 'Cancel')}
+                </button>
+              </div>
+            </form>
+          </Show>
+        </Show>
+
+        <Show when={createRoomError()}>
+          {(message) => (
+            <p class="core-sidebar-empty verevon-sidebar-row-normal" role="alert">{message()}</p>
+          )}
         </Show>
 
         <Show when={!spaces.loading && !spacesLoadFailed() && visiblePersonalSpaces().length > 0}>

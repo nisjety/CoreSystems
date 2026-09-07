@@ -83,6 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // crate's own fingerprint (edit this file) or drop the cache mount with
     // `docker builder prune --filter type=exec.cachemount`. Editing the
     // proto alone is not enough.
+    //
+    // Hit again 2026-09-07 adding ListRunsRequest.space_id + the Space read
+    // decision fields: model-gateway rebuilt and session-core did not, so the
+    // room Work listing would have compiled against a contract without the
+    // fields. Touching this comment is the fingerprint bust.
     for p in &proto_paths {
         println!("cargo:rerun-if-changed={}", p.display());
     }

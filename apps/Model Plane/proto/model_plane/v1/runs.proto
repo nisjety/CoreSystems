@@ -113,7 +113,8 @@ message ScheduledStepContext {
 }
 
 message ListRunsRequest {
-  // Thread to list runs for.
+  // Thread to list runs for. Required UNLESS a Space read decision is supplied
+  // below, in which case it is an optional extra narrowing within that Space.
   string thread_id = 1;
 
   // Filter by status (empty = all).
@@ -124,6 +125,21 @@ message ListRunsRequest {
 
   // Maximum results.
   uint32 limit = 4;
+
+  // Optional Control-issued authority to read a SHARED Space's record, the
+  // same `model.thread.read` decision the conversation read takes.
+  //
+  // Reused rather than given its own permission on purpose: the runs this
+  // returns are exactly the runs of the threads that decision already admits,
+  // so it grants no reach the caller did not already have on the conversation.
+  // Session Core enforces that by listing runs THROUGH those threads rather
+  // than by trusting `space_id` as a filter.
+  //
+  // Without it this listing is unchanged: `thread_id` is required and the
+  // caller must own the thread.
+  string space_id = 5;
+  string space_read_decision_ref = 6;
+  string space_read_decision_token = 7;
 }
 
 message ListRunsResponse {

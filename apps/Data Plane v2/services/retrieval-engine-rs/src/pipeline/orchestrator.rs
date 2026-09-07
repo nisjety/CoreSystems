@@ -1143,6 +1143,11 @@ impl RetrievalPipeline {
                 );
             }
             scope.apply_to_filters(&mut request_filters)?;
+            // The binding's workspace/collection are wiki-only payload keys.
+            // Pin the document vertical to the Space's own documents as well,
+            // or the dense arm filters on a key its points do not carry and
+            // answers every Space query with zero candidates.
+            scope.apply_document_scope_to_filters(&mut request_filters)?;
         }
         let filters = RetrievalFilters {
             document_types: request_filters.document_types,

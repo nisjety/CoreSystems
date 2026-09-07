@@ -213,11 +213,12 @@ func Load() (*Config, error) {
 		if !validKeyID(cfg.ControlRunActionDecisionKeyID) {
 			return nil, fmt.Errorf("CONTROL_RUN_ACTION_DECISION_KEY_ID is invalid")
 		}
-		publicKey, err := base64.RawStdEncoding.DecodeString(cfg.ControlRunActionDecisionPublicKey)
-		if err != nil {
-			publicKey, err = base64.StdEncoding.DecodeString(cfg.ControlRunActionDecisionPublicKey)
-		}
-		if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		// Accepts base64url as well as standard base64. Control mints these
+		// keys URL-safe, and rejecting that here refused to start the service
+		// at all — see DecodeControlPublicKey for the full account. The two
+		// decoders must stay in agreement: a config check that admits a key the
+		// verifier would refuse is worse than no check.
+		if !validControlPublicKey(cfg.ControlRunActionDecisionPublicKey) {
 			return nil, fmt.Errorf("CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64 must be an Ed25519 public key")
 		}
 	}
@@ -397,6 +398,31 @@ func Load() (*Config, error) {
 }
 
 var serviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$`)
+
+// validControlPublicKey mirrors http.DecodeControlPublicKey's alphabet set.
+//
+// Deliberately duplicated rather than imported: `internal/config` is a leaf
+// package that `internal/http` depends on, so calling into it would invert the
+// dependency. The comment on each side names the other so a future change to
+// one is a visible obligation on both.
+func validControlPublicKey(encoded string) bool {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		return false
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.StdEncoding,
+	} {
+		if decoded, err := encoding.DecodeString(encoded); err == nil &&
+			len(decoded) == ed25519.PublicKeySize {
+			return true
+		}
+	}
+	return false
+}
 
 func validKeyID(value string) bool {
 	value = strings.TrimSpace(value)

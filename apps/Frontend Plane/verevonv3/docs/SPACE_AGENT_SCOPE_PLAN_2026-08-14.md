@@ -733,10 +733,16 @@ declares the room's full service roster to Control with
 `["user"]`) → Control acceptance flips the binding `active`. Verified
 end-to-end in the AQUATIQ AS room: created "Statusagent" from the dialog,
 Control roster row appeared, the agent joined the mention list and answered
-in its template persona. Deferred from the born-with list below: the
-`mention_only`/`approval_mode` policy fields still do not exist on the
-binding (tracked as the policy-fields task) — invocation is gated by binding
-status + Control membership only, exactly as UI-2b left it.
+in its template persona.
+
+**Corrected 2026-09-07:** the sentence that used to stand here said the
+`mention_only`/`approval_mode` policy fields "still do not exist on the
+binding". They do. `spaceAgentBindings` stores `triggerModes`, `allowedTools`
+and `approvalMode`, the gateway enforces them at invocation, and the room
+renders them as chips. Invocation is gated by that policy AS WELL AS binding
+status and Control membership. The still-absent fields are the three this
+document's own binding model already lists as unstored: `knowledge_scope`,
+`default_thread_policy`, `audit_visibility`.
 
 **Goal:** let a non-technical person get a working teammate without opening a
 studio. This is the threshold-lowering the product depends on.

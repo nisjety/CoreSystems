@@ -51,7 +51,7 @@ export interface SpaceRoomComposerProps {
    * gateway exchanges it for a fresh, content-bound append decision from
    * Control instead of minting a new thread. Cleared by the caller via
    * `onClearReplyTarget` — on success, or when the member dismisses it. */
-  readonly replyTarget?: () => { threadId: string; title: string } | undefined
+  readonly replyTarget?: () => { threadId: string; title: string; awaitingApproval?: boolean } | undefined
   readonly onClearReplyTarget?: () => void
 }
 
@@ -124,9 +124,14 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     textareaRef?.focus()
   }
 
+  // A thread paused on a human decision does not take new input. Sending into
+  // it would queue a message behind a gate the same person is standing at, and
+  // the reply would arrive after an answer they have not given yet.
+  const blockedByApproval = () => props.replyTarget?.()?.awaitingApproval === true
+
   async function submitMessage(): Promise<void> {
     const content = text().trim()
-    if (!content || submitting()) return
+    if (!content || submitting() || blockedByApproval()) return
 
     setSubmitting(true)
     setMentionQuery(undefined)
@@ -209,6 +214,14 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             </p>
           )}
         </Show>
+        <Show when={blockedByApproval()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {i18n.tr(
+              'Godkjenn eller avslå for å fortsette denne samtalen.',
+              'Approve or deny to continue this conversation.',
+            )}
+          </p>
+        </Show>
         <Show when={visibleCandidates().length > 0}>
           <ul class="verevon-space-room-mentions" role="listbox" aria-label={i18n.tr('Nevn noen', 'Mention someone')}>
             <For each={visibleCandidates()}>
@@ -235,19 +248,26 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
               void submitMessage()
             }
           }}
-          placeholder={i18n.tr(
-            'Skriv i rommet. Skriv @ for å nevne noen.',
-            'Write in the room. Type @ to mention someone.',
-          )}
+          placeholder={
+            blockedByApproval()
+              ? i18n.tr(
+                  'Denne samtalen venter på en godkjenning.',
+                  'This conversation is waiting on an approval.',
+                )
+              : i18n.tr(
+                  'Skriv i rommet. Skriv @ for å nevne noen.',
+                  'Write in the room. Type @ to mention someone.',
+                )
+          }
           rows={2}
-          disabled={submitting()}
+          disabled={submitting() || blockedByApproval()}
         />
         <Show when={mentionedAgentRef()}>
           <p class="verevon-space-room-composer__hint">
             {i18n.tr('Vil invokere en agent når du sender.', 'Will invoke an agent when you send.')}
           </p>
         </Show>
-        <button type="submit" disabled={submitting() || !text().trim()}>
+        <button type="submit" disabled={submitting() || blockedByApproval() || !text().trim()}>
           {i18n.tr('Send', 'Send')}
         </button>
       </form>

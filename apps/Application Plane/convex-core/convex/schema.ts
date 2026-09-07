@@ -795,6 +795,34 @@ export default defineSchema({
   // independently verifies every member before any owner plane receives a
   // shared-effect decision. Superseded snapshots remain for visibility-safe
   // replay/fork decisions; their principal IDs never go to the browser.
+  // Who a NAMED room's people are, as decided by its owners and managers.
+  //
+  // Only for rooms somebody created and populated by hand. The organization
+  // room deliberately has no rows here: its roster is derived from org-core by
+  // `spaceMembershipSync`, on the rule that being in the organization is what
+  // grants a place in its room. Two sources for one room's people would fight,
+  // and the derived one would win every sync.
+  //
+  // This is an INTENT record, not an authority. Control owns membership; this
+  // table is what Application declares to it, and a row here means nothing
+  // until that declaration is accepted.
+  spaceMemberGrants: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    // The person's auth identity, the same subject Control stores in
+    // `space_memberships.subject_id` for a user.
+    externalAuthId: v.string(),
+    // Deliberately narrow: this flow grants participation, not the ability to
+    // hand out more of it. Promoting someone to manage a room is a separate
+    // decision that does not exist yet, and inventing it here would let anyone
+    // who can add a person also create another grantor.
+    role: v.literal("editor"),
+    grantedByExternalAuthId: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_space_ref", ["spaceRef"])
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+
   spaceRecipientAudiences: defineTable({
     audienceRef: v.string(),
     audienceHash: v.string(),

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
 import { useI18n } from '@/shared/i18n'
@@ -23,9 +23,10 @@ import { useI18n } from '@/shared/i18n'
  *
  * # Honest about what does not exist yet
  *
- * Only Chat and Activity have a real space-scoped source today (threads), and
- * Agent has one as of the new actions catalog. Work, Knowledge and Members have
- * no space-scoped endpoint at all. Rather than render a convincing empty state
+ * Chat, Activity, Agent and Members all have real Space-scoped sources now.
+ * Work and Knowledge still have none: Model Plane's run and schedule listings
+ * carry no `space_id` filter, and Data Plane honours a Space decision on only
+ * its three retrieval endpoints. Rather than render a convincing empty state
  * that implies "nothing here", an unsupplied tab says which owner plane has not
  * published a Space projection yet — the same honesty `SpacePage` already
  * applies to run receipts. A tab that looks finished but shows nothing is how a
@@ -135,6 +136,9 @@ export interface SpaceCockpitProps {
 export function SpaceCockpit(props: SpaceCockpitProps) {
   const i18n = useI18n()
   const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_TAB)
+  // One evaluation of the caller's tabs object per change — see the note on
+  // `content` below for why reading `props.tabs` per tab is not free.
+  const tabs = createMemo(() => props.tabs ?? {})
   const tabButtons: Partial<Record<SpaceTabId, HTMLButtonElement>> = {}
 
   createEffect(
@@ -203,7 +207,20 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
 
       <For each={SPACE_TABS}>
         {(tab) => {
-          const content = () => props.tabs?.[tab.id]
+          // Memoized, and reading the memoized `tabs` object rather than
+          // `props.tabs` directly.
+          //
+          // `props.tabs` is a getter over the caller's object literal, so every
+          // read re-runs that literal — and Solid JSX constructs a component
+          // eagerly, so re-running it MOUNTS every panel again. This `For` has
+          // six tabs and each read `props.tabs` twice (once for `when`, once
+          // for the child), so a single context resolve produced twelve
+          // constructions of all six panels. Panels that fetch on mount
+          // (`SpaceWorkPanel`, `SpaceKnowledgePanel`,
+          // `SpaceInstructionsSection`) each fired a burst of identical
+          // requests — measured live as six `/work` and six `/knowledge` calls
+          // inside 3ms, repeated on every membership recheck.
+          const content = createMemo(() => tabs()[tab.id])
           return (
             <section
               role="tabpanel"

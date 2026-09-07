@@ -2274,6 +2274,12 @@ pub async fn dispatch_tool(
                 ListConversationRequest {
                     org_id: org_id.to_owned(),
                     thread_id: thread_id.to_owned(),
+                    // Internal context read for the caller's own thread: no
+                    // shared-Space read authority is involved, so it stays
+                    // on the owner-bound path.
+                    space_id: String::new(),
+                    space_read_decision_ref: String::new(),
+                    space_read_decision_token: String::new(),
                 },
                 session_bearer,
             );

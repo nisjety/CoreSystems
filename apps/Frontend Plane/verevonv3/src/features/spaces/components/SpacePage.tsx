@@ -14,6 +14,8 @@ import {
   getSpaceRoster,
   getSpaceThreads,
   requestPersonalSpaceDeletion,
+  revokeSpaceAgent,
+  setSpaceAgentState,
   updateSpaceInstructions,
   type SpaceAgent,
   type SpaceDeletionReceipt,
@@ -24,16 +26,21 @@ import { translateApiError, useI18n } from '@/shared/i18n'
 import { spaceDisplayName } from '../lib/space-name'
 import {
   ACTIVE_RUN_STATUSES,
+  AWAITING_APPROVAL_RUN_STATUS,
   formatLabel,
   threadStatus,
   threadTitle,
 } from '../lib/space-thread-presentation'
-import { SpaceActivityFeed } from './SpaceActivityFeed'
 import { SpaceBindAgentDialog } from './SpaceBindAgentDialog'
 import { SpaceCockpit } from './SpaceCockpit'
+import { SpaceConfirmButton } from './SpaceConfirmButton'
+import { SpaceMemberControls, SpaceMemberRemoveButton } from './SpaceMemberControls'
 import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
 import { SpaceRoomComposer } from './SpaceRoomComposer'
 import { SpaceRoomTimeline } from './SpaceRoomTimeline'
+import { SpaceActivityPanel } from './SpaceActivityPanel'
+import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
+import { SpaceWorkPanel } from './SpaceWorkPanel'
 
 // Mirrors the gateway's own gate (`CREATE_AGENT_ROLES`): creation is a
 // governed grant, so only roles that may grant get the entry points. The
@@ -51,10 +58,26 @@ function canEditSpaceInstructions(role: string): boolean {
   return role === 'editor' || role === 'manager' || role === 'owner'
 }
 
+// Deciding who may read a room's shared record is at least as consequential as
+// granting an agent access to it, so it takes the same roles. Mirrors the
+// gateway's own gate; the server enforces it regardless.
+function canGrantSpaceMembership(role: string): boolean {
+  return role === 'owner' || role === 'manager'
+}
+
 // Membership is authoritative only at the server. Revalidate while the Space
 // is open so a removal/revocation cannot leave an old resolved value usable in
 // the cockpit between navigations.
 const SPACE_CONTEXT_RECHECK_MS = 30_000
+
+// How often an open room re-reads its own conversation projection.
+//
+// A room where another member's message appears half a minute late does not
+// read as a room, so this is deliberately much shorter than the authority
+// recheck above — it is a cheap projection read, not an authorization. It is
+// not a substitute for the durable delivery projection either: when that
+// lands, this becomes the fallback rather than the mechanism.
+const SPACE_TIMELINE_POLL_MS = 6_000
 
 /**
  * The Space is a workroom, not a second application shell. It composes the
@@ -90,7 +113,7 @@ export default function SpacePage() {
   // stays mounted underneath SpaceCockpit (panels hide, they don't unmount),
   // so fetching this per-panel would mean two independent network calls for
   // the same room's agents on every page load.
-  const [roster] = createResource(spaceRef, getSpaceRoster)
+  const [roster, { refetch: refetchRoster }] = createResource(spaceRef, getSpaceRoster)
   const [agents, { refetch: refetchAgents }] = createResource(spaceRef, getSpaceAgents)
   const [createAgentOpen, setCreateAgentOpen] = createSignal(false)
   const [bindAgentOpen, setBindAgentOpen] = createSignal(false)
@@ -102,10 +125,6 @@ export default function SpacePage() {
   async function requestDeletion() {
     const selectedSpace = context()?.space
     if (!selectedSpace || selectedSpace.kind !== 'personal' || deletionSubmitting()) return
-    if (!window.confirm(i18n.tr(
-      'Be om sletting av dette personlige rommet? Eksisterende data slettes først etter godkjenning fra Control og kvitteringer fra hver eierplan.',
-      'Request deletion of this Personal Space? Existing data will be deleted only after Control authorization and owner-plane receipts.',
-    ))) return
     setDeletionError('')
     setDeletionSubmitting(true)
     try {
@@ -120,6 +139,50 @@ export default function SpacePage() {
       setDeletionSubmitting(false)
     }
   }
+
+  // Keep the room live while it is actually being looked at.
+  //
+  // Gated on visibility for two reasons, and the second is the load-bearing
+  // one: a background tab polling forever is waste, but a tab that resumes
+  // after an hour showing an hour-old room is a lie. Refetching on
+  // `visibilitychange` means the first thing a returning reader sees is
+  // current, not stale.
+  createEffect(
+    () => undefined,
+    () => {
+      if (typeof document === 'undefined') return undefined
+      let timer: number | undefined
+      const stop = () => {
+        if (timer !== undefined) {
+          window.clearInterval(timer)
+          timer = undefined
+        }
+      }
+      const start = () => {
+        if (timer !== undefined) return
+        timer = window.setInterval(() => {
+          // The authority recheck below owns membership. This only refreshes
+          // the projection, and a failure is already rendered as "temporarily
+          // unavailable" rather than as an empty room.
+          void Promise.resolve(refetchThreads()).catch(() => undefined)
+        }, SPACE_TIMELINE_POLL_MS)
+      }
+      const onVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          void Promise.resolve(refetchThreads()).catch(() => undefined)
+          start()
+        } else {
+          stop()
+        }
+      }
+      if (document.visibilityState === 'visible') start()
+      document.addEventListener('visibilitychange', onVisibilityChange)
+      return () => {
+        stop()
+        document.removeEventListener('visibilitychange', onVisibilityChange)
+      }
+    },
+  )
 
   createEffect(
     () => undefined,
@@ -207,6 +270,7 @@ export default function SpacePage() {
                     <SpaceConversationPanel
                       spaceRef={current().space.space_ref}
                       spaceName={spaceDisplayName(current().space, i18n.tr)}
+                      viewerSubjectId={() => current().membership.subject_id}
                       threads={currentThreads}
                       loading={() => threads.loading}
                       unavailable={threadsUnavailable}
@@ -222,10 +286,13 @@ export default function SpacePage() {
                       }
                     />
                   ),
+                  arbeid: <SpaceWorkPanel spaceRef={current().space.space_ref} />,
+                  kunnskap: <SpaceKnowledgePanel spaceRef={current().space.space_ref} />,
                   aktivitet: (
                     <SpaceActivityPanel
+                      spaceRef={current().space.space_ref}
                       threads={currentThreads}
-                      loading={() => threads.loading}
+                      threadsLoading={() => threads.loading}
                     />
                   ),
                   agent: (
@@ -236,6 +303,11 @@ export default function SpacePage() {
                       />
                       <SpaceAgentPanel
                         agents={agents}
+                        spaceRef={current().space.space_ref}
+                        canGovern={canCreateAgent(current().membership.role)}
+                        onChanged={() => {
+                          void refetchAgents()
+                        }}
                         onCreateAgent={
                           canCreateAgent(current().membership.role)
                             ? () => setCreateAgentOpen(true)
@@ -254,6 +326,11 @@ export default function SpacePage() {
                       spaceRef={current().space.space_ref}
                       role={current().membership.role}
                       kind={current().space.kind}
+                      orgId={current().membership.org_id}
+                      isOrganizationRoom={current().space.is_organization_room}
+                      onMembersChanged={() => {
+                        void refetchRoster()
+                      }}
                       roster={roster}
                       deletionError={deletionError}
                       deletionReceipt={deletionReceipt}
@@ -276,6 +353,9 @@ export default function SpacePage() {
 function SpaceConversationPanel(props: {
   readonly spaceRef: string
   readonly spaceName: string
+  /** The reading member's own Control subject, so their own turns can be
+   * marked as theirs. Never used to name an unattributed turn. */
+  readonly viewerSubjectId: () => string | undefined
   readonly threads: () => readonly SpaceThread[]
   readonly loading: () => boolean
   readonly unavailable: () => boolean
@@ -286,14 +366,28 @@ function SpaceConversationPanel(props: {
 }) {
   const i18n = useI18n()
   let focusComposer: (() => void) | undefined
-  const [replyTarget, setReplyTarget] = createSignal<{ threadId: string; title: string } | undefined>(undefined)
+  const [replyTarget, setReplyTarget] = createSignal<
+    { threadId: string; title: string; awaitingApproval?: boolean } | undefined
+  >(undefined)
+  // Read from the live projection rather than from what was true when Reply was
+  // pressed: an approval can be raised (or settled) while the reply is being
+  // typed, and the composer must follow the room, not the click.
+  const replyTargetWithStatus = () => {
+    const target = replyTarget()
+    if (!target) return undefined
+    const thread = props.threads().find((item) => item.thread_id === target.threadId)
+    return {
+      ...target,
+      awaitingApproval: thread?.latest_run_status === AWAITING_APPROVAL_RUN_STATUS,
+    }
+  }
 
   return (
     <section class="verevon-space-view verevon-space-view--conversations" aria-labelledby="space-conversations-title">
       <div class="verevon-space-view__heading">
         <div>
         <p class="verevon-space-eyebrow">{i18n.tr('Samtale i rommet', 'Space conversation')}</p>
-          <h2 id="space-conversations-title">Samtaler</h2>
+          <h2 id="space-conversations-title">{i18n.tr('Samtaler', 'Chat')}</h2>
           <p>{i18n.tr(
             'Det delte arkivet for mennesker og agentarbeid knyttet til dette rommet.',
             'The shared record for people and agent work connected to this Space.',
@@ -325,7 +419,9 @@ function SpaceConversationPanel(props: {
           }
         >
           <SpaceRoomTimeline
+            spaceRef={props.spaceRef}
             spaceName={props.spaceName}
+            viewerSubjectId={props.viewerSubjectId}
             threads={props.threads}
             roster={props.roster}
             agents={props.agents}
@@ -335,6 +431,7 @@ function SpaceConversationPanel(props: {
               setReplyTarget({ threadId: thread.thread_id, title: threadTitle(thread, i18n.tr) })
               focusComposer?.()
             }}
+            onApprovalSettled={props.onExchangeSettled}
           />
         </Show>
       </Show>
@@ -345,66 +442,25 @@ function SpaceConversationPanel(props: {
         agents={props.agents}
         onExchangeSettled={props.onExchangeSettled}
         registerFocusHandle={(focus) => { focusComposer = focus }}
-        replyTarget={replyTarget}
+        replyTarget={replyTargetWithStatus}
         onClearReplyTarget={() => setReplyTarget(undefined)}
       />
     </section>
   )
 }
 
-function SpaceActivityPanel(props: {
-  readonly threads: () => readonly SpaceThread[]
-  readonly loading: () => boolean
-}) {
-  const i18n = useI18n()
-
-  return (
-    <section class="verevon-space-view" aria-labelledby="space-activity-title">
-      <div class="verevon-space-view__heading">
-        <div>
-          {/* This eyebrow previously read "Room pulse" — copy-pasted from the
-              SpacePulse aside, unrelated to this Activity view. Corrected while
-              translating rather than carried forward. */}
-          <p class="verevon-space-eyebrow">{i18n.tr('Aktivitet i rommet', 'Space activity')}</p>
-          <h2 id="space-activity-title">Aktivitet</h2>
-          <p>{i18n.tr(
-            'Lesbar bevegelse, godkjenninger og utfall fra rommets samtaleprojeksjon.',
-            'Readable movement, approvals, and outcomes from this Space’s conversation projection.',
-          )}</p>
-        </div>
-      </div>
-      <Show when={props.loading()}>
-        <p class="verevon-space-inline-status" role="status">{i18n.tr('Laster aktivitet i rommet …', 'Loading Space activity…')}</p>
-      </Show>
-      <SpaceActivityFeed
-        threads={props.threads()}
-        emptyLabel={i18n.tr(
-          'Ingen samtaleaktivitet er publisert til dette rommet ennå.',
-          'No conversation activity has been published to this Space yet.',
-        )}
-      />
-      <p class="verevon-space-view__footnote">
-        {i18n.tr(
-          'Kjørekvitteringer og godkjenninger vises fra den gjeldende trådprojeksjonen. Annen dokumentasjon fra eierplan kommer til når en korrelert romprojeksjon er publisert.',
-          'Run receipts and approvals appear from the current thread projection. Other owner-plane evidence joins only when a correlated Space projection is published.',
-        )}
-      </p>
-    </section>
-  )
-}
 
 /**
  * Agents bound to this Space.
  *
- * Control owns bindings, and it already expresses one: a `service` subject in
- * `space_memberships` IS an agent bound to a room, granted the same revisioned
- * way a person is. So this reads the roster rather than waiting for a separate
- * binding projection — the authority exists, and inventing a second one would
- * mean two places deciding which agents are in a room.
+ * Two planes fill the tab in and the split is load-bearing: Control decides who
+ * may act in the room (the `service` subjects in `space_memberships`), and an
+ * Application binding says what each one is called and how it may be invoked.
+ * The join happens server-side in the gateway, so this renders one list rather
+ * than reconciling two.
  *
- * What it deliberately does NOT show is everything a binding will eventually
- * carry: skills, connectors, availability, latest run. Those need the dedicated
- * model, and a card implying them from a membership row would be the false
+ * What a card still does NOT show is what no binding carries yet: skills,
+ * connectors, availability, latest run. Implying them would be the false
  * promise this tab was left honest to avoid.
  */
 const MAX_SPACE_INSTRUCTIONS_LENGTH = 4000
@@ -540,8 +596,13 @@ function SpaceInstructionsSection(props: { readonly spaceRef: string; readonly r
  */
 function SpaceAgentPanel(props: {
   readonly agents: ResourceAccessor<readonly SpaceAgent[]>
+  readonly spaceRef: string
   readonly onCreateAgent?: () => void
   readonly onBindAgent?: () => void
+  /** Present only for roles that may govern a binding here. Absent hides the
+   * controls; the server refuses regardless, so this is presentation. */
+  readonly canGovern: boolean
+  readonly onChanged?: () => void
 }) {
   const i18n = useI18n()
   const agents = props.agents
@@ -604,7 +665,14 @@ function SpaceAgentPanel(props: {
         >
           <ul class="verevon-space-agents">
             <For each={current()}>
-              {(agent) => <SpaceAgentCard agent={agent} />}
+              {(agent) => (
+                <SpaceAgentCard
+                  agent={agent}
+                  spaceRef={props.spaceRef}
+                  canGovern={props.canGovern}
+                  onChanged={props.onChanged}
+                />
+              )}
             </For>
           </ul>
         </Show>
@@ -614,9 +682,68 @@ function SpaceAgentPanel(props: {
 }
 
 /** One agent as a room participant. */
-function SpaceAgentCard(props: { readonly agent: SpaceAgent }) {
+function SpaceAgentCard(props: {
+  readonly agent: SpaceAgent
+  readonly spaceRef: string
+  readonly canGovern: boolean
+  readonly onChanged?: () => void
+}) {
   const i18n = useI18n()
   const agent = () => props.agent
+  const [busy, setBusy] = createSignal(false)
+  const [actionError, setActionError] = createSignal('')
+
+  // Only a settled binding can be governed here. `pending` is waiting on
+  // Control, `failed` records that provisioning did not work, and `revoked` is
+  // terminal — offering buttons for any of them would be a control that the
+  // server is going to refuse.
+  const governable = () => agent().status === 'active' || agent().status === 'paused'
+  const bindingRef = () => agent().binding_ref?.trim()
+
+  async function run(change: () => Promise<unknown>, failure: { no: string; en: string }) {
+    if (busy()) return
+    setBusy(true)
+    setActionError('')
+    try {
+      await change()
+      props.onChanged?.()
+    } catch (err) {
+      setActionError(translateApiError(err, i18n.tr, failure))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const setState = (status: 'active' | 'paused') => {
+    const ref = bindingRef()
+    if (!ref) return
+    void run(
+      () => setSpaceAgentState(props.spaceRef, ref, status),
+      status === 'paused'
+        ? {
+            no: 'Agenten kunne ikke settes på pause. Ingenting er endret.',
+            en: 'The agent could not be paused. Nothing was changed.',
+          }
+        : {
+            no: 'Agenten kunne ikke gjenopptas. Ingenting er endret.',
+            en: 'The agent could not be resumed. Nothing was changed.',
+          },
+    )
+  }
+
+  // Revocation is the one control here that the other button cannot undo, so
+  // it arms before it acts. Getting the agent back means adding it again.
+  const revoke = () => {
+    const ref = bindingRef()
+    if (!ref) return
+    void run(
+      () => revokeSpaceAgent(props.spaceRef, ref),
+      {
+        no: 'Agenten kunne ikke fjernes. Den deltar fortsatt i rommet.',
+        en: 'The agent could not be removed. It is still taking part in the room.',
+      },
+    )
+  }
   const displayName = () =>
     agent().name?.trim() || i18n.tr('Agent uten publisert navn', 'Agent with no published name')
   // The initial is decoration over a name we already show; when there is no
@@ -700,6 +827,56 @@ function SpaceAgentCard(props: { readonly agent: SpaceAgent }) {
           )}
         </Show>
 
+        {/* "Pause / mute / remove HERE" from the product model's dividing rule:
+            this governs one binding in one room, and never the definition or
+            its other installations — that is the Agent page's job. */}
+        <Show when={props.canGovern && governable() && bindingRef()}>
+          <div class="verevon-space-agent__controls">
+            <Show
+              when={agent().status === 'active'}
+              fallback={
+                <button
+                  type="button"
+                  class="verevon-space-agent__control"
+                  disabled={busy()}
+                  onClick={() => setState('active')}
+                >
+                  {i18n.tr('Gjenoppta', 'Resume')}
+                </button>
+              }
+            >
+              <button
+                type="button"
+                class="verevon-space-agent__control"
+                disabled={busy()}
+                onClick={() => setState('paused')}
+              >
+                {i18n.tr('Sett på pause', 'Pause')}
+              </button>
+            </Show>
+            <SpaceConfirmButton
+              class="verevon-space-agent__control verevon-space-agent__control--remove"
+              label={i18n.tr('Fjern fra rommet', 'Remove from room')}
+              confirmLabel={i18n.tr(
+                `Bekreft at ${agent().name?.trim() || 'agenten'} fjernes`,
+                `Confirm removing ${agent().name?.trim() || 'the agent'}`,
+              )}
+              consequence={i18n.tr(
+                'Agenten slutter å delta her. For å få den tilbake må den legges til på nytt.',
+                'The agent stops taking part here. Getting it back means adding it again.',
+              )}
+              disabled={busy()}
+              onConfirm={revoke}
+            />
+          </div>
+        </Show>
+
+        <Show when={actionError()}>
+          {(message) => (
+            <p class="verevon-space-agent__error" role="alert">{message()}</p>
+          )}
+        </Show>
+
         <Show
           when={agent().delivery_targets.length > 0}
           fallback={
@@ -732,6 +909,15 @@ function SpaceMembersPanel(props: {
   readonly spaceRef: string
   readonly role: string
   readonly kind: string
+  readonly orgId: string
+  /** The organization's own channel derives its roster from org-core, so it
+   * has no editable member list — see `SpaceMemberControls`.
+   *
+   * `undefined` means the server did not say, which is NOT the same as "no".
+   * An older gateway omits the field entirely, and showing the editor on that
+   * silence would offer a door the server then refuses to open. */
+  readonly isOrganizationRoom: boolean | undefined
+  readonly onMembersChanged?: () => void
   readonly roster: ResourceAccessor<readonly SpaceRosterMember[]>
   readonly deletionError: () => string
   readonly deletionReceipt: (() => SpaceDeletionReceipt | undefined) & { readonly loading: boolean }
@@ -746,7 +932,7 @@ function SpaceMembersPanel(props: {
       <div class="verevon-space-view__heading">
         <div>
           <p class="verevon-space-eyebrow">{i18n.tr('Tilgang', 'Access')}</p>
-          <h2 id="space-members-title">Medlemmer</h2>
+          <h2 id="space-members-title">{i18n.tr('Medlemmer', 'Members')}</h2>
           <p>{i18n.tr(
             'Medlemskapet ditt sjekkes på nytt av serveren mens dette rommet er åpent.',
             'Your membership is rechecked by the server while this Space stays open.',
@@ -781,6 +967,33 @@ function SpaceMembersPanel(props: {
         </p>
       </Show>
 
+      {/* Only a room somebody made has a member list to edit. The organization
+          channel's people come from the organization, and a personal Space has
+          exactly one member by construction. */}
+      <Show
+        when={
+          canGrantSpaceMembership(props.role)
+          && props.kind !== 'personal'
+          && props.isOrganizationRoom === false
+        }
+      >
+        <SpaceMemberControls
+          spaceRef={props.spaceRef}
+          orgId={props.orgId}
+          roster={() => (props.roster.error ? [] : props.roster() ?? [])}
+          onChanged={props.onMembersChanged}
+        />
+      </Show>
+
+      <Show when={props.isOrganizationRoom === true}>
+        <p class="verevon-space-member-controls__derived">
+          {i18n.tr(
+            'Alle i organisasjonen er med i dette rommet. Medlemskapet følger organisasjonen og redigeres ikke her.',
+            'Everyone in the organization is in this room. Its membership follows the organization and is not edited here.',
+          )}
+        </p>
+      </Show>
+
       <Show when={roster.error ? undefined : roster()}>
         {(members) => (
           <ul class="verevon-space-roster">
@@ -796,6 +1009,25 @@ function SpaceMembersPanel(props: {
                   <span class="verevon-space-roster__meta">
                     {member.subject_type === 'service' ? i18n.tr('Agent', 'Agent') : i18n.tr('Person', 'Person')} · {spaceRoleLabel(member.role, i18n.tr)}
                   </span>
+                  {/* The registered owner stays: Control keeps them as owner
+                      regardless, so removing the grant would only make this
+                      list disagree with the roster it describes. Agents are
+                      governed from the Agent tab, not here. */}
+                  <Show
+                    when={
+                      canGrantSpaceMembership(props.role)
+                      && props.kind !== 'personal'
+                      && props.isOrganizationRoom === false
+                      && member.subject_type === 'user'
+                      && member.role !== 'owner'
+                    }
+                  >
+                    <SpaceMemberRemoveButton
+                      spaceRef={props.spaceRef}
+                      member={member}
+                      onChanged={props.onMembersChanged}
+                    />
+                  </Show>
                 </li>
               )}
             </For>
@@ -813,9 +1045,24 @@ function SpaceMembersPanel(props: {
               'Deletion is authorized and completed separately. A request is not proof that every owner has erased its data.',
             )}</p>
           </div>
-          <button type="button" onClick={() => void props.onRequestDeletion()} disabled={props.deletionSubmitting()}>
-            {props.deletionSubmitting() ? i18n.tr('Ber om sletting …', 'Requesting deletion…') : i18n.tr('Be om sletting', 'Request deletion')}
-          </button>
+          <Show
+            when={!props.deletionSubmitting()}
+            fallback={
+              <button type="button" disabled>
+                {i18n.tr('Ber om sletting …', 'Requesting deletion…')}
+              </button>
+            }
+          >
+            <SpaceConfirmButton
+              label={i18n.tr('Be om sletting', 'Request deletion')}
+              confirmLabel={i18n.tr('Bekreft sletteforespørsel', 'Confirm deletion request')}
+              consequence={i18n.tr(
+                'Sletting godkjennes av Control og bekreftes av hver eierplan før noe faktisk fjernes.',
+                'Deletion is authorized by Control and confirmed by every owner plane before anything is actually removed.',
+              )}
+              onConfirm={() => void props.onRequestDeletion()}
+            />
+          </Show>
           <Show when={props.deletionError()}>
             <p role="alert">{props.deletionError()}</p>
           </Show>

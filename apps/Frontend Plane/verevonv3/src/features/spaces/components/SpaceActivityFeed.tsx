@@ -6,6 +6,7 @@ import {
   type SpaceActivityItem,
   type ThreadLikeActivitySource,
 } from '@/features/spaces/lib/activity-grammar'
+import { formatWhenWithTime } from '@/features/spaces/lib/space-thread-presentation'
 
 /**
  * A Space's activity feed, rendered with the Verb/Object/Outcome grammar.
@@ -25,6 +26,17 @@ import {
 
 interface SpaceActivityFeedProps {
   readonly threads: readonly ThreadLikeActivitySource[]
+  /**
+   * Already-built items, for a caller whose source is not threads.
+   *
+   * The Work tab composes runs and schedules through the same grammar and hands
+   * the result here, so the two tabs cannot drift into describing one run with
+   * two different vocabularies. When present this WINS over `threads` rather
+   * than merging with it: a feed built from two sources at once would order
+   * them together and make it impossible to say which question the list is
+   * answering.
+   */
+  readonly items?: readonly SpaceActivityItem[]
   /** Rendered instead of the list when there is genuinely nothing yet. */
   readonly emptyLabel?: string
 }
@@ -43,17 +55,8 @@ function rowClass(item: SpaceActivityItem): string {
     .join(' ')
 }
 
-function formatWhen(value?: string): string {
-  if (!value) return ''
-  try {
-    return new Date(value).toLocaleString('nb-NO', { dateStyle: 'short', timeStyle: 'short' })
-  } catch {
-    return value
-  }
-}
-
 export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
-  const items = createMemo(() => buildSpaceActivity(props.threads))
+  const items = createMemo(() => props.items ?? buildSpaceActivity(props.threads))
 
   return (
     <Show
@@ -93,7 +96,18 @@ export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
                 </span>
               </Dynamic>
               <Show when={item.at}>
-                {(at) => <span class="verevon-activity-when">{formatWhen(at())}</span>}
+                {(at) => <span class="verevon-activity-when">{formatWhenWithTime(at())}</span>}
+              </Show>
+              {/* Progressive disclosure without a second component: the
+                  sentence stays one line and the evidence a supervisor asks
+                  for next — token counts, the ticket an effect produced, who
+                  granted an authority — sits directly beneath it. Outside the
+                  link, because these are facts about the row rather than part
+                  of its destination. */}
+              <Show when={item.detail?.length}>
+                <ul class="verevon-activity-detail">
+                  <For each={item.detail ?? []}>{(line) => <li>{line}</li>}</For>
+                </ul>
               </Show>
             </li>
           )}

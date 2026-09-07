@@ -6,7 +6,12 @@ import type { SpaceThread } from '@/shared/api/spaces-client'
  * different words in two corners of the same room.
  */
 
-export const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'awaiting_approval'])
+/** Session Core's own token for a run paused on a human decision. Named once
+ * so the pulse count, the post's approval surface, and the composer guard all
+ * agree on what "waiting" means. */
+export const AWAITING_APPROVAL_RUN_STATUS = 'awaiting_approval'
+
+export const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', AWAITING_APPROVAL_RUN_STATUS])
 
 export const FAILED_RUN_STATUSES = new Set(['failed'])
 
@@ -50,9 +55,35 @@ export function stripMarkdownPreview(content: string): string {
     .trim()
 }
 
+/**
+ * A post's date, for the room timeline: "6. sep.".
+ *
+ * Day precision on purpose — a post is placed in the conversation by the turns
+ * around it, so the hour is noise there. The activity feed wants the opposite
+ * (see [`formatWhenWithTime`]), and the two used to be separate functions with
+ * the SAME name in different files, which is how one surface can quietly start
+ * disagreeing with the other about what a timestamp means.
+ */
 export function formatWhen(value: string): string {
   try {
     return new Date(value).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' })
+  } catch {
+    return value
+  }
+}
+
+/**
+ * A moment, for the activity feed: "06.09.2026, 14:32".
+ *
+ * The feed is ordered by consequence rather than recency, so a row has to carry
+ * its own time — "which of these two failures came first" is not answerable
+ * from the order. Falls back to the raw value rather than dropping it: an
+ * unparseable timestamp is still evidence something happened then.
+ */
+export function formatWhenWithTime(value?: string): string {
+  if (!value) return ''
+  try {
+    return new Date(value).toLocaleString('nb-NO', { dateStyle: 'short', timeStyle: 'short' })
   } catch {
     return value
   }

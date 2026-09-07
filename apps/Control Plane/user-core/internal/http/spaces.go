@@ -668,6 +668,70 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
 }
 
+type sharedThreadReadDecisionRequest struct {
+	SpaceRef       string `json:"space_ref"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// issueThreadReadDecision authorizes one short-lived read of a SHARED Space's
+// conversation record.
+//
+// Personal Spaces are refused rather than served, and that is not an omission:
+// a personal Space's threads are already readable by their only member through
+// the existing owner-bound path, so issuing a read decision there would add a
+// second, weaker way to reach the same rows. Model Plane keeps the owner check
+// for anything without one of these decisions.
+func (s *Server) issueThreadReadDecision(c *gin.Context) {
+	if s.spaceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+		return
+	}
+	var request sharedThreadReadDecisionRequest
+	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref and idempotency_key are required"})
+		return
+	}
+	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(
+		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
+	)
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "current shared Space authority required"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "shared Space read authority is not available"})
+		return
+	}
+	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
+		return
+	}
+	decisionRef, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	nonce, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	decision, err := spaces.IssueSharedThreadReadDecision(evidence, spaces.SharedThreadReadDecisionRequest{
+		DecisionRef: decisionRef, IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
+	}, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space thread read is not authorized"})
+		return
+	}
+	token, err := spaces.SignDecision(key, decision)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
 type personalRetrievalDecisionRequest struct {
 	SpaceRef       string `json:"space_ref"`
 	IdempotencyKey string `json:"idempotency_key"`

@@ -65,12 +65,11 @@ func NewOwnerGrantDecisionVerifier(keyID, publicKeyEncoded string) (*OwnerGrantD
 	if keyID == "" {
 		return nil, fmt.Errorf("Control owner grant decision key id is required")
 	}
-	encoded := strings.TrimSpace(publicKeyEncoded)
-	publicKeyBytes, err := base64.RawStdEncoding.DecodeString(encoded)
-	if err != nil {
-		publicKeyBytes, err = base64.StdEncoding.DecodeString(encoded)
-	}
-	if err != nil || len(publicKeyBytes) != ed25519.PublicKeySize {
+	// Same Control key, same URL-safe encoding — see DecodeControlPublicKey.
+	// This verifier had the identical standard-only bug as the run-action one,
+	// so the owner-grant path was dead for exactly the same reason.
+	publicKeyBytes, ok := DecodeControlPublicKey(publicKeyEncoded)
+	if !ok {
 		return nil, fmt.Errorf("Control owner grant decision public key is invalid")
 	}
 	return &OwnerGrantDecisionVerifier{keyID: keyID, publicKey: ed25519.PublicKey(publicKeyBytes), now: func() time.Time { return time.Now().UTC() }}, nil

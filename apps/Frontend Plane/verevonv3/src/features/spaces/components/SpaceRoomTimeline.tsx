@@ -3,12 +3,14 @@ import { createMemo, For, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import {
+  AWAITING_APPROVAL_RUN_STATUS,
   FAILED_RUN_STATUSES,
   formatWhen,
   stripMarkdownPreview,
   threadStatus,
 } from '@/features/spaces/lib/space-thread-presentation'
-import { getChatThreadTranscript } from '@/shared/api/chat-client'
+import { SpaceApprovalPanel } from './SpaceApprovalPanel'
+import { getSpaceThreadTranscript } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -20,13 +22,15 @@ import { createResource } from '@/shared/lib/create-resource-compat'
  * Nothing here links a room conversation out to `/chat`; the room is the
  * workspace.
  *
- * Turn attribution is deliberately conservative. Transcript reads are
- * owner-bound at the gateway (`get_thread_transcript` only resolves threads in
- * the caller's own durable list), so every `user` turn a member can see is
- * their own — labeling those with the single human roster member's name is
- * exact today. When Control grows shared-thread transcript authority for
- * multi-member rooms, turns need real server-side author attribution before
- * this component may claim anyone else's words.
+ * Turn attribution is server-side. Each turn carries the subject Model Plane
+ * recorded as its author at append time, and this component resolves that id
+ * against Control's roster for a display name. It never infers an author from
+ * who is looking: an unrecorded author renders as unnamed, because the one
+ * thing worse than an unlabelled turn is a turn labelled with the wrong person.
+ *
+ * The transcript itself comes from the Space route, not Chat's — Chat resolves
+ * a thread only inside the caller's own durable list, which is why a
+ * colleague's post used to render as its preview and nothing else.
  */
 
 type TranscriptTurn = {
@@ -36,6 +40,10 @@ type TranscriptTurn = {
    * session-core. Absent on turns older than the attribution field and on
    * un-personified assistant turns. */
   readonly agentName?: string
+  /** Who wrote this turn, as recorded server-side. Absent on turns written
+   * before authorship existed — those stay unnamed rather than borrowing a
+   * name from the reader. */
+  readonly authorSubjectId?: string
 }
 
 const MAX_TURNS_PER_POST = 30
@@ -52,17 +60,56 @@ export function normalizeTranscriptTurns(turns: readonly unknown[] | undefined):
     const agentName = typeof record.agentName === 'string' && record.agentName.trim()
       ? record.agentName.trim()
       : undefined
-    normalized.push({ role, content, ...(agentName ? { agentName } : {}) })
+    const authorSubjectId = typeof record.authorSubjectId === 'string' && record.authorSubjectId.trim()
+      ? record.authorSubjectId.trim()
+      : undefined
+    normalized.push({
+      role,
+      content,
+      ...(agentName ? { agentName } : {}),
+      ...(authorSubjectId ? { authorSubjectId } : {}),
+    })
     if (normalized.length >= MAX_TURNS_PER_POST) break
   }
   return normalized
 }
 
+/**
+ * Resolve one recorded author id to something a person can read.
+ *
+ * Three outcomes, kept apart on purpose: a roster match gives the member's
+ * name; an id with no roster entry gives a truthful "former member" rather
+ * than a blank, since someone did write it; and no id at all gives an unnamed
+ * author. `viewerSubjectId` only ever adds "(you)" to a name the server
+ * already attributed — it never supplies one.
+ */
+export function resolveAuthorName(
+  authorSubjectId: string | undefined,
+  roster: readonly SpaceRosterMember[],
+  viewerSubjectId: string | undefined,
+  tr: (no: string, en: string) => string,
+): string {
+  if (!authorSubjectId) return tr('Ukjent avsender', 'Unknown author')
+  const member = roster.find((entry) => entry.subject_id === authorSubjectId)
+  const isViewer = viewerSubjectId !== undefined && viewerSubjectId === authorSubjectId
+  const name = member?.display_name?.trim()
+  if (!name) {
+    return isViewer
+      ? tr('Du', 'You')
+      : tr('Tidligere medlem', 'Former member')
+  }
+  return isViewer ? `${name} ${tr('(deg)', '(you)')}` : name
+}
+
 export interface SpaceRoomTimelineProps {
+  readonly spaceRef: string
   readonly spaceName: string
   readonly threads: () => readonly SpaceThread[]
   readonly roster: () => readonly SpaceRosterMember[]
   readonly agents: () => readonly SpaceAgent[]
+  /** The reading member's own Control subject, used only to mark their own
+   * turns as theirs. Never used to attribute an unattributed turn. */
+  readonly viewerSubjectId?: () => string | undefined
   /** Focuses the room composer — the intro block's primary action. */
   readonly onStartConversation?: () => void
   /** When provided, the intro block offers the in-room create-agent flow. */
@@ -70,6 +117,9 @@ export interface SpaceRoomTimelineProps {
   /** When provided, every post offers "Reply" — the composer then continues
    * that thread through the append authority instead of starting a new one. */
   readonly onReply?: (thread: SpaceThread) => void
+  /** Called after an approval settles, so the room re-reads its projection and
+   * the post's status stops saying it is waiting. */
+  readonly onApprovalSettled?: () => void
 }
 
 export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
@@ -80,11 +130,6 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
       (a.updated_at ?? a.latest_run_updated_at ?? '').localeCompare(b.updated_at ?? b.latest_run_updated_at ?? ''),
     ),
   )
-
-  const humanName = createMemo(() => {
-    const humans = props.roster().filter((member) => member.subject_type === 'user')
-    return humans.length === 1 ? humans[0]?.display_name?.trim() || i18n.tr('Du', 'You') : i18n.tr('Du', 'You')
-  })
 
   const agentName = createMemo(() => {
     const active = props.agents().filter((agent) => agent.status === 'active' && agent.name?.trim())
@@ -106,10 +151,13 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
         <For each={orderedThreads()}>
           {(thread) => (
             <SpaceRoomPost
+              spaceRef={props.spaceRef}
               thread={thread}
-              humanName={humanName()}
+              roster={props.roster}
+              viewerSubjectId={props.viewerSubjectId}
               agentName={agentName()}
               onReply={props.onReply}
+              onApprovalSettled={props.onApprovalSettled}
             />
           )}
         </For>
@@ -119,10 +167,13 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
 }
 
 function SpaceRoomPost(props: {
+  readonly spaceRef: string
   readonly thread: SpaceThread
-  readonly humanName: string
+  readonly roster: () => readonly SpaceRosterMember[]
+  readonly viewerSubjectId?: () => string | undefined
   readonly agentName: string
   readonly onReply?: (thread: SpaceThread) => void
+  readonly onApprovalSettled?: () => void
 }) {
   const i18n = useI18n()
   const [transcript] = createResource(
@@ -130,15 +181,27 @@ function SpaceRoomPost(props: {
     // list bumps updated_at, which re-keys this source and refetches the
     // transcript for exactly the post that changed. NUL-joined because thread
     // ids may themselves contain any printable character, including spaces.
-    () => `${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}`,
+    () => `${props.spaceRef}\u0000${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}`,
     async (key) => {
-      const threadId = key.split('\u0000')[0] ?? ''
-      const snapshot = await getChatThreadTranscript(threadId).catch(() => null)
-      return normalizeTranscriptTurns(snapshot?.turns)
+      const [spaceRef = '', threadId = ''] = key.split('\u0000')
+      const snapshot = await getSpaceThreadTranscript(spaceRef, threadId).catch(() => null)
+      return normalizeTranscriptTurns(snapshot?.turns as readonly unknown[] | undefined)
     },
   )
   const turns = () => (transcript.error ? [] : transcript() ?? [])
+  const authorOf = (turn: TranscriptTurn) =>
+    resolveAuthorName(turn.authorSubjectId, props.roster(), props.viewerSubjectId?.(), i18n.tr)
+  // Before any turn has loaded, the post is still attributable: the thread's
+  // own owner started it.
+  const starterName = () =>
+    resolveAuthorName(props.thread.owner_subject_id, props.roster(), props.viewerSubjectId?.(), i18n.tr)
   const isFailed = () => FAILED_RUN_STATUSES.has(props.thread.latest_run_status ?? '')
+  // Only a run that is actually paused gets a decision surface, and only when
+  // the projection named the run — an approval card with no run to decide on
+  // would be a control that cannot do anything.
+  const awaitingApproval = () =>
+    props.thread.latest_run_status === AWAITING_APPROVAL_RUN_STATUS
+    && Boolean(props.thread.latest_run_id?.trim())
   const when = () => props.thread.updated_at ?? props.thread.latest_run_updated_at
 
   return (
@@ -151,7 +214,7 @@ function SpaceRoomPost(props: {
               <MessageCircle size={14} />
             </span>
             <div class="verevon-room-turn__content">
-              <PostTurnHeader author={props.humanName} />
+              <PostTurnHeader author={starterName()} />
               <p class="verevon-room-turn__plain">
                 {(props.thread.preview && stripMarkdownPreview(props.thread.preview))
                   || props.thread.title?.trim()
@@ -173,7 +236,7 @@ function SpaceRoomPost(props: {
                 ]}
                 aria-hidden="true"
               >
-                <Show when={turn.role === 'assistant'} fallback={initials(props.humanName)}>
+                <Show when={turn.role === 'assistant'} fallback={initials(authorOf(turn))}>
                   <Sparkles size={14} />
                 </Show>
               </span>
@@ -181,8 +244,10 @@ function SpaceRoomPost(props: {
                 <PostTurnHeader
                   // The turn's own recorded persona wins; the room-level
                   // heuristic (single active agent, else 'Verevon') covers
-                  // turns persisted before attribution existed.
-                  author={turn.role === 'assistant' ? turn.agentName ?? props.agentName : props.humanName}
+                  // turns persisted before attribution existed. A human turn
+                  // is named by the subject the server recorded, never by who
+                  // happens to be reading.
+                  author={turn.role === 'assistant' ? turn.agentName ?? props.agentName : authorOf(turn)}
                   isAgent={turn.role === 'assistant'}
                 />
                 <Show
@@ -197,6 +262,12 @@ function SpaceRoomPost(props: {
             </div>
           )}
         </For>
+      </Show>
+
+      <Show when={awaitingApproval() ? props.thread.latest_run_id : undefined}>
+        {(runId) => (
+          <SpaceApprovalPanel runId={runId()} onSettled={props.onApprovalSettled} />
+        )}
       </Show>
 
       <div class="verevon-room-post__meta">

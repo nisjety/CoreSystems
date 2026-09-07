@@ -158,6 +158,29 @@ describe('activity grammar', () => {
     })
   })
 
+  describe('where a row sends you', () => {
+    // The Activity tab is where a supervisor sees that something needs them.
+    // The decision itself lives on the post, in the Chat tab, so a row that
+    // dropped the reader on whichever tab the hash happened to hold would show
+    // them a duty and hide the control for it.
+    it('lands on the chat tab, where the decision surface is', () => {
+      const items = activityFromThread(
+        thread({ space_id: 'space-room', latest_run_status: 'awaiting_approval' }),
+      )
+      for (const item of items) {
+        expect(item.href).toContain('/spaces/space-room')
+        expect(item.href?.endsWith('#chat')).toBe(true)
+      }
+    })
+
+    // Unchanged by the hash: an item whose owning Space is unknown still has
+    // nowhere honest to point.
+    it('still refuses to link when the owning Space is unknown', () => {
+      const items = activityFromThread(thread({ space_id: '', latest_run_status: 'failed' }))
+      expect(items.every((item) => item.href === undefined)).toBe(true)
+    })
+  })
+
   describe('the sentence', () => {
     it('reads as verb, object, outcome', () => {
       const run = activityFromThread(

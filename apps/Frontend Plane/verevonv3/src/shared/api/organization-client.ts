@@ -28,6 +28,52 @@ function organizationSummary(value: unknown): OrganizationSummary | null {
   }
 }
 
+/** One person in the organization, as the org roster reports them. */
+export type OrganizationMember = {
+  userId: string
+  name?: string
+  email: string
+  role: string
+  status: string
+}
+
+function memberFrom(value: unknown): OrganizationMember | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const userId = typeof record.userId === 'string' ? record.userId : typeof record.user_id === 'string' ? record.user_id : ''
+  const email = typeof record.email === 'string' ? record.email : ''
+  if (!userId.trim()) return null
+  return {
+    userId,
+    ...(typeof record.name === 'string' && record.name.trim() ? { name: record.name.trim() } : {}),
+    email,
+    role: typeof record.role === 'string' ? record.role : '',
+    status: typeof record.status === 'string' ? record.status : '',
+  }
+}
+
+/**
+ * Everyone in the organization, for choosing who to add to a room.
+ *
+ * Only `active` members are returned. An invitation is not yet a membership and
+ * a suspension deliberately withholds access, so offering either as someone to
+ * put in a room would hand out content on the strength of a state that says
+ * not to — the same rule the organization room's own roster sync applies.
+ */
+export async function listOrganizationMembers(organizationId: string): Promise<OrganizationMember[]> {
+  const payload = await requestJson<{ members?: unknown[] } | unknown[]>(
+    `/api/v1/orgs/${encodeURIComponent(organizationId)}/members`,
+  )
+  const raw = Array.isArray(payload)
+    ? payload
+    : Array.isArray((payload as { members?: unknown[] })?.members)
+      ? (payload as { members: unknown[] }).members
+      : []
+  return raw
+    .map(memberFrom)
+    .filter((member): member is OrganizationMember => member !== null && member.status === 'active')
+}
+
 export async function listOrganizations(): Promise<OrganizationSummary[]> {
   const payload = await requestJson<unknown>('/api/v1/orgs')
   const values = Array.isArray(payload)

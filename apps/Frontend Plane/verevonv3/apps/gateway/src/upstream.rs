@@ -449,6 +449,39 @@ pub(crate) async fn proxy_user_bearer_json(
     bearer: &str,
     content_type: Option<&str>,
 ) -> (StatusCode, Json<Value>) {
+    proxy_user_bearer_json_with_extra_headers(
+        state,
+        method,
+        url,
+        body,
+        org_id,
+        actor,
+        bearer,
+        content_type,
+        BTreeMap::new(),
+    )
+    .await
+}
+
+/// As `proxy_user_bearer_json`, plus caller-supplied headers.
+///
+/// `extra` exists for authority the upstream verifies for itself — today the
+/// Data Plane `x-space-decision` bearer, which is a Control-signed decision
+/// that retrieval-engine verifies against its own key set. It is added AFTER
+/// the identity headers and deliberately cannot replace them: an upstream must
+/// never learn who the caller is from a value this function was handed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxy_user_bearer_json_with_extra_headers(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    org_id: Option<&str>,
+    actor: &ActionActor,
+    bearer: &str,
+    content_type: Option<&str>,
+    extra: BTreeMap<String, String>,
+) -> (StatusCode, Json<Value>) {
     let bearer = bearer.trim();
     if bearer.is_empty() || bearer.chars().any(char::is_whitespace) {
         return (
@@ -478,6 +511,19 @@ pub(crate) async fn proxy_user_bearer_json(
     }
     if !actor.user_role.trim().is_empty() {
         headers.insert("x-user-role".to_owned(), actor.user_role.trim().to_owned());
+    }
+    // Identity is settled above. Anything here is upstream-verified authority,
+    // so it may add to the request but never rewrite who is making it.
+    for (name, value) in extra {
+        let name = name.trim().to_ascii_lowercase();
+        if name.starts_with("x-user-")
+            || name == "authorization"
+            || name == "x-org-id"
+            || name == "x-internal-api-key"
+        {
+            continue;
+        }
+        headers.insert(name, value);
     }
 
     proxy_json_with_headers(state, method, url, body, headers, content_type).await

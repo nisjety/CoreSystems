@@ -69,6 +69,8 @@ type fakeRepository struct {
 	emailDeliveryFailureErr        error
 	supportRecurrenceCorpus        []SupportRecurrenceCorpusEntry
 	ticketOperations               map[string]*TicketOperationReceipt
+	spaceOperationReceipts         map[string][]SpaceOperationReceipt
+	spaceAuthorityEvents           map[string][]SpaceAuthorityEvent
 	agentTicketActionGrants        map[string]*AgentTicketActionGrant
 }
 
@@ -93,6 +95,8 @@ func newFakeRepository() *fakeRepository {
 		csatOutcomes:            make(map[string]*TicketCSATOutcome),
 		sideConversations:       make(map[string]*TicketSideConversation),
 		ticketOperations:        make(map[string]*TicketOperationReceipt),
+		spaceOperationReceipts:  make(map[string][]SpaceOperationReceipt),
+		spaceAuthorityEvents:    make(map[string][]SpaceAuthorityEvent),
 		agentTicketActionGrants: make(map[string]*AgentTicketActionGrant),
 	}
 }
@@ -890,6 +894,18 @@ func (f *fakeRepository) GetTicketOperation(_ context.Context, orgID, _ string, 
 	copy := *receipt
 	copy.Replayed = true
 	return &copy, nil
+}
+
+func (f *fakeRepository) ListSpaceOperationReceipts(_ context.Context, orgID, spaceRef string) ([]SpaceOperationReceipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]SpaceOperationReceipt(nil), f.spaceOperationReceipts[orgID+":"+spaceRef]...), nil
+}
+
+func (f *fakeRepository) ListSpaceAuthorityEvents(_ context.Context, orgID, spaceRef string) ([]SpaceAuthorityEvent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]SpaceAuthorityEvent(nil), f.spaceAuthorityEvents[orgID+":"+spaceRef]...), nil
 }
 
 func (f *fakeRepository) CreateAgentTicketActionGrant(_ context.Context, input CreateAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error) {

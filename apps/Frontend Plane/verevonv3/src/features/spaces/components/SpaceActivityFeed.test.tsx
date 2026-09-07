@@ -62,12 +62,15 @@ describe('SpaceActivityFeed', () => {
     expect(screen.getByText('Uten tittel')).toBeTruthy()
   })
 
-  it('links an item to its conversation in the owning Space', () => {
+  // The hash matters: the conversation, and any decision it is waiting on, live
+  // in the room's Chat tab. Without it a reader who clicks an item that needs
+  // them lands on whichever tab the URL happened to carry.
+  it('links an item to its conversation in the owning Space, on the chat tab', () => {
     const { container } = render(() => (
       <SpaceActivityFeed threads={[{ thread_id: 'thr_1', title: 'A', space_id: 'space_1' }]} />
     ))
     const link = container.querySelector('.verevon-activity-link')
-    expect(link?.getAttribute('href')).toBe('/spaces/space_1?thread_id=thr_1')
+    expect(link?.getAttribute('href')).toBe('/spaces/space_1?thread_id=thr_1#chat')
   })
 
   /**

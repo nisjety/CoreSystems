@@ -988,6 +988,64 @@ func (r *Repository) ResolveSharedRetrievalDecisionEvidence(ctx context.Context,
 	return evidence, nil
 }
 
+// ResolveSharedThreadReadDecisionEvidence resolves the authority to read a
+// shared Space's conversation record. It reuses the current-membership and
+// current-recipient-audience joins of its sibling resolvers — in particular
+// the join against space_recipient_audience_members, which is what makes a
+// removed participant stop resolving — and binds the independent
+// thread_read_entitled bit and its own resource reference.
+//
+// It must never fall back to the shared thread-create grant: writing into a
+// room and reading everyone else's turns in it are separate disclosures.
+func (r *Repository) ResolveSharedThreadReadDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
+	if r == nil || r.db == nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("Space authority repository unavailable")
+	}
+	var evidence PersonalThreadDecisionEvidence
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
+		       r.authority_revision, r.membership_revision, r.privacy_revision,
+		       r.recipient_audience_revision, r.entitlement_revision,
+		       a.audience_ref, a.audience_hash,
+		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
+		       p.third_party_processing_allowed, p.retention_class, p.residency,
+		       p.deletion_scope, p.zero_data_retention, p.thread_read_entitled
+		FROM registered_spaces s
+		JOIN space_memberships m ON m.space_ref=s.space_ref
+		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		JOIN space_recipient_audiences a ON a.space_ref=s.space_ref AND a.revision=r.recipient_audience_revision
+		JOIN space_recipient_audience_members am ON am.space_ref=a.space_ref AND am.revision=a.revision AND am.subject_id=m.subject_id
+		JOIN space_effect_policies p ON p.org_id=s.org_id
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'
+		  AND s.space_kind <> 'personal'
+		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
+		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
+	).Scan(
+		&evidence.Membership.SpaceRef, &evidence.Membership.OrgID, &evidence.Membership.SubjectID,
+		&evidence.Membership.Kind, &evidence.Membership.Role,
+		&evidence.Membership.Revisions.Authority, &evidence.Membership.Revisions.Membership,
+		&evidence.Membership.Revisions.Privacy, &evidence.Membership.Revisions.RecipientAudience,
+		&evidence.Membership.Revisions.Entitlement,
+		&evidence.RecipientAudienceRef, &evidence.RecipientAudienceHash,
+		&evidence.Privacy.PolicyRef, &evidence.Privacy.Purpose, &evidence.Privacy.LawfulBasis,
+		&evidence.Privacy.PrivacyClass, &evidence.Privacy.ThirdPartyAllowed,
+		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
+		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadReadEntitled,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
+	}
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space thread read authority: %w", err)
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:thread-read:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if err := evidence.ValidateForSharedThreadRead(); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space thread read authority: %w", err)
+	}
+	return evidence, nil
+}
+
 // ResolvePersonalRetrievalDecisionEvidence returns the same current Control
 // authority facts as thread issuance, but binds them to the independent
 // retrieval entitlement and resource reference. This must never fall back to
@@ -1119,12 +1177,13 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		SELECT org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
 		       third_party_processing_allowed, retention_class, residency,
 		       deletion_scope, zero_data_retention, thread_create_entitled, retrieval_read_entitled,
-		       import_write_entitled, agent_action_entitled, schedule_fire_entitled
+		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled
 		FROM space_effect_policies WHERE org_id=$1 FOR UPDATE`, policy.OrgID,
 	).Scan(&current.OrgID, &current.PrivacyPolicyRef, &current.Purpose, &current.LawfulBasis,
 		&current.PrivacyClass, &current.ThirdPartyProcessingAllowed, &current.RetentionClass,
 		&current.Residency, &current.DeletionScope, &current.ZeroDataRetention,
-		&current.ThreadCreateEntitled, &current.RetrievalReadEntitled, &current.ImportWriteEntitled, &current.AgentActionEntitled, &current.ScheduleFireEntitled)
+		&current.ThreadCreateEntitled, &current.RetrievalReadEntitled, &current.ImportWriteEntitled, &current.AgentActionEntitled, &current.ScheduleFireEntitled,
+		&current.ThreadReadEntitled)
 	if err != nil && err != pgx.ErrNoRows {
 		return false, fmt.Errorf("read Space effect policy: %w", err)
 	}
@@ -1133,12 +1192,14 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 			INSERT INTO space_effect_policies
 			(org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
 			 third_party_processing_allowed, retention_class, residency, deletion_scope,
-			 zero_data_retention, thread_create_entitled, retrieval_read_entitled, import_write_entitled, agent_action_entitled, schedule_fire_entitled)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			 zero_data_retention, thread_create_entitled, retrieval_read_entitled, import_write_entitled, agent_action_entitled, schedule_fire_entitled,
+			 thread_read_entitled)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 			policy.OrgID, policy.PrivacyPolicyRef, policy.Purpose, policy.LawfulBasis,
 			policy.PrivacyClass, policy.ThirdPartyProcessingAllowed, policy.RetentionClass,
 			policy.Residency, policy.DeletionScope, policy.ZeroDataRetention,
-			policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled); err != nil {
+			policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled,
+			policy.ThreadReadEntitled); err != nil {
 			return false, fmt.Errorf("insert Space effect policy: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1161,19 +1222,22 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		current.RetrievalReadEntitled != policy.RetrievalReadEntitled ||
 		current.ImportWriteEntitled != policy.ImportWriteEntitled ||
 		current.AgentActionEntitled != policy.AgentActionEntitled ||
-		current.ScheduleFireEntitled != policy.ScheduleFireEntitled
+		current.ScheduleFireEntitled != policy.ScheduleFireEntitled ||
+		current.ThreadReadEntitled != policy.ThreadReadEntitled
 	if _, err := tx.Exec(ctx, `
 		UPDATE space_effect_policies SET privacy_policy_ref=$2, purpose=$3, lawful_basis=$4,
 		privacy_class=$5, third_party_processing_allowed=$6, retention_class=$7,
 		residency=$8, deletion_scope=$9, zero_data_retention=$10,
 		thread_create_entitled=$11, retrieval_read_entitled=$12, import_write_entitled=$13, agent_action_entitled=$14, schedule_fire_entitled=$15,
-		policy_revision=policy_revision + CASE WHEN $16 THEN 1 ELSE 0 END,
-		entitlement_revision=entitlement_revision + CASE WHEN $17 THEN 1 ELSE 0 END,
+		thread_read_entitled=$16,
+		policy_revision=policy_revision + CASE WHEN $17 THEN 1 ELSE 0 END,
+		entitlement_revision=entitlement_revision + CASE WHEN $18 THEN 1 ELSE 0 END,
 		updated_at=NOW() WHERE org_id=$1`,
 		policy.OrgID, policy.PrivacyPolicyRef, policy.Purpose, policy.LawfulBasis,
 		policy.PrivacyClass, policy.ThirdPartyProcessingAllowed, policy.RetentionClass,
 		policy.Residency, policy.DeletionScope, policy.ZeroDataRetention,
-		policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled, privacyChanged, entitlementChanged); err != nil {
+		policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled,
+		policy.ThreadReadEntitled, privacyChanged, entitlementChanged); err != nil {
 		return false, fmt.Errorf("update Space effect policy: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `

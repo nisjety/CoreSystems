@@ -343,6 +343,66 @@ export const ensureOrganizationRoomForGateway = mutation({
 });
 
 /**
+ * Create a named shared room.
+ *
+ * The organization gets exactly one room automatically, and until now that was
+ * the only channel that could exist — the sidebar drew a "Channels" heading
+ * over a list that could never hold more than one. This is the general case:
+ * a room somebody names, for a team or a piece of work, alongside it.
+ *
+ * Two things it is deliberately NOT:
+ *
+ * * **Not an organization room.** `isOrganizationRoom` stays absent, which is
+ *   what keeps `syncOrganizationRoom` from adopting this room and replacing its
+ *   roster with the whole organization. A room created here starts with its
+ *   creator and grows by explicit grant.
+ * * **Not usable on creation.** It is born `pending_registration` like every
+ *   other Space, and Control must register it before anything may happen in it.
+ *   The caller gets the room back so the UI can say so truthfully, not so it
+ *   can act as though the room were ready.
+ */
+export const createRoomForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    name: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const name = args.name.trim();
+    if (!name) throw new Error("A room name is required");
+    if (name.length > 120) throw new Error("A room name must be 120 characters or fewer");
+
+    const now = Date.now();
+    const recordId = await ctx.db.insert("spaces", {
+      spaceRef: "pending",
+      externalOrgId: args.externalOrgId,
+      kind: "room",
+      name,
+      // The creator is the registration owner, the same role the organization
+      // room's registrar takes: Control's Register needs an owner principal
+      // with a live membership. It is a registration fact, not a claim that
+      // the room is private to them.
+      ownerExternalAuthId: args.externalAuthId,
+      createdByExternalAuthId: args.externalAuthId,
+      lifecycle: "pending_registration",
+      lifecycleRevision: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const spaceRef = String(recordId);
+    await ctx.db.patch(recordId, { spaceRef });
+    const space = await ctx.db.get(recordId);
+    if (!space) throw new Error("room creation failed");
+    const event = await appendLifecycleEvent(ctx, space, now);
+    return { ...space, lifecycleEvent: event };
+  },
+});
+
+/**
  * Display facts for every Space in an organization: name, kind, lifecycle.
  *
  * This is a LABEL source, not an access decision. Control owns memberships and
