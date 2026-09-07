@@ -252,6 +252,7 @@ impl ProviderRouter for CodexSubscriptionProvider {
                 reasoning_delta: String::new(),
                 provider_used: String::new(),
                 residency: String::new(),
+                token_confidence: None,
             })
             .await;
         Ok(rx)
