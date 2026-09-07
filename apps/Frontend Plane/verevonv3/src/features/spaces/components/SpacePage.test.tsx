@@ -1136,4 +1136,104 @@ describe('SpacePage', () => {
       )
     })
   })
+
+  // Regression: the Agent tab's instructions were fetched ten times per Space,
+  // and again on every 30s membership recheck.
+  //
+  // `SpacePage` passes `tabs={{ chat: <.../>, agent: <.../>, ... }}` to
+  // `SpaceCockpit`. Solid's JSX compiler wraps a dynamic prop expression in a
+  // getter, so that object literal compiled to `get tabs() { return { ... } }`
+  // — a factory, not a value. Every *read* of `props.tabs` re-ran
+  // `createComponent` for every panel, so every read mounted a fresh
+  // `SpaceInstructionsSection` (a `createResource` on mount => one GET) and a
+  // fresh `SpaceRoomComposer` (losing whatever was typed into it).
+  //
+  // `SpaceCockpit` reads `props.tabs` twice per panel — once for `<Show>`'s
+  // `when`, once for its `children` — over six tabs, of which four are
+  // supplied: 6 `when` reads + 4 `children` reads = the ten observed requests.
+  // Both reads sit inside memos that track `current()`, so the 30s recheck
+  // resolving a fresh-but-equal context object replayed the whole burst.
+  //
+  // These tests pin the count and the composer's survival rather than the
+  // mechanism, so they keep holding if the shell's plumbing changes again.
+  describe('panel identity across context rechecks', () => {
+    const composerPlaceholder = 'Skriv i rommet. Skriv @ for å nevne noen.'
+
+    // The real gateway returns a freshly parsed object on every call, so a
+    // recheck always changes the context's identity even when nothing about
+    // the membership changed. `mockResolvedValue` would hand back one shared
+    // reference and hide exactly the churn under test.
+    function freshContext() {
+      return structuredClone(personalContext)
+    }
+
+    // A refetch triggered by the recheck would be queued, not synchronous, so
+    // `flush()` alone could let these assertions pass vacuously. Yield to the
+    // macrotask queue first, then flush, so a stray fetch has actually landed
+    // in the mock by the time it is counted.
+    async function settle() {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      flush()
+    }
+
+    /** Captures the 30s membership recheck so a test can run it on demand. */
+    function captureRecheck(): () => () => void {
+      let recheck: (() => void) | undefined
+      vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number) => {
+        if (timeout === 30_000) recheck = handler as () => void
+        return 1 as unknown as number
+      }) as typeof window.setInterval)
+      return () => {
+        expect(recheck).toBeTypeOf('function')
+        return recheck!
+      }
+    }
+
+    it('loads the Space instructions exactly once per Space', async () => {
+      spacesClient.getSpaceContext.mockImplementation(async () => freshContext())
+
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom' })
+
+      expect(spacesClient.getSpaceInstructions).toHaveBeenCalledTimes(1)
+      expect(spacesClient.getSpaceInstructions).toHaveBeenCalledWith('space_personal_1')
+    })
+
+    it('does not refetch the instructions when the membership recheck resolves an equivalent context', async () => {
+      spacesClient.getSpaceContext.mockImplementation(async () => freshContext())
+      const getRecheck = captureRecheck()
+
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom' })
+      expect(spacesClient.getSpaceInstructions).toHaveBeenCalledTimes(1)
+
+      getRecheck()()
+      await waitFor(() => expect(spacesClient.getSpaceContext).toHaveBeenCalledTimes(2))
+      await settle()
+
+      expect(spacesClient.getSpaceInstructions).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps a half-typed room message across a membership recheck', async () => {
+      spacesClient.getSpaceContext.mockImplementation(async () => freshContext())
+      const getRecheck = captureRecheck()
+
+      renderSpacePage()
+      await screen.findByRole('heading', { name: 'Personlig rom' })
+
+      const composer = screen.getByPlaceholderText(composerPlaceholder) as HTMLTextAreaElement
+      fireEvent.input(composer, { target: { value: 'halvskrevet melding' } })
+      flush()
+
+      getRecheck()()
+      await waitFor(() => expect(spacesClient.getSpaceContext).toHaveBeenCalledTimes(2))
+      await settle()
+
+      // Same element, same text: a remount would replace the node and reset
+      // the composer's local draft signal to ''.
+      const afterRecheck = screen.getByPlaceholderText(composerPlaceholder) as HTMLTextAreaElement
+      expect(afterRecheck).toBe(composer)
+      expect(afterRecheck.value).toBe('halvskrevet melding')
+    })
+  })
 })

@@ -4,29 +4,90 @@
 # Opt in once per clone:
 #     git config core.hooksPath .githooks
 #
-# Scans ONLY the staged diff (`gitleaks protect --staged`), so it never trips on
-# pre-existing tracked findings — it stops a secret in the change you're about
-# to commit. Uses a local gitleaks binary if present, otherwise falls back to
-# the official Docker image. If neither is available it warns and allows the
-# commit (CI is the backstop) so the hook never hard-blocks a machine without
-# tooling.
+# Scans ONLY the staged diff, so it never trips on pre-existing tracked
+# findings — it stops a secret in the change you're about to commit. Uses a
+# local gitleaks binary if present, otherwise falls back to the official Docker
+# image. If neither is available it warns and allows the commit (CI is the
+# backstop) so the hook never hard-blocks a machine without tooling.
+#
+# # Why the diff is piped in rather than scanned in place
+#
+# The obvious spelling is `gitleaks protect --staged` against a mounted repo.
+# It silently did nothing inside a git worktree. In a worktree `.git` is a
+# *file* holding `gitdir: <main-checkout>/.git/worktrees/<name>`, which lives
+# outside the worktree directory — so a container that mounts only the
+# worktree cannot resolve it. git inside the container failed with "not a git
+# repository", gitleaks scanned 0 bytes, printed "no leaks found" and exited 0.
+# Every commit made from a worktree got a green secret gate that had not read a
+# single line.
+#
+# Piping `git diff --cached` in on stdin removes the container's need for git
+# metadata altogether, so one code path covers a normal clone and every
+# worktree. It is also why the local-binary branch below uses the same
+# `detect --pipe` spelling: two spellings meant only one of them was ever
+# exercised here, and the untested one was the broken one.
 set -euo pipefail
 
-CONFIG=".gitleaks.toml"
-COMMON_ARGS=(protect --staged --redact --no-banner)
-[ -f "$CONFIG" ] && COMMON_ARGS+=(--config "$CONFIG")
+CONFIG_NAME=".gitleaks.toml"
+# Windows form (C:/...) under Git Bash, POSIX elsewhere. Used for the host side
+# of the bind mount: `pwd` would yield /c/... here, which Docker cannot resolve.
+TOPLEVEL="$(git rev-parse --show-toplevel)"
+ARGS=(detect --pipe --redact --no-banner)
+
+# Nothing staged (a mode-only change, an empty --amend) is not a failure.
+if git diff --cached --quiet; then
+  exit 0
+fi
 
 if command -v gitleaks >/dev/null 2>&1; then
-  gitleaks "${COMMON_ARGS[@]}"
-  exit $?
+  [ -f "$TOPLEVEL/$CONFIG_NAME" ] && ARGS+=(--config "$TOPLEVEL/$CONFIG_NAME")
+  rc=0
+  git diff --cached | gitleaks "${ARGS[@]}" || rc=$?
+elif command -v docker >/dev/null 2>&1; then
+  MOUNT=()
+  if [ -f "$TOPLEVEL/$CONFIG_NAME" ]; then
+    MOUNT=(-v "$TOPLEVEL/$CONFIG_NAME:/gitleaks.toml:ro")
+    ARGS+=(--config /gitleaks.toml)
+  fi
+  # MSYS_NO_PATHCONV: Git Bash rewrites arguments that look like POSIX paths
+  # into Windows ones, so the container-side `/gitleaks.toml` became
+  # `C:/Program Files/Git/gitleaks.toml` and `-w /repo` became
+  # `C:/Program Files/Git/repo` — the error that made this hook fail outright
+  # on Windows. The host side is unaffected because TOPLEVEL is already a
+  # Windows path. The variable is inert on Linux and macOS.
+  rc=0
+  git diff --cached | MSYS_NO_PATHCONV=1 docker run --rm -i \
+    ${MOUNT[@]+"${MOUNT[@]}"} \
+    ghcr.io/gitleaks/gitleaks:latest "${ARGS[@]}" || rc=$?
+else
+  echo "pre-commit: gitleaks not found and docker unavailable — skipping local scan." >&2
+  echo "            CI secret-scan will still gate this change. Install gitleaks to scan locally." >&2
+  exit 0
 fi
 
-if command -v docker >/dev/null 2>&1; then
-  docker run --rm -v "$(git rev-parse --show-toplevel)":/repo -w /repo \
-    ghcr.io/gitleaks/gitleaks:latest "${COMMON_ARGS[@]}"
-  exit $?
-fi
-
-echo "pre-commit: gitleaks not found and docker unavailable — skipping local scan." >&2
-echo "            CI secret-scan will still gate this change. Install gitleaks to scan locally." >&2
-exit 0
+# gitleaks: 0 = clean, 1 = leaks found. Docker's own 125/126/127 mean the
+# container never started (daemon down, image unpullable) — that is the same
+# "no tooling on this machine" case the fallback above allows, so treat it the
+# same way rather than hard-blocking a commit over a stopped daemon.
+case "$rc" in
+  0) exit 0 ;;
+  1)
+    echo "pre-commit: gitleaks found a secret in the staged diff — commit blocked." >&2
+    echo "            Remove it and re-stage. Do not use --no-verify: that is how an" >&2
+    echo "            unscanned secret reaches the remote." >&2
+    exit 1
+    ;;
+  125 | 126 | 127)
+    echo "pre-commit: could not start the gitleaks container (exit $rc) — skipping local scan." >&2
+    echo "            CI secret-scan will still gate this change." >&2
+    exit 0
+    ;;
+  *)
+    # Anything else means the scanner ran but did not complete cleanly. Fail
+    # closed: a gate that cannot report is exactly how the worktree bug above
+    # stayed invisible.
+    echo "pre-commit: gitleaks exited $rc without completing the scan — commit blocked." >&2
+    echo "            The staged diff has NOT been checked for secrets." >&2
+    exit 1
+    ;;
+esac
