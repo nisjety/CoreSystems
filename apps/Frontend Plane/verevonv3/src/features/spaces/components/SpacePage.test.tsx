@@ -80,11 +80,20 @@ const chatClient = vi.hoisted(() => ({
   cancelInvocation: vi.fn(),
 }))
 
-vi.mock('@/shared/api/chat-client', () => ({
-  streamChat: chatClient.streamChat,
-  getChatThreadTranscript: chatClient.getChatThreadTranscript,
-  cancelInvocation: chatClient.cancelInvocation,
-}))
+// Partial mock: spread the real module so every other export (constants like
+// VEREVON_BALANCE_MODE_ID, helpers the composer imports) stays real. A
+// complete-replacement mock here has broken before as chat-client's surface
+// grew — see the getSpaceInstructions comment above for the same lesson on
+// spaces-client.
+vi.mock('@/shared/api/chat-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/shared/api/chat-client')>()
+  return {
+    ...actual,
+    streamChat: chatClient.streamChat,
+    getChatThreadTranscript: chatClient.getChatThreadTranscript,
+    cancelInvocation: chatClient.cancelInvocation,
+  }
+})
 
 const personalContext = {
   space: { space_ref: 'space_personal_1', name: 'Personal Space', kind: 'personal', lifecycle: 'active' },
