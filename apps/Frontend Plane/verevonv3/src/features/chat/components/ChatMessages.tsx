@@ -2112,6 +2112,13 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
 export function EmptyChatState(props: {
   children: JSX.Element
   onSelectPrompt: (prompt: string) => void
+  /**
+   * Open an earlier thread. Distinct from `onSelectPrompt` on purpose:
+   * resuming a conversation is navigation, not a message. Typing a
+   * sentence ABOUT an earlier thread into a new one sends the model a
+   * reference it cannot resolve.
+   */
+  onResumeThread: (threadId: string) => void
   /** Names the actual grounding scope when the session knows it. */
   orgName?: string
   /** Greets the person by name when the session knows it. First name only. */
@@ -2201,18 +2208,22 @@ export function EmptyChatState(props: {
               Verevon can reach, this says what to do with it right now.
               Sourced from real state — the most recent thread when there is
               one — because a suggestion the product invented is just another
-              generic prompt, and there are three of those below already. */}
+              generic prompt, and there are three of those below already.
+
+              It OPENS that thread. It used to type a prompt naming the
+              thread's title into the new conversation instead, so the model
+              was asked to continue a conversation it had never been given —
+              and answered, correctly, that it did not have it. The
+              affordance promised continuity the wire never carried.
+              `selectChatThread` fires the same event the sidebar's thread
+              rows do, so this reuses the one working resume path rather than
+              adding a second. */}
           <Show when={resumeTarget()}>
             {(target) => (
               <button
                 type="button"
                 class="verevon-chat-empty__resume"
-                onClick={() => props.onSelectPrompt(
-                  i18n.tr(
-                    `Fortsett der vi slapp i «${target().title}». Oppsummer kort hva vi kom fram til, og foreslå neste steg.`,
-                    `Pick up where we left off in "${target().title}". Briefly summarise what we concluded, and suggest the next step.`,
-                  ),
-                )}
+                onClick={() => props.onResumeThread(target().threadId)}
               >
                 <ArrowRight size={14} aria-hidden="true" />
                 <span>

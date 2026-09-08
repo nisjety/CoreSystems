@@ -56,6 +56,7 @@ import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
 import { useI18n } from '@/shared/i18n'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
+import { selectChatThread } from '../lib/chat-thread-history'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -614,6 +615,7 @@ export default function ChatPage() {
           <Match when={!hasMessages()}>
             <EmptyChatState
               onSelectPrompt={setInput}
+              onResumeThread={(threadId) => selectChatThread(threadId)}
               orgName={session.activeOrg?.name}
               userName={session.user?.name}
             >
