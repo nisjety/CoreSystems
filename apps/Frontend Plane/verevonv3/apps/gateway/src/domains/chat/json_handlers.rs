@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -137,17 +137,37 @@ pub(crate) async fn queue_invocation_input(
     // in model-gateway's http_routes.rs), the same as submit_feedback above —
     // without it the call 401s before the queue logic ever runs.
     let session_token = shared::session_token(&state, &user, &headers).await;
-    shared::proxy_model_json_with_session(
-        &state,
-        Method::POST,
-        &url,
-        Some(outbound_body),
-        token.as_deref(),
-        session_token.as_deref(),
-        &user,
+    normalize_queue_response(
+        shared::proxy_model_json_with_session(
+            &state,
+            Method::POST,
+            &url,
+            Some(outbound_body),
+            token.as_deref(),
+            session_token.as_deref(),
+            &user,
+        )
+        .await,
     )
-    .await
     .into_response()
+}
+
+/// A run ending between the browser's keystroke and the enqueue request is an
+/// expected lifecycle race, not a missing API resource. Model Gateway uses 404
+/// to keep inactive and foreign request ids indistinguishable; at the
+/// browser-facing boundary we retain that indistinguishable payload while
+/// returning 200 so DevTools does not report a handled retry as a failed HTTP
+/// request. The explicit flag prevents unrelated upstream 404s from being
+/// normalized.
+fn normalize_queue_response(response: (StatusCode, Json<Value>)) -> (StatusCode, Json<Value>) {
+    let (status, body) = response;
+    let run_ended = status == StatusCode::NOT_FOUND
+        && body.0.get("resend_as_new_turn").and_then(Value::as_bool) == Some(true);
+    if run_ended {
+        (StatusCode::OK, body)
+    } else {
+        (status, body)
+    }
 }
 
 pub(super) async fn get_thread_messages(
@@ -363,4 +383,37 @@ pub(crate) async fn submit_feedback(
         &user,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ended_queue_race_is_a_successful_browser_protocol_response() {
+        let (status, Json(body)) = normalize_queue_response((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "queued": false,
+                "error": "no active stream",
+                "resend_as_new_turn": true,
+            })),
+        ));
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["queued"], false);
+        assert_eq!(body["resend_as_new_turn"], true);
+    }
+
+    #[test]
+    fn unrelated_not_found_response_stays_not_found() {
+        let (status, Json(body)) = normalize_queue_response((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "route not found"})),
+        ));
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "route not found");
+    }
 }

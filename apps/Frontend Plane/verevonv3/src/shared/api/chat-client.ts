@@ -1413,6 +1413,14 @@ export async function queueInvocationInput(
         }),
       },
     )
+    // The BFF translates Model Gateway's "stream just ended" 404 into a
+    // successful protocol response. It is an expected race and the caller
+    // replays the text as a new turn; treating it as a failed HTTP request only
+    // adds a misleading red entry to DevTools. Keep accepting a legacy 404 in
+    // the catch below while older gateways roll out.
+    if (raw.queued === false && raw.resend_as_new_turn === true) {
+      return { outcome: 'run_ended' }
+    }
     return {
       outcome: 'queued',
       pending: typeof raw.pending === 'number' ? raw.pending : 1,

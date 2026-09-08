@@ -296,6 +296,24 @@ describe('mid-run queued input', () => {
     })
   })
 
+  it('handles the browser-facing run-ended protocol without producing an HTTP 404', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          request_id: 'req-1',
+          queued: false,
+          error: 'no active stream',
+          resend_as_new_turn: true,
+        }),
+      ),
+    )
+
+    await expect(queueInvocationInput('req-1', 'bruk EUR')).resolves.toEqual({
+      outcome: 'run_ended',
+    })
+  })
+
   it('keeps the two refusal reasons apart, since one means wait and the other means shorten', async () => {
     vi.stubGlobal(
       'fetch',
