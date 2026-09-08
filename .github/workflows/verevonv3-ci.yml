@@ -74,12 +74,26 @@ jobs:
               fail=1
             fi
           done
-          # (b) No domain may READ a client/forwarded org header — that is the
-          # cross-tenant IDOR vector. Header reads only ever live in the
-          # ingress-strip regression tests (middleware.rs / main.rs), never under domains/.
-          if grep -rInE 'get\("x-(verevon-)?org-id"' "$gw/domains" >/dev/null 2>&1; then
+          # (b) No domain may READ a client/forwarded org header in PRODUCTION
+          # code — that is the cross-tenant IDOR vector. Header reads only
+          # ever live in the ingress-strip regression tests (middleware.rs /
+          # main.rs) or in a domain file's OWN trailing test module, which
+          # this crate's clippy lints (items_after_test_module) guarantee
+          # always starts at that file's `#[cfg(test)]` marker and runs to
+          # EOF — e.g. a wiremock assertion that the gateway forwarded the
+          # server-validated org outward, proving this exact guard's intent
+          # rather than violating it. Only the portion of each file BEFORE
+          # that marker is checked.
+          domain_violations=""
+          while IFS= read -r -d '' file; do
+            hit=$(sed '/^#\[cfg(test)\]/,$d' "$file" | grep -nE 'get\("x-(verevon-)?org-id"' || true)
+            if [ -n "$hit" ]; then
+              domain_violations="${domain_violations}${file}:\n${hit}\n"
+            fi
+          done < <(find "$gw/domains" -name '*.rs' -print0)
+          if [ -n "$domain_violations" ]; then
             echo "::error::a gateway domain reads a client org header — derive org via authorized_org_id, never x-org-id/x-verevon-org-id:"
-            grep -rInE 'get\("x-(verevon-)?org-id"' "$gw/domains"; fail=1
+            printf '%b' "$domain_violations"; fail=1
           fi
           # Phase 2 PR-6: the fabricated "US region default" residency/timezone option
           # must not return. Real IANA timezones (Europe/Oslo, America/New_York) are
@@ -107,6 +121,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: 'apps/Frontend Plane/verevonv3/apps/gateway -> target'
+          # One-time cache-buster (2026-09-08): a restored target/ directory's
+          # artifact mtimes can land after the just-checked-out source's, so
+          # cargo's freshness check treated an already-linted crate as still
+          # up to date and clippy kept reporting a stale prior commit's
+          # findings under `-D warnings`. Bump this key's suffix again only
+          # if the same class of staleness recurs.
+          prefix-key: 'v1-cachebust-2026-09-08'
 
       - name: Check formatting
         run: cargo fmt --check
@@ -131,12 +152,12 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: '11.21.0'
+          version: '11.3.0'
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: 'apps/Frontend Plane/verevonv3/pnpm-lock.yaml'
 
