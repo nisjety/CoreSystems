@@ -98,7 +98,7 @@ jobs:
             type=sha
 
       - name: Build and push image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: 'apps/Control Plane/user-core'
           push: ${{ github.event_name != 'pull_request' }}
