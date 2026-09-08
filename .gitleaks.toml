@@ -12,7 +12,7 @@ title = "Verevon CoreSystem secret-scan"
 # JWTs, private keys, curl auth headers, etc.), then layer the allowlist below.
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Build artifacts, lockfiles, vendored code, and obvious placeholders"
 
 # Paths that never contain real secrets we control (regex, matched against path).
@@ -45,4 +45,16 @@ regexes = [
   '''\bscoped-(password|token|secret|key)\b''',
   '''\b(secret-value|legacy-token)\b''',
   '''secret\\r\\ninjected''',
+]
+
+# `pre-commit` scans the staged patch through stdin so gitleaks cannot attach a
+# source path and the go.sum path allowlist above cannot apply. Limit this
+# exception to the generic-key rule and the exact canonical Go checksum line
+# shape; arbitrary base64 values remain findings.
+[[allowlists]]
+description = "Canonical Go module checksums in staged patch input"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = [
+  '''^api v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.+-]+)?(?:/go\.mod)? h1:[A-Za-z0-9+/]{43}=$''',
 ]

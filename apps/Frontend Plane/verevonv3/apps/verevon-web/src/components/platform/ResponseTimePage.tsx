@@ -228,7 +228,7 @@ export function ResponseTimePage() {
 								ref={corridorVideoRef}
 								src={
 									shouldLoadCorridor
-										? "/verevon-vibe/problem-waiting/corridor.mp4"
+										? "/verevon-vibe/problem-waiting/corridor-web.mp4"
 										: undefined
 								}
 							/>

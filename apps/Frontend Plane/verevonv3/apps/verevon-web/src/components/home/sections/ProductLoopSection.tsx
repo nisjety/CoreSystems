@@ -319,7 +319,10 @@ export function ProductLoopSection() {
 					const header = section.querySelector<HTMLElement>(
 						"[data-product-loop-header]",
 					);
-					const copyFloat = section.querySelector<HTMLElement>(
+					const copyPosition = section.querySelector<HTMLElement>(
+						"[data-product-loop-copy-position]",
+					);
+					const copyMotion = section.querySelector<HTMLElement>(
 						"[data-product-loop-copy]",
 					);
 					const frameMarkers = Array.from(
@@ -371,7 +374,8 @@ export function ProductLoopSection() {
 						!connector ||
 						!chrome ||
 						!header ||
-						!copyFloat ||
+						!copyPosition ||
+						!copyMotion ||
 						frameMarkers.length !== 4 ||
 						copyMarkers.length !== copyStages.length ||
 						layers.length !== loopStages.length ||
@@ -407,29 +411,43 @@ export function ProductLoopSection() {
 					const placeFrame = (index: number) =>
 						boxFromMarker(frameMarkers[index]);
 					const placeCopy = (index: number) => boxFromMarker(copyMarkers[index]);
+					const dynamicTransform = (
+						base: () => {
+							height: number;
+							left: number;
+							top: number;
+							width: number;
+						},
+						target: () => {
+							height: number;
+							left: number;
+							top: number;
+							width: number;
+						},
+					) => ({
+						scaleX: () => {
+							const baseBox = base();
+							return target().width / baseBox.width;
+						},
+						scaleY: () => {
+							const baseBox = base();
+							return target().height / baseBox.height;
+						},
+						x: () => {
+							const baseBox = base();
+							return target().left - baseBox.left;
+						},
+						y: () => {
+							const baseBox = base();
+							return target().top - baseBox.top;
+						},
+					});
 					const dynamicFrameTransform = (target: () => {
 						height: number;
 						left: number;
 						top: number;
 						width: number;
-					}) => ({
-						scaleX: () => {
-							const base = placeFrame(0);
-							return target().width / base.width;
-						},
-						scaleY: () => {
-							const base = placeFrame(0);
-							return target().height / base.height;
-						},
-						x: () => {
-							const base = placeFrame(0);
-							return target().left - base.left;
-						},
-						y: () => {
-							const base = placeFrame(0);
-							return target().top - base.top;
-						},
-					});
+					}) => dynamicTransform(() => placeFrame(0), target);
 					const dynamicFramePosition = (index: number) => ({
 						...dynamicFrameTransform(() => placeFrame(index)),
 					});
@@ -445,12 +463,8 @@ export function ProductLoopSection() {
 							};
 						}),
 					});
-					const dynamicCopyPosition = (index: number) => ({
-						height: () => placeCopy(index).height,
-						left: () => placeCopy(index).left,
-						top: () => placeCopy(index).top,
-						width: () => placeCopy(index).width,
-					});
+					const dynamicCopyPosition = (index: number) =>
+						dynamicTransform(() => placeCopy(0), () => placeCopy(index));
 					const entranceFrame = () => {
 						const viewportRect = viewport.getBoundingClientRect();
 
@@ -506,10 +520,19 @@ export function ProductLoopSection() {
 							...dynamicCircleGeometry(0.3, 0, 0.15),
 						});
 						gsap.set(connector, { autoAlpha: 1 });
-						gsap.set(copyFloat, {
+						gsap.set(copyPosition, {
 							...placeCopy(0),
-							autoAlpha: 0,
 							pointerEvents: "none",
+							scaleX: 1,
+							scaleY: 1,
+							transformOrigin: "0% 0%",
+							willChange: "transform",
+							x: 0,
+							y: 0,
+						});
+						gsap.set(copyMotion, {
+							autoAlpha: 0,
+							force3D: true,
 							y: 28,
 						});
 						gsap.set(layers, {
@@ -598,27 +621,34 @@ export function ProductLoopSection() {
 
 							if (copyIndex === null) {
 								loopTimeline.to(
-									copyFloat,
+									copyMotion,
 									{
 										autoAlpha: 0,
-										pointerEvents: "none",
 										y: -24,
 										duration: 0.24,
 									},
+									at + 0.06,
+								)
+								.to(
+									copyPosition,
+									{ pointerEvents: "none", duration: 0 },
 									at + 0.06,
 								);
 							} else {
 								const nextPanel = panels[copyIndex];
 								loopTimeline
 									.to(
-										copyFloat,
+										copyPosition,
 										{
 											...dynamicCopyPosition(copyIndex),
-											autoAlpha: 1,
 											pointerEvents: "auto",
-											y: 0,
 											duration: 0.52,
 										},
+										at,
+									)
+									.to(
+										copyMotion,
+										{ autoAlpha: 1, y: 0, duration: 0.52 },
 										at,
 									)
 									.to(
@@ -755,13 +785,17 @@ export function ProductLoopSection() {
 								2.9,
 							)
 							.to(
-								copyFloat,
+								copyMotion,
 								{
 									autoAlpha: 0,
-									pointerEvents: "none",
 									y: -24,
 									duration: 0.24,
 								},
+								2.78,
+							)
+							.to(
+								copyPosition,
+								{ pointerEvents: "none", duration: 0 },
 								2.78,
 							)
 							.to(chrome, { autoAlpha: 0, duration: 0.18 }, 2.88)
@@ -1070,10 +1104,15 @@ export function ProductLoopSection() {
 						<LoopFrameChrome />
 					</div>
 
-					<div className="absolute z-30 motion-reduce:hidden max-[899px]:hidden" data-product-loop-copy="">
-						{copyStages.map((stage, index) => (
-							<LoopCopyPanel index={index} key={stage.step} stage={stage} />
-						))}
+					<div
+						className="absolute z-30 motion-reduce:hidden max-[899px]:hidden"
+						data-product-loop-copy-position=""
+					>
+						<div data-product-loop-copy="">
+							{copyStages.map((stage, index) => (
+								<LoopCopyPanel index={index} key={stage.step} stage={stage} />
+							))}
+						</div>
 					</div>
 
 					<div

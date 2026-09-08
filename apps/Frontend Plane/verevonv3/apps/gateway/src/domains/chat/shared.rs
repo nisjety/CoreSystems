@@ -4,6 +4,7 @@ use axum::{
 };
 use reqwest::Method;
 use serde_json::{json, Value};
+use std::time::Duration;
 
 use crate::{
     audience_tokens::{
@@ -304,6 +305,7 @@ pub(crate) async fn proxy_model_json(
         None,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -337,6 +339,43 @@ pub(crate) async fn proxy_model_json_with_data_plane(
         execution_bearer,
         cost_bearer,
         session_bearer,
+        None,
+        user,
+    )
+    .await
+}
+
+// Subscription-backed model invocations can legitimately run longer than the
+// gateway's standard 25-second upstream budget. Keep that exception explicit
+// and local to chat invocation rather than weakening every upstream call.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxy_model_json_with_data_plane_request_timeout(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    data_plane_bearer: Option<&str>,
+    inference_bearer: Option<&str>,
+    execution_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
+    session_bearer: Option<&str>,
+    request_timeout: Option<Duration>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        data_plane_bearer,
+        None,
+        inference_bearer,
+        execution_bearer,
+        cost_bearer,
+        session_bearer,
+        request_timeout,
         user,
     )
     .await
@@ -359,6 +398,7 @@ pub(crate) async fn proxy_model_json_with_capability(
         bearer_token,
         None,
         capability_bearer,
+        None,
         None,
         None,
         None,
@@ -389,6 +429,7 @@ pub(crate) async fn proxy_model_json_with_session(
         None,
         None,
         session_bearer,
+        None,
         user,
     )
     .await
@@ -415,6 +456,7 @@ pub(crate) async fn proxy_model_json_with_inference(
         None,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -433,6 +475,7 @@ async fn proxy_model_json_with_delegations(
     execution_bearer: Option<&str>,
     cost_bearer: Option<&str>,
     session_bearer: Option<&str>,
+    request_timeout: Option<Duration>,
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
@@ -451,6 +494,9 @@ async fn proxy_model_json_with_delegations(
         .request(method, url)
         .header("x-user-id", &user.user_id)
         .header("x-user-role", user_role);
+    if let Some(timeout) = request_timeout {
+        req = req.timeout(timeout);
+    }
     if !org_id.trim().is_empty() {
         req = req.header("x-org-id", org_id);
     }
@@ -488,6 +534,13 @@ async fn proxy_model_json_with_delegations(
             let b = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
             (status, Json(b))
         }
+        Err(cause) if cause.is_timeout() => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(error(
+                "model_request_timeout",
+                "The model did not respond before the request deadline",
+            )),
+        ),
         Err(_) => (
             StatusCode::BAD_GATEWAY,
             Json(crate::envelope::upstream_unavailable()),
@@ -515,7 +568,7 @@ mod tests {
     use super::{
         apply_org_zdr_posture, data_plane_authorization_value, delegated_auth_unavailable,
         dev_bypass_model_token, normalized_model_body, proxy_model_json_with_data_plane,
-        proxy_model_json_with_session,
+        proxy_model_json_with_data_plane_request_timeout, proxy_model_json_with_session,
     };
 
     fn test_state(allow_dev_auth_bypass: bool) -> AppState {
@@ -724,6 +777,122 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_proxy_can_override_the_standard_client_timeout_for_slow_models() {
+        use std::time::Duration;
+
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/slow-invoke"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(60))
+                    .set_body_json(json!({"ok": true})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(10))
+            .build()
+            .expect("test client");
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+
+        let (status, _) = proxy_model_json_with_data_plane_request_timeout(
+            &state,
+            Method::POST,
+            &format!("{}/slow-invoke", server.uri()),
+            Some(json!({"prompt": "hello"})),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Duration::from_millis(250)),
+            &user,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn chat_proxy_returns_a_typed_gateway_timeout_when_the_model_deadline_expires() {
+        use std::time::Duration;
+
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/timed-out-invoke"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(json!({"ok": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+
+        let (status, Json(body)) = proxy_model_json_with_data_plane_request_timeout(
+            &state,
+            Method::POST,
+            &format!("{}/timed-out-invoke", server.uri()),
+            Some(json!({"prompt": "hello"})),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Duration::from_millis(10)),
+            &user,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body["error"]["code"], "model_request_timeout");
     }
 
     #[test]

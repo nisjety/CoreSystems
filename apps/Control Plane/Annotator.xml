@@ -1,0 +1,990 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>112</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>17</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>113</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>6</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>114</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>6</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>115</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>6</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>116</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>12</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>117</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>11</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>123</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>17</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>124</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>9</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>126</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>8</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>127</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Statement expected #loc</description>
+  <highlighted_element>,</highlighted_element>
+  <language>Markdown</language>
+  <offset>3</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>129</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>11</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>135</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>17</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>136</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>19</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>137</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>15</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>138</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>10</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>139</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>12</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>140</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>15</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>141</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>11</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>147</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>17</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>148</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>6</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>149</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>11</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>159</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>9</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>160</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>7</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>161</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>6</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>162</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>6</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>163</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>10</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>164</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>11</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>170</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>9</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>171</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>7</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>172</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>9</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>174</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>16</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>175</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Statement expected #loc</description>
+  <highlighted_element>,</highlighted_element>
+  <language>Markdown</language>
+  <offset>3</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>186</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>17</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>187</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>19</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>188</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>9</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>189</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>12</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>190</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>6</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>191</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>12</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>192</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>11</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>198</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>17</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>199</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>19</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>200</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>9</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>201</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>12</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>202</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>12</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>203</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>11</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>254</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Expression expected #loc</description>
+  <highlighted_element>)</highlighted_element>
+  <language>Markdown</language>
+  <offset>19</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/ENHANCEMENT_SUMMARY.md</file>
+  <line>296</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/ENHANCEMENT_SUMMARY.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>package expected, got 'orgService' #loc</description>
+  <highlighted_element>orgService</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/ENHANCEMENT_SUMMARY.md</file>
+  <line>410</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/ENHANCEMENT_SUMMARY.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>package expected, got 'POST' #loc</description>
+  <highlighted_element>POST</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/ENHANCEMENT_SUMMARY.md</file>
+  <line>425</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/ENHANCEMENT_SUMMARY.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>package expected, got 'func' #loc</description>
+  <highlighted_element>func</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/ENHANCEMENT_SUMMARY.md</file>
+  <line>448</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/ENHANCEMENT_SUMMARY.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>package expected, got 'func' #loc</description>
+  <highlighted_element>func</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/Dockerfile</file>
+  <line>22</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/Dockerfile" />
+  <problem_class id="Annotator" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve variable 'i' #loc</description>
+  <highlighted_element>i</highlighted_element>
+  <language>Dockerfile</language>
+  <offset>37</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md</file>
+  <line>99</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>19</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md</file>
+  <line>100</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>14</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>21</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md</file>
+  <line>102</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>12</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md</file>
+  <line>102</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/docs/EMAIL_CONFIGURATION.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Expression expected #loc</description>
+  <highlighted_element />
+  <language>Markdown</language>
+  <offset>21</offset>
+  <length>0</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve symbol 'google.golang.org' #loc</description>
+  <highlighted_element>google.golang.org</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve symbol 'grpc' #loc</description>
+  <highlighted_element>grpc</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve symbol 'google.golang.org' #loc</description>
+  <highlighted_element>google.golang.org</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve symbol 'grpc' #loc</description>
+  <highlighted_element>grpc</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve symbol 'credentials' #loc</description>
+  <highlighted_element>credentials</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve symbol 'insecure' #loc</description>
+  <highlighted_element>insecure</highlighted_element>
+  <language>go</language>
+  <offset>37</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Unresolved reference 'NewClient' #loc</description>
+  <highlighted_element>NewClient</highlighted_element>
+  <language>go</language>
+  <offset>19</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>20</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Unresolved reference 'WithTransportCredentials' #loc</description>
+  <highlighted_element>WithTransportCredentials</highlighted_element>
+  <language>go</language>
+  <offset>7</offset>
+  <length>24</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>20</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Unresolved reference 'NewCredentials' #loc</description>
+  <highlighted_element>NewCredentials</highlighted_element>
+  <language>go</language>
+  <offset>41</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/test-grpc-client.go</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/test-grpc-client.go" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Unresolved reference 'Close' #loc</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>12</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/Dockerfile</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/Dockerfile" />
+  <problem_class id="Annotator" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve variable 'i' #loc</description>
+  <highlighted_element>i</highlighted_element>
+  <language>Dockerfile</language>
+  <offset>37</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md</file>
+  <line>381</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>13</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md</file>
+  <line>382</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Newline or semicolon expected #loc</description>
+  <highlighted_element>:</highlighted_element>
+  <language>Markdown</language>
+  <offset>21</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/billing-core.md</file>
+  <line>63</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/billing-core.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Statement expected #loc</description>
+  <highlighted_element />
+  <language>Markdown</language>
+  <offset>70</offset>
+  <length>0</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/billing-core.md</file>
+  <line>77</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/billing-core.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>package expected, got 'if' #loc</description>
+  <highlighted_element>if</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/session-core.md</file>
+  <line>49</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/session-core.md" />
+  <problem_class id="Annotator" severity="ERROR" attribute_key="WRONG_REFERENCES_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>package expected, got 'func' #loc</description>
+  <highlighted_element>func</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/Dockerfile</file>
+  <line>26</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/Dockerfile" />
+  <problem_class id="Annotator" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve variable 'i' #loc</description>
+  <highlighted_element>i</highlighted_element>
+  <language>Dockerfile</language>
+  <offset>37</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/Dockerfile</file>
+  <line>19</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/Dockerfile" />
+  <problem_class id="Annotator" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve variable 'i' #loc</description>
+  <highlighted_element>i</highlighted_element>
+  <language>Dockerfile</language>
+  <offset>37</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/Dockerfile</file>
+  <line>43</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/Dockerfile" />
+  <problem_class id="Annotator" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve variable 'i' #loc</description>
+  <highlighted_element>i</highlighted_element>
+  <language>Dockerfile</language>
+  <offset>37</offset>
+  <length>1</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/Dockerfile</file>
+  <line>57</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/Dockerfile" />
+  <problem_class id="Annotator" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Annotator</problem_class>
+  <hints />
+  <description>Cannot resolve variable 'i' #loc</description>
+  <highlighted_element>i</highlighted_element>
+  <language>Dockerfile</language>
+  <offset>37</offset>
+  <length>1</length>
+</problem>
+</problems>

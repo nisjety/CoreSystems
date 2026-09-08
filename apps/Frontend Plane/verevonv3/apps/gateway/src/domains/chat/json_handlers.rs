@@ -6,8 +6,19 @@ use axum::{
 };
 use reqwest::Method;
 use serde_json::Value;
+use std::time::Duration;
 
 use crate::{config::AppState, domains::chat::shared, middleware::AuthenticatedUser};
+
+// Integration Core permits subscription-backed Codex requests to run for up
+// to 90 seconds. Leave a small proxy/response margin so a successful provider
+// result is not discarded by the gateway first.
+const SUBSCRIPTION_CHAT_INVOKE_TIMEOUT: Duration = Duration::from_secs(100);
+
+fn chat_invoke_timeout(body: &Value) -> Option<Duration> {
+    (body.get("provider").and_then(Value::as_str) == Some("openai-codex-subscription"))
+        .then_some(SUBSCRIPTION_CHAT_INVOKE_TIMEOUT)
+}
 
 pub(super) async fn invoke_chat(
     State(state): State<AppState>,
@@ -66,9 +77,10 @@ pub(super) async fn invoke_chat(
     let mut outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    let request_timeout = chat_invoke_timeout(&outbound_body);
     // Same rule as the streaming path: mark before dispatch, so a ZDR turn that
     // fails still leaves the thread non-persistable.
-    shared::proxy_model_json_with_data_plane(
+    shared::proxy_model_json_with_data_plane_request_timeout(
         &state,
         Method::POST,
         &url,
@@ -79,6 +91,7 @@ pub(super) async fn invoke_chat(
         Some(&execution_token),
         Some(&cost_token),
         Some(&session_token),
+        request_timeout,
         &user,
     )
     .await
@@ -389,6 +402,16 @@ pub(crate) async fn submit_feedback(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn subscription_chat_uses_the_extended_model_deadline() {
+        assert_eq!(
+            chat_invoke_timeout(&json!({"provider": "openai-codex-subscription"})),
+            Some(SUBSCRIPTION_CHAT_INVOKE_TIMEOUT),
+        );
+        assert_eq!(chat_invoke_timeout(&json!({"provider": "openai"})), None);
+        assert_eq!(chat_invoke_timeout(&json!({})), None);
+    }
 
     #[test]
     fn ended_queue_race_is_a_successful_browser_protocol_response() {

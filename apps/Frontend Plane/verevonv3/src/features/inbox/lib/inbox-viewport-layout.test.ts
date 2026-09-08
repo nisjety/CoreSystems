@@ -24,7 +24,8 @@ describe('Inbox viewport layout', () => {
     expect(workspace).toContain('min(var(--inbox-list-w, 340px), 34%)')
     expect(detail).toContain('height: 100%')
     expect(detail).toContain('overflow: hidden')
-    expect(detail).toContain('min(var(--inbox-aside-w, 360px), 44%)')
+    expect(detail).toContain('--inbox-aside-track: clamp(220px, var(--inbox-aside-w, 280px), calc(100% - 228px))')
+    expect(detail).toContain('grid-template-columns: minmax(220px, 1fr) var(--inbox-aside-track)')
   })
 
   it('does not move the context pane below the conversation at laptop widths', async () => {
@@ -38,5 +39,15 @@ describe('Inbox viewport layout', () => {
     expect(ruleBody(css, '.verevon-inbox-ticket-list')).toContain('overflow-y: auto')
     expect(ruleBody(css, '.verevon-inbox-transcript')).toContain('overflow-y: auto')
     expect(ruleBody(css, '.verevon-inbox-aside-scroll')).toContain('overflow-y: auto')
+    expect(ruleBody(css, '.verevon-inbox-aside-scroll')).toContain('overflow-x: hidden')
+    const tabpanel = ruleBody(css, ".verevon-inbox-aside > [role='tabpanel']")
+    expect(tabpanel).toContain('min-height: 0')
+    expect(tabpanel).toContain('overflow: hidden')
+  })
+
+  it('keeps the context resize affordance visible and aligned to its track', async () => {
+    const css = await readCss()
+    expect(ruleBody(css, '.verevon-inbox-resize-handle::after')).toContain('background: var(--verevon-border-soft)')
+    expect(ruleBody(css, '.verevon-inbox-resize-handle--aside')).toContain('right: calc(var(--inbox-aside-track) + 4px)')
   })
 })

@@ -1,7 +1,7 @@
 # Verevon web: requested skills audit
 Date: 7 September 2026; runtime verification and remediation updated 8 September 2026
 
-**Current verdict: the launch-blocking accessibility and readability findings are resolved.** The V2 and V3 variants and fragile full-screen page loader have been removed; the menu, footer, response-time hero, reduced-motion behavior, deferred corridor loading, connector marquee, hidden SVG work, homepage client boundary, and public discovery metadata have been corrected. Remaining work is post-change performance measurement, re-encoding the large corridor source, and a visual redesign of the product-loop copy-panel geometry. The baseline audit below retains its original evidence for traceability.
+**Current verdict: the launch-blocking accessibility and readability findings are resolved.** The V2 and V3 variants and fragile full-screen page loader have been removed; the menu, footer, response-time hero, reduced-motion behavior, corridor transfer, connector marquee, hidden SVG work, product-loop geometry, homepage client boundary, and public discovery metadata have been corrected. Remaining work is production and device performance measurement. The baseline audit below retains its original evidence for traceability.
 
 This began as an audit. The 8 September remediation section records the application changes made from its findings.
 
@@ -25,12 +25,12 @@ The table describes the live code state after the fixes. “Mitigated” means t
 | F02 footer contrast | Resolved | Normal footer copy now uses the 65% text token, calculated at approximately 5.39:1 on the declared background. |
 | F03/F04 destinations | Resolved | Removed dead homepage anchors and misleading social/search/legal labels; navigation now uses actual product, trust, mail, and contact destinations. |
 | F05 reduced motion | Resolved for audited videos | Homepage and response-time hero videos wait for the no-preference setting before playing, and pause when reduced motion is enabled. |
-| F06 corridor transfer | Mitigated | The below-fold corridor video has no source until it is within 200px of the viewport; it remains a poster for reduced-motion visitors. The 71.42 MiB source still needs a web rendition and fresh production transfer measurement; no local video encoder was available. |
+| F06 corridor transfer | Resolved | The below-fold corridor video has no source until it is within 200px of the viewport and remains a poster for reduced-motion visitors. Its supplied media is now a silent 1280×720, 24fps H.264 rendition of 5.96 MiB, down from the 71.42 MiB 1440p source; local browser playback was verified. |
 | F08 reduced-motion marquee | Resolved | Connector names render once in a wrapped static list without a mask or clipping. |
 | F14 short mobile menu | Resolved | The menu is a scrollable flex layout, so every control remains reachable at 320×568. |
 | F15 response-time hero | Resolved | An inverse typography variant prevents semantic type styles from overriding the light hero copy. |
 | F07 hidden SVG work | Resolved | Signal routes initialize only within 300px of view on desktop visitors without reduced-motion preference; they pause when leaving view. Hidden/mobile SVGs do no animation setup. |
-| F09 product-loop geometry | Mitigated | The decorative ring and main frame now use composited translate, scale, and rotate changes. The independent copy panel retains layout geometry so its line wrapping stays readable; redesign it before replacing that behavior. |
+| F09 product-loop geometry | Resolved | The decorative ring, main frame, and independent copy-position wrapper now use composited translate, scale, and rotate changes. A nested motion wrapper keeps the copy fade/offset separate, preserving readable line wrapping without scroll-time width, height, left, or top writes. |
 | F10 homepage client boundary | Resolved | Homepage composition is again a Server Component. A small client shell owns the menu, scroll state, and footer parallax while section islands load only their own browser code. |
 | F11 canonical and social metadata | Resolved | Added the `https://verevon.ai` metadata base, route canonicals, Open Graph URLs, Twitter metadata, and a generated 1200×630 social image. |
 | F12 sitemap, crawler policy, entity data | Resolved | Added a sitemap, explicit crawler rules that permit search and block training crawlers, plus Organization, WebSite, and SoftwareApplication JSON-LD using visible product claims. |
@@ -39,9 +39,9 @@ The table describes the live code state after the fixes. “Mitigated” means t
 | V2/V3 cleanup | Resolved | Removed both routes, their component trees, preloader CSS, V3-only assets, and stale documentation references. `/v2` and `/v3` return 404. |
 | Runtime loader | Resolved | Removed the initial full-screen loader, whose server-rendered state remained visible when development HMR failed. The local `dev` command now uses Webpack because the active Turbopack session panicked with “Next.js package not found.” |
 
-Targeted browser verification at 320×568 confirmed initial close-button focus, focus wrapping within the menu, focus restoration to “Åpne meny”, a scrollable menu surface, an inert background, the response-time hero's light computed colors, and corridor source assignment only near the viewport. The repaired local preview at `http://localhost:3000` has no loader element or console errors; it emits a canonical, generated Open Graph image and JSON-LD. `robots.txt`, `sitemap.xml`, the social-image route, the noindexed showcase and trust canonical all return 200. The V1 route returned 200; `/v2` and `/v3` returned 404.
+Targeted browser verification at 320×568 confirmed initial close-button focus, focus wrapping within the menu, focus restoration to “Åpne meny”, a scrollable menu surface, an inert background, the response-time hero's light computed colors, and corridor source assignment only near the viewport. The optimized corridor video reached ready state 4 and played locally without a media or console error. During the product-loop scroll, the copy wrapper retained its initial `width`, `height`, `left`, and `top` while its transform changed, confirming the geometry transition is composited. The repaired local preview at `http://localhost:3000` has no loader element or console errors; it emits a canonical, generated Open Graph image and JSON-LD. `robots.txt`, `sitemap.xml`, the social-image route, the noindexed showcase and trust canonical all return 200. The V1 route returned 200; `/v2` and `/v3` returned 404.
 
-Remaining priority order: create a web-sized corridor rendition, then profile the product-loop copy-panel resize and large homepage media on a throttled device. Do not treat the pre-fix local network figures below as post-change performance results.
+Remaining priority: measure production transfer, decode, and scroll performance on a throttled physical device after deployment. Do not treat the pre-fix local network figures below as post-change performance results.
 
 ## Coverage of all 14 requested skills
 

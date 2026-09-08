@@ -8,13 +8,16 @@ import { createSignal, type Accessor } from 'solid-js'
  */
 
 const LIST_KEY = 'verevon.inbox.listWidth'
-const ASIDE_KEY = 'verevon.inbox.asideWidth'
+// v2 starts from a width that fits the three-pane laptop layout. The previous
+// key could contain values that were silently capped by CSS, making the handle
+// appear to move state without moving the panel.
+const ASIDE_KEY = 'verevon.inbox.asideWidth.v2'
 
 export const LIST_DEFAULT = 340
 export const LIST_MIN = 260
 export const LIST_MAX = 560
-export const ASIDE_DEFAULT = 360
-export const ASIDE_MIN = 300
+export const ASIDE_DEFAULT = 280
+export const ASIDE_MIN = 220
 export const ASIDE_MAX = 620
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
@@ -95,6 +98,22 @@ export function createInboxLayout(): InboxLayout {
     // Handle sits on the LIST's right edge: dragging right widens the list.
     startListResize: (event) => drag(event, listWidth(), 1, LIST_MIN, LIST_MAX, setListWidth, LIST_KEY),
     // Handle sits on the ASIDE's left edge: dragging left widens the aside.
-    startAsideResize: (event) => drag(event, asideWidth(), -1, ASIDE_MIN, ASIDE_MAX, setAsideWidth, ASIDE_KEY),
+    // Start from the rendered width because the responsive CSS track may have
+    // clamped a stored preference to the currently available viewport.
+    startAsideResize: (event) => {
+      const handle = event.currentTarget as HTMLElement | null
+      const renderedWidth = handle?.parentElement
+        ?.querySelector<HTMLElement>('.verevon-inbox-aside')
+        ?.getBoundingClientRect().width
+      drag(
+        event,
+        renderedWidth && renderedWidth > 0 ? renderedWidth : asideWidth(),
+        -1,
+        ASIDE_MIN,
+        ASIDE_MAX,
+        setAsideWidth,
+        ASIDE_KEY,
+      )
+    },
   }
 }

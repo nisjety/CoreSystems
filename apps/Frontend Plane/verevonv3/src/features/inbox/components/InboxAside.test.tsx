@@ -108,7 +108,7 @@ describe('InboxAside Verevon actions', () => {
     expect(screen.getByText('The package is missing and I need it tomorrow.')).toBeTruthy()
   })
 
-  it('starts and reuses a Chat thread only for the selected support conversation', async () => {
+  it('submits with the question form and reuses a Chat thread only for the selected support conversation', async () => {
     window.localStorage.setItem('verevon.chat.threadId', 'unrelated-thread')
     let invokeBody: Record<string, unknown> | null = null
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -138,9 +138,10 @@ describe('InboxAside Verevon actions', () => {
     fireEvent.click(screen.getByRole('tab', { name: /verevon/i }))
     flush()
     expect(screen.queryByRole('link', { name: /open in chat|åpne i chat/i })).toBeNull()
-    fireEvent.input(screen.getByRole('textbox', { name: /ask verevon a question|spør verevon et spørsmål/i }), { target: { value: 'What should I do next?' } })
+    const questionInput = screen.getByRole('textbox', { name: /ask verevon a question|spør verevon et spørsmål/i })
+    fireEvent.input(questionInput, { target: { value: 'What should I do next?' } })
     flush()
-    fireEvent.click(screen.getByRole('button', { name: /send verevon question|send spørsmål til verevon/i }))
+    fireEvent.submit(questionInput.closest('form')!)
 
     expect(await screen.findByText('Use the verified delivery workflow.')).toBeTruthy()
     expect(invokeBody).not.toHaveProperty('thread_id', 'unrelated-thread')
@@ -155,6 +156,108 @@ describe('InboxAside Verevon actions', () => {
     // overwrite Chat's unrelated active-thread pointer as a side effect.
     expect(window.localStorage.getItem('verevon.chat.threadId')).toBe('unrelated-thread')
     expect(window.localStorage.getItem('verevon.chat.supportContext.v1')).toBeNull()
+  })
+
+  it('keeps an in-progress question when polling replaces the same selected ticket', () => {
+    const initialSelectedTicket: ZammadTicket = {
+      ...ticket,
+      conversationId: 'conversation-42',
+      supportTicket,
+    }
+    const [selectedTicket, setSelectedTicket] = createSignal(initialSelectedTicket)
+    render(() => (
+      <InboxAside
+        orgId="org-coresystem"
+        articles={articles}
+        recent={[]}
+        onSelectRecent={vi.fn()}
+        onQueueDraftReply={vi.fn(async () => true)}
+        onMacroExecuted={vi.fn()}
+        onOpenModal={vi.fn()}
+        selectedTicket={selectedTicket()}
+        userId="user-coresystem"
+      />
+    ))
+
+    fireEvent.click(screen.getByRole('tab', { name: /verevon/i }))
+    flush()
+    const questionInput = screen.getByRole('textbox', { name: /ask verevon a question|spør verevon et spørsmål/i }) as HTMLInputElement
+    fireEvent.input(questionInput, { target: { value: 'Keep this while new mail is checked' } })
+    flush()
+
+    setSelectedTicket({ ...initialSelectedTicket, updated_at: '2026-07-18T09:00:15.000Z' })
+    flush()
+
+    expect(questionInput.value).toBe('Keep this while new mail is checked')
+  })
+
+  it('keeps secondary AI actions collapsed outside the primary Verevon view', () => {
+    render(() => (
+      <InboxAside
+        orgId="org-coresystem"
+        articles={articles}
+        recent={[]}
+        onSelectRecent={vi.fn()}
+        onQueueDraftReply={vi.fn(async () => true)}
+        onMacroExecuted={vi.fn()}
+        onOpenModal={vi.fn()}
+        selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket }}
+        userId="user-coresystem"
+      />
+    ))
+
+    fireEvent.click(screen.getByRole('tab', { name: /verevon/i }))
+    flush()
+
+    expect(screen.getByRole('button', { name: /draft reply|lag svarutkast/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /summarize|oppsummer/i })).toBeTruthy()
+    const advancedActions = screen.getByText(/more actions|flere handlinger/i).closest('details') as HTMLDetailsElement
+    expect(advancedActions.open).toBe(false)
+    expect(within(advancedActions).getByText(/confirm intent|bekreft hensikt/i)).toBeTruthy()
+    expect(within(advancedActions).getByText(/source-backed reply|kildebasert svar/i)).toBeTruthy()
+  })
+
+  it('explains when the selected model exceeds the reply deadline', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/v1/orgs/org-coresystem') {
+        return new Response(JSON.stringify({ data: { id: 'org-coresystem', metadata: {} } }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (String(input) === '/api/v1/chat/invoke') {
+        return new Response(JSON.stringify({
+          error: {
+            code: 'model_request_timeout',
+            message: 'The model did not respond before the request deadline',
+          },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 504,
+        })
+      }
+      return new Response(JSON.stringify({ data: {} }), { headers: { 'Content-Type': 'application/json' } })
+    }))
+
+    render(() => (
+      <InboxAside
+        orgId="org-coresystem"
+        articles={articles}
+        recent={[]}
+        onSelectRecent={vi.fn()}
+        onQueueDraftReply={vi.fn(async () => true)}
+        onMacroExecuted={vi.fn()}
+        onOpenModal={vi.fn()}
+        selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket }}
+        userId="user-coresystem"
+      />
+    ))
+
+    fireEvent.click(screen.getByRole('tab', { name: /verevon/i }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: /draft reply|lag svarutkast/i }))
+
+    expect(await screen.findByText(/took too long|brukte for lang tid/i)).toBeTruthy()
+    expect(screen.queryByText(/could not generate a reply|kunne ikke generere et svar/i)).toBeNull()
   })
 
   it('discards an in-flight Verevon answer when the organization changes with the same provider ticket id', async () => {
