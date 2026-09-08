@@ -46,6 +46,16 @@ EXPOSE 5173
 CMD ["pnpm", "dev", "--host", "0.0.0.0"]
 
 FROM dev AS build
+# `COPY --chown=node:node . .` above is what first reveals packages/* and
+# apps/remote-dev's own package.json files -- `pnpm install --frozen-lockfile`
+# earlier in the `dev` stage only had the root manifest on disk. pnpm's
+# dependency-status check runs before any `pnpm run <script>` and, seeing the
+# now-complete workspace, decides node_modules needs to be purged and
+# reinstalled to reconcile. That decision needs a confirmation prompt, and a
+# Docker RUN step never has a TTY to answer it. CI=true is pnpm's own
+# documented way to say this is a non-interactive environment (which a Docker
+# build genuinely is), so it proceeds instead of aborting.
+ENV CI=true
 RUN pnpm build
 
 # Static production image. nginx-unprivileged runs as UID 101 and listens on a
