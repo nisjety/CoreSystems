@@ -70,11 +70,13 @@ type ChatMessage struct {
 }
 
 type InvokeRequest struct {
-	ConnectionID string        `json:"connectionId"`
-	RequestID    string        `json:"requestId"`
-	Model        string        `json:"model"`
-	Messages     []ChatMessage `json:"messages"`
-	MaxTokens    int           `json:"maxTokens"`
+	ConnectionID    string        `json:"connectionId"`
+	RequestID       string        `json:"requestId"`
+	Model           string        `json:"model"`
+	Messages        []ChatMessage `json:"messages"`
+	MaxTokens       int           `json:"maxTokens"`
+	ReasoningEffort string        `json:"reasoningEffort"`
+	ServiceTier     string        `json:"serviceTier,omitempty"`
 }
 
 type InvokeResponse struct {
@@ -89,6 +91,7 @@ type InvokeResponse struct {
 type Runner interface {
 	BeginDeviceLogin(ctx context.Context, codeHome string) (LoginProcess, DeviceCode, error)
 	Invoke(ctx context.Context, codeHome string, request InvokeRequest) (InvokeResponse, error)
+	InvokeStream(ctx context.Context, codeHome string, request InvokeRequest, onDelta func(string) error) (InvokeResponse, error)
 	Logout(ctx context.Context, codeHome string) error
 }
 
@@ -236,19 +239,51 @@ func (m *Manager) PollLogin(ctx context.Context, loginID string) (LoginStatus, e
 }
 
 func (m *Manager) Invoke(ctx context.Context, request InvokeRequest) (InvokeResponse, error) {
-	if m == nil || !m.enabled {
-		return InvokeResponse{}, ErrDisabled
-	}
-	if strings.TrimSpace(request.ConnectionID) == "" || strings.TrimSpace(request.Model) == "" || len(request.Messages) == 0 {
-		return InvokeResponse{}, fmt.Errorf("%w: connectionId, model, and messages are required", ErrInvalidRequest)
-	}
-	home, err := m.connectionHome(request.ConnectionID)
+	home, request, err := m.prepareInvocation(request)
 	if err != nil {
 		return InvokeResponse{}, err
 	}
 	invokeCtx, cancel := context.WithTimeout(ctx, m.invocationTimeout)
 	defer cancel()
 	return m.runner.Invoke(invokeCtx, home, request)
+}
+
+func (m *Manager) InvokeStream(ctx context.Context, request InvokeRequest, onDelta func(string) error) (InvokeResponse, error) {
+	home, request, err := m.prepareInvocation(request)
+	if err != nil {
+		return InvokeResponse{}, err
+	}
+	if onDelta == nil {
+		return InvokeResponse{}, fmt.Errorf("%w: stream delta callback is required", ErrInvalidRequest)
+	}
+	invokeCtx, cancel := context.WithTimeout(ctx, m.invocationTimeout)
+	defer cancel()
+	return m.runner.InvokeStream(invokeCtx, home, request, onDelta)
+}
+
+func (m *Manager) prepareInvocation(request InvokeRequest) (string, InvokeRequest, error) {
+	if m == nil || !m.enabled {
+		return "", InvokeRequest{}, ErrDisabled
+	}
+	if strings.TrimSpace(request.ConnectionID) == "" || strings.TrimSpace(request.Model) == "" || len(request.Messages) == 0 {
+		return "", InvokeRequest{}, fmt.Errorf("%w: connectionId, model, and messages are required", ErrInvalidRequest)
+	}
+	request.ReasoningEffort = strings.ToLower(strings.TrimSpace(request.ReasoningEffort))
+	if request.ReasoningEffort == "" {
+		request.ReasoningEffort = "low"
+	}
+	if request.ReasoningEffort != "low" && request.ReasoningEffort != "high" {
+		return "", InvokeRequest{}, fmt.Errorf("%w: reasoningEffort must be low or high", ErrInvalidRequest)
+	}
+	request.ServiceTier = strings.ToLower(strings.TrimSpace(request.ServiceTier))
+	if request.ServiceTier != "" && request.ServiceTier != "priority" {
+		return "", InvokeRequest{}, fmt.Errorf("%w: serviceTier must be empty or priority", ErrInvalidRequest)
+	}
+	home, err := m.connectionHome(request.ConnectionID)
+	if err != nil {
+		return "", InvokeRequest{}, err
+	}
+	return home, request, nil
 }
 
 // Logout removes the managed Codex login from the isolated connection home.

@@ -7654,6 +7654,47 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+/* One model selector contract across Chat, Spaces, Ticketing, and Inbox. The
+   shared picker deliberately reuses the composer's row geometry so icons and
+   labels stay aligned on every surface; only its popover direction changes. */
+.verevon-ai-model-picker {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.verevon-ai-model-picker__trigger {
+  width: auto;
+  max-width: 100%;
+  height: 34px;
+}
+
+.verevon-ai-model-picker__menu {
+  top: calc(100% + 7px);
+  bottom: auto;
+  width: min(340px, calc(100vw - 32px));
+}
+
+.verevon-ai-model-picker__menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.verevon-support-verevon-composer__model-picker,
+.verevon-inbox-verevon-panel__model-picker {
+  justify-self: start;
+  margin-bottom: 2px;
+}
+
+.verevon-space-room-composer__model-picker {
+  align-self: flex-start;
+}
+
+.verevon-space-room-composer__model-picker .verevon-ai-model-picker__menu {
+  top: auto;
+  bottom: calc(100% + 7px);
+}
+
 .dashboard-composer-model-badge {
   display: inline-flex;
   align-items: center;

@@ -22,6 +22,22 @@ func TestCodexAppServerUsesProtocolSandboxValue(t *testing.T) {
 	}
 }
 
+func TestThreadStartUsesMinimalEphemeralChatContract(t *testing.T) {
+	params := threadStartParams("/isolated/workspace", InvokeRequest{
+		Model:       "gpt-6-astra",
+		ServiceTier: "priority",
+	})
+	if params["baseInstructions"] != codexBaseInstructions {
+		t.Fatalf("base instructions = %q", params["baseInstructions"])
+	}
+	if params["ephemeral"] != true || params["sandbox"] != codexReadOnlySandbox {
+		t.Fatalf("thread params = %#v", params)
+	}
+	if params["serviceTier"] != "priority" {
+		t.Fatalf("service tier = %q, want priority", params["serviceTier"])
+	}
+}
+
 func TestCodexAccountCallsUseObjectParams(t *testing.T) {
 	encoded, err := json.Marshal(codexEmptyObjectParams())
 	if err != nil {
@@ -29,6 +45,24 @@ func TestCodexAccountCallsUseObjectParams(t *testing.T) {
 	}
 	if string(encoded) != "{}" {
 		t.Fatalf("empty Codex params = %s, want {}", encoded)
+	}
+}
+
+func TestTurnStartParamsIncludesOptionalPriorityTier(t *testing.T) {
+	request := InvokeRequest{
+		ReasoningEffort: "low",
+		ServiceTier:     "priority",
+		Messages:        []ChatMessage{{Role: "user", Content: "hello"}},
+	}
+	params := turnStartParams("thread-1", request)
+	if params["effort"] != "low" || params["serviceTier"] != "priority" {
+		t.Fatalf("turn params = %#v", params)
+	}
+
+	request.ServiceTier = ""
+	params = turnStartParams("thread-1", request)
+	if _, exists := params["serviceTier"]; exists {
+		t.Fatalf("standard turn unexpectedly included serviceTier: %#v", params)
 	}
 }
 
@@ -57,9 +91,10 @@ func TestPersistedAuthReadyRequiresNonEmptyAuthJSON(t *testing.T) {
 func TestProcessRunnerInvokeRejectsMissingPersistedAuthentication(t *testing.T) {
 	runner := NewProcessRunner("command-that-must-not-run")
 	_, err := runner.Invoke(t.Context(), t.TempDir(), InvokeRequest{
-		ConnectionID: "conn-1",
-		Model:        "gpt-5",
-		Messages:     []ChatMessage{{Role: "user", Content: "hello"}},
+		ConnectionID:    "conn-1",
+		Model:           "gpt-5",
+		Messages:        []ChatMessage{{Role: "user", Content: "hello"}},
+		ReasoningEffort: "low",
 	})
 	if !errors.Is(err, ErrReauthenticationRequired) {
 		t.Fatalf("Invoke error = %v, want ErrReauthenticationRequired", err)

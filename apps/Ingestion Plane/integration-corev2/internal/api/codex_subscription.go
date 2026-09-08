@@ -1,6 +1,8 @@
 package api
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"strings"
 
@@ -150,21 +152,9 @@ func registerCodexSubscriptionRoutes(
 		if err := c.BodyParser(&body); err != nil {
 			return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
 		}
-		if strings.TrimSpace(body.OrganizationID) == "" || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.ConnectionID) == "" || strings.TrimSpace(body.Model) == "" || len(body.Messages) == 0 {
-			return apiError(c, fiber.StatusBadRequest, "invalid_subscription_request", "organizationId, userId, connectionId, model, and messages are required.")
-		}
-		connection, err := cfg.Repo.GetConnection(c.UserContext(), strings.TrimSpace(body.ConnectionID))
+		connection, err := validateCodexSubscriptionInference(c, cfg, body)
 		if err != nil {
 			return subscriptionError(c, err)
-		}
-		if connection.ProviderKey != codexsubscription.ProviderKey || connection.ConnectorType != codexsubscription.ConnectorType || connection.DeletedAt != nil || connection.Status != "active" {
-			return apiError(c, fiber.StatusConflict, "subscription_connection_inactive", "The selected ChatGPT subscription connection is not active.")
-		}
-		if connection.OrganizationID != strings.TrimSpace(body.OrganizationID) || connection.UserID != strings.TrimSpace(body.UserID) {
-			return apiError(c, fiber.StatusForbidden, "subscription_connection_scope_mismatch", "The selected subscription connection is not owned by this organization and user.")
-		}
-		if !hasCapability(connection.Capabilities, codexsubscription.Capability) {
-			return apiError(c, fiber.StatusForbidden, "subscription_capability_not_granted", "The subscription connection does not permit inference.")
 		}
 		if err := withAuditTransaction(c.UserContext(), cfg, func(_ store.AuditTransaction, persist func(store.AuditEvent) error) error {
 			return persist(store.AuditEvent{
@@ -179,13 +169,7 @@ func registerCodexSubscriptionRoutes(
 		}); err != nil {
 			return apiError(c, fiber.StatusServiceUnavailable, "subscription_audit_unavailable", "The subscription invocation could not be audited safely.")
 		}
-		response, err := cfg.CodexSubscriptions.Invoke(c.UserContext(), codexsubscription.InvokeRequest{
-			ConnectionID: connection.ID,
-			RequestID:    strings.TrimSpace(body.RequestID),
-			Model:        strings.TrimSpace(body.Model),
-			Messages:     body.Messages,
-			MaxTokens:    body.MaxTokens,
-		})
+		response, err := cfg.CodexSubscriptions.Invoke(c.UserContext(), codexSubscriptionInvokeRequest(connection, body))
 		if err != nil {
 			if errors.Is(err, codexsubscription.ErrReauthenticationRequired) {
 				markCodexSubscriptionNeedsRefresh(c, cfg, connection)
@@ -203,22 +187,136 @@ func registerCodexSubscriptionRoutes(
 		})
 		return success(c, fiber.Map{"response": response, "providerUsed": codexsubscription.ProviderKey})
 	})...)
+
+	app.Post("/internal/model-subscriptions/openai-codex/infer/stream", chainHandlers(rateLimited, modelPlaneAuth, func(c *fiber.Ctx) error {
+		var body codexSubscriptionInferBody
+		if err := c.BodyParser(&body); err != nil {
+			return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
+		}
+		connection, err := validateCodexSubscriptionInference(c, cfg, body)
+		if err != nil {
+			return subscriptionError(c, err)
+		}
+		if err := withAuditTransaction(c.UserContext(), cfg, func(_ store.AuditTransaction, persist func(store.AuditEvent) error) error {
+			return persist(store.AuditEvent{
+				ID:             auditMutationID(c.UserContext(), "codex-subscription-infer-stream-requested", connection.ID),
+				OrganizationID: connection.OrganizationID,
+				UserID:         connection.UserID,
+				ConnectionID:   connection.ID,
+				EventType:      "subscription_inference.requested",
+				ProviderKey:    connection.ProviderKey,
+				Metadata:       map[string]any{"requestId": strings.TrimSpace(body.RequestID), "model": strings.TrimSpace(body.Model), "stream": true},
+			})
+		}); err != nil {
+			return apiError(c, fiber.StatusServiceUnavailable, "subscription_audit_unavailable", "The subscription invocation could not be audited safely.")
+		}
+
+		request := codexSubscriptionInvokeRequest(connection, body)
+		streamContext := c.UserContext()
+		c.Set("Content-Type", "text/event-stream")
+		c.Set("Cache-Control", "no-cache, no-transform")
+		c.Set("Connection", "keep-alive")
+		c.Set("X-Accel-Buffering", "no")
+		c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+			writeSSE(w, "subscription.ready", codexSubscriptionStreamEvent{Type: "ready", RequestID: request.RequestID, ModelUsed: request.Model})
+			if err := w.Flush(); err != nil {
+				return
+			}
+
+			response, invokeErr := cfg.CodexSubscriptions.InvokeStream(streamContext, request, func(delta string) error {
+				writeSSE(w, "subscription.delta", codexSubscriptionStreamEvent{Type: "delta", Delta: delta})
+				return w.Flush()
+			})
+			if invokeErr != nil {
+				if errors.Is(invokeErr, codexsubscription.ErrReauthenticationRequired) {
+					markCodexSubscriptionNeedsRefreshContext(streamContext, cfg, connection)
+				}
+				code := "subscription_broker_failed"
+				message := "The ChatGPT subscription broker could not complete the streamed request."
+				if errors.Is(invokeErr, codexsubscription.ErrReauthenticationRequired) {
+					code = "subscription_reauthentication_required"
+					message = "Reconnect your ChatGPT subscription in Integrations."
+				}
+				writeSSE(w, "subscription.error", codexSubscriptionStreamEvent{Type: "error", Code: code, Message: message})
+				_ = w.Flush()
+				return
+			}
+
+			recordAuditEvent(streamContext, cfg, store.AuditEvent{
+				ID:             auditMutationID(streamContext, "codex-subscription-infer-stream-completed", connection.ID),
+				OrganizationID: connection.OrganizationID,
+				UserID:         connection.UserID,
+				ConnectionID:   connection.ID,
+				EventType:      "subscription_inference.completed",
+				ProviderKey:    connection.ProviderKey,
+				Metadata:       map[string]any{"requestId": response.RequestID, "model": response.ModelUsed, "stream": true},
+			})
+			writeSSE(w, "subscription.done", codexSubscriptionStreamEvent{Type: "done", RequestID: response.RequestID, ModelUsed: response.ModelUsed})
+			_ = w.Flush()
+		})
+		return nil
+	})...)
+}
+
+func validateCodexSubscriptionInference(c *fiber.Ctx, cfg ServerConfig, body codexSubscriptionInferBody) (store.Connection, error) {
+	if strings.TrimSpace(body.OrganizationID) == "" || strings.TrimSpace(body.UserID) == "" || strings.TrimSpace(body.ConnectionID) == "" || strings.TrimSpace(body.Model) == "" || len(body.Messages) == 0 {
+		return store.Connection{}, auth.NewError(fiber.StatusBadRequest, "invalid_subscription_request", "organizationId, userId, connectionId, model, and messages are required")
+	}
+	connection, err := cfg.Repo.GetConnection(c.UserContext(), strings.TrimSpace(body.ConnectionID))
+	if err != nil {
+		return store.Connection{}, err
+	}
+	if connection.ProviderKey != codexsubscription.ProviderKey || connection.ConnectorType != codexsubscription.ConnectorType || connection.DeletedAt != nil || connection.Status != "active" {
+		return store.Connection{}, auth.NewError(fiber.StatusConflict, "subscription_connection_inactive", "The selected ChatGPT subscription connection is not active")
+	}
+	if connection.OrganizationID != strings.TrimSpace(body.OrganizationID) || connection.UserID != strings.TrimSpace(body.UserID) {
+		return store.Connection{}, auth.NewError(fiber.StatusForbidden, "subscription_connection_scope_mismatch", "The selected subscription connection is not owned by this organization and user")
+	}
+	if !hasCapability(connection.Capabilities, codexsubscription.Capability) {
+		return store.Connection{}, auth.NewError(fiber.StatusForbidden, "subscription_capability_not_granted", "The subscription connection does not permit inference")
+	}
+	return connection, nil
+}
+
+func codexSubscriptionInvokeRequest(connection store.Connection, body codexSubscriptionInferBody) codexsubscription.InvokeRequest {
+	return codexsubscription.InvokeRequest{
+		ConnectionID:    connection.ID,
+		RequestID:       strings.TrimSpace(body.RequestID),
+		Model:           strings.TrimSpace(body.Model),
+		Messages:        body.Messages,
+		MaxTokens:       body.MaxTokens,
+		ReasoningEffort: strings.TrimSpace(body.ReasoningEffort),
+		ServiceTier:     strings.TrimSpace(body.ServiceTier),
+	}
+}
+
+type codexSubscriptionStreamEvent struct {
+	Type      string `json:"type"`
+	Delta     string `json:"delta,omitempty"`
+	RequestID string `json:"requestId,omitempty"`
+	ModelUsed string `json:"modelUsed,omitempty"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // markCodexSubscriptionNeedsRefresh reconciles database state with the
 // service-owned credential volume. This prevents a connection whose local
 // credential disappeared from continuing to look usable in model pickers.
 func markCodexSubscriptionNeedsRefresh(c *fiber.Ctx, cfg ServerConfig, connection store.Connection) {
+	markCodexSubscriptionNeedsRefreshContext(c.UserContext(), cfg, connection)
+}
+
+func markCodexSubscriptionNeedsRefreshContext(ctx context.Context, cfg ServerConfig, connection store.Connection) {
 	connection.Status = "needs_refresh"
 	connection.LastSyncStatus = "reauthentication_required"
-	if err := withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
-		updated, err := tx.UpsertConnection(c.UserContext(), connection)
+	if err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		updated, err := tx.UpsertConnection(ctx, connection)
 		if err != nil {
 			return err
 		}
 		connection = updated
 		return persist(store.AuditEvent{
-			ID:             auditMutationID(c.UserContext(), "codex-subscription-needs-refresh", connection.ID),
+			ID:             auditMutationID(ctx, "codex-subscription-needs-refresh", connection.ID),
 			OrganizationID: connection.OrganizationID,
 			UserID:         connection.UserID,
 			ConnectionID:   connection.ID,
@@ -226,7 +324,7 @@ func markCodexSubscriptionNeedsRefresh(c *fiber.Ctx, cfg ServerConfig, connectio
 			ProviderKey:    connection.ProviderKey,
 		})
 	}); err == nil {
-		publishIntegrationEvent(c.UserContext(), cfg, "verevon.ingestion.integration.connection_updated", connection, map[string]any{"change": "subscription_reauthentication_required"})
+		publishIntegrationEvent(ctx, cfg, "verevon.ingestion.integration.connection_updated", connection, map[string]any{"change": "subscription_reauthentication_required"})
 	}
 }
 
@@ -304,13 +402,15 @@ func scopedCodexSubscriptionConnection(c *fiber.Ctx, cfg ServerConfig, connectio
 }
 
 type codexSubscriptionInferBody struct {
-	OrganizationID string                          `json:"organizationId"`
-	UserID         string                          `json:"userId"`
-	ConnectionID   string                          `json:"connectionId"`
-	RequestID      string                          `json:"requestId"`
-	Model          string                          `json:"model"`
-	Messages       []codexsubscription.ChatMessage `json:"messages"`
-	MaxTokens      int                             `json:"maxTokens"`
+	OrganizationID  string                          `json:"organizationId"`
+	UserID          string                          `json:"userId"`
+	ConnectionID    string                          `json:"connectionId"`
+	RequestID       string                          `json:"requestId"`
+	Model           string                          `json:"model"`
+	Messages        []codexsubscription.ChatMessage `json:"messages"`
+	MaxTokens       int                             `json:"maxTokens"`
+	ReasoningEffort string                          `json:"reasoningEffort"`
+	ServiceTier     string                          `json:"serviceTier"`
 }
 
 func subscriptionError(c *fiber.Ctx, err error) error {

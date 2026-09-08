@@ -469,10 +469,7 @@ func (s *Service) accessTokenForConnection(ctx context.Context, connection store
 		return AccessTokenResult{}, store.ErrNotFound
 	}
 	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
-	if err != nil {
-		return AccessTokenResult{}, err
-	}
-	if s.now().Add(s.cfg.TokenRefreshSkew).Before(connection.AccessTokenExpiresAt) {
+	if err == nil && s.now().Add(s.cfg.TokenRefreshSkew).Before(connection.AccessTokenExpiresAt) {
 		return AccessTokenResult{
 			ConnectionID: connection.ID,
 			ProviderKey:  connection.ProviderKey,
@@ -482,6 +479,11 @@ func (s *Service) accessTokenForConnection(ctx context.Context, connection store
 			Capabilities: connection.Capabilities,
 		}, nil
 	}
+	// An unreadable ciphertext can happen after a local credential-key rollout.
+	// A Microsoft connection adopted from Control Plane already carries the
+	// Better Auth account reference needed to re-mint the token, so let the
+	// coordinated refresh path repair and re-encrypt it instead of turning a
+	// service configuration problem into a user-facing reconnect loop.
 	refreshed, accessToken, err := s.refreshCoordinated(ctx, connection)
 	if err != nil {
 		return AccessTokenResult{}, err
@@ -720,6 +722,9 @@ func (s *Service) refreshIfStillExpired(ctx context.Context, connectionID string
 	}
 	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
 	if err != nil {
+		if refreshed, token, applies, cpErr := s.refreshFromControlPlane(ctx, connection); applies {
+			return refreshed, token, cpErr
+		}
 		return store.Connection{}, "", err
 	}
 	if s.now().Add(s.cfg.TokenRefreshSkew).Before(connection.AccessTokenExpiresAt) {
@@ -736,6 +741,9 @@ func (s *Service) refreshIfStillExpired(ctx context.Context, connectionID string
 	}
 	refreshToken, err := s.vault.Decrypt(connection.EncryptedRefreshToken, []byte(connection.ID))
 	if err != nil {
+		if refreshed, token, applies, cpErr := s.refreshFromControlPlane(ctx, connection); applies {
+			return refreshed, token, cpErr
+		}
 		return store.Connection{}, "", err
 	}
 	refreshed, token, err := s.refresh(ctx, connection, refreshToken)

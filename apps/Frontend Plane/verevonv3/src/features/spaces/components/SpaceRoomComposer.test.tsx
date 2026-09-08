@@ -7,8 +7,20 @@ import { publishSpaceThreads, resetLiveWorkForTests } from '../lib/space-live-wo
 const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
   cancelInvocation: vi.fn(),
+  listModels: vi.fn(),
 }))
-vi.mock('@/shared/api/chat-client', () => chatClient)
+vi.mock('@/shared/api/chat-client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/shared/api/chat-client')>(),
+  ...chatClient,
+}))
+const subscriptionsClient = vi.hoisted(() => ({ listChatGptSubscriptions: vi.fn() }))
+vi.mock('@/shared/api/chatgpt-subscription-client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/shared/api/chatgpt-subscription-client')>(),
+  ...subscriptionsClient,
+}))
+vi.mock('@/shared/session/session-store', () => ({
+  getSession: () => ({ activeOrg: { id: 'org-1', name: 'Test', role: 'admin' } }),
+}))
 const spacesClient = vi.hoisted(() => ({ updateSpaceThreadPresentation: vi.fn() }))
 vi.mock('@/shared/api/spaces-client', () => spacesClient)
 const skillsClient = vi.hoisted(() => ({ listAvailableSkills: vi.fn(), MAX_PICKED_SKILLS: 4 }))
@@ -75,12 +87,19 @@ beforeEach(() => {
   chatClient.streamChat.mockReset()
   chatClient.cancelInvocation.mockReset()
   chatClient.cancelInvocation.mockResolvedValue(undefined)
+  chatClient.listModels.mockReset()
+  chatClient.listModels.mockResolvedValue([])
+  subscriptionsClient.listChatGptSubscriptions.mockReset()
+  subscriptionsClient.listChatGptSubscriptions.mockResolvedValue([])
   spacesClient.updateSpaceThreadPresentation.mockReset()
   spacesClient.updateSpaceThreadPresentation.mockResolvedValue({ thread_id: 't-new' })
   resetLiveWorkForTests()
 })
 
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  window.localStorage.clear()
+})
 
 describe('SpaceRoomComposer — interruptible turns', () => {
   // Item 1b. Until this existed, a member who sent a message could only wait.
@@ -179,6 +198,35 @@ describe('SpaceRoomComposer — interruptible turns', () => {
 
     expect(await screen.findByText(/Avbrutt før svaret startet/)).toBeTruthy()
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('SpaceRoomComposer — subscription model routing', () => {
+  it('sends a plain room turn through the selected active subscription connection', async () => {
+    chatClient.listModels.mockResolvedValue([{
+      id: 'gpt-5.6-luna',
+      name: 'GPT 5.6 Luna Subscription',
+      provider: 'openai-codex-subscription',
+    }])
+    subscriptionsClient.listChatGptSubscriptions.mockResolvedValue([{
+      id: 'conn-subscription-1',
+      providerKey: 'openai-codex-subscription',
+      status: 'active',
+    }])
+    const stream = scriptedStream()
+    renderComposer()
+
+    fireEvent.click(await screen.findByRole('button', { name: /choose ai model|velg ai-modell/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /gpt 5\.6 luna subscription/i }))
+    await send('Use the room subscription')
+
+    expect(chatClient.streamChat.mock.calls[0]?.[0]).toMatchObject({
+      model: 'gpt-5.6-luna',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn-subscription-1',
+      spaceRef: 'room-1',
+    })
+    stream.finish()
   })
 })
 

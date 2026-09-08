@@ -409,13 +409,19 @@ export class InternalOAuthService {
   ): Promise<void> {
     const encAccess = this.encryptMaybe(accessToken);
     const encRefresh = refreshToken ? this.encryptMaybe(refreshToken) : null;
+    // postgres.js receives these tagged-template values as untyped parameters
+    // (`prepare: false` in db/index.ts). Passing a Date reached the wire writer
+    // unchanged in this path and Buffer.byteLength rejected it before PostgreSQL
+    // saw the query. RFC 3339 is lossless here and PostgreSQL casts it from the
+    // assignment context into the timestamp column.
+    const expiresAtSql = expiresAt.toISOString();
 
     if (encRefresh !== null) {
       await sqlClient`
         UPDATE account
         SET access_token = ${encAccess},
             refresh_token = ${encRefresh},
-            access_token_expires_at = ${expiresAt},
+            access_token_expires_at = ${expiresAtSql},
             scope = COALESCE(${scope}, scope),
             updated_at = NOW()
         WHERE id = ${tokenRef}
@@ -425,7 +431,7 @@ export class InternalOAuthService {
       await sqlClient`
         UPDATE account
         SET access_token = ${encAccess},
-            access_token_expires_at = ${expiresAt},
+            access_token_expires_at = ${expiresAtSql},
             scope = COALESCE(${scope}, scope),
             updated_at = NOW()
         WHERE id = ${tokenRef}

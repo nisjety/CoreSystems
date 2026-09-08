@@ -56,6 +56,7 @@ import { ApiError } from '@/shared/api/http'
 import { getCSATScorecard, getTicketCSATOutcome, listTicketMacros, type SupportTicket, type TicketMacro } from '@/shared/api/tickets-client'
 import { cn } from '@/shared/lib/cn'
 import { localeDateTime, useI18n } from '@/shared/i18n'
+import { AiModelPicker } from '@/shared/components/AiModelPicker'
 
 type AsideTab = 'details' | 'verevon' | 'actions' | 'audit'
 
@@ -635,6 +636,7 @@ function VerevonPanel(props: {
   return (
     <div class="verevon-inbox-verevon-panel">
       <div class="verevon-inbox-aside-scroll verevon-inbox-aside-scroll--panel">
+        <AiModelPicker orgId={props.orgId} respectOrgZdr class="verevon-inbox-verevon-panel__model-picker" />
         <Show
           when={props.selectedTicket}
           fallback={

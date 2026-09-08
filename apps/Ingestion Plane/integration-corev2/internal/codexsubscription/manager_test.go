@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -52,7 +53,7 @@ func TestManagerInvokesOnlyInsideTheConnectionHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	_, err = manager.Invoke(t.Context(), InvokeRequest{ConnectionID: "conn-1", Model: "gpt-5", Messages: []ChatMessage{{Role: "user", Content: "hello"}}})
+	_, err = manager.Invoke(t.Context(), InvokeRequest{ConnectionID: "conn-1", Model: "gpt-5", Messages: []ChatMessage{{Role: "user", Content: "hello"}}, ReasoningEffort: "low"})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -60,11 +61,75 @@ func TestManagerInvokesOnlyInsideTheConnectionHome(t *testing.T) {
 	if runner.invokeHome != want {
 		t.Fatalf("runner code home = %q, want %q", runner.invokeHome, want)
 	}
+	if runner.invokeRequest.ReasoningEffort != "low" {
+		t.Fatalf("runner reasoning effort = %q, want low", runner.invokeRequest.ReasoningEffort)
+	}
+}
+
+func TestManagerRejectsUnsupportedReasoningEffort(t *testing.T) {
+	manager, err := NewManager(Config{Enabled: true, Home: t.TempDir()}, &fakeRunner{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	_, err = manager.Invoke(t.Context(), InvokeRequest{
+		ConnectionID:    "conn-1",
+		Model:           "gpt-5",
+		Messages:        []ChatMessage{{Role: "user", Content: "hello"}},
+		ReasoningEffort: "maximum",
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Invoke error = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestManagerRejectsUnsupportedServiceTier(t *testing.T) {
+	manager, err := NewManager(Config{Enabled: true, Home: t.TempDir()}, &fakeRunner{})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	_, err = manager.Invoke(t.Context(), InvokeRequest{
+		ConnectionID:    "conn-1",
+		Model:           "gpt-5",
+		Messages:        []ChatMessage{{Role: "user", Content: "hello"}},
+		ReasoningEffort: "low",
+		ServiceTier:     "unlimited",
+	})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Invoke error = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestManagerInvokeStreamNormalizesDefaultsAndForwardsDeltas(t *testing.T) {
+	runner := &fakeRunner{}
+	manager, err := NewManager(Config{Enabled: true, Home: t.TempDir()}, runner)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	var streamed strings.Builder
+	response, err := manager.InvokeStream(t.Context(), InvokeRequest{
+		ConnectionID: "conn-1",
+		RequestID:    "req-1",
+		Model:        "gpt-5",
+		Messages:     []ChatMessage{{Role: "user", Content: "hello"}},
+	}, func(delta string) error {
+		streamed.WriteString(delta)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("InvokeStream: %v", err)
+	}
+	if streamed.String() != "streamed answer" || response.Content != "streamed answer" {
+		t.Fatalf("streamed = %q, response = %#v", streamed.String(), response)
+	}
+	if runner.invokeRequest.ReasoningEffort != "low" {
+		t.Fatalf("runner reasoning effort = %q, want low", runner.invokeRequest.ReasoningEffort)
+	}
 }
 
 type fakeRunner struct {
-	login      *fakeLogin
-	invokeHome string
+	login         *fakeLogin
+	invokeHome    string
+	invokeRequest InvokeRequest
 }
 
 func (f *fakeRunner) BeginDeviceLogin(_ context.Context, _ string) (LoginProcess, DeviceCode, error) {
@@ -76,7 +141,20 @@ func (f *fakeRunner) BeginDeviceLogin(_ context.Context, _ string) (LoginProcess
 
 func (f *fakeRunner) Invoke(_ context.Context, codeHome string, request InvokeRequest) (InvokeResponse, error) {
 	f.invokeHome = codeHome
+	f.invokeRequest = request
 	return InvokeResponse{RequestID: request.RequestID, Content: "ok", ModelUsed: request.Model}, nil
+}
+
+func (f *fakeRunner) InvokeStream(_ context.Context, codeHome string, request InvokeRequest, onDelta func(string) error) (InvokeResponse, error) {
+	f.invokeHome = codeHome
+	f.invokeRequest = request
+	if err := onDelta("streamed "); err != nil {
+		return InvokeResponse{}, err
+	}
+	if err := onDelta("answer"); err != nil {
+		return InvokeResponse{}, err
+	}
+	return InvokeResponse{RequestID: request.RequestID, Content: "streamed answer", ModelUsed: request.Model}, nil
 }
 
 func (f *fakeRunner) Logout(context.Context, string) error { return nil }

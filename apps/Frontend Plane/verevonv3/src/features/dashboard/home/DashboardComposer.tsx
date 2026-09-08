@@ -98,6 +98,10 @@ import {
 import { useI18n } from "@/shared/i18n";
 import { cn } from "@/shared/lib/cn";
 import { getSession } from "@/shared/session/session-store";
+import {
+	readAiModelSelection,
+	rememberAiModelSelection,
+} from "@/shared/ai/model-selection";
 
 type ResponseMode = "auto" | "quick" | "deep";
 
@@ -570,10 +574,12 @@ export function DashboardComposer(props: {
 	// real catalog models come live from the gateway `/api/v1/models` (Model Plane)
 	// and render below. Default = Verevon Balance. We never auto-select an expensive
 	// catalog model; users pick opus/sonnet/gpt-5.x deliberately (cost badge nudges).
+	const modelPreferenceOrgId = getSession().activeOrg?.id?.trim() ?? "";
+	const initialModelSelection = readAiModelSelection(modelPreferenceOrgId);
 	const [selectedModel, setSelectedModel] = createSignal<string>(
-		VEREVON_BALANCE_MODE_ID,
+		initialModelSelection.model || VEREVON_BALANCE_MODE_ID,
 	);
-	const [selectedModelProvider, setSelectedModelProvider] = createSignal<string>();
+	const [selectedModelProvider, setSelectedModelProvider] = createSignal<string | undefined>(initialModelSelection.provider);
 	const [models] = createResource(async () => {
 		try {
 			return await listModels();
@@ -654,6 +660,17 @@ export function DashboardComposer(props: {
 	const selectModel = (id: string, provider?: string) => {
 		setSelectedModel(id);
 		setSelectedModelProvider(provider);
+		const catalogModel = flatChatModels().find(
+			(model) => model.id === id && model.provider === provider,
+		);
+		rememberAiModelSelection(activeOrgId() || "", {
+			model: id,
+			label: verevonModeById(id)?.label ?? catalogModel?.name ?? id,
+			...(provider ? { provider } : {}),
+			...(provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && activeSubscriptionConnection()
+				? { subscriptionConnectionId: activeSubscriptionConnection()!.id }
+				: {}),
+		});
 		setModelOpen(false);
 	};
 	const [settings, setSettings] = createSignal<ComposerSettings>({

@@ -14,6 +14,10 @@ import { useI18n } from '@/shared/i18n'
 import { translateApiError } from '@/shared/i18n/errors'
 import { beginOwnStream, endOwnStream, liveThreadsIn, ownStream } from '../lib/space-live-work'
 import { threadTitle } from '../lib/space-thread-presentation'
+import { AiModelPicker } from '@/shared/components/AiModelPicker'
+import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-selection'
+import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
+import { getSession } from '@/shared/session/session-store'
 
 /**
  * The room's own composer — buzz's "the channel is the workspace" plus Grok's
@@ -134,6 +138,8 @@ export interface SpaceRoomComposerProps {
 
 export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const i18n = useI18n()
+  const orgId = getSession().activeOrg?.id?.trim() ?? ''
+  const [selectedModel, setSelectedModel] = createSignal<AiModelSelection>(readAiModelSelection(orgId))
   const [text, setText] = createSignal('')
   const [mentionQuery, setMentionQuery] = createSignal<string | undefined>(undefined)
   const [mentionedAgentRef, setMentionedAgentRef] = createSignal<string | undefined>(undefined)
@@ -360,15 +366,18 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   // it would queue a message behind a gate the same person is standing at, and
   // the reply would arrive after an answer they have not given yet.
   const blockedByApproval = () => props.replyTarget?.()?.awaitingApproval === true
+  const subscriptionIncompatible = () => selectedModel().provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
+    && (Boolean(mentionedAgentRef()) || pickedSkills().length > 0)
 
   async function submitMessage(): Promise<void> {
     const content = text().trim()
-    if (!content || submitting() || blockedByApproval()) return
+    if (!content || submitting() || blockedByApproval() || subscriptionIncompatible()) return
 
     setSubmitting(true)
     closePicker()
     const agentRef = mentionedAgentRef()
     const picked = pickedSkills()
+    const modelSelection = selectedModel()
     const replyThreadId = props.replyTarget?.()?.threadId
     setExchange({ userContent: content, assistantContent: '', status: 'streaming' })
     setText('')
@@ -385,6 +394,13 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
       await streamChat(
         {
           content,
+          model: modelSelection.model,
+          provider: modelSelection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
+            ? modelSelection.provider
+            : undefined,
+          subscriptionConnectionId: modelSelection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
+            ? modelSelection.subscriptionConnectionId
+            : undefined,
           spaceRef: props.spaceRef,
           mentionedAgentRef: agentRef,
           threadId: replyThreadId,
@@ -624,6 +640,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             )}
           </p>
         </Show>
+        <AiModelPicker orgId={orgId} class="verevon-space-room-composer__model-picker" onChange={setSelectedModel} />
         <Show when={pickedSkills().length > 0}>
           <ul class="verevon-space-room-skills" aria-label={i18n.tr('Valgte ferdigheter', 'Chosen skills')}>
             <For each={pickedSkills()}>
@@ -732,7 +749,15 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             )}
           </p>
         </Show>
-        <button type="submit" disabled={submitting() || blockedByApproval() || !text().trim()}>
+        <Show when={subscriptionIncompatible()}>
+          <p class="verevon-space-room-composer__blocked" role="status">
+            {i18n.tr(
+              'Abonnementsmodeller er tekstbaserte. Fjern agenten/ferdigheten, eller velg en Verevon-modell.',
+              'Subscription models are text-only. Remove the agent/skill, or choose a Verevon model.',
+            )}
+          </p>
+        </Show>
+        <button type="submit" disabled={submitting() || blockedByApproval() || subscriptionIncompatible() || !text().trim()}>
           {i18n.tr('Send', 'Send')}
         </button>
       </form>

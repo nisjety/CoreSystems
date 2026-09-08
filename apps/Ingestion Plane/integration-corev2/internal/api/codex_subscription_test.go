@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,6 +77,63 @@ func TestCodexSubscriptionInferIsScopedAndNeverLeasesAToken(t *testing.T) {
 	defer mismatchResp.Body.Close()
 	if mismatchResp.StatusCode != http.StatusForbidden || runner.invocations != 1 {
 		t.Fatalf("mismatch status=%d invocations=%d, want 403 and no second invocation", mismatchResp.StatusCode, runner.invocations)
+	}
+}
+
+func TestCodexSubscriptionInferStreamsDeltasAndCompletion(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	runner := &apiCodexRunner{}
+	manager, err := codexsubscription.NewManager(codexsubscription.Config{
+		Enabled: true,
+		Home:    t.TempDir(),
+	}, runner)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:             "conn-stream",
+		ProviderKey:    codexsubscription.ProviderKey,
+		ConnectorType:  codexsubscription.ConnectorType,
+		OrganizationID: "org-1",
+		UserID:         "user-1",
+		Status:         "active",
+		Capabilities:   []string{codexsubscription.Capability},
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection: %v", err)
+	}
+	app := NewServer(ServerConfig{
+		Config:             cfg,
+		Repo:               repo,
+		OAuth:              service,
+		CodexSubscriptions: manager,
+	})
+
+	body := `{"organizationId":"org-1","userId":"user-1","connectionId":"conn-stream","requestId":"req-stream","model":"gpt-codex","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/model-subscriptions/openai-codex/infer/stream", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "codex-subscription-test-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("content-type = %q, want text/event-stream", got)
+	}
+	payload, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	stream := string(payload)
+	first := strings.Index(stream, `"type":"delta","delta":"subscription "`)
+	second := strings.Index(stream, `"type":"delta","delta":"answer"`)
+	done := strings.Index(stream, `"type":"done","requestId":"req-stream"`)
+	if first < 0 || second <= first || done <= second {
+		t.Fatalf("stream events out of order: %s", stream)
 	}
 }
 
@@ -153,6 +211,20 @@ func (r *apiCodexRunner) Invoke(_ context.Context, _ string, request codexsubscr
 	r.invocations++
 	if r.invokeErr != nil {
 		return codexsubscription.InvokeResponse{}, r.invokeErr
+	}
+	return codexsubscription.InvokeResponse{RequestID: request.RequestID, Content: "subscription answer", ModelUsed: request.Model}, nil
+}
+
+func (r *apiCodexRunner) InvokeStream(_ context.Context, _ string, request codexsubscription.InvokeRequest, onDelta func(string) error) (codexsubscription.InvokeResponse, error) {
+	r.invocations++
+	if r.invokeErr != nil {
+		return codexsubscription.InvokeResponse{}, r.invokeErr
+	}
+	if err := onDelta("subscription "); err != nil {
+		return codexsubscription.InvokeResponse{}, err
+	}
+	if err := onDelta("answer"); err != nil {
+		return codexsubscription.InvokeResponse{}, err
 	}
 	return codexsubscription.InvokeResponse{RequestID: request.RequestID, Content: "subscription answer", ModelUsed: request.Model}, nil
 }

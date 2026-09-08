@@ -261,6 +261,7 @@ export function deriveConnectedEmailAccounts(connections: InboxConnection[]): Co
 }
 
 const reconnectErrorPattern = /access token|refresh token|token_expired|invalid_grant|authorization|reauthoriz|consent/i
+const localCredentialErrorPattern = /decrypt ciphertext|message authentication failed|ciphertext too short|decode ciphertext/i
 
 /**
  * Mailbox health comes from the mail lane alone. The connection-level
@@ -276,6 +277,10 @@ function emailAccountSyncHealth(connection: InboxConnection): EmailAccountSyncHe
   if (!lane) return 'unknown'
   switch (lane.status.trim().toLowerCase()) {
     case 'failed':
+      // A vault/decryption failure is our deployment problem, not a Microsoft
+      // or Google authorization verdict. Calling it "Reconnect" sends the user
+      // through consent again even though the provider was never contacted.
+      if (localCredentialErrorPattern.test(lane.lastError ?? '')) return 'attention'
       return reconnectErrorPattern.test(lane.lastError ?? '') ? 'needs_reconnect' : 'attention'
     case 'running':
     case 'pending':

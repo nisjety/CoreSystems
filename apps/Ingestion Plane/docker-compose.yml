@@ -433,8 +433,10 @@ services:
       NATS_TOKEN: ""
       VEREVON_NATS_TOKEN: ""
       NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-}
-      # Development fallback only. Override in shared/prod environments with `openssl rand -base64 32`.
-      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+      # The credential-vault key intentionally comes only from
+      # integration-corev2/.env in development. Defining it again through
+      # Compose interpolation lets an unrelated plane-level env file silently
+      # replace the key and makes existing OAuth ciphertext unreadable.
       AZURE_TENANT_ID: ${AZURE_TENANT_ID:-common}
       MICROSOFT_GRAPH_BASE_URL: ${MICROSOFT_GRAPH_BASE_URL:-https://graph.microsoft.com}
       NANGO_API_KEY: ""
@@ -600,9 +602,8 @@ services:
       DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-${DATA_PLANE_URL:-http://dpv2-documents-api:8010}}
       INTEGRATION_SERVICE_ID: ${INTEGRATION_SERVICE_ID:-integration-corev2}
       INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
-      # config.Load still initializes the shared vault even though this worker
-      # never decrypts provider tokens.
-      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+      # config.Load still initializes the shared vault from the service env file
+      # even though this worker never decrypts provider tokens.
     deploy:
       resources:
         limits:
@@ -638,9 +639,10 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       DATABASE_URL: postgresql://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/integration
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}
-      # This worker decrypts real provider OAuth tokens — the vault key is
-      # load-bearing here (unlike finspo-worker) and has NO insecure default.
-      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY must be set}
+      # This worker decrypts real provider OAuth tokens. In development the
+      # load-bearing vault key comes only from integration-corev2/.env, keeping
+      # it identical to integration-api's key. Production supplies it through
+      # the hardened overlay below.
       # conversation-ingest-rs lives on the Application Plane; both sides sit
       # on the shared inter-plane-bus network.
       CONVERSATION_INGEST_URL: ${CONVERSATION_INGEST_URL:-http://conversation-ingest-rs:3161}

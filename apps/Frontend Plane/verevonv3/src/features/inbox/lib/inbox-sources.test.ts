@@ -267,9 +267,17 @@ describe('deriveConnectedInboxSources', () => {
         capabilities: ['gmail.read'],
         syncLanes: { mail: { status: 'failed', source: 'email-worker', lastError: 'resolve access token: invalid_grant' } },
       },
+      {
+        id: 'conn-outlook-local-vault',
+        providerKey: 'microsoft',
+        status: 'active',
+        capabilities: ['mail.read'],
+        syncLanes: { mail: { status: 'failed', source: 'email-worker', lastError: 'resolve access token: decrypt ciphertext: cipher: message authentication failed' } },
+      },
     ]).map(({ id, syncHealth, lastSyncAt, syncDetail }) => ({ id, syncHealth, lastSyncAt, syncDetail }))).toEqual([
       { id: 'conn-outlook-synced', syncHealth: 'synced', lastSyncAt: '2026-08-05T11:00:00.000Z', syncDetail: undefined },
       { id: 'conn-outlook-failed', syncHealth: 'attention', lastSyncAt: undefined, syncDetail: 'ingest message 42: ingest bridge returned unexpected status 401' },
+      { id: 'conn-outlook-local-vault', syncHealth: 'attention', lastSyncAt: undefined, syncDetail: 'resolve access token: decrypt ciphertext: cipher: message authentication failed' },
       { id: 'conn-gmail-refresh', syncHealth: 'needs_reconnect', lastSyncAt: undefined, syncDetail: undefined },
       { id: 'conn-gmail-running', syncHealth: 'syncing', lastSyncAt: undefined, syncDetail: undefined },
       { id: 'conn-gmail-token', syncHealth: 'needs_reconnect', lastSyncAt: undefined, syncDetail: 'resolve access token: invalid_grant' },

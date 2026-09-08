@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const codexReadOnlySandbox = "read-only"
+const (
+	codexReadOnlySandbox  = "read-only"
+	codexBaseInstructions = "You are Verevon's text-only assistant. Answer the supplied conversation directly. Do not use tools, access files, run commands, or modify anything. Return only the answer."
+)
 
 // ProcessRunner speaks the documented JSON-RPC-over-stdio Codex app-server
 // protocol. It invokes the configured executable directly (never through a
@@ -49,6 +52,14 @@ func (r *ProcessRunner) BeginDeviceLogin(ctx context.Context, codeHome string) (
 }
 
 func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request InvokeRequest) (InvokeResponse, error) {
+	return r.invoke(ctx, codeHome, request, nil)
+}
+
+func (r *ProcessRunner) InvokeStream(ctx context.Context, codeHome string, request InvokeRequest, onDelta func(string) error) (InvokeResponse, error) {
+	return r.invoke(ctx, codeHome, request, onDelta)
+}
+
+func (r *ProcessRunner) invoke(ctx context.Context, codeHome string, request InvokeRequest, onDelta func(string) error) (InvokeResponse, error) {
 	ready, err := persistedAuthReady(codeHome)
 	if err != nil {
 		return InvokeResponse{}, err
@@ -62,11 +73,10 @@ func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request Inv
 	}
 	defer client.Close()
 
-	// account/read makes a disconnected home fail before a prompt is accepted.
-	var account json.RawMessage
-	if err := client.call(ctx, "account/read", codexEmptyObjectParams(), &account); err != nil {
-		return InvokeResponse{}, fmt.Errorf("read ChatGPT subscription account: %w", err)
-	}
+	// `persistedAuthReady` already rejects a missing local login. Avoid an
+	// account/read RPC on every answer: thread/start and turn/start are the
+	// authoritative authenticated operations and Codex refreshes its managed
+	// credential while serving them.
 
 	workspace := filepath.Join(codeHome, "workspace")
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
@@ -77,13 +87,7 @@ func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request Inv
 			ID string `json:"id"`
 		} `json:"thread"`
 	}
-	if err := client.call(ctx, "thread/start", map[string]any{
-		"cwd":            workspace,
-		"model":          request.Model,
-		"approvalPolicy": "never",
-		"sandbox":        codexReadOnlySandbox,
-		"serviceName":    "coresystem_integration_core",
-	}, &thread); err != nil {
+	if err := client.call(ctx, "thread/start", threadStartParams(workspace, request), &thread); err != nil {
 		return InvokeResponse{}, fmt.Errorf("start Codex subscription thread: %w", err)
 	}
 	if strings.TrimSpace(thread.Thread.ID) == "" {
@@ -94,16 +98,10 @@ func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request Inv
 			ID string `json:"id"`
 		} `json:"turn"`
 	}
-	if err := client.call(ctx, "turn/start", map[string]any{
-		"threadId": thread.Thread.ID,
-		"input": []map[string]string{{
-			"type": "text",
-			"text": renderPrompt(request.Messages),
-		}},
-	}, &turn); err != nil {
+	if err := client.call(ctx, "turn/start", turnStartParams(thread.Thread.ID, request), &turn); err != nil {
 		return InvokeResponse{}, fmt.Errorf("start Codex subscription turn: %w", err)
 	}
-	content, err := client.waitForTurn(ctx, thread.Thread.ID, turn.Turn.ID)
+	content, err := client.waitForTurn(ctx, thread.Thread.ID, turn.Turn.ID, onDelta)
 	if err != nil {
 		return InvokeResponse{}, err
 	}
@@ -111,6 +109,37 @@ func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request Inv
 		return InvokeResponse{}, errors.New("codex subscription turn completed without text")
 	}
 	return InvokeResponse{RequestID: request.RequestID, Content: content, ModelUsed: request.Model}, nil
+}
+
+func threadStartParams(workspace string, request InvokeRequest) map[string]any {
+	params := map[string]any{
+		"cwd":              workspace,
+		"model":            request.Model,
+		"approvalPolicy":   "never",
+		"sandbox":          codexReadOnlySandbox,
+		"serviceName":      "coresystem_integration_core",
+		"baseInstructions": codexBaseInstructions,
+		"ephemeral":        true,
+	}
+	if request.ServiceTier != "" {
+		params["serviceTier"] = request.ServiceTier
+	}
+	return params
+}
+
+func turnStartParams(threadID string, request InvokeRequest) map[string]any {
+	params := map[string]any{
+		"threadId": threadID,
+		"effort":   request.ReasoningEffort,
+		"input": []map[string]string{{
+			"type": "text",
+			"text": renderPrompt(request.Messages),
+		}},
+	}
+	if request.ServiceTier != "" {
+		params["serviceTier"] = request.ServiceTier
+	}
+	return params
 }
 
 func (r *ProcessRunner) Logout(ctx context.Context, codeHome string) error {
@@ -439,7 +468,7 @@ func (c *appServerClient) notify(method string, params any) error {
 	return c.writer.Flush()
 }
 
-func (c *appServerClient) waitForTurn(ctx context.Context, threadID, turnID string) (string, error) {
+func (c *appServerClient) waitForTurn(ctx context.Context, threadID, turnID string, onDelta func(string) error) (string, error) {
 	var content strings.Builder
 	for {
 		select {
@@ -456,6 +485,11 @@ func (c *appServerClient) waitForTurn(ctx context.Context, threadID, turnID stri
 				}
 				if json.Unmarshal(event.Params, &delta) == nil && matchesTurn(threadID, turnID, delta.ThreadID, delta.TurnID) {
 					content.WriteString(delta.Delta)
+					if onDelta != nil && delta.Delta != "" {
+						if err := onDelta(delta.Delta); err != nil {
+							return "", fmt.Errorf("stream Codex subscription delta: %w", err)
+						}
+					}
 				}
 			case "item/completed":
 				// Some app-server releases stream only completion items. Use their
@@ -471,6 +505,11 @@ func (c *appServerClient) waitForTurn(ctx context.Context, threadID, turnID stri
 					}
 					if json.Unmarshal(event.Params, &item) == nil && item.Item.Type == "agentMessage" && matchesTurn(threadID, turnID, item.ThreadID, item.TurnID) {
 						content.WriteString(item.Item.Text)
+						if onDelta != nil && item.Item.Text != "" {
+							if err := onDelta(item.Item.Text); err != nil {
+								return "", fmt.Errorf("stream completed Codex subscription item: %w", err)
+							}
+						}
 					}
 				}
 			case "turn/completed":
@@ -526,7 +565,6 @@ func (c *appServerClient) Close() error {
 
 func renderPrompt(messages []ChatMessage) string {
 	var prompt strings.Builder
-	prompt.WriteString("You are the text-only inference adapter for CoreSystem. Answer the user's request directly. Do not use tools, access files, run commands, or modify anything.\n\n")
 	for _, message := range messages {
 		role := strings.TrimSpace(message.Role)
 		if role == "" {

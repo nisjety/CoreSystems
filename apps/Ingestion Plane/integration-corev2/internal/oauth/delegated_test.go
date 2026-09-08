@@ -229,6 +229,53 @@ func TestExpiredDelegatedConnectionRefreshesThroughControlPlane(t *testing.T) {
 	}
 }
 
+// Credential-encryption keys can change during a local rollout. A connection
+// linked to Better Auth must heal from its Control Plane token reference rather
+// than asking the user to reconnect to Microsoft for a local key mismatch.
+func TestUnreadableDelegatedCiphertextRefreshesThroughControlPlane(t *testing.T) {
+	service, repo := newDelegatedTestService(t, ProviderProfile{})
+	ctx := context.Background()
+	oldVault, err := secretcrypto.NewVault([]byte("abcdefghijklmnopqrstuvwxyz123456"))
+	if err != nil {
+		t.Fatalf("old vault: %v", err)
+	}
+	unreadableAccess, err := oldVault.Encrypt("old-access-token", []byte("conn-key-rollout"))
+	if err != nil {
+		t.Fatalf("encrypt old access token: %v", err)
+	}
+	unreadableRefresh, err := oldVault.Encrypt("old-refresh-token", []byte("conn-key-rollout"))
+	if err != nil {
+		t.Fatalf("encrypt old refresh token: %v", err)
+	}
+	if _, err := repo.UpsertConnection(ctx, store.Connection{
+		ID: "conn-key-rollout", ProviderKey: "microsoft", ConnectorType: "microsoft-graph", OrganizationID: "org-1",
+		Status: "active", Capabilities: []string{"mail.read"}, Scopes: []string{"Mail.Read"},
+		EncryptedAccessToken: unreadableAccess, EncryptedRefreshToken: unreadableRefresh,
+		AccessTokenExpiresAt: time.Now().Add(time.Hour),
+		ProviderContext:      map[string]string{providerContextTokenRef: "account-row-1"}, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed error: %v", err)
+	}
+
+	cp := &fakeControlPlaneTokens{token: DelegatedToken{AccessToken: "recovered-token", ExpiresAt: time.Now().Add(time.Hour)}}
+	service.SetControlPlaneTokenSource(cp)
+	result, err := service.AccessTokenForConnection(ctx, "conn-key-rollout")
+	if err != nil || result.AccessToken != "recovered-token" {
+		t.Fatalf("AccessTokenForConnection = %#v, %v; want Control Plane recovery", result, err)
+	}
+	stored, err := repo.GetConnection(ctx, "conn-key-rollout")
+	if err != nil {
+		t.Fatalf("stored connection: %v", err)
+	}
+	decrypted, err := service.vault.Decrypt(stored.EncryptedAccessToken, []byte(stored.ID))
+	if err != nil || decrypted != "recovered-token" {
+		t.Fatalf("re-encrypted access token = %q, %v; want recovered token under the active key", decrypted, err)
+	}
+	if !slices.Equal(cp.calls, []string{"account-row-1"}) {
+		t.Fatalf("control plane calls = %v, want one re-mint", cp.calls)
+	}
+}
+
 // When our own refresh token is dead (AADSTS70008 / invalid_grant) but the
 // user still signs in, Control Plane's live credential recovers the connection
 // instead of parking it in needs_refresh.

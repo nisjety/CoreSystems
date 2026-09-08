@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SupportAIModeError, runAssist } from "./inbox-ai";
 import { buildModelContextPack } from "@/shared/context-packs/context-pack";
+import { rememberAiModelSelection, resetAiModelSelectionForTests } from "@/shared/ai/model-selection";
+import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from "@/shared/api/chatgpt-subscription-client";
 
 afterEach(() => {
 	vi.unstubAllGlobals();
+	resetAiModelSelectionForTests("org-subscription");
 });
 
 function jsonResponse(data: unknown, status = 200) {
@@ -14,6 +17,40 @@ function jsonResponse(data: unknown, status = 200) {
 }
 
 describe("runAssist", () => {
+	it("routes support text through the selected active subscription without tool features", async () => {
+		rememberAiModelSelection("org-subscription", {
+			model: "gpt-5.6-luna",
+			label: "GPT 5.6 Luna Subscription",
+			provider: OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
+			subscriptionConnectionId: "conn-subscription-1",
+		});
+		const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url === "/api/v1/orgs/org-subscription") {
+				return jsonResponse({ id: "org-subscription", metadata: { interactiveRetention: { zdr: false } } });
+			}
+			if (url === "/api/v1/integrations/connections") {
+				return jsonResponse([{ id: "conn-subscription-1", providerKey: OPENAI_CODEX_SUBSCRIPTION_PROVIDER, status: "active", createdAt: "2026-09-08T00:00:00Z" }]);
+			}
+			if (url === "/api/v1/chat/invoke") {
+				const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				expect(body).toMatchObject({
+					model: "gpt-5.6-luna",
+					provider: OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
+					subscription_connection_id: "conn-subscription-1",
+					features: [],
+					tools: [],
+				});
+				return jsonResponse({ content: "Subscription answer", model_used: "gpt-5.6-luna", sources: [] });
+			}
+			throw new Error(`Unexpected request ${url}`);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(runAssist("org-subscription", "draft", [{ agent: false, body: "Help" }]))
+			.resolves.toMatchObject({ text: "Subscription answer", model: "gpt-5.6-luna" });
+	});
+
 	it("sends organization-scoped conversation context with the canonical default ZDR posture", async () => {
 		const fetchMock = vi.fn(
 			async (input: RequestInfo | URL, _init?: RequestInit) => {

@@ -4,6 +4,8 @@ import { getOrganizationAISettings, type SupportAIMode } from '@/shared/api/orga
 import type { ModelContextPack, SupportAssistantContext } from '@/shared/context-packs/context-pack'
 import { supportQuestionEnvelope } from '@/shared/chat/support-context-envelope'
 import { newSupportChatThreadId } from '@/shared/chat/support-chat-thread'
+import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
+import { resolveAiModelSelection } from '@/shared/ai/model-selection'
 
 /**
  * Inbox AI assist — real model-plane calls.
@@ -58,6 +60,18 @@ export class SupportAIModeError extends Error {
   constructor() {
     super('Support AI is disabled for this organization.')
     this.name = 'SupportAIModeError'
+  }
+}
+
+export class SubscriptionAssistUnavailableError extends Error {
+  readonly code: 'subscription_connection_unavailable' | 'subscription_zdr_unsupported'
+
+  constructor(code: SubscriptionAssistUnavailableError['code']) {
+    super(code === 'subscription_zdr_unsupported'
+      ? 'Subscription models cannot process zero-retention support data.'
+      : 'The selected subscription model has no active connection.')
+    this.name = 'SubscriptionAssistUnavailableError'
+    this.code = code
   }
 }
 
@@ -288,6 +302,12 @@ export async function runAssist(
   // includes customer transcript content, so this boundary must fail closed.
   const { zdr, supportAiMode } = await getOrganizationAISettings(orgId)
   if (supportAiMode === 'off') throw new SupportAIModeError()
+  const selectedModel = await resolveAiModelSelection(orgId)
+  const subscriptionBacked = selectedModel.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
+  if (subscriptionBacked && zdr) throw new SubscriptionAssistUnavailableError('subscription_zdr_unsupported')
+  if (subscriptionBacked && !selectedModel.subscriptionConnectionId) {
+    throw new SubscriptionAssistUnavailableError('subscription_connection_unavailable')
+  }
   const enrichedOpts = await addKnowledgeContext(orgId, mode, opts)
   const content = buildPrompt(mode, messages, enrichedOpts)
   const requestedThreadId = opts.threadId?.trim()
@@ -300,6 +320,9 @@ export async function runAssist(
     headers: { 'x-verevon-org-id': orgId },
     body: JSON.stringify({
       content,
+      model: selectedModel.model,
+      provider: subscriptionBacked ? selectedModel.provider : undefined,
+      subscription_connection_id: subscriptionBacked ? selectedModel.subscriptionConnectionId : undefined,
       profile: 'chat',
       thread_id: threadId,
       session_key: threadId,
@@ -307,7 +330,7 @@ export async function runAssist(
       // A durable support question contains customer-authored transcript text.
       // The immutable support_ namespace keeps the whole shared thread
       // contextual but read-only, including later turns opened in Chat.
-      features: readOnlySupportAssist ? [] : ['tools'],
+      features: readOnlySupportAssist || subscriptionBacked ? [] : ['tools'],
       tools: [],
       attachments: [],
       zdr,
