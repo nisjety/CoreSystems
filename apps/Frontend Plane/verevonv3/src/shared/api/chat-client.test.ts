@@ -562,7 +562,7 @@ describe('chat invoke privacy tier (Venice tiering)', () => {
 
   it('emits min_privacy_tier snake_case when a tier is selected', () => {
     const body = buildChatWireBody({ content: 'hi', minPrivacyTier: 'sovereign' })
-    expect(body.min_privacy_tier).toBe('sovereign')
+    expect(body.min_privacy_tier).toBe(4)
   })
 
   it('never emits min_privacy_tier for unspecified, even if passed', () => {

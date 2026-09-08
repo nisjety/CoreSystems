@@ -1362,9 +1362,15 @@ export function useChatController() {
             browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
             deepResearch: pending.tools?.includes('research'),
             displayAttachments: pending.attachments ?? [],
+            effort: pending.effort,
             generateImage: pending.tools?.includes('image'),
             tools: pending.tools ?? [],
             actions: (pending.actions ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
+            minPrivacyTier: pending.minPrivacyTier,
+            provider: pending.provider,
+            subscriptionConnectionId: pending.subscriptionConnectionId,
+            tone: pending.tone,
+            zdr: pending.zdr,
           })
           const currentThreadId = untrack(() => state.threadId)
           if (pending.supportHandoff && currentThreadId) {

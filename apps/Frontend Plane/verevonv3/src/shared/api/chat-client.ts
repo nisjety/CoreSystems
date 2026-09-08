@@ -3,6 +3,7 @@ import { readSseStream, type SseEvent } from './sse'
 import {
   isSelectablePrivacyTier,
   normalizePrivacyTier,
+  privacyTierWireValue,
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
@@ -703,7 +704,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // `support_context_query` above. `isSelectablePrivacyTier` (not mere
     // truthiness) keeps a literal `'unspecified'` OFF the wire too.
     ...(isSelectablePrivacyTier(request.minPrivacyTier)
-      ? { min_privacy_tier: request.minPrivacyTier }
+      ? { min_privacy_tier: privacyTierWireValue(request.minPrivacyTier) }
       : {}),
   }
 }

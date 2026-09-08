@@ -74,6 +74,19 @@ export function isSelectablePrivacyTier(
 }
 
 /**
+ * Encode the UI's readable tier name for Model Gateway's protobuf-backed
+ * request contract. `/v1/models` may expose either names or ordinals, but the
+ * invoke boundary accepts the numeric `PrivacyTier` value only.
+ */
+export function privacyTierWireValue(
+  tier: PrivacyTier | undefined | null,
+): number | undefined {
+  if (!isSelectablePrivacyTier(tier)) return undefined
+  const ordinal = PRIVACY_TIERS.indexOf(tier)
+  return ordinal > 0 ? ordinal : undefined
+}
+
+/**
  * Short badge label for the picker's tier chip. Norwegian-first via `i18n.tr`,
  * matching the rest of the composer copy.
  */
