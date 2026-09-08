@@ -631,7 +631,13 @@ export function DashboardComposer(props: {
 	);
 	const selectedCatalogModel = createMemo(() => {
 		const provider = selectedModelProvider();
-		if (!provider) return undefined;
+		// No truthiness guard on `provider`: plenty of real catalog models have
+		// no provider tag (ModelInfo.provider is optional), and `selectModel`
+		// below already threads the clicked model's own provider straight into
+		// both signals, so an undefined-vs-undefined match is a legitimate
+		// selection, not an absent one. Bailing out here previously made
+		// selectedPrivacyTier() (and the submit payload's minPrivacyTier) go
+		// undefined for any selected model without a provider.
 		return flatChatModels().find(
 			(model) => model.id === selectedModel() && model.provider === provider,
 		);

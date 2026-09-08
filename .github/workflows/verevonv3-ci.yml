@@ -179,6 +179,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # @verevon/remote-core (packages/remote-core) is a `workspace:*` dep that
+      # RemoteSupportPage.tsx imports. `pnpm install` only links the workspace
+      # package -- it does not run remote-core's own `build` script -- and its
+      # package.json `main`/`types`/`exports` all point at dist/, which is
+      # gitignored. Without this step a clean checkout fails typecheck with
+      # "Cannot find module '@verevon/remote-core'" (plus cascading
+      # implicit-any errors in the same file) rather than a legible build error.
+      - name: Build @verevon/remote-core workspace package
+        run: pnpm --filter @verevon/remote-core run build
+
       - name: Verify (lint -> typecheck -> test -> build)
         run: pnpm verify
 
