@@ -533,7 +533,7 @@ export default function RemoteSupportPage() {
                   disabled={state() !== 'connected'}
                   onClick={() => void selectQuality(level)}
                 >
-                  {i18n.tr(...QUALITY_LABELS[level])}
+                  {i18n.tr(...QUALITY_LABELS[level]!)}
                 </button>
               )}
             </For>
@@ -572,7 +572,7 @@ export default function RemoteSupportPage() {
               {(permission) => (
                 <span class={{ 'verevon-remote-support__permission': true, 'verevon-remote-support__permission--granted': permissions().includes(permission) }}>
                   <Show when={permission === 'input.pointer'} fallback={<Show when={permission === 'input.keyboard'} fallback={<Eye />}><Keyboard /></Show>}><MousePointer2 /></Show>
-                  {i18n.tr(...PERMISSION_LABELS[permission])}
+                  {i18n.tr(...PERMISSION_LABELS[permission]!)}
                 </span>
               )}
             </For>

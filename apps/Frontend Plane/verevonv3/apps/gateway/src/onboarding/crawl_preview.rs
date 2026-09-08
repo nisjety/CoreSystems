@@ -1,5 +1,5 @@
-mod handler;
 mod dedupe;
+mod handler;
 mod normalize;
 mod quarry;
 mod sse;

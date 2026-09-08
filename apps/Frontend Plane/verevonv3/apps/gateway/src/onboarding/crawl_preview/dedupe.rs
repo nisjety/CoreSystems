@@ -84,14 +84,16 @@ mod tests {
     #[test]
     fn first_snippet_for_a_url_is_admitted_and_counted() {
         let mut ledger = SnippetLedger::default();
-        let bare = json!({ "url": "https://aquatiq.com/", "title": "aquatiq.com", "excerpt": null });
+        let bare =
+            json!({ "url": "https://aquatiq.com/", "title": "aquatiq.com", "excerpt": null });
         assert_eq!(ledger.admit(&bare), Admission::First);
     }
 
     #[test]
     fn richer_snippet_for_same_url_updates_without_recounting() {
         let mut ledger = SnippetLedger::default();
-        let bare = json!({ "url": "https://aquatiq.com/", "title": "aquatiq.com", "excerpt": null });
+        let bare =
+            json!({ "url": "https://aquatiq.com/", "title": "aquatiq.com", "excerpt": null });
         let rich = json!({
             "url": "https://aquatiq.com",
             "title": "Aquatiq – hygiene for matindustrien",

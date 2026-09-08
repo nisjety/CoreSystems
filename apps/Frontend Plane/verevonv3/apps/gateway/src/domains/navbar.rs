@@ -225,7 +225,8 @@ async fn navbar(
             let data = crate::envelope::unwrap_data(&acct);
             trial_ends_at = first_str(&data, &["trial_ends_at", "trialEndsAt"]).map(str::to_owned);
             plan_trial = trial_ends_at.is_some()
-                && first_str(&data, &["subscription_state", "subscriptionState"]) == Some("trialing");
+                && first_str(&data, &["subscription_state", "subscriptionState"])
+                    == Some("trialing");
             first_str(&data, &["plan"])
                 .filter(|p| !p.trim().is_empty())
                 .map(str::to_owned)

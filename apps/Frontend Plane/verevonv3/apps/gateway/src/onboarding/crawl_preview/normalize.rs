@@ -189,8 +189,14 @@ mod tests {
             let snippet = mapped.value.unwrap();
             assert_eq!(snippet["title"], "Aquatiq – hygiene for matindustrien");
             assert_eq!(snippet["titleSource"], "model");
-            assert!(snippet["excerpt"].as_str().unwrap().starts_with("Vi leverer"));
-            assert_eq!(snippet["summary"], "Leverandør av hygieneløsninger til matindustrien.");
+            assert!(snippet["excerpt"]
+                .as_str()
+                .unwrap()
+                .starts_with("Vi leverer"));
+            assert_eq!(
+                snippet["summary"],
+                "Leverandør av hygieneløsninger til matindustrien."
+            );
             assert_eq!(snippet["wordCount"], 412);
             assert_eq!(snippet["lang"], "no");
             assert_eq!(snippet["driver"], "browser");
@@ -222,7 +228,8 @@ mod tests {
     // ledger later lets page_extracted replace it.
     #[test]
     fn page_fetched_derives_provenance_and_null_excerpt() {
-        let bare = json!({ "url": "https://aquatiq.com/", "status": 200, "content_type": "text/html" });
+        let bare =
+            json!({ "url": "https://aquatiq.com/", "status": 200, "content_type": "text/html" });
         let snippet = to_snippet(&bare, "live").unwrap();
         assert_eq!(snippet["titleSource"], "host");
         assert!(snippet["excerpt"].is_null());

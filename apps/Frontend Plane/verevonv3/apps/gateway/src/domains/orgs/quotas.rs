@@ -84,7 +84,7 @@ pub(crate) async fn set_quota(
             StatusCode::BAD_REQUEST,
             Json(error(
                 "validation_error",
-                &format!(
+                format!(
                     "unknown quota key '{key}'. Settable keys: {}.",
                     ENFORCED_QUOTA_KEYS.join(", ")
                 ),
@@ -124,7 +124,7 @@ pub(crate) async fn set_quota(
                 StatusCode::BAD_REQUEST,
                 Json(error(
                     "validation_error",
-                    &format!(
+                    format!(
                         "reset_period must be one of: {}.",
                         VALID_RESET_PERIODS.join(", ")
                     ),

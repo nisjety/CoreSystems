@@ -100,7 +100,10 @@ mod tests {
 
         assert!(config.configured);
         assert!(config.missing.is_empty());
-        assert_eq!(config.rendezvous_url.as_deref(), Some("wss://remote.example.com"));
+        assert_eq!(
+            config.rendezvous_url.as_deref(),
+            Some("wss://remote.example.com")
+        );
         assert_eq!(config.relay_url.as_deref(), Some("wss://relay.example.com"));
     }
 
@@ -117,7 +120,11 @@ mod tests {
     fn missing_public_key_is_not_configured_even_with_urls() {
         // Without the key the peer cannot be authenticated, and the product UI
         // must never fall back to an unverified handshake.
-        let config = build_config(&state_with("wss://remote.example.com", "wss://relay.example.com", ""));
+        let config = build_config(&state_with(
+            "wss://remote.example.com",
+            "wss://relay.example.com",
+            "",
+        ));
         assert!(!config.configured);
         assert_eq!(config.missing, vec!["REMOTE_SUPPORT_SERVER_PUBLIC_KEY"]);
     }
@@ -128,7 +135,10 @@ mod tests {
         assert!(!config.configured);
         assert_eq!(
             config.missing,
-            vec!["REMOTE_SUPPORT_RENDEZVOUS_URL", "REMOTE_SUPPORT_SERVER_PUBLIC_KEY"]
+            vec![
+                "REMOTE_SUPPORT_RENDEZVOUS_URL",
+                "REMOTE_SUPPORT_SERVER_PUBLIC_KEY"
+            ]
         );
         assert_eq!(config.rendezvous_url, None);
     }
@@ -156,9 +166,13 @@ mod tests {
         // caller, whether the middleware answers 401 or (auth-core unreachable
         // in a unit test) 503. Either way it is never 200.
         let status = response.status().as_u16();
-        let body: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
-            .unwrap_or(Value::Null);
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
         assert_ne!(status, 200, "{body}");
-        assert!(body.get("data").is_none(), "config leaked to anonymous caller: {body}");
+        assert!(
+            body.get("data").is_none(),
+            "config leaked to anonymous caller: {body}"
+        );
     }
 }

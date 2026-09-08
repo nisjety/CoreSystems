@@ -1441,7 +1441,7 @@ fn group_documents_by_source(documents: &[DocSummary]) -> Vec<(String, Vec<DocSu
             (key, group)
         })
         .collect::<Vec<_>>();
-    grouped.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    grouped.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
     grouped
 }
 

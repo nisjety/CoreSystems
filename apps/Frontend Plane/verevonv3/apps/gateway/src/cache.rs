@@ -139,6 +139,9 @@ impl ResultCache {
     ///
     /// The TTL is refreshed on every add so an active roster never expires out
     /// from under the data it indexes.
+    // Documented for the GDPR-erasure roster caller described above; not yet
+    // wired up anywhere in this crate, so clippy sees it as unreachable.
+    #[allow(dead_code)]
     pub(crate) async fn set_add(&self, key: &str, member: &str, ttl_secs: u64) {
         let Some(mut conn) = self.conn.clone() else {
             return;
@@ -154,6 +157,7 @@ impl ResultCache {
     /// Read every member of the Redis SET at `key`. An empty vector on a miss,
     /// a disabled cache, or any error — callers must treat "empty" as "nothing
     /// known here", never as proof of absence.
+    #[allow(dead_code)]
     pub(crate) async fn set_members(&self, key: &str) -> Vec<String> {
         let Some(mut conn) = self.conn.clone() else {
             return Vec::new();

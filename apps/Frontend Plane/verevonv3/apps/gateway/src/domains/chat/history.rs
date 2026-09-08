@@ -625,10 +625,7 @@ fn canonical_messages_to_transcript(
             // the conditional shape used for `agentName` above: the SPA treats
             // an absent key as "nothing grounded" and a present one as real
             // evidence, so writing `null` here would be a different claim.
-            if let Some(grounding) = message
-                .grounding
-                .filter(|value| !value.is_null())
-            {
+            if let Some(grounding) = message.grounding.filter(|value| !value.is_null()) {
                 turn["grounding"] = grounding;
             }
             if let Some(citations) = message
@@ -1088,7 +1085,10 @@ mod tests {
         )
         .expect("canonical conversation should render");
 
-        assert_eq!(transcript.turns[0]["citations"][0]["url"], "https://example.test/oslo");
+        assert_eq!(
+            transcript.turns[0]["citations"][0]["url"],
+            "https://example.test/oslo"
+        );
         assert!(transcript.turns[0].get("grounding").is_none());
         assert!(transcript.turns[1].get("citations").is_none());
     }

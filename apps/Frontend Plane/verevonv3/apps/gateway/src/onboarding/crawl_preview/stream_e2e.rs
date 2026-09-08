@@ -148,10 +148,12 @@ fn test_state(quarry_edge_url: String) -> AppState {
         finspo_core_url: "http://127.0.0.1:1".into(),
         imports_api_url: "http://127.0.0.1:1".into(),
         notification_core_url: "http://127.0.0.1:1".into(),
-        notification_core_service_token: "stream-e2e-not-a-real-notification-core-service-token".into(),
+        notification_core_service_token: "stream-e2e-not-a-real-notification-core-service-token"
+            .into(),
         information_core_url: "http://127.0.0.1:1".into(),
         conversation_core_url: "http://127.0.0.1:1".into(),
-        conversation_core_service_token: "stream-e2e-not-a-real-conversation-core-service-token".into(),
+        conversation_core_service_token: "stream-e2e-not-a-real-conversation-core-service-token"
+            .into(),
         social_core_url: "http://127.0.0.1:1".into(),
         searxng_url: "http://127.0.0.1:1".into(),
         autocomplete_core_url: "http://127.0.0.1:1".into(),

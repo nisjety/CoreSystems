@@ -1419,14 +1419,10 @@ async fn space_activity(
         Some((decision_ref, token)) => {
             let model_token =
                 crate::domains::chat::shared::model_token(&state, &user, &headers).await;
-            let session_token = match crate::domains::chat::shared::required_session_token(
-                &state, &user, &headers,
-            )
-            .await
-            {
-                Ok(token) => Some(token),
-                Err(_) => None,
-            };
+            let session_token =
+                crate::domains::chat::shared::required_session_token(&state, &user, &headers)
+                    .await
+                    .ok();
             match session_token {
                 None => unavailable.push(json!({
                     "section": "runs",
@@ -1472,9 +1468,7 @@ async fn space_activity(
                                             == Some("awaiting_approval")
                                     })
                                     .filter_map(|row| {
-                                        row.get("run_id")
-                                            .and_then(Value::as_str)
-                                            .map(str::to_owned)
+                                        row.get("run_id").and_then(Value::as_str).map(str::to_owned)
                                     })
                                     .take(SPACE_ACTIVITY_APPROVAL_RUNS)
                                     .collect()
@@ -1502,9 +1496,7 @@ async fn space_activity(
                                 approval_read_failed = true;
                                 continue;
                             }
-                            if let Some(rows) =
-                                payload.get("approvals").and_then(Value::as_array)
-                            {
+                            if let Some(rows) = payload.get("approvals").and_then(Value::as_array) {
                                 for row in rows {
                                     let mut row = row.clone();
                                     // Carry the run so the timeline can put an
@@ -1789,10 +1781,7 @@ async fn space_knowledge(
             "reason": "Reading this Space's knowledge is not authorized.",
         })),
         Ok(Some(decision)) => {
-            let url = format!(
-                "{}/v1/knowledge/space-sources",
-                state.retrieval_engine_url
-            );
+            let url = format!("{}/v1/knowledge/space-sources", state.retrieval_engine_url);
             let (status, Json(payload)) =
                 crate::domains::knowledge::shared::proxy_data_plane_json_with_space_decision(
                     &state,
@@ -2178,7 +2167,10 @@ async fn space_thread_presentation(
     if space_ref.is_empty() || thread_id.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(error("invalid_space", "A Space and thread reference are required.")),
+            Json(error(
+                "invalid_space",
+                "A Space and thread reference are required.",
+            )),
         );
     }
     let title = body
@@ -2199,7 +2191,10 @@ async fn space_thread_presentation(
     if title.is_some_and(|value| value.chars().count() > 200) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(error("invalid_presentation", "A title is at most 200 characters.")),
+            Json(error(
+                "invalid_presentation",
+                "A title is at most 200 characters.",
+            )),
         );
     }
     match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
@@ -5790,7 +5785,10 @@ mod tests {
             .iter()
             .filter_map(|gap| gap["code"].as_str())
             .collect();
-        assert!(codes.contains(&"operations_upstream_unavailable"), "codes = {codes:?}");
+        assert!(
+            codes.contains(&"operations_upstream_unavailable"),
+            "codes = {codes:?}"
+        );
         assert_eq!(body["data"]["operations"], json!([]));
     }
 
@@ -5813,7 +5811,10 @@ mod tests {
             .iter()
             .filter_map(|gap| gap["code"].as_str())
             .collect();
-        assert!(codes.contains(&"operations_endpoint_unavailable"), "codes = {codes:?}");
+        assert!(
+            codes.contains(&"operations_endpoint_unavailable"),
+            "codes = {codes:?}"
+        );
     }
 
     /// The tab's footnote has promised since the cockpit shipped that other
@@ -5836,7 +5837,10 @@ mod tests {
             .iter()
             .filter_map(|gap| gap["code"].as_str())
             .collect();
-        assert!(codes.contains(&"delivery_ledger_not_built"), "codes = {codes:?}");
+        assert!(
+            codes.contains(&"delivery_ledger_not_built"),
+            "codes = {codes:?}"
+        );
         assert!(codes.contains(&"watches_not_built"), "codes = {codes:?}");
     }
 
@@ -5862,11 +5866,18 @@ mod tests {
             .iter()
             .filter_map(|gap| gap["code"].as_str())
             .collect();
-        assert!(codes.contains(&"runs_read_not_authorized"), "codes = {codes:?}");
+        assert!(
+            codes.contains(&"runs_read_not_authorized"),
+            "codes = {codes:?}"
+        );
         // The owner receipts do NOT depend on that decision, so they still load.
         assert_eq!(body["data"]["operations"][0]["operation_id"], "op-1");
         assert!(
-            model_gateway.received_requests().await.expect("requests").is_empty(),
+            model_gateway
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
             "Model Plane must not be asked without a decision to present"
         );
     }
@@ -5932,7 +5943,9 @@ mod tests {
         // owner-bound path, which is enough for these tests.
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "forbidden"}})))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "forbidden"}})),
+            )
             .mount(&user_core)
             .await;
         let application = MockServer::start().await;
@@ -5940,7 +5953,9 @@ mod tests {
         // on the function path in the body.
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .and(wiremock::matchers::body_partial_json(json!({"path": "spaceReadMarkers:spaceReadMarkerForGateway"})))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"path": "spaceReadMarkers:spaceReadMarkerForGateway"}),
+            ))
             .respond_with(convex_marker_query)
             .mount(&application)
             .await;
@@ -5993,7 +6008,9 @@ mod tests {
             builder = builder.header("content-type", "application/json");
         }
         let request = builder
-            .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
+            .body(Body::from(
+                body.map(|value| value.to_string()).unwrap_or_default(),
+            ))
             .unwrap();
         let response = crate::build_router(state).oneshot(request).await.unwrap();
         let status = response.status().as_u16();
@@ -6010,14 +6027,19 @@ mod tests {
     async fn space_threads_carry_the_readers_marker_and_pin_state() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
-            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1_757_240_000_000_i64}})),
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"lastReadAt": 1_757_240_000_000_i64}})),
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1}})),
             ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-1"})),
         )
         .await;
-        let (status, body) = room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        let (status, body) =
+            room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
         assert_eq!(status, 200);
-        assert_eq!(body["data"]["read_marker"]["last_read_at"], 1_757_240_000_000_i64);
+        assert_eq!(
+            body["data"]["read_marker"]["last_read_at"],
+            1_757_240_000_000_i64
+        );
         assert_eq!(body["data"]["threads"][0]["pinned"], true);
         assert_eq!(body["data"]["unavailable"], json!([]));
     }
@@ -6033,7 +6055,8 @@ mod tests {
             ResponseTemplate::new(200).set_body_json(json!({})),
         )
         .await;
-        let (status, body) = room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        let (status, body) =
+            room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
         assert_eq!(status, 200);
         assert!(body["data"]["read_marker"]["last_read_at"].is_null());
         assert_eq!(body["data"]["unavailable"], json!([]));
@@ -6044,12 +6067,16 @@ mod tests {
             ResponseTemplate::new(200).set_body_json(json!({})),
         )
         .await;
-        let (status, body) = room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        let (status, body) =
+            room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
         // Application being down must never cost the room its threads.
         assert_eq!(status, 200);
         assert_eq!(body["data"]["threads"][0]["thread_id"], "thread-1");
         assert!(body["data"]["read_marker"].is_null());
-        assert_eq!(body["data"]["unavailable"][0]["code"], "read_marker_unavailable");
+        assert_eq!(
+            body["data"]["unavailable"][0]["code"],
+            "read_marker_unavailable"
+        );
     }
 
     async fn presence_fixture(
@@ -6146,9 +6173,13 @@ mod tests {
                 .set_body_json(json!({"value": {"present": [], "ttlSeconds": 30}})),
         )
         .await;
-        let (status, body) =
-            room_4b_request(state, "POST", "/api/v1/spaces/space-room/presence", Some(json!({})))
-                .await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/presence",
+            Some(json!({})),
+        )
+        .await;
         assert_eq!(status, 200);
         assert_eq!(body["data"]["status"], "online");
         assert_eq!(body["data"]["present"], json!([]));
@@ -6197,11 +6228,18 @@ mod tests {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let (state, application, _mg, _auth, _user_core) = room_4b_fixture(
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
-            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1_757_240_100_000_i64}})),
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"lastReadAt": 1_757_240_100_000_i64}})),
             ResponseTemplate::new(200).set_body_json(json!({})),
         )
         .await;
-        let (status, body) = room_4b_request(state, "POST", "/api/v1/spaces/space-room/read", Some(json!({}))).await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/read",
+            Some(json!({})),
+        )
+        .await;
         assert_eq!(status, 200);
         assert_eq!(body["data"]["last_read_at"], 1_757_240_100_000_i64);
         // The mutation carries identifiers only — never a thread list or content.
@@ -6227,7 +6265,13 @@ mod tests {
             ResponseTemplate::new(200).set_body_json(json!({})),
         )
         .await;
-        let (status, body) = room_4b_request(state, "POST", "/api/v1/spaces/space-room/read", Some(json!({}))).await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/read",
+            Some(json!({})),
+        )
+        .await;
         assert_eq!(status, 503);
         assert_eq!(body["error"]["code"], "read_marker_unavailable");
     }
@@ -6312,7 +6356,11 @@ mod tests {
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "invalid_presentation");
         assert!(
-            model_gateway.received_requests().await.expect("requests").is_empty(),
+            model_gateway
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
             "nothing to change means nothing is sent upstream"
         );
     }
@@ -6406,8 +6454,7 @@ mod tests {
     async fn space_knowledge_lists_the_rooms_documents_and_wiki_pages() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let (status, body, retrieval) = space_knowledge_response(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
             ResponseTemplate::new(200).set_body_json(json!({
                 "space_ref": "space-room",
                 "binding": {"workspace_id": "ws-1", "collection_id": null},
@@ -6424,7 +6471,9 @@ mod tests {
         assert_eq!(body["data"]["wiki_pages"][0]["title"], "Onboarding");
         assert_eq!(body["data"]["binding"]["workspace_id"], "ws-1");
         assert!(
-            body["data"]["unavailable"].as_array().is_some_and(|gaps| gaps.is_empty()),
+            body["data"]["unavailable"]
+                .as_array()
+                .is_some_and(|gaps| gaps.is_empty()),
             "nothing was missing, so the gap list must be present and empty"
         );
 
@@ -6464,11 +6513,17 @@ mod tests {
             "knowledge_read_not_authorized"
         );
         assert!(
-            body["data"]["documents"].as_array().is_some_and(|d| d.is_empty()),
+            body["data"]["documents"]
+                .as_array()
+                .is_some_and(|d| d.is_empty()),
             "an unauthorized read must still answer with an empty list, not null"
         );
         assert!(
-            retrieval.received_requests().await.expect("requests").is_empty(),
+            retrieval
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
             "Data must not be asked without a decision to present"
         );
     }
@@ -6480,8 +6535,7 @@ mod tests {
     async fn space_knowledge_separates_no_binding_from_an_outage() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let (status, body, _retrieval) = space_knowledge_response(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
             ResponseTemplate::new(403).set_body_json(json!({
                 "error": "Space retrieval binding is unavailable"
             })),
@@ -6494,8 +6548,7 @@ mod tests {
         );
 
         let (status, body, _retrieval) = space_knowledge_response(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
             ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
         )
         .await;
@@ -6513,8 +6566,7 @@ mod tests {
     async fn space_knowledge_relays_the_per_section_gap_data_reported() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let (status, body, _retrieval) = space_knowledge_response(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
             ResponseTemplate::new(200).set_body_json(json!({
                 "documents": [{"document_id": "doc-1", "title": "Rutine"}],
                 // Go/Rust both marshal an absent list this way somewhere in
@@ -6555,7 +6607,11 @@ mod tests {
         .await;
         assert_eq!(status, 503);
         assert!(
-            retrieval.received_requests().await.expect("requests").is_empty(),
+            retrieval
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
             "Data must not be asked when Control could not be reached"
         );
     }
@@ -6669,7 +6725,9 @@ mod tests {
         assert_eq!(body["data"]["runs"][0]["goal"], "Send varsel");
         assert_eq!(body["data"]["schedules"][0]["name"], "Daglig rapport");
         assert!(
-            body["data"]["unavailable"].as_array().is_some_and(|gaps| gaps.is_empty()),
+            body["data"]["unavailable"]
+                .as_array()
+                .is_some_and(|gaps| gaps.is_empty()),
             "nothing was missing, so the gap list must be present and empty"
         );
 
@@ -6680,12 +6738,20 @@ mod tests {
             .iter()
             .find(|request| request.url.path() == "/v1/runs")
             .expect("runs request");
-        assert!(runs.url.query().unwrap_or_default().contains("space_read_decision_token=v2.a.b.c"));
+        assert!(runs
+            .url
+            .query()
+            .unwrap_or_default()
+            .contains("space_read_decision_token=v2.a.b.c"));
         let cron = requests
             .iter()
             .find(|request| request.url.path() == "/v1/cron")
             .expect("cron request");
-        assert!(cron.url.query().unwrap_or_default().contains("space_ref=space-room"));
+        assert!(cron
+            .url
+            .query()
+            .unwrap_or_default()
+            .contains("space_ref=space-room"));
     }
 
     /// Either upstream can fail alone. Showing what resolved with a named gap
@@ -6731,7 +6797,9 @@ mod tests {
         // under.
         let requests = model_gateway.received_requests().await.expect("requests");
         assert!(
-            requests.iter().all(|request| request.url.path() != "/v1/runs"),
+            requests
+                .iter()
+                .all(|request| request.url.path() != "/v1/runs"),
             "an unauthorized read must not reach Model Plane"
         );
     }
@@ -6833,7 +6901,9 @@ mod tests {
         assert_eq!(body["data"]["changed"], true);
         let requests = application.received_requests().await.expect("requests");
         assert!(
-            requests.iter().any(|request| request.url.path() == "/api/action"),
+            requests
+                .iter()
+                .any(|request| request.url.path() == "/api/action"),
             "a membership change must be declared to Control"
         );
     }
@@ -6865,7 +6935,8 @@ mod tests {
             ("DELETE", None),
         ] {
             let (status, payload, application) =
-                room_membership_response("viewer", method, body, json!({"status": "applied"})).await;
+                room_membership_response("viewer", method, body, json!({"status": "applied"}))
+                    .await;
             assert_eq!(status, 403, "{method} must be refused for a viewer");
             assert_eq!(payload["error"]["code"], "space_role_cannot_create_agent");
             assert!(
@@ -6965,8 +7036,14 @@ mod tests {
         for (body, code) in [
             (json!({"kind": "room"}), "room_name_required"),
             (json!({"kind": "room", "name": "   "}), "room_name_required"),
-            (json!({"kind": "project", "name": "P"}), "unsupported_space_kind"),
-            (json!({"kind": "case", "name": "C"}), "unsupported_space_kind"),
+            (
+                json!({"kind": "project", "name": "P"}),
+                "unsupported_space_kind",
+            ),
+            (
+                json!({"kind": "case", "name": "C"}),
+                "unsupported_space_kind",
+            ),
         ] {
             let (status, payload, application) = create_space_response(body.clone()).await;
             assert_eq!(status, 400, "{body} must be refused");
@@ -7077,7 +7154,9 @@ mod tests {
         // Pausing keeps the agent a member that may not be invoked, so Control
         // has nothing to converge — the roster is unchanged.
         assert!(
-            requests.iter().all(|request| request.url.path() != "/api/action"),
+            requests
+                .iter()
+                .all(|request| request.url.path() != "/api/action"),
             "pausing must not re-declare the room's roster to Control"
         );
     }
@@ -7144,7 +7223,9 @@ mod tests {
         assert_eq!(status, 200);
         let requests = application.received_requests().await.expect("requests");
         assert!(
-            requests.iter().any(|request| request.url.path() == "/api/action"),
+            requests
+                .iter()
+                .any(|request| request.url.path() == "/api/action"),
             "revocation must re-declare the room's roster to Control"
         );
     }
@@ -7169,7 +7250,9 @@ mod tests {
         // ever asks Control anything.
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/session-core/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token": "session-core-token"})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"token": "session-core-token"})),
+            )
             .mount(&auth)
             .await;
         let user_core = MockServer::start().await;
@@ -7236,17 +7319,19 @@ mod tests {
     #[tokio::test]
     async fn a_space_transcript_returns_another_members_turns_with_their_author() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (status, body, model_gateway) = space_thread_transcript_response(
-            ResponseTemplate::new(200).set_body_json(json!({
+        let (status, body, model_gateway) =
+            space_thread_transcript_response(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {
                     "decision": {"decision_ref": "read-decision-1"},
                     "token": "v2.a.b.c"
                 }
-            })),
-        )
-        .await;
+            })))
+            .await;
 
-        assert_eq!(status, 200, "a current member must be able to read the room");
+        assert_eq!(
+            status, 200,
+            "a current member must be able to read the room"
+        );
         let turns = body["data"]["transcript"]["turns"]
             .as_array()
             .expect("turns");

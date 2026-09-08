@@ -2940,6 +2940,6 @@ mod artifact_relay_tests {
 
     #[test]
     fn the_relay_cap_is_sane_for_a_full_page_screenshot() {
-        assert!(ARTIFACT_RELAY_MAX_BYTES >= 4 * 1024 * 1024);
+        const { assert!(ARTIFACT_RELAY_MAX_BYTES >= 4 * 1024 * 1024) };
     }
 }
