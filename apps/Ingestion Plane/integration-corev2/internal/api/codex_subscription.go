@@ -187,6 +187,9 @@ func registerCodexSubscriptionRoutes(
 			MaxTokens:    body.MaxTokens,
 		})
 		if err != nil {
+			if errors.Is(err, codexsubscription.ErrReauthenticationRequired) {
+				markCodexSubscriptionNeedsRefresh(c, cfg, connection)
+			}
 			return subscriptionError(c, err)
 		}
 		recordAuditEvent(c.UserContext(), cfg, store.AuditEvent{
@@ -200,6 +203,31 @@ func registerCodexSubscriptionRoutes(
 		})
 		return success(c, fiber.Map{"response": response, "providerUsed": codexsubscription.ProviderKey})
 	})...)
+}
+
+// markCodexSubscriptionNeedsRefresh reconciles database state with the
+// service-owned credential volume. This prevents a connection whose local
+// credential disappeared from continuing to look usable in model pickers.
+func markCodexSubscriptionNeedsRefresh(c *fiber.Ctx, cfg ServerConfig, connection store.Connection) {
+	connection.Status = "needs_refresh"
+	connection.LastSyncStatus = "reauthentication_required"
+	if err := withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		updated, err := tx.UpsertConnection(c.UserContext(), connection)
+		if err != nil {
+			return err
+		}
+		connection = updated
+		return persist(store.AuditEvent{
+			ID:             auditMutationID(c.UserContext(), "codex-subscription-needs-refresh", connection.ID),
+			OrganizationID: connection.OrganizationID,
+			UserID:         connection.UserID,
+			ConnectionID:   connection.ID,
+			EventType:      "subscription_connection.reauthentication_required",
+			ProviderKey:    connection.ProviderKey,
+		})
+	}); err == nil {
+		publishIntegrationEvent(c.UserContext(), cfg, "verevon.ingestion.integration.connection_updated", connection, map[string]any{"change": "subscription_reauthentication_required"})
+	}
 }
 
 // markCodexSubscriptionLoginTerminal prevents abandoned device-code attempts
@@ -297,6 +325,8 @@ func subscriptionError(c *fiber.Ctx, err error) error {
 		return apiError(c, fiber.StatusGone, "subscription_login_expired", "The subscription sign-in session expired. Start a new connection.")
 	case errors.Is(err, codexsubscription.ErrInvalidRequest):
 		return apiError(c, fiber.StatusBadRequest, "invalid_subscription_request", "The subscription request is invalid.")
+	case errors.Is(err, codexsubscription.ErrReauthenticationRequired):
+		return apiError(c, fiber.StatusConflict, "subscription_reauthentication_required", "Reconnect your ChatGPT subscription in Integrations.")
 	default:
 		var authErr auth.Error
 		if errors.As(err, &authErr) {

@@ -23,10 +23,11 @@ const (
 )
 
 var (
-	ErrDisabled       = errors.New("codex subscription connections are disabled")
-	ErrLoginNotFound  = errors.New("subscription login was not found")
-	ErrLoginExpired   = errors.New("subscription login expired")
-	ErrInvalidRequest = errors.New("invalid subscription invocation request")
+	ErrDisabled                 = errors.New("codex subscription connections are disabled")
+	ErrLoginNotFound            = errors.New("subscription login was not found")
+	ErrLoginExpired             = errors.New("subscription login expired")
+	ErrInvalidRequest           = errors.New("invalid subscription invocation request")
+	ErrReauthenticationRequired = errors.New("ChatGPT subscription reauthentication is required")
 )
 
 // Config controls the local Codex app-server broker. Home must be a persistent

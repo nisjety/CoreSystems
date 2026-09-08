@@ -1,0 +1,57 @@
+package codexsubscription
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
+
+func TestCodexAppServerForcesFileCredentialStore(t *testing.T) {
+	want := []string{"app-server", "-c", `cli_auth_credentials_store="file"`}
+	if got := codexAppServerArgs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("codexAppServerArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestPersistedAuthReadyRequiresNonEmptyAuthJSON(t *testing.T) {
+	home := t.TempDir()
+	ready, err := persistedAuthReady(home)
+	if err != nil || ready {
+		t.Fatalf("missing auth.json: ready=%v err=%v, want false and nil", ready, err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), nil, 0o600); err != nil {
+		t.Fatalf("write empty auth.json: %v", err)
+	}
+	ready, err = persistedAuthReady(home)
+	if err != nil || ready {
+		t.Fatalf("empty auth.json: ready=%v err=%v, want false and nil", ready, err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write auth.json: %v", err)
+	}
+	ready, err = persistedAuthReady(home)
+	if err != nil || !ready {
+		t.Fatalf("non-empty auth.json: ready=%v err=%v, want true and nil", ready, err)
+	}
+}
+
+func TestProcessRunnerInvokeRejectsMissingPersistedAuthentication(t *testing.T) {
+	runner := NewProcessRunner("command-that-must-not-run")
+	_, err := runner.Invoke(t.Context(), t.TempDir(), InvokeRequest{
+		ConnectionID: "conn-1",
+		Model:        "gpt-5",
+		Messages:     []ChatMessage{{Role: "user", Content: "hello"}},
+	})
+	if !errors.Is(err, ErrReauthenticationRequired) {
+		t.Fatalf("Invoke error = %v, want ErrReauthenticationRequired", err)
+	}
+}
+
+func TestProcessRunnerLogoutIsIdempotentWhenAuthenticationIsMissing(t *testing.T) {
+	runner := NewProcessRunner("command-that-must-not-run")
+	if err := runner.Logout(t.Context(), t.TempDir()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+}

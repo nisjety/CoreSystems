@@ -79,8 +79,70 @@ func TestCodexSubscriptionInferIsScopedAndNeverLeasesAToken(t *testing.T) {
 	}
 }
 
+func TestCodexSubscriptionInferMarksMissingAuthenticationForReconnect(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	runner := &apiCodexRunner{invokeErr: codexsubscription.ErrReauthenticationRequired}
+	manager, err := codexsubscription.NewManager(codexsubscription.Config{
+		Enabled: true,
+		Home:    t.TempDir(),
+	}, runner)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:             "conn-stale-subscription",
+		ProviderKey:    codexsubscription.ProviderKey,
+		ConnectorType:  codexsubscription.ConnectorType,
+		OrganizationID: "org-1",
+		UserID:         "user-1",
+		Status:         "active",
+		Capabilities:   []string{codexsubscription.Capability},
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection: %v", err)
+	}
+	app := NewServer(ServerConfig{
+		Config:             cfg,
+		Repo:               repo,
+		OAuth:              service,
+		CodexSubscriptions: manager,
+	})
+
+	body := `{"organizationId":"org-1","userId":"user-1","connectionId":"conn-stale-subscription","requestId":"req-1","model":"gpt-codex","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/model-subscriptions/openai-codex/infer", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "codex-subscription-test-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	var decoded struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if decoded.Error.Code != "subscription_reauthentication_required" {
+		t.Fatalf("error code = %q, want subscription_reauthentication_required", decoded.Error.Code)
+	}
+	connection, err := repo.GetConnection(t.Context(), "conn-stale-subscription")
+	if err != nil {
+		t.Fatalf("GetConnection: %v", err)
+	}
+	if connection.Status != "needs_refresh" || connection.LastSyncStatus != "reauthentication_required" {
+		t.Fatalf("connection status = %q/%q, want needs_refresh/reauthentication_required", connection.Status, connection.LastSyncStatus)
+	}
+}
+
 type apiCodexRunner struct {
 	invocations int
+	invokeErr   error
 }
 
 func (r *apiCodexRunner) BeginDeviceLogin(context.Context, string) (codexsubscription.LoginProcess, codexsubscription.DeviceCode, error) {
@@ -89,6 +151,9 @@ func (r *apiCodexRunner) BeginDeviceLogin(context.Context, string) (codexsubscri
 
 func (r *apiCodexRunner) Invoke(_ context.Context, _ string, request codexsubscription.InvokeRequest) (codexsubscription.InvokeResponse, error) {
 	r.invocations++
+	if r.invokeErr != nil {
+		return codexsubscription.InvokeResponse{}, r.invokeErr
+	}
 	return codexsubscription.InvokeResponse{RequestID: request.RequestID, Content: "subscription answer", ModelUsed: request.Model}, nil
 }
 

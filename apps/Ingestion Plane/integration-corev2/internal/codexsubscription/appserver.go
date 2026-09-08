@@ -43,10 +43,17 @@ func (r *ProcessRunner) BeginDeviceLogin(ctx context.Context, codeHome string) (
 		_ = client.Close()
 		return nil, DeviceCode{}, errors.New("codex app-server returned an incomplete device code")
 	}
-	return &processLogin{client: client}, DeviceCode{VerificationURL: result.VerificationURL, UserCode: result.UserCode}, nil
+	return &processLogin{client: client, codeHome: codeHome}, DeviceCode{VerificationURL: result.VerificationURL, UserCode: result.UserCode}, nil
 }
 
 func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request InvokeRequest) (InvokeResponse, error) {
+	ready, err := persistedAuthReady(codeHome)
+	if err != nil {
+		return InvokeResponse{}, err
+	}
+	if !ready {
+		return InvokeResponse{}, ErrReauthenticationRequired
+	}
 	client, err := r.start(ctx, codeHome)
 	if err != nil {
 		return InvokeResponse{}, err
@@ -105,6 +112,15 @@ func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request Inv
 }
 
 func (r *ProcessRunner) Logout(ctx context.Context, codeHome string) error {
+	ready, err := persistedAuthReady(codeHome)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		// A missing local credential is already logged out. Keeping this path
+		// idempotent lets a stale database connection be disconnected cleanly.
+		return nil
+	}
 	client, err := r.start(ctx, codeHome)
 	if err != nil {
 		return err
@@ -124,7 +140,7 @@ func (r *ProcessRunner) start(ctx context.Context, codeHome string) (*appServerC
 	// A device-code login intentionally outlives its initiating HTTP request.
 	// Invocation callers still close this process when their timeout elapses.
 	// Do not bind the process lifetime to the supplied context here.
-	cmd := exec.Command(r.command, "app-server") // #nosec G204 -- command is trusted deployment config, not user input.
+	cmd := exec.Command(r.command, codexAppServerArgs()...) // #nosec G204 -- command is trusted deployment config, not user input.
 	cmd.Env = codexEnvironment(codeHome)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -158,6 +174,13 @@ func (r *ProcessRunner) start(ctx context.Context, codeHome string) (*appServerC
 	return client, nil
 }
 
+func codexAppServerArgs() []string {
+	// The broker runs in a headless container backed by a persistent CODEX_HOME.
+	// Force the documented file store so device login cannot silently choose an
+	// unavailable desktop keyring and leave the database ahead of durable auth.
+	return []string{"app-server", "-c", `cli_auth_credentials_store="file"`}
+}
+
 func codexEnvironment(codeHome string) []string {
 	environment := make([]string, 0, len(os.Environ())+1)
 	for _, entry := range os.Environ() {
@@ -170,7 +193,8 @@ func codexEnvironment(codeHome string) []string {
 }
 
 type processLogin struct {
-	client *appServerClient
+	client   *appServerClient
+	codeHome string
 }
 
 func (p *processLogin) Poll(_ context.Context) (ProcessLoginStatus, error) {
@@ -182,13 +206,52 @@ func (p *processLogin) Poll(_ context.Context) (ProcessLoginStatus, error) {
 			}
 			switch event.Method {
 			case "account/login/completed":
-				return parseLoginCompletion(event.Params), nil
+				status := parseLoginCompletion(event.Params)
+				if status.Status != "connected" {
+					return status, nil
+				}
+				if err := waitForPersistedAuth(p.codeHome, 2*time.Second); err != nil {
+					return ProcessLoginStatus{
+						Status:    "failed",
+						ErrorCode: "auth_not_persisted",
+						Message:   "ChatGPT sign-in completed, but its credential could not be saved. Start a new connection.",
+					}, nil
+				}
+				return status, nil
 			case "account/login/failed":
 				return ProcessLoginStatus{Status: "failed", ErrorCode: "login_failed", Message: "ChatGPT sign-in did not complete."}, nil
 			}
 		default:
 			return ProcessLoginStatus{Status: "pending"}, nil
 		}
+	}
+}
+
+func persistedAuthReady(codeHome string) (bool, error) {
+	info, err := os.Stat(filepath.Join(codeHome, "auth.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect persisted Codex authentication: %w", err)
+	}
+	return info.Mode().IsRegular() && info.Size() > 0, nil
+}
+
+func waitForPersistedAuth(codeHome string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		ready, err := persistedAuthReady(codeHome)
+		if err != nil {
+			return err
+		}
+		if ready {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return ErrReauthenticationRequired
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
