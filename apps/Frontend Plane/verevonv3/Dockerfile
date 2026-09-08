@@ -56,6 +56,14 @@ FROM dev AS build
 # documented way to say this is a non-interactive environment (which a Docker
 # build genuinely is), so it proceeds instead of aborting.
 ENV CI=true
+# @verevon/remote-core (packages/remote-core) is a `workspace:*` dep that
+# RemoteSupportPage.tsx imports. `pnpm install` only links the workspace
+# package -- it does not run remote-core's own `build` script -- and its
+# package.json `main`/`types`/`exports` all point at dist/, which is
+# gitignored. Without this step `pnpm build`'s typecheck fails with "Cannot
+# find module '@verevon/remote-core'" instead of a legible build error.
+# Mirrors the same fix in the `spa-verify` CI job's workflow step.
+RUN pnpm --filter @verevon/remote-core run build
 RUN pnpm build
 
 # Static production image. nginx-unprivileged runs as UID 101 and listens on a
