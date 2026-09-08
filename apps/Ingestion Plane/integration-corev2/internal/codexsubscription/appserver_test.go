@@ -1,6 +1,7 @@
 package codexsubscription
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,22 @@ func TestCodexAppServerForcesFileCredentialStore(t *testing.T) {
 	want := []string{"app-server", "-c", `cli_auth_credentials_store="file"`}
 	if got := codexAppServerArgs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("codexAppServerArgs() = %q, want %q", got, want)
+	}
+}
+
+func TestCodexAppServerUsesProtocolSandboxValue(t *testing.T) {
+	if codexReadOnlySandbox != "read-only" {
+		t.Fatalf("codexReadOnlySandbox = %q, want read-only", codexReadOnlySandbox)
+	}
+}
+
+func TestCodexAccountCallsUseObjectParams(t *testing.T) {
+	encoded, err := json.Marshal(codexEmptyObjectParams())
+	if err != nil {
+		t.Fatalf("marshal empty Codex params: %v", err)
+	}
+	if string(encoded) != "{}" {
+		t.Fatalf("empty Codex params = %s, want {}", encoded)
 	}
 }
 

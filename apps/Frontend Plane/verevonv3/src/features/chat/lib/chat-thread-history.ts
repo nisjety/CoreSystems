@@ -97,6 +97,10 @@ export type ChatThreadTranscriptTurn = {
   recalledMemories?: unknown[]
   model?: string
   modelUsed?: string
+  /** Explicit model route used when this turn was submitted. */
+  provider?: string
+  /** Opaque user-owned model subscription connection id. */
+  subscriptionConnectionId?: string
   outputTokens?: number
   /** Durable orchestration run id for an agentic/Do turn. */
   runId?: string
@@ -455,6 +459,8 @@ function normalizeTranscriptTurn(turn: ChatThreadTranscriptTurn): ChatThreadTran
     latencyMs: normalizeOptionalNumber(turn.latencyMs),
     model: normalizeOptionalText(turn.model),
     modelUsed: normalizeOptionalText(turn.modelUsed),
+    provider: normalizeOptionalText(turn.provider),
+    subscriptionConnectionId: normalizeOptionalText(turn.subscriptionConnectionId),
     outputTokens: normalizeOptionalNumber(turn.outputTokens),
     planMode: typeof turn.planMode === 'boolean' ? turn.planMode : undefined,
     grantedRung: normalizeGrantedRung(turn.grantedRung),
@@ -629,6 +635,8 @@ function isChatThreadTranscriptTurn(value: unknown): value is ChatThreadTranscri
     !Number.isNaN(Date.parse(record.createdAt)) &&
     (record.model === undefined || typeof record.model === 'string') &&
     (record.modelUsed === undefined || typeof record.modelUsed === 'string') &&
+    (record.provider === undefined || typeof record.provider === 'string') &&
+    (record.subscriptionConnectionId === undefined || typeof record.subscriptionConnectionId === 'string') &&
     (record.requestId === undefined || typeof record.requestId === 'string') &&
     (record.runId === undefined || typeof record.runId === 'string') &&
     (record.planMode === undefined || typeof record.planMode === 'boolean') &&

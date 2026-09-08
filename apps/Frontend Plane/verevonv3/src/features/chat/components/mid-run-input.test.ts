@@ -136,6 +136,17 @@ describe('mid-run input is never dropped', () => {
     expect(handler).toContain('options.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER')
   })
 
+  it('preserves the subscription route when regenerating the latest answer', async () => {
+    const text = await source(CONTROLLER)
+    const regenerate = text.slice(
+      text.indexOf('const regenerateLatest'),
+      text.indexOf('const rerunAsNewTurn'),
+    )
+
+    expect(regenerate).toContain('provider: lastUser.provider')
+    expect(regenerate).toContain('subscriptionConnectionId: lastUser.subscriptionConnectionId')
+  })
+
   it('renders the strip, so a queued message is visible while it is in flight', async () => {
     const page = await source(PAGE)
     expect(

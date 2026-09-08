@@ -189,6 +189,10 @@ export type ChatTurn = {
   attachments: ChatTurnAttachment[]
   status?: 'waiting' | 'stopped' | 'error'
   model?: string
+  /** Explicit route retained so retry/edit/regenerate cannot leave a user-owned subscription. */
+  provider?: string
+  /** Opaque Integration Core connection id paired with a subscription route. */
+  subscriptionConnectionId?: string
   requestId?: string
   /**
    * Highest SSE frame `id:` seen for this turn, sent as `Last-Event-ID` on

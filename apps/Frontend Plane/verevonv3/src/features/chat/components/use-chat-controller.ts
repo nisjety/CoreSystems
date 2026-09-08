@@ -1706,6 +1706,8 @@ export function useChatController() {
           createdAt: submittedAt,
           streaming: false,
           model,
+          provider: options.provider,
+          subscriptionConnectionId: options.subscriptionConnectionId,
           tools,
           attachments: displayAttachments,
         }
@@ -1721,6 +1723,8 @@ export function useChatController() {
       planMode: planMode(),
       status: 'waiting',
       model,
+      provider: options.provider,
+      subscriptionConnectionId: options.subscriptionConnectionId,
       tools,
       attachments: [],
     }
@@ -2644,6 +2648,8 @@ export function useChatController() {
       displayAttachments: lastUser.attachments,
       generateImage: lastUser.tools.includes('image'),
       tools: lastUser.tools,
+      provider: lastUser.provider,
+      subscriptionConnectionId: lastUser.subscriptionConnectionId,
       // Regenerating within an already-temporary thread must keep sending
       // ZDR — the thread-level lock, not the (possibly since-toggled)
       // composer state, decides.
@@ -2675,6 +2681,8 @@ export function useChatController() {
       displayAttachments: user.attachments,
       generateImage: user.tools.includes('image'),
       tools: user.tools,
+      provider: user.provider ?? assistant.provider,
+      subscriptionConnectionId: user.subscriptionConnectionId ?? assistant.subscriptionConnectionId,
       zdr: isTemporaryThread(state.threadId),
     })
   }
@@ -2726,6 +2734,8 @@ export function useChatController() {
       displayAttachments: original.attachments,
       generateImage: original.tools.includes('image'),
       tools: original.tools,
+      provider: original.provider,
+      subscriptionConnectionId: original.subscriptionConnectionId,
       // Same thread-level ZDR lock as `regenerateLatest`.
       zdr: isTemporaryThread(state.threadId),
       // The edit happened in the composer and never reached the server as a

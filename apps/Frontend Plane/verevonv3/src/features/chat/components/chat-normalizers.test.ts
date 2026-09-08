@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn } from './chat-normalizers'
+import { humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript } from './chat-normalizers'
 import type { ChatTurn } from './chat-types'
 
 describe('summarizeToolArgs', () => {
@@ -98,6 +98,28 @@ describe('readBrowseWebPreference', () => {
     localStorage.setItem('verevon.chat.browseWeb.v1', '1')
     expect(readBrowseWebPreference()).toBe(true)
     localStorage.removeItem('verevon.chat.browseWeb.v1')
+  })
+})
+
+describe('subscription route persistence', () => {
+  it('round-trips the provider and opaque connection id through the local transcript', () => {
+    const [stored] = turnsToTranscript([{
+      id: 'user-1',
+      role: 'user',
+      content: 'hello',
+      createdAt: '2026-09-08T13:00:00.000Z',
+      streaming: false,
+      model: 'gpt-6-astra',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn_123',
+      tools: [],
+      attachments: [],
+    }])
+
+    expect(transcriptTurnToChatTurn(stored!)).toMatchObject({
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn_123',
+    })
   })
 })
 
@@ -240,6 +262,21 @@ describe('mergeServerTurnsWithCachedMetadata (resumable tail, §3b)', () => {
     expect(merged.at(1)?.status).toBeUndefined()
     expect(merged.at(1)?.requestId).toBe('req_9')
     expect(merged.at(1)?.content).toBe('the full answer')
+  })
+
+  it('keeps the cached subscription route when canonical messages omit it', () => {
+    const server = [turn({ id: 'u1', content: 'question' })]
+    const cached = [turn({
+      id: 'u1',
+      content: 'question',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn_123',
+    })]
+
+    expect(mergeServerTurnsWithCachedMetadata(server, cached)[0]).toMatchObject({
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn_123',
+    })
   })
 
   it('still carries a terminal cached status onto a status-less server turn', () => {

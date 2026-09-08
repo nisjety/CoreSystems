@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+const codexReadOnlySandbox = "read-only"
+
 // ProcessRunner speaks the documented JSON-RPC-over-stdio Codex app-server
 // protocol. It invokes the configured executable directly (never through a
 // shell), so a configured command cannot become shell injection.
@@ -62,7 +64,7 @@ func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request Inv
 
 	// account/read makes a disconnected home fail before a prompt is accepted.
 	var account json.RawMessage
-	if err := client.call(ctx, "account/read", nil, &account); err != nil {
+	if err := client.call(ctx, "account/read", codexEmptyObjectParams(), &account); err != nil {
 		return InvokeResponse{}, fmt.Errorf("read ChatGPT subscription account: %w", err)
 	}
 
@@ -79,7 +81,7 @@ func (r *ProcessRunner) Invoke(ctx context.Context, codeHome string, request Inv
 		"cwd":            workspace,
 		"model":          request.Model,
 		"approvalPolicy": "never",
-		"sandbox":        "readOnly",
+		"sandbox":        codexReadOnlySandbox,
 		"serviceName":    "coresystem_integration_core",
 	}, &thread); err != nil {
 		return InvokeResponse{}, fmt.Errorf("start Codex subscription thread: %w", err)
@@ -127,7 +129,7 @@ func (r *ProcessRunner) Logout(ctx context.Context, codeHome string) error {
 	}
 	defer client.Close()
 	var ignored json.RawMessage
-	if err := client.call(ctx, "account/logout", nil, &ignored); err != nil {
+	if err := client.call(ctx, "account/logout", codexEmptyObjectParams(), &ignored); err != nil {
 		return fmt.Errorf("logout Codex subscription: %w", err)
 	}
 	return nil
@@ -179,6 +181,10 @@ func codexAppServerArgs() []string {
 	// Force the documented file store so device login cannot silently choose an
 	// unavailable desktop keyring and leave the database ahead of durable auth.
 	return []string{"app-server", "-c", `cli_auth_credentials_store="file"`}
+}
+
+func codexEmptyObjectParams() map[string]any {
+	return map[string]any{}
 }
 
 func codexEnvironment(codeHome string) []string {
