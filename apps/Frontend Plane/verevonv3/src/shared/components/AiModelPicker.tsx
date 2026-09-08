@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   groupChatModels,
@@ -32,7 +32,7 @@ export function AiModelPicker(props: {
 }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
-  const [selected, setSelected] = createSignal<AiModelSelection>(readAiModelSelection(props.orgId))
+  const [selected, setSelected] = createSignal<AiModelSelection>(DEFAULT_AI_MODEL_SELECTION)
   const [models] = createResource(async () => {
     try {
       return await listModels()
@@ -79,12 +79,18 @@ export function AiModelPicker(props: {
       modelsLoading: models.loading,
       subscriptionsLoading: subscriptions.loading,
       connectionId: activeSubscription()?.id,
+      blocked: subscriptionBlocked(),
+      current: selected(),
+      orgId: props.orgId,
+      onChange: props.onChange,
     }),
     (state) => {
       if (state.modelsLoading || state.subscriptionsLoading) return
-      const current = selected()
-      if (current.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER || state.connectionId) return
-      choose(DEFAULT_AI_MODEL_SELECTION)
+      if (state.current.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER || (state.connectionId && !state.blocked)) return
+      setSelected(DEFAULT_AI_MODEL_SELECTION)
+      rememberAiModelSelection(state.orgId, DEFAULT_AI_MODEL_SELECTION)
+      state.onChange?.(DEFAULT_AI_MODEL_SELECTION)
+      setOpen(false)
     },
   )
 
@@ -97,16 +103,16 @@ export function AiModelPicker(props: {
 
   function choose(selection: AiModelSelection): void {
     const next = selection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
-      ? { ...selection, subscriptionConnectionId: activeSubscription()?.id }
+      ? { ...selection, subscriptionConnectionId: untrack(activeSubscription)?.id }
       : selection
     setSelected(next)
-    rememberAiModelSelection(props.orgId, next)
-    props.onChange?.(next)
+    rememberAiModelSelection(untrack(() => props.orgId), next)
+    untrack(() => props.onChange)?.(next)
     setOpen(false)
   }
 
   function chooseCatalogModel(model: ModelInfo): void {
-    if (model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && subscriptionBlocked()) return
+    if (model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && untrack(subscriptionBlocked)) return
     choose({
       model: model.id,
       label: model.name,

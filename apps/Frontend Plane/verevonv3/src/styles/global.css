@@ -33794,19 +33794,23 @@ body.verevon-chat-canvas-resizing * {
 .verevon-inbox-workspace {
   position: relative;
   display: grid;
-  grid-template-columns: var(--inbox-list-w, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, min(var(--inbox-list-w, 340px), 34%)) minmax(0, 1fr);
   gap: 8px;
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   padding: 8px;
+  overflow: hidden;
 }
 
 .verevon-inbox-detail-grid {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--inbox-aside-w, 360px);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, min(var(--inbox-aside-w, 360px), 44%));
   gap: 8px;
+  height: 100%;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* Draggable column dividers (widths persisted per-user in localStorage). The
@@ -33841,12 +33845,12 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-inbox-resize-handle--list {
-  left: calc(var(--inbox-list-w, 340px) + 8px);
+  left: calc(min(var(--inbox-list-w, 340px), 34%) + 8px);
   transform: translateX(-50%);
 }
 
 .verevon-inbox-resize-handle--aside {
-  right: calc(var(--inbox-aside-w, 360px) + 8px);
+  right: calc(min(var(--inbox-aside-w, 360px), 44%) + 8px);
   transform: translateX(50%);
 }
 
@@ -34921,9 +34925,7 @@ body.verevon-chat-canvas-resizing * {
   text-align: center;
 }
 
-.verevon-inbox-conversation-empty {
-  min-height: 520px;
-}
+.verevon-inbox-conversation-empty { min-height: 0; }
 
 .verevon-inbox-queue-empty__icon,
 .verevon-inbox-conversation-empty__icon,
@@ -37393,32 +37395,6 @@ body.verevon-chat-canvas-resizing * {
 
   50% {
     opacity: 1;
-  }
-}
-
-@media (max-width: 1279px) {
-  .verevon-inbox-page {
-    overflow: auto;
-  }
-
-  .verevon-inbox-workspace {
-    grid-template-columns: 320px minmax(0, 1fr);
-    align-items: start;
-  }
-
-  .verevon-inbox-detail-grid {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto;
-  }
-
-  .verevon-inbox-aside {
-    display: flex;
-    height: min(680px, 72dvh);
-    min-height: 420px;
-  }
-
-  .verevon-inbox-resize-handle--aside {
-    display: none;
   }
 }
 
