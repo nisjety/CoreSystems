@@ -15,11 +15,22 @@ minimumReleaseAgeExclude:
 # pnpm v11 reads `overrides` (and most settings) from here, not from the
 # package.json "pnpm" field, which it now ignores.
 #
-# Force patched versions of two DEV-only transitive advisories so the
-# verevonv3-security gate (`pnpm audit --audit-level=high`) passes. Both reach
+# Force patched versions of DEV-only transitive advisories so the
+# verevonv3-security gate (`pnpm audit --audit-level=high`) passes. All reach
 # the tree only through dev tooling, never the shipped runtime bundle:
-#   - hono   >=4.12.25  (GHSA-88fw-hqm2-52qc, CORS reflects any origin)  via vite-plugin-mcp > @modelcontextprotocol/sdk
-#   - undici >=7.28.0   (GHSA-vmh5-mc38-953g / -vxpw-j846-p89q / -hm92-r4w5-c3mj)  via vitest > jsdom > undici
+#   - hono         >=4.12.25  (GHSA-88fw-hqm2-52qc, CORS reflects any origin) via vite-plugin-mcp > @modelcontextprotocol/sdk
+#   - undici       >=7.29.0   (GHSA-vmh5-mc38-953g / -vxpw-j846-p89q / -hm92-r4w5-c3mj) via vitest > jsdom > undici.
+#                              Raised from the >=7.28.0 floor set for the same
+#                              three advisories — 7.28.x still matched their
+#                              vulnerable range; the audit re-flagged it.
+#   - brace-expansion >=5.0.9 (three overlapping DoS advisories, highest floor wins) via eslint > minimatch, eslint-plugin-solid's typescript-eslint chain
+#   - fast-uri     >=3.1.6    (five overlapping advisories: host confusion, SSRF; highest floor wins) via vite-plugin-mcp > @modelcontextprotocol/sdk > ajv(-formats)
+#   - ip-address   >=10.3.1   (GHSA-2p57-rm9w-gvfp, Address4 leading-zero octet parsing) transitive, exact path not surfaced by `pnpm why`
+#   - browserslist >=4.28.7   (two advisories: unbounded memory growth, prototype-write crash) via vite's build tooling
 overrides:
   hono: '>=4.12.25 <5'
-  undici: '>=7.28.0 <8'
+  undici: '>=7.29.0 <8'
+  brace-expansion: '>=5.0.9'
+  fast-uri: '>=3.1.6'
+  ip-address: '>=10.3.1'
+  browserslist: '>=4.28.7'

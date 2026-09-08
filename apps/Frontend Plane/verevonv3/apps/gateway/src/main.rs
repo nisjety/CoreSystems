@@ -1,3 +1,13 @@
+// This crate's pervasive error-propagation idiom is `Result<T, Response>` —
+// fail with the exact HTTP response to send, propagate with `?`, no
+// second translation step at the call site. `axum::http::Response<Body>` is
+// unavoidably large (status, headers, extensions, a body handle), so this
+// shape trips clippy::result_large_err at every one of its ~25+ call sites
+// across the crate's domains. Boxing the error type there would touch every
+// one of those sites for no behavioral gain, so the trade-off is accepted
+// crate-wide rather than suppressed function-by-function.
+#![allow(clippy::result_large_err)]
+
 use std::{env, net::SocketAddr};
 
 use anyhow::Result;

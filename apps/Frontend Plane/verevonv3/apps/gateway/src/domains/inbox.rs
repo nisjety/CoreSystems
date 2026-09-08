@@ -1034,10 +1034,6 @@ fn bounded_optional_string(body: &Value, key: &str, max_chars: usize) -> Option<
         .map(str::to_owned)
 }
 
-// `Response` as the error variant is this crate's idiomatic "fail with an
-// HTTP response, propagate with `?`" pattern; boxing it here would ripple
-// into every caller for no behavioral gain.
-#[allow(clippy::result_large_err)]
 fn bounded_evidence_message_ids(body: &Value) -> Result<Vec<Value>, Response> {
     let evidence = body
         .get("evidence_message_ids")
@@ -1064,7 +1060,6 @@ fn bounded_evidence_message_ids(body: &Value) -> Result<Vec<Value>, Response> {
 /// approval credential: each action remains independently scoped, reviewed,
 /// and executed. Keep it opaque and bounded so it cannot become arbitrary
 /// metadata or a query language.
-#[allow(clippy::result_large_err)]
 fn proposal_group_id(body: &Value) -> Result<String, Response> {
     let Some(value) = body.get("proposal_group_id") else {
         return Ok(String::new());
