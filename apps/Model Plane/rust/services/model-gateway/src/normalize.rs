@@ -267,6 +267,7 @@ mod tests {
             zdr: false,
             min_privacy_tier: None,
             browse_web: false,
+            skill_ids: Vec::new(),
             deep_research: false,
             max_cost_usd: None,
             max_tokens: None,
@@ -335,7 +336,13 @@ mod tests {
         assert_eq!(normalized.provider_hint, "openai-codex-subscription");
         assert_eq!(normalized.subscription_connection_id, "conn_example");
 
-        req.tools = vec!["web_search".to_owned()];
+        // `tools` is `Vec<ToolSpec>` (http_routes.rs); this literal had drifted
+        // to `Vec<String>` and stopped the whole lib test target compiling.
+        req.tools = vec![crate::http_routes::ToolSpec {
+            name: "web_search".to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        }];
         assert!(
             normalize(&req).is_err(),
             "subscription provider must not run tools"

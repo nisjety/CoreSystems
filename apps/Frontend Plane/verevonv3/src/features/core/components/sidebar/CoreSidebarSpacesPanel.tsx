@@ -1,5 +1,5 @@
 import { useLocation } from '@solidjs/router'
-import { Hash, MessageCircle, Plus, Users } from '@/shared/icons'
+import { Hash, MessageCircle, Pin, Plus, Users } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 
@@ -14,6 +14,12 @@ import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { spaceDisplayName } from '@/features/spaces/lib/space-name'
+import {
+  isSpaceObserved,
+  isSpaceWorking,
+  liveThreadsIn,
+  unreadThreadIdsIn,
+} from '@/features/spaces/lib/space-live-work'
 import { SidebarPanelTitle, SidebarSearchField } from './CoreSidebarPrimitives'
 
 /**
@@ -238,12 +244,19 @@ function SidebarGroup(props: { title: string; children: JSX.Element }) {
 
 function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
   const i18n = useI18n()
+  // Slack's channel dot, for agent work. Read from the live-work store, which
+  // the Space page publishes on its own poll — the sidebar fetches nothing
+  // extra. It can only know about rooms whose page has published, so an
+  // unobserved room shows no dot rather than a calm one: absence here means
+  // "not looked", never "idle".
+  const working = () => isSpaceObserved(props.space.space_ref) && isSpaceWorking(props.space.space_ref)
   return (
     <a
       href={spaceHref(props.space.space_ref)}
       link
       aria-current={props.active ? 'page' : undefined}
       class={cn('core-sidebar-panel-link', props.active && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')}
+      data-working={working() ? 'true' : undefined}
     >
       <Show
         when={props.space.kind === 'personal'}
@@ -254,6 +267,13 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
       <span class="core-sidebar-panel-link__label verevon-sidebar-row-strong">
         {spaceDisplayName(props.space, i18n.tr)}
       </span>
+      <Show when={working()}>
+        <span
+          class="core-sidebar-working-dot"
+          role="img"
+          aria-label={i18n.tr('Agentarbeid pågår', 'Agent work in progress')}
+        />
+      </Show>
     </a>
   )
 }
@@ -261,10 +281,41 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
 function SpaceThreadLink(props: { thread: SpaceThread }) {
   const i18n = useI18n()
   const title = () => threadTitle(props.thread, i18n)
+  // This panel fetched the thread list once, on mount, so its status was stale
+  // for the rest of the session. When the room's page has published a fresher
+  // projection, that wins for the live-ness question; the mounted copy is
+  // still the source for title and preview.
+  const liveNow = () => liveThreadsIn(props.thread.space_id).some((t) => t.thread_id === props.thread.thread_id)
+  const current = (): SpaceThread =>
+    isSpaceObserved(props.thread.space_id)
+      ? { ...props.thread, latest_run_status: liveNow() ? 'running' : props.thread.latest_run_status === 'running' ? 'completed' : props.thread.latest_run_status }
+      : props.thread
+  // New since the reader arrived, from the page's published derivation (item
+  // 4b) — the same set the timeline badges, so the two never disagree.
+  const unread = () => unreadThreadIdsIn(props.thread.space_id).has(props.thread.thread_id)
   return (
-    <a href={spaceHref(props.thread.space_id)} link class="core-sidebar-panel-link core-sidebar-space-thread" aria-label={threadLinkLabel(props.thread, i18n)}>
-      <MessageCircle class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
+    <a
+      href={spaceHref(props.thread.space_id)}
+      link
+      class="core-sidebar-panel-link core-sidebar-space-thread"
+      aria-label={threadLinkLabel(current(), i18n, { unread: unread() })}
+      data-working={liveNow() ? 'true' : undefined}
+      data-pinned={props.thread.pinned === true ? 'true' : undefined}
+      data-unread={unread() ? 'true' : undefined}
+    >
+      <Show
+        when={props.thread.pinned === true}
+        fallback={<MessageCircle class="core-sidebar-panel-link__icon" strokeWidth={1.7} />}
+      >
+        <Pin class="core-sidebar-panel-link__icon core-sidebar-panel-link__icon--pinned" strokeWidth={1.7} />
+      </Show>
       <span class="core-sidebar-panel-link__label verevon-sidebar-row-normal">{title()}</span>
+      <Show when={liveNow()}>
+        <span class="core-sidebar-working-dot" aria-hidden="true" />
+      </Show>
+      <Show when={unread() && !liveNow()}>
+        <span class="core-sidebar-unread-dot" aria-hidden="true" />
+      </Show>
     </a>
   )
 }
@@ -319,8 +370,18 @@ function threadTitle(thread: SpaceThread, i18n?: ReturnType<typeof useI18n>): st
   return thread.title?.trim() || thread.preview?.trim() || i18n?.tr('Samtale uten tittel', 'Untitled conversation') || 'Untitled conversation'
 }
 
-function threadLinkLabel(thread: SpaceThread, i18n: ReturnType<typeof useI18n>): string {
+function threadLinkLabel(
+  thread: SpaceThread,
+  i18n: ReturnType<typeof useI18n>,
+  flags: { readonly unread?: boolean } = {},
+): string {
   const detail = thread.preview?.trim() || i18n.tr('Åpne samtale', 'Open conversation')
+  const marks = [
+    thread.pinned === true ? i18n.tr('Festet', 'Pinned') : '',
+    flags.unread ? i18n.tr('Ny siden sist', 'New since your last visit') : '',
+  ]
+    .filter(Boolean)
+    .join('. ')
   const status = thread.latest_run_status === 'running'
     ? i18n.tr('Jobber', 'Working')
     : thread.latest_run_status === 'awaiting_approval'
@@ -328,5 +389,5 @@ function threadLinkLabel(thread: SpaceThread, i18n: ReturnType<typeof useI18n>):
       : thread.latest_run_status === 'completed'
         ? i18n.tr('Fullført', 'Completed')
         : i18n.tr('Samtale åpen', 'Conversation open')
-  return `${i18n.tr('Åpne', 'Open')} ${threadTitle(thread, i18n)}. ${detail} ${status}.`
+  return `${i18n.tr('Åpne', 'Open')} ${threadTitle(thread, i18n)}. ${marks ? `${marks}. ` : ''}${detail} ${status}.`
 }

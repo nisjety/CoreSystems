@@ -25,6 +25,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "fzstd": "^0.1.1",
     "libsodium": "^0.8.4",
     "libsodium-wrappers": "^0.8.4"
   },
@@ -32,7 +33,7 @@
     "@types/libsodium-wrappers": "^0.7.14",
     "@types/node": "^26.2.0",
     "eslint": "^10.8.1",
-    "typescript": "^7.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-eslint": "^8.67.0",
     "vitest": "^4.1.10"
   }

@@ -11,6 +11,7 @@ import { noopLogger } from '../logging/Logger.js';
 import { AuthenticationError, RemoteConnectionError, RemoteError } from '../errors/RemoteError.js';
 import { SessionStateMachine } from './SessionStateMachine.js';
 import { RemoteSessionImpl } from './RemoteSession.js';
+import { DEFAULT_RECONNECT_POLICY, type ReconnectPolicy } from './Reconnector.js';
 
 export interface RemoteClientOptions {
   readonly protocol: RemoteProtocol;
@@ -23,18 +24,25 @@ export interface RemoteClientOptions {
    * kall med en egendefinert `protocol` og ingen fabrikk må sende
    * `authenticator` eksplisitt i stedet for `auth.token`.
    */
-  readonly createAuthenticatorFromToken?: (token: string) => SessionAuthenticator;
+  readonly createAuthenticatorFromToken?: (
+    token: string,
+    secondFactor?: () => Promise<string>,
+  ) => SessionAuthenticator;
+  /** Backoff for automatisk gjenoppkobling etter forbigående tap. Standard: 5 forsøk, 0,5 s → 8 s. */
+  readonly reconnectPolicy?: ReconnectPolicy;
 }
 
 export class RemoteClientImpl implements IRemoteClient {
   private readonly protocol: RemoteProtocol;
   private readonly logger: Logger;
-  private readonly createAuthenticatorFromToken: ((token: string) => SessionAuthenticator) | undefined;
+  private readonly createAuthenticatorFromToken: RemoteClientOptions['createAuthenticatorFromToken'];
+  private readonly reconnectPolicy: ReconnectPolicy;
 
   constructor(options: RemoteClientOptions) {
     this.protocol = options.protocol;
     this.logger = options.logger ?? noopLogger;
     this.createAuthenticatorFromToken = options.createAuthenticatorFromToken;
+    this.reconnectPolicy = options.reconnectPolicy ?? DEFAULT_RECONNECT_POLICY;
   }
 
   async connect(options: ConnectOptions): Promise<RemoteSession> {
@@ -51,9 +59,11 @@ export class RemoteClientImpl implements IRemoteClient {
       }
     });
 
+    const protocolOptions = { deviceId: options.deviceId, authenticator, signal: options.signal };
+
     try {
       stateMachine.transition('connecting');
-      await this.protocol.connect({ deviceId: options.deviceId, authenticator, signal: options.signal });
+      await this.protocol.connect(protocolOptions);
     } catch (error) {
       unsubscribeState();
       if (stateMachine.state !== 'failed' && stateMachine.state !== 'disconnected') {
@@ -78,6 +88,23 @@ export class RemoteClientImpl implements IRemoteClient {
       protocol: this.protocol,
       stateMachine,
       logger: this.logger,
+      // Økten kjenner ikke legitimasjonen; den får en lukket funksjon som
+      // gjør ett fullt nytt tilkoblingsforsøk med samme oppsett.
+      //
+      // To ting er bevisst: (1) har kalleren avbrutt sin `signal`, kobler vi
+      // ikke til igjen — å gjenopprette en fjernstyringsøkt etter et
+      // eksplisitt avbrudd ville vært stikk i strid med det kalleren ba om.
+      // (2) `isAutomaticRetry` gjør at protokollen ikke ber om interaktiv
+      // legitimasjon i bakgrunnen.
+      reconnect: () => {
+        if (options.signal?.aborted === true) {
+          return Promise.reject(
+            new RemoteConnectionError('Not reconnecting: the caller aborted this connection'),
+          );
+        }
+        return this.protocol.connect({ ...protocolOptions, isAutomaticRetry: true });
+      },
+      reconnectPolicy: this.reconnectPolicy,
     });
   }
 
@@ -89,7 +116,7 @@ export class RemoteClientImpl implements IRemoteClient {
           'This protocol does not support the "auth.token" shorthand — pass "authenticator" explicitly.',
         );
       }
-      return this.createAuthenticatorFromToken(options.auth.token);
+      return this.createAuthenticatorFromToken(options.auth.token, options.auth.secondFactor);
     }
     throw new AuthenticationError('connect() requires either "authenticator" or "auth.token"');
   }

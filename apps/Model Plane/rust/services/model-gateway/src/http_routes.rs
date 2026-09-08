@@ -6126,6 +6126,13 @@ pub struct InvokeRequest {
     /// toggle cannot be lost by tool normalization or client/BFF drift.
     #[serde(default)]
     pub browse_web: bool,
+    /// Skills the member picked explicitly for this turn — the composer's `/`
+    /// picker. Resolved server-side against the org's catalogue and the SKILL-1
+    /// ownership rule (`skills::resolve_requested_skills`); an unknown or
+    /// not-usable id is dropped, never trusted. Keyword matching still runs
+    /// alongside, so a turn that names no skill behaves exactly as before.
+    #[serde(default, alias = "skillIds")]
+    pub skill_ids: Vec<String>,
     /// Deep-research intent from the composer's "Dyp research" button.
     ///
     /// The button has existed since the chat surface shipped, but the client

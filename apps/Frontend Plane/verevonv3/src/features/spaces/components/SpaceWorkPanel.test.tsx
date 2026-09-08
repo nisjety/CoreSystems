@@ -118,4 +118,14 @@ describe('SpaceWorkPanel', () => {
     // And the schedules that DID load are still shown.
     expect(screen.getByText('Daglig rapport')).toBeTruthy()
   })
+
+  // Routines: the room states where they are managed rather than offering a
+  // create form the release gates still hold closed (see audit §17).
+  it('points to Settings for routines instead of offering a form the room cannot honour', async () => {
+    spacesClient.getSpaceWork.mockResolvedValue({ runs: [], schedules: [], unavailable: [] })
+    render(() => <SpaceWorkPanel spaceRef="room-1" />)
+    const link = await screen.findByRole('link', { name: 'Innstillinger › Planlagte kjøringer' })
+    expect(link.getAttribute('href')).toBe('/settings/cron')
+    expect(screen.queryByRole('button', { name: /Ny rutine|Opprett/ })).toBeNull()
+  })
 })

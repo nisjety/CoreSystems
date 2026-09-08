@@ -407,17 +407,43 @@ export function ProductLoopSection() {
 					const placeFrame = (index: number) =>
 						boxFromMarker(frameMarkers[index]);
 					const placeCopy = (index: number) => boxFromMarker(copyMarkers[index]);
+					const dynamicFrameTransform = (target: () => {
+						height: number;
+						left: number;
+						top: number;
+						width: number;
+					}) => ({
+						scaleX: () => {
+							const base = placeFrame(0);
+							return target().width / base.width;
+						},
+						scaleY: () => {
+							const base = placeFrame(0);
+							return target().height / base.height;
+						},
+						x: () => {
+							const base = placeFrame(0);
+							return target().left - base.left;
+						},
+						y: () => {
+							const base = placeFrame(0);
+							return target().top - base.top;
+						},
+					});
 					const dynamicFramePosition = (index: number) => ({
-						height: () => placeFrame(index).height,
-						left: () => placeFrame(index).left,
-						top: () => placeFrame(index).top,
-						width: () => placeFrame(index).width,
+						...dynamicFrameTransform(() => placeFrame(index)),
 					});
 					const dynamicFullFrame = () => ({
-						height: () => viewport.getBoundingClientRect().height,
-						left: () => 0,
-						top: () => 0,
-						width: () => viewport.getBoundingClientRect().width,
+						...dynamicFrameTransform(() => {
+							const viewportRect = viewport.getBoundingClientRect();
+
+							return {
+								height: viewportRect.height,
+								left: 0,
+								top: 0,
+								width: viewportRect.width,
+							};
+						}),
 					});
 					const dynamicCopyPosition = (index: number) => ({
 						height: () => placeCopy(index).height,
@@ -436,24 +462,18 @@ export function ProductLoopSection() {
 						};
 					};
 					const dynamicEntranceFrame = () => ({
-						height: () => entranceFrame().height,
-						left: () => entranceFrame().left,
-						top: () => entranceFrame().top,
-						width: () => entranceFrame().width,
+						...dynamicFrameTransform(entranceFrame),
 					});
-					// A single ring that grows and rotates behind the frame as the
-					// timeline moves through each stage — the section's own "loop"
-					// motif (lightweight.info-style morphing circle), independent of
-					// SignalPathLayer. Sized as a ratio of the viewport's own height
-					// (kept square) and offset as a ratio of viewport width/height, so
-					// it stays responsive the same way dynamicFramePosition does.
+					// A single ring grows and rotates behind the frame. Its base square
+					// is CSS-sized at 62vh; every scroll-time update below is therefore
+					// a composited translate/scale/rotate instead of a layout resize.
+					const CIRCLE_BASE_SIZE_RATIO = 0.62;
 					const dynamicCircleGeometry = (
 						sizeRatio: number,
 						xRatio: number,
 						yRatio: number,
 					) => ({
-						height: () => viewport.getBoundingClientRect().height * sizeRatio,
-						width: () => viewport.getBoundingClientRect().height * sizeRatio,
+						scale: sizeRatio / CIRCLE_BASE_SIZE_RATIO,
 						x: () => viewport.getBoundingClientRect().width * xRatio,
 						y: () => viewport.getBoundingClientRect().height * yRatio,
 					});
@@ -465,7 +485,12 @@ export function ProductLoopSection() {
 							...placeFrame(0),
 							autoAlpha: 1,
 							bottom: "auto",
+							force3D: true,
 							right: "auto",
+							scaleX: 1,
+							scaleY: 1,
+							transformOrigin: "0% 0%",
+							willChange: "transform, opacity",
 							x: 0,
 							y: 0,
 						});
@@ -475,6 +500,7 @@ export function ProductLoopSection() {
 							autoAlpha: 0.5,
 							force3D: true,
 							rotation: -20,
+							willChange: "transform, opacity",
 							xPercent: -50,
 							yPercent: -50,
 							...dynamicCircleGeometry(0.3, 0, 0.15),
@@ -1024,7 +1050,7 @@ export function ProductLoopSection() {
 					    each stage (see the circle tweens in the timeline above). */}
 					<div
 						aria-hidden="true"
-						className="pointer-events-none absolute left-1/2 top-1/2 z-10 aspect-square rounded-full border border-verevon-j-text/10 motion-reduce:hidden max-[899px]:hidden"
+						className="pointer-events-none absolute left-1/2 top-1/2 z-10 size-[62vh] rounded-full border border-verevon-j-text/10 motion-reduce:hidden max-[899px]:hidden"
 						data-product-loop-circle=""
 					/>
 

@@ -41,6 +41,14 @@ pub(crate) struct AppState {
     pub(crate) leads_core_url: String,
     pub(crate) shipping_core_url: String,
     pub(crate) user_core_url: String,
+    /// Application Plane's Convex deployment. Read from the environment once,
+    /// here, like every other upstream — not with `std::env::var` inside a
+    /// handler. A per-call read is a process-wide global that two requests (or
+    /// two tests) cannot point at different places, which is exactly how a
+    /// test that touches none of this began failing when unrelated tests were
+    /// added beside it.
+    pub(crate) application_convex_url: String,
+    pub(crate) application_convex_service_key: String,
     pub(crate) graph_index_url: String,
     pub(crate) quarry_edge_url: String,
     pub(crate) model_recommend_url: String,
@@ -65,6 +73,13 @@ pub(crate) struct AppState {
     pub(crate) autocomplete_core_url: String,
     pub(crate) autocomplete_token: String,
     pub(crate) zammad_api_url: String,
+    /// Support Plane (apps/Support Plane) connection details handed to the SPA
+    /// for `@verevon/remote-core`. Empty = not configured; there is deliberately
+    /// no fallback host. `remote_support_server_public_key` is RustDesk's public
+    /// access key — public by design, not a secret.
+    pub(crate) remote_support_rendezvous_url: String,
+    pub(crate) remote_support_relay_url: String,
+    pub(crate) remote_support_server_public_key: String,
     pub(crate) zammad_api_token: String,
     pub(crate) audience_token_cache: AudienceTokenCache,
     /// Retained only for legacy browser-domain unit fixtures. Runtime browser
@@ -146,6 +161,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // inter-plane bus, so the in-network name resolves from the gateway.
         shipping_core_url: env_url("SHIPPING_CORE_URL", "http://shipping-core:8080"),
         user_core_url: env_url("USER_CORE_URL", "http://user-core:3012"),
+        application_convex_url: std::env::var("APPLICATION_CONVEX_URL").unwrap_or_default(),
+        application_convex_service_key: std::env::var("APPLICATION_CONVEX_SERVICE_KEY")
+            .unwrap_or_default(),
         graph_index_url: env_url("GRAPH_INDEX_URL", "http://dpv2-graph-index:9203"),
         quarry_edge_url: env_url("QUARRY_EDGE_URL", "http://quarry-edge:8082"),
         model_recommend_url: env_url(
@@ -193,6 +211,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .trim()
             .to_owned(),
         zammad_api_url: env_url("ZAMMAD_API_URL", "http://zammad-railsserver:3000"),
+        remote_support_rendezvous_url: optional_env("REMOTE_SUPPORT_RENDEZVOUS_URL"),
+        remote_support_relay_url: optional_env("REMOTE_SUPPORT_RELAY_URL"),
+        remote_support_server_public_key: optional_env("REMOTE_SUPPORT_SERVER_PUBLIC_KEY"),
         zammad_api_token: env::var("ZAMMAD_API_TOKEN")
             .unwrap_or_default()
             .trim()
@@ -366,6 +387,16 @@ fn env_bool(key: &str, fallback: bool) -> bool {
             )
         })
         .unwrap_or(fallback)
+}
+
+/// Optional setting: empty string when unset. Trailing slashes are stripped so
+/// URL joins never double up.
+fn optional_env(key: &str) -> String {
+    env::var(key)
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 fn env_url(key: &str, fallback: &str) -> String {

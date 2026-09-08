@@ -384,7 +384,10 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
     })
 }
 
-async fn update_durable_presentation(
+/// `pub(crate)`: the Space room's own presentation route reuses this rather
+/// than duplicating the Model Gateway call. Session Core keeps it owner-bound,
+/// so a room member can only retitle or pin a post they started.
+pub(crate) async fn update_durable_presentation(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,

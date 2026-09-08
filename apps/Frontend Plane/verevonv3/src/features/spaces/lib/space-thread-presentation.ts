@@ -13,6 +13,17 @@ export const AWAITING_APPROVAL_RUN_STATUS = 'awaiting_approval'
 
 export const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', AWAITING_APPROVAL_RUN_STATUS])
 
+/**
+ * Statuses under which an agent is actually producing output right now.
+ *
+ * Distinct from `ACTIVE_RUN_STATUSES` on purpose: a run paused for approval is
+ * active in the sense that it has not finished, but nobody is working — a
+ * person is being waited for. The "working" indicator (item 1b) must say the
+ * first thing and not the second, or a room stalled on a decision would look
+ * busy instead of blocked.
+ */
+export const LIVE_RUN_STATUSES = new Set(['queued', 'running'])
+
 export const FAILED_RUN_STATUSES = new Set(['failed'])
 
 export function threadTitle(thread: SpaceThread, tr: (no: string, en: string) => string): string {
@@ -27,6 +38,12 @@ export function threadStatus(thread: SpaceThread, tr: (no: string, en: string) =
   if (status === 'queued') return tr('I kø', 'Queued')
   if (status === 'completed') return tr('Fullført', 'Completed')
   if (status === 'failed') return tr('Feilet', 'Failed')
+  // A recorded stop. Session Core writes `cancelled` when a member presses Stop
+  // (model-gateway cancels the direct-inference run rather than letting it
+  // finish), and until this line existed the room rendered that as the
+  // untranslated enum token "Cancelled" — so a stop the room itself caused read
+  // as a foreign word.
+  if (status === 'cancelled') return tr('Stoppet', 'Stopped')
   return formatLabel(status)
 }
 

@@ -9,12 +9,11 @@ const footerColumns = [
 		{ href: "/#kunnskap", label: "Kunnskap" },
 	],
 	[
-		{ href: "/#produksjon", label: "Produksjon" },
 		{ href: "/#flyt", label: "Arbeidssløyfen" },
 	],
 	[
 		{ href: "/trust", label: "Tillitssenter ↗" },
-		{ href: "/#trust", label: "Datasuverenitet" },
+		{ href: "/trust", label: "Datasuverenitet ↗" },
 		{ href: "/trust", label: "Sikkerhet ↗" },
 	],
 	[
@@ -23,7 +22,10 @@ const footerColumns = [
 	],
 ];
 
-const socialLinks = ["LinkedIn", "Instagram", "YouTube"];
+const contactLinks = [
+	{ href: "mailto:hei@verevon.ai", label: "hei@verevon.ai" },
+	{ href: "/trust", label: "Sikkerhet og tillit" },
+];
 
 export function Footer() {
 	const currentYear = new Date().getFullYear();
@@ -40,15 +42,15 @@ export function Footer() {
 			>
 				<div className="grid min-h-[calc(73svh-112px)] grid-cols-[minmax(180px,0.9fr)_minmax(0,3.1fr)] gap-[clamp(48px,6vw,112px)] max-[900px]:min-h-0 max-[900px]:grid-cols-1">
 					<div className="relative top-10 grid content-start gap-8">
-						<a
+						<Link
 							aria-label="Verevon hjem"
 							className="font-arbeit text-[clamp(2rem,2.4vw,3rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text"
-							href="#top"
+							href="/#top"
 						>
 							VEREVON
-						</a>
+						</Link>
 
-						<p className="m-0 max-w-[320px] font-protokoll text-[clamp(0.9rem,0.95vw,1.08rem)] font-light uppercase leading-[1.32] tracking-[0.02em] text-verevon-j-text/48">
+						<p className="m-0 max-w-[320px] font-protokoll text-[clamp(0.9rem,0.95vw,1.08rem)] font-light uppercase leading-[1.32] tracking-[0.02em] text-verevon-j-text/65">
 							Verevon hjelper teamet å svare raskere, handle
 							tryggere og vise hvor AI-en fant grunnlaget.
 						</p>
@@ -78,7 +80,7 @@ export function Footer() {
 								Hovedkontor
 							</h4>
 
-							<p className="m-0 font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-verevon-j-text/35">
+							<p className="m-0 font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-verevon-j-text/65">
 								Oslo, Norge
 								<br />
 								Distribuert team
@@ -94,7 +96,7 @@ export function Footer() {
 								Kontakt oss
 							</h4>
 
-							<p className="m-0 font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-verevon-j-text/35">
+							<p className="m-0 font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-verevon-j-text/65">
 								<a
 									className="transition-colors hover:text-verevon-j-text"
 									href="mailto:hei@verevon.ai"
@@ -113,33 +115,33 @@ export function Footer() {
 
 						<div className="col-start-1 self-end max-[900px]:col-start-auto">
 							<h4 className="font-arbeit text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-verevon-j-text/70">
-								Følg oss
+								Kontakt
 							</h4>
 						</div>
 
-						<a
+						<Link
 							className="col-start-4 self-end justify-self-start font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light text-verevon-j-text/80 transition-colors hover:text-verevon-j-text max-[900px]:col-start-auto"
-							href="#top"
+							href="/#top"
 						>
 							<span aria-hidden="true">↑</span> Til toppen
-						</a>
+						</Link>
 					</div>
 				</div>
 
 				<div className="grid grid-cols-[minmax(180px,0.9fr)_minmax(0,3.1fr)] gap-[clamp(48px,6vw,112px)] border-t border-verevon-j-text/8 py-4 max-[900px]:grid-cols-1">
 					<div />
 
-					<div className="grid grid-cols-3 items-center gap-6 font-protokoll text-[clamp(0.88rem,0.9vw,1rem)] font-light text-verevon-j-text/50 max-[900px]:grid-cols-1">
+					<div className="grid grid-cols-3 items-center gap-6 font-protokoll text-[clamp(0.88rem,0.9vw,1rem)] font-light text-verevon-j-text/65 max-[900px]:grid-cols-1">
 						<div>
-							{socialLinks.map((link, index) => (
-								<span key={link}>
+							{contactLinks.map((link, index) => (
+								<span key={link.href}>
 									<a
 										className="transition-colors hover:text-verevon-j-text"
-										href="#kontakt"
+										href={link.href}
 									>
-										{link}
+										{link.label}
 									</a>
-									{index < socialLinks.length - 1
+									{index < contactLinks.length - 1
 										? " / "
 										: ""}
 								</span>
@@ -150,7 +152,7 @@ export function Footer() {
 							className="justify-self-center transition-colors hover:text-verevon-j-text max-[900px]:justify-self-start"
 							href="/trust"
 						>
-							Personvern og vilkår
+							Sikkerhet og tillit
 						</a>
 
 						<small className="justify-self-end font-protokoll text-[clamp(0.88rem,0.9vw,1rem)] font-light max-[900px]:justify-self-start">

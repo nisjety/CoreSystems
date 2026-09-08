@@ -1,4 +1,5 @@
 import { ProtoWriter } from '../wire/ProtoWriter.js';
+import { encodeOptionMessage } from './controlCodec.js';
 import { ProtoReader } from '../wire/ProtoReader.js';
 import type {
   RdDisplayInfo,
@@ -112,11 +113,17 @@ export function encodeLoginRequest(value: RdLoginRequest): Uint8Array {
   // os_login (felt 12) utelates alltid: RustDesk sitt passord-håndtrykk
   // (felt 2) er det som faktisk brukes her, og feltnumrene for OSLogin sine
   // egne underfelt er ikke uavhengig bekreftet — se docs/rustdesk-protocol.md.
-  return new ProtoWriter()
+  const writer = new ProtoWriter()
     .string(1, value.username)
     .bytes(2, value.password)
     .string(4, value.myId)
-    .string(5, value.myName)
+    .string(5, value.myName);
+
+  // Felt 6 er OptionMessage. Utelates den, registrerer verten oss som
+  // «bare VP9» — trygt, men da kan vi heller ikke skru av lyd vi ikke bruker.
+  if (value.option) writer.message(6, encodeOptionMessage(value.option));
+
+  return writer
     .bool(9, value.videoAckRequired)
     .uint64(10, value.sessionId)
     .string(11, value.version)
@@ -265,13 +272,19 @@ export function decodeLoginResponse(data: Uint8Array): RdLoginResponse {
 export const MessageField = {
   SignedId: 3,
   PublicKey: 4,
+  TestDelay: 5,
   VideoFrame: 6,
   LoginRequest: 7,
   LoginResponse: 8,
   Hash: 9,
   MouseEvent: 10,
+  CursorData: 12,
+  CursorPosition: 13,
+  /** Bar uint64 i oneof-en: «bytt til denne tidligere sendte markørformen». */
+  CursorId: 14,
   KeyEvent: 15,
   Clipboard: 16,
   Misc: 19,
   PeerInfo: 25,
+  Auth2FA: 27,
 } as const;

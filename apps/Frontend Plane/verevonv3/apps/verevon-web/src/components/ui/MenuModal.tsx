@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { useEffect, useRef, type CSSProperties, type KeyboardEvent } from "react";
 import Link from "next/link";
 import { VerevonMarkFilled } from "@/components/home/sections/VerevonMark";
 
@@ -14,9 +14,68 @@ const menuItems = [
 	{ href: "#kontakt", label: "Kontakt", number: "004" },
 ];
 
-const socialLinks = ["Instagram", "LinkedIn", "YouTube"];
+const contactLinks = [
+	{ href: "mailto:hei@verevon.ai", label: "hei@verevon.ai" },
+	{ href: "/trust", label: "Sikkerhet og tillit" },
+];
 
 export function MenuModal({ onClose, open }: MenuModalProps) {
+	const dialogRef = useRef<HTMLDivElement>(null);
+	const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+	useEffect(() => {
+		if (!open) {
+			return;
+		}
+
+		const focusInitialControl = window.requestAnimationFrame(() => {
+			closeButtonRef.current?.focus();
+		});
+
+		return () => window.cancelAnimationFrame(focusInitialControl);
+	}, [open]);
+
+	const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			onClose();
+			return;
+		}
+
+		if (event.key !== "Tab") {
+			return;
+		}
+
+		const dialog = dialogRef.current;
+		if (!dialog) {
+			return;
+		}
+
+		const focusableElements = Array.from(
+			dialog.querySelectorAll<HTMLElement>(
+				'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+			),
+		).filter((element) => !element.hasAttribute("disabled"));
+
+		if (focusableElements.length === 0) {
+			event.preventDefault();
+			dialog.focus();
+			return;
+		}
+
+		const firstElement = focusableElements[0];
+		const lastElement = focusableElements[focusableElements.length - 1];
+		const activeElement = document.activeElement;
+
+		if (event.shiftKey && activeElement === firstElement) {
+			event.preventDefault();
+			lastElement.focus();
+		} else if (!event.shiftKey && activeElement === lastElement) {
+			event.preventDefault();
+			firstElement.focus();
+		}
+	};
+
 	if (!open) {
 		return null;
 	}
@@ -25,8 +84,11 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 		<div
 			aria-label="Verevon meny"
 			aria-modal="true"
-			className="fixed inset-0 z-[100] grid grid-rows-[auto_1fr_auto] bg-[linear-gradient(115deg,rgba(121,56,25,0.78),transparent_52%),linear-gradient(135deg,var(--verevon-a-earth),var(--verevon-h-ink-warm)_68%,#080707)] px-[clamp(24px,4vw,56px)] pb-14 pt-[54px] text-verevon-c-white animate-[verevon-menu-enter_420ms_ease_both] max-[760px]:pb-[34px] max-[760px]:pt-[34px]"
+			className="fixed inset-0 z-[100] flex min-h-0 flex-col overflow-y-auto bg-[linear-gradient(115deg,rgba(121,56,25,0.78),transparent_52%),linear-gradient(135deg,var(--verevon-a-earth),var(--verevon-h-ink-warm)_68%,#080707)] px-[clamp(24px,4vw,56px)] pb-14 pt-[54px] text-verevon-c-white animate-[verevon-menu-enter_420ms_ease_both] max-[760px]:pb-[34px] max-[760px]:pt-[34px]"
+			onKeyDown={handleKeyDown}
+			ref={dialogRef}
 			role="dialog"
+			tabIndex={-1}
 		>
 			<div className="flex items-start justify-between">
 				<a
@@ -42,6 +104,7 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 					aria-label="Lukk meny"
 					className="grid h-[58px] w-[58px] cursor-pointer place-items-center border-0 bg-transparent p-0 text-current transition-opacity hover:opacity-70"
 					onClick={onClose}
+					ref={closeButtonRef}
 					type="button"
 				>
 					<svg
@@ -56,7 +119,7 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 
 			<nav
 				aria-label="Hovedmeny"
-				className="grid grid-cols-4 gap-7 self-center max-[1100px]:grid-cols-2 max-[760px]:grid-cols-1 max-[760px]:gap-[22px]"
+				className="my-auto grid grid-cols-4 gap-7 py-[clamp(36px,9vh,144px)] max-[1100px]:grid-cols-2 max-[760px]:grid-cols-1 max-[760px]:gap-[22px] max-[760px]:py-8"
 			>
 				{menuItems.map((item, index) => {
 					const itemContent = (
@@ -72,7 +135,7 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 					);
 					const itemProps = {
 						className:
-							"grid translate-y-[26px] gap-[38px] border-t border-white/20 pt-2 opacity-0 animate-[verevon-menu-item-enter_560ms_ease_forwards] [animation-delay:var(--delay)] transition-colors hover:text-white max-[760px]:gap-[18px]",
+							"grid translate-y-[26px] gap-[38px] border-t border-white/20 pt-2 opacity-0 animate-[verevon-menu-item-enter_560ms_ease_forwards] [animation-delay:var(--delay)] transition-colors hover:text-white motion-reduce:translate-y-0 motion-reduce:opacity-100 motion-reduce:animate-none max-[760px]:gap-[18px]",
 						href: item.href,
 						onClick: onClose,
 						style: { "--delay": `${index * 80}ms` } as CSSProperties,
@@ -91,19 +154,19 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 			</nav>
 
 			<div
-				aria-label="Sosiale lenker"
-				className="grid justify-items-start gap-2 font-arbeit text-base text-[color-mix(in_srgb,var(--verevon-c-white)_74%,transparent)]"
+				aria-label="Kontaktlenker"
+				className="grid shrink-0 justify-items-start gap-2 font-arbeit text-base text-[color-mix(in_srgb,var(--verevon-c-white)_74%,transparent)]"
 			>
-				<span>Følg oss:</span>
+				<span>Kontakt:</span>
 
-				{socialLinks.map((link) => (
+				{contactLinks.map((link) => (
 					<a
 						className="transition-colors hover:text-verevon-c-white"
-						href="#kontakt"
-						key={link}
+						href={link.href}
+						key={link.href}
 						onClick={onClose}
 					>
-						{link}
+						{link.label}
 					</a>
 				))}
 			</div>

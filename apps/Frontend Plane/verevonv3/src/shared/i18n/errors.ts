@@ -86,6 +86,17 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   integration_auth_unavailable: { no: 'Denne integrasjonen er ikke koblet til ennå.', en: 'This integration is not connected yet.' },
   imports_auth_unavailable: { no: 'Import-tilkoblingen er ikke satt opp ennå.', en: 'The import connection is not set up yet.' },
   cost_auth_unavailable: { no: 'Kunne ikke hente kostnadsdata akkurat nå.', en: 'Could not fetch cost data right now.' },
+  // Model Plane's pre-flight budget guard (model-gateway `budget.rs`): the one
+  // hard stop on spend that exists. It refuses BEFORE the run starts, so the
+  // copy must not imply a partial answer was cut off.
+  budget_exceeded: {
+    no: 'Forbrukstaket er nådd, så agenten startet ikke. En administrator kan endre taket under Innstillinger › Forbrukstak.',
+    en: 'The spend ceiling has been reached, so the agent did not start. An administrator can change the ceiling under Settings › Spend ceiling.',
+  },
+  budget_unavailable: {
+    no: 'Forbruket kunne ikke kontrolleres, så agenten startet ikke. Prøv igjen om litt.',
+    en: 'Spend could not be verified, so the agent did not start. Try again shortly.',
+  },
   shipping_auth_unavailable: { no: 'Fraktintegrasjonen er ikke koblet til ennå.', en: 'The shipping integration is not connected yet.' },
   social_core_unavailable: { no: 'Sosiale medier-tjenesten er utilgjengelig akkurat nå.', en: 'The social service is unavailable right now.' },
   search_provider_unconfigured: { no: 'Søketjenesten er ikke satt opp ennå.', en: 'The search provider is not configured yet.' },

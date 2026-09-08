@@ -51,12 +51,29 @@ export type SpaceThread = {
   latest_run_id?: string
   latest_run_status?: string
   latest_run_updated_at?: string
+  /**
+   * Pinned in the room. Server-owned and relayed from Session Core's listing,
+   * which already orders pinned posts first. Absent on an older gateway.
+   */
+  pinned?: boolean
+}
+
+/**
+ * Where the reader last caught up with this room (item 4b). `last_read_at` is
+ * epoch milliseconds, `null` when they have never had the room open — which
+ * is "nothing is new yet", not "everything is new". An absent marker means it
+ * could not be read; the listing names that as a gap.
+ */
+export type SpaceReadMarker = {
+  readonly last_read_at: number | null
 }
 
 export type SpaceThreads = {
   space: SpaceSummary
   membership: SpaceMembership
   threads: readonly SpaceThread[]
+  read_marker?: SpaceReadMarker
+  unavailable?: readonly SpaceWorkGap[]
 }
 
 /** Actor-filtered owner contracts available in a Space. This is an availability
@@ -137,8 +154,105 @@ export function getSpaceContext(spaceRef: string): Promise<SpaceContext> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/context`)
 }
 
-export function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
-  return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
+export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
+  const response = await requestJson<{
+    space: SpaceSummary
+    membership: SpaceMembership
+    threads: readonly SpaceThread[]
+    read_marker?: unknown
+    unavailable?: unknown
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
+  const marker = response.read_marker
+  const lastReadAt =
+    marker && typeof marker === 'object' ? (marker as { last_read_at?: unknown }).last_read_at : undefined
+  // Only a real object counts as "the marker was read". `null` inside it is
+  // the member who has never caught up; a missing object is the gap.
+  const read_marker: SpaceReadMarker | undefined =
+    marker && typeof marker === 'object'
+      ? { last_read_at: typeof lastReadAt === 'number' && Number.isFinite(lastReadAt) ? lastReadAt : null }
+      : undefined
+  return {
+    space: response.space,
+    membership: response.membership,
+    threads: response.threads,
+    ...(read_marker ? { read_marker } : {}),
+    unavailable: workGaps(response.unavailable),
+  }
+}
+
+/**
+ * Retitle or pin a post in the room.
+ *
+ * Owner-bound in Session Core: only the member who started the post may. The
+ * room route relays a refusal as `thread_presentation_owner_only`, and the UI
+ * offers the control only to the author — so anyone else reaches this only by
+ * racing a membership change, and it fails honestly then.
+ */
+export async function updateSpaceThreadPresentation(
+  spaceRef: string,
+  threadId: string,
+  presentation: { readonly title?: string; readonly pinned?: boolean },
+): Promise<{ thread_id: string; title?: string; pinned?: boolean }> {
+  return requestJson(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads/${encodeURIComponent(threadId)}/presentation`,
+    { method: 'PATCH', body: JSON.stringify(presentation) },
+  )
+}
+
+/** The reader has this room open now. Advances their read marker. */
+export async function markSpaceRead(spaceRef: string): Promise<SpaceReadMarker> {
+  const response = await requestJson<{ last_read_at?: unknown }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/read`,
+    { method: 'POST', body: '{}' },
+  )
+  const at = response.last_read_at
+  return { last_read_at: typeof at === 'number' && Number.isFinite(at) ? at : null }
+}
+
+/** Someone else in the room right now. Identifiers and a status, never content. */
+export type SpacePresentMember = {
+  readonly subject_id: string
+  readonly status: 'online' | 'typing'
+  readonly last_seen_at: number
+}
+
+export type SpacePresence = {
+  readonly present: readonly SpacePresentMember[]
+  /** How long a heartbeat counts as present, per Application Plane. */
+  readonly ttl_seconds: number | null
+}
+
+/**
+ * "I am here" — and, in the same answer, "who else is?".
+ *
+ * One request per beat rather than a write plus a read, on a timer that
+ * already runs. `offline` is the polite goodbye a room can send when the
+ * reader leaves; it is never required, because a heartbeat that stops coming
+ * expires on its own.
+ */
+export async function recordSpacePresence(
+  spaceRef: string,
+  status: 'online' | 'typing' | 'offline' = 'online',
+): Promise<SpacePresence> {
+  const response = await requestJson<{ present?: unknown; ttl_seconds?: unknown }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/presence`,
+    { method: 'POST', body: JSON.stringify({ status }) },
+  )
+  const present = Array.isArray(response.present) ? response.present : []
+  return {
+    present: present.flatMap((row) => {
+      if (!row || typeof row !== 'object') return []
+      const member = row as Record<string, unknown>
+      const subjectId = typeof member.subject_id === 'string' ? member.subject_id.trim() : ''
+      if (!subjectId) return []
+      return [{
+        subject_id: subjectId,
+        status: member.status === 'typing' ? ('typing' as const) : ('online' as const),
+        last_seen_at: typeof member.last_seen_at === 'number' ? member.last_seen_at : 0,
+      }]
+    }),
+    ttl_seconds: typeof response.ttl_seconds === 'number' ? response.ttl_seconds : null,
+  }
 }
 
 /** One evidence section this response deliberately does not claim, with why. */

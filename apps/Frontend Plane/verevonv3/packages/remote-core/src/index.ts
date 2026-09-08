@@ -22,6 +22,7 @@ export type {
   RemoteAction,
   RemoteActionType,
   RemoteClient,
+  RemoteCursorShape,
   RemoteDisplay,
   RemoteEvent,
   RemoteEventHandler,
@@ -52,6 +53,8 @@ export type { RemoteErrorCode, RemoteErrorMetadata } from './errors/RemoteError.
 
 export { createRemoteClient } from './client/createRemoteClient.js';
 export type { CreateRemoteClientOptions } from './client/createRemoteClient.js';
+export { DEFAULT_RECONNECT_POLICY } from './client/Reconnector.js';
+export type { ReconnectPolicy } from './client/Reconnector.js';
 
 export type { RemoteProtocol, ProtocolConnectOptions } from './protocol/RemoteProtocol.js';
 
@@ -63,13 +66,18 @@ export { WebSocketTransport } from './transport/WebSocketTransport.js';
 export type { Transport, TransportCloseInfo } from './transport/Transport.js';
 export type { WebSocketFactory, WebSocketLike, WebSocketTransportOptions } from './transport/WebSocketTransport.js';
 
-export { releaseVideoFrame } from './media/VideoFrame.js';
+export { cloneVideoFrame, cropVideoFrame, releaseVideoFrame } from './media/VideoFrame.js';
+export { detectMediaCapabilities } from './media/RemoteVideoDecoder.js';
+export type { MediaCapabilities } from './media/RemoteVideoDecoder.js';
 
 export type { Logger } from './logging/Logger.js';
 export { noopLogger } from './logging/Logger.js';
 
 // ---------- RustDesk-spesifikke byggeklosser ----------
-// Kun for avanserte forbrukere som bygger sin egen RemoteProtocol, eller for
-// tester. Vanlig bruk trenger aldri disse — se docs/architecture.md,
-// "RustDesk protocol isolation".
+// `createRemoteClient({ rendezvousUrl })` bygger denne protokollen selv, så
+// vanlig bruk trenger ingenting herfra. Eksponert for kallere som vil sette
+// opp protokollen eksplisitt (egne timeouts, egen transport, egen
+// autentikator) — se docs/architecture.md, "RustDesk protocol isolation".
+export { createRustDeskProtocol } from './protocol/rustdesk/createRustDeskProtocol.js';
+export type { RustDeskProtocolOptions } from './protocol/rustdesk/RustDeskProtocol.js';
 export { RustDeskPasswordAuthenticator } from './protocol/rustdesk/RustDeskPasswordAuthenticator.js';

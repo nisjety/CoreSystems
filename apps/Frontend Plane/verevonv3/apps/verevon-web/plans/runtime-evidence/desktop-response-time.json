@@ -1,0 +1,1269 @@
+{
+  "url": "http://127.0.0.1:3100/produkt/svartid",
+  "readyState": "complete",
+  "sampleMs": 13039.899999976158,
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "nav": [
+    {
+      "ttfb": 23.599999964237213,
+      "domContentLoaded": 78.39999997615814,
+      "load": 509.89999997615814,
+      "transferSize": 7199
+    }
+  ],
+  "paints": [
+    {
+      "name": "first-paint",
+      "time": 184
+    },
+    {
+      "name": "first-contentful-paint",
+      "time": 184
+    }
+  ],
+  "observed": {
+    "lcp": [
+      {
+        "time": 184,
+        "size": 1178475,
+        "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai-poster.jpg",
+        "element": "VIDEO",
+        "text": ""
+      }
+    ],
+    "shifts": [
+      {
+        "time": 145.5,
+        "value": 0.0008902205806914949,
+        "hadRecentInput": false
+      },
+      {
+        "time": 209.80000001192093,
+        "value": 0.0013141235853909464,
+        "hadRecentInput": false
+      },
+      {
+        "time": 1567.300000011921,
+        "value": 4.6685133887349955e-05,
+        "hadRecentInput": false
+      }
+    ],
+    "tasks": []
+  },
+  "resources": [
+    {
+      "url": "http://127.0.0.1:3100/_next/static/media/797e433ab948586e-s.p.0r6juujl39pe6.woff2",
+      "type": "link",
+      "bytes": 23408,
+      "encoded": 23108,
+      "duration": 18.899999976158142
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/media/caa3a2e1cccd8315-s.p.0wgildi0cnwt9.woff2",
+      "type": "link",
+      "bytes": 29588,
+      "encoded": 29288,
+      "duration": 29.099999964237213
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/233p45nuh4m5b.css",
+      "type": "link",
+      "bytes": 1265,
+      "encoded": 965,
+      "duration": 23.200000047683716
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2pv02s_0vsqln.css",
+      "type": "link",
+      "bytes": 34891,
+      "encoded": 34591,
+      "duration": 31.19999998807907
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/09lkwf_qozcls.js",
+      "type": "link",
+      "bytes": 9775,
+      "encoded": 9475,
+      "duration": 32.60000002384186
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2z9867j-49xml.js",
+      "type": "script",
+      "bytes": 9538,
+      "encoded": 9238,
+      "duration": 34.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/3n3dzy_m5hzj8.js",
+      "type": "script",
+      "bytes": 38884,
+      "encoded": 38584,
+      "duration": 39.299999952316284
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/3l2f1y3a9ppw-.js",
+      "type": "script",
+      "bytes": 71274,
+      "encoded": 70974,
+      "duration": 46.799999952316284
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/14xy9ype22mwn.js",
+      "type": "script",
+      "bytes": 4334,
+      "encoded": 4034,
+      "duration": 47.60000002384186
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/turbopack-0w1nrrx9uy0af.js",
+      "type": "script",
+      "bytes": 4452,
+      "encoded": 4152,
+      "duration": 47.10000002384186
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2hi4qfwktzw-c.js",
+      "type": "script",
+      "bytes": 13167,
+      "encoded": 12867,
+      "duration": 48.10000002384186
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2jd3iknt5j0s8.js",
+      "type": "script",
+      "bytes": 4473,
+      "encoded": 4173,
+      "duration": 94.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/27k17j3cau--o.js",
+      "type": "script",
+      "bytes": 10700,
+      "encoded": 10400,
+      "duration": 106
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai-poster.jpg",
+      "type": "video",
+      "bytes": 50644,
+      "encoded": 50344,
+      "duration": 16.700000047683716
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/corridor-poster.jpg",
+      "type": "video",
+      "bytes": 80066,
+      "encoded": 79766,
+      "duration": 23.899999976158142
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai.mp4",
+      "type": "video",
+      "bytes": 3175208,
+      "encoded": 3174908,
+      "duration": 108.80000001192093
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/arbeit-pro-light/arbeit-pro-light.woff",
+      "type": "css",
+      "bytes": 24324,
+      "encoded": 24024,
+      "duration": 11.300000011920929
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/protokoll-light/ProtokollLight-Web.woff2",
+      "type": "css",
+      "bytes": 47320,
+      "encoded": 47020,
+      "duration": 11.899999976158142
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/arbeit-pro-book/arbeit-pro-book.woff",
+      "type": "css",
+      "bytes": 30020,
+      "encoded": 29720,
+      "duration": 17
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/protokoll-medium/ProtokollMedium-Web.woff2",
+      "type": "css",
+      "bytes": 50288,
+      "encoded": 49988,
+      "duration": 17.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fsvartid-waiting-room.jpg&w=750&q=75",
+      "type": "img",
+      "bytes": 18208,
+      "encoded": 17908,
+      "duration": 100.59999996423721
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai.mp4",
+      "type": "video",
+      "bytes": 3175208,
+      "encoded": 3174908,
+      "duration": 80.60000002384186
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=4I7bHgFcyxmCZPo1",
+      "type": "fetch",
+      "bytes": 604,
+      "encoded": 304,
+      "duration": 10
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=boXgjTnnDNKfVraJ",
+      "type": "fetch",
+      "bytes": 1069,
+      "encoded": 769,
+      "duration": 16.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=AW2IHd2WeUyzqdUe",
+      "type": "fetch",
+      "bytes": 1341,
+      "encoded": 1041,
+      "duration": 16.799999952316284
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=isL1XsvOuUGL-3AG",
+      "type": "fetch",
+      "bytes": 778,
+      "encoded": 478,
+      "duration": 16.900000035762787
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2efcj7x7n5p82.js",
+      "type": "script",
+      "bytes": 6574,
+      "encoded": 6274,
+      "duration": 11.600000023841858
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/08d5nm27n6c04.js",
+      "type": "script",
+      "bytes": 35188,
+      "encoded": 34888,
+      "duration": 14
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/43ypyj1ngpd0q.js",
+      "type": "script",
+      "bytes": 10703,
+      "encoded": 10403,
+      "duration": 19.600000023841858
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2slkcx5_t7zxy.js",
+      "type": "script",
+      "bytes": 46046,
+      "encoded": 45746,
+      "duration": 25.5
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0vrk5obp2n1z6.js",
+      "type": "script",
+      "bytes": 63137,
+      "encoded": 62837,
+      "duration": 36.30000001192093
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/23-osay-bduqw.js",
+      "type": "script",
+      "bytes": 27871,
+      "encoded": 27571,
+      "duration": 39.90000003576279
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0n4hdvr1jjose.js",
+      "type": "script",
+      "bytes": 17786,
+      "encoded": 17486,
+      "duration": 45.30000001192093
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/clock-ai.mp4",
+      "type": "video",
+      "bytes": 0,
+      "encoded": 0,
+      "duration": 0.9000000357627869
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/clock-ai.mp4",
+      "type": "video",
+      "bytes": 3333915,
+      "encoded": 3333615,
+      "duration": 23.30000001192093
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/traffic-light-higgsfield.mp4",
+      "type": "video",
+      "bytes": 0,
+      "encoded": 0,
+      "duration": 2.800000011920929
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/traffic-light-higgsfield.mp4",
+      "type": "video",
+      "bytes": 300,
+      "encoded": 0,
+      "duration": 14.800000011920929
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/traffic-light-higgsfield.mp4",
+      "type": "video",
+      "bytes": 18539,
+      "encoded": 18239,
+      "duration": 11.199999988079071
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/traffic-light-higgsfield.mp4",
+      "type": "video",
+      "bytes": 300,
+      "encoded": 0,
+      "duration": 31.80000001192093
+    }
+  ],
+  "videos": [
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/traffic-light-higgsfield.mp4",
+      "paused": false,
+      "time": 2.585076,
+      "ready": 4,
+      "top": 73
+    },
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/corridor.mp4",
+      "paused": true,
+      "time": 0,
+      "ready": 4,
+      "top": 1964.09375
+    }
+  ],
+  "network": [
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fa95a19e05613baa759395e7dfc3241e5.jpg&w=256&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "S5sTmWhAXatpg0rwPJ4NOABsNb9T2SbluL6Hzfo94xQ",
+        "Connection": "keep-alive",
+        "Content-Length": "11776",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"a95a19e05613baa759395e7dfc3241e5.webp\""
+      },
+      "received": 11776,
+      "finishedBytes": 12224,
+      "bytes": 12224
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fdesk-vast-white.jpg&w=128&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "b459eY2VjeY5iUbGbfZMa3KomnzK_T6Xs3bSazQBrD4",
+        "Connection": "keep-alive",
+        "Content-Length": "1194",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"desk-vast-white.webp\""
+      },
+      "received": 1194,
+      "finishedBytes": 1624,
+      "bytes": 1624
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fsoft-orb.png&w=96&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "0bO0290IH012632qK_GY-G0Fu3BTR3r193M_m3Znu2k",
+        "Connection": "keep-alive",
+        "Content-Length": "228",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"soft-orb.webp\""
+      },
+      "received": 228,
+      "finishedBytes": 650,
+      "bytes": 650
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fagent-run-console-running.jpg&w=96&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "A1lF5twCHp_04z32AaLrF7fsz0vh1Qz-3kSkO7w4Yrk",
+        "Connection": "keep-alive",
+        "Content-Length": "1460",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"agent-run-console-running.webp\""
+      },
+      "received": 1460,
+      "finishedBytes": 1900,
+      "bytes": 1900
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fwindow-city-dusk.jpg&w=96&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "gNhBeXA5NvAP9SZpGFHdOoz0zQjyLfNTACugkov8HRg",
+        "Connection": "keep-alive",
+        "Content-Length": "1678",
+        "X-Nextjs-Cache": "HIT",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"window-city-dusk.webp\""
+      },
+      "received": 1678,
+      "finishedBytes": 2109,
+      "bytes": 2109
+    },
+    {
+      "url": "http://127.0.0.1:3100/trust?_rsc=5CB68i4pnAekjehf",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "bytes": 0
+    },
+    {
+      "url": "http://127.0.0.1:3100/produkt/svartid",
+      "status": 200,
+      "mime": "text/html",
+      "headers": {
+        "Cache-Control": "s-maxage=31536000",
+        "Connection": "keep-alive",
+        "Content-Encoding": "gzip",
+        "Content-Type": "text/html; charset=utf-8",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "ETag": "\"wqrp54i3v4nzj\"",
+        "Keep-Alive": "timeout=5",
+        "Transfer-Encoding": "chunked",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding",
+        "X-Powered-By": "Next.js",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1\n1",
+        "x-nextjs-stale-time": "300"
+      },
+      "received": 0,
+      "finishedBytes": 7389,
+      "bytes": 7389
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai-poster.jpg",
+      "status": 200,
+      "mime": "image/jpeg",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"c4a8-1a05058eb96\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "50344",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "image/jpeg"
+      },
+      "received": 50344,
+      "finishedBytes": 50626,
+      "bytes": 50626
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/corridor-poster.jpg",
+      "status": 200,
+      "mime": "image/jpeg",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"13796-1a05058e9e0\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "79766",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "image/jpeg"
+      },
+      "received": 79766,
+      "finishedBytes": 80049,
+      "bytes": 80049
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/233p45nuh4m5b.css",
+      "status": 200,
+      "mime": "text/css",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"e81-1a07f02378b\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "text/css; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 982,
+      "finishedBytes": 1346,
+      "bytes": 1346
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/media/797e433ab948586e-s.p.0r6juujl39pe6.woff2",
+      "status": 200,
+      "mime": "font/woff2",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "ETag": "W/\"5a44-1a07f023644\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "23108",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "font/woff2"
+      },
+      "received": 23108,
+      "finishedBytes": 23408,
+      "bytes": 23408
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2pv02s_0vsqln.css",
+      "status": 200,
+      "mime": "text/css",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"346e3-1a07f0233b6\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:05 GMT",
+        "Content-Type": "text/css; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 34632,
+      "finishedBytes": 34998,
+      "bytes": 34998
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/media/caa3a2e1cccd8315-s.p.0wgildi0cnwt9.woff2",
+      "status": 200,
+      "mime": "font/woff2",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "ETag": "W/\"7268-1a07f0237c7\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "29288",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "font/woff2"
+      },
+      "received": 29288,
+      "finishedBytes": 29588,
+      "bytes": 29588
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/09lkwf_qozcls.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"802c-1a07f023594\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 9493,
+      "finishedBytes": 9872,
+      "bytes": 9872
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2z9867j-49xml.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"ad78-1a07f023511\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 9256,
+      "finishedBytes": 9635,
+      "bytes": 9635
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/3n3dzy_m5hzj8.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"22929-1a07f0236ee\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 38621,
+      "finishedBytes": 39006,
+      "bytes": 39006
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"3071fc-1a05058eba1\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-3174907/3174908",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "3174908",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 3174908,
+      "finishedBytes": 3175246,
+      "bytes": 3175246
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/corridor.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"476bc5c-1a05058eaad\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-74890331/74890332",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "74890332",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 21626880,
+      "bytes": 21626880
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/arbeit-pro-light/arbeit-pro-light.woff",
+      "status": 200,
+      "mime": "font/woff",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"5dd8-1a05058e579\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "24024",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "font/woff"
+      },
+      "received": 24024,
+      "finishedBytes": 24305,
+      "bytes": 24305
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/protokoll-light/ProtokollLight-Web.woff2",
+      "status": 200,
+      "mime": "font/woff2",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"b7ac-1a05058e57a\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "47020",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "font/woff2"
+      },
+      "received": 47020,
+      "finishedBytes": 47302,
+      "bytes": 47302
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/arbeit-pro-book/arbeit-pro-book.woff",
+      "status": 200,
+      "mime": "font/woff",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"7418-1a05058e578\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "29720",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "font/woff"
+      },
+      "received": 29720,
+      "finishedBytes": 30001,
+      "bytes": 30001
+    },
+    {
+      "url": "http://127.0.0.1:3100/fonts/protokoll-medium/ProtokollMedium-Web.woff2",
+      "status": 200,
+      "mime": "font/woff2",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"c344-1a05058e57d\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Content-Length": "49988",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:38 GMT",
+        "Content-Type": "font/woff2"
+      },
+      "received": 49988,
+      "finishedBytes": 50270,
+      "bytes": 50270
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/14xy9ype22mwn.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"287e-1a07f023642\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 4051,
+      "finishedBytes": 4430,
+      "bytes": 4430
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/turbopack-0w1nrrx9uy0af.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"2954-1a07f0236ec\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 4170,
+      "finishedBytes": 4549,
+      "bytes": 4549
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2hi4qfwktzw-c.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"d566-1a07f0236db\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 12885,
+      "finishedBytes": 13264,
+      "bytes": 13264
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/3l2f1y3a9ppw-.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"377e2-1a07f02378b\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 71034,
+      "finishedBytes": 71414,
+      "bytes": 71414
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2jd3iknt5j0s8.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"3226-1a07f02355f\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 4191,
+      "finishedBytes": 4570,
+      "bytes": 4570
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/27k17j3cau--o.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"7477-1a07f023616\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 10418,
+      "finishedBytes": 10797,
+      "bytes": 10797
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"3071fc-1a05058eba1\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-3174907/3174908",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "3174908",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 3174908,
+      "finishedBytes": 3175246,
+      "bytes": 3175246
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/image?url=%2Fverevon-mood%2Fsvartid-waiting-room.jpg&w=750&q=75",
+      "status": 200,
+      "mime": "image/webp",
+      "headers": {
+        "Content-Security-Policy": "script-src 'none'; frame-src 'none'; sandbox;",
+        "Cache-Control": "public, max-age=14400, must-revalidate",
+        "ETag": "JS0fjDvOi7ySAziWRfvWiAooCVDICclxJW6tfRQMrug",
+        "Connection": "keep-alive",
+        "Content-Length": "17908",
+        "X-Nextjs-Cache": "MISS",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Keep-Alive": "timeout=5",
+        "Content-Type": "image/webp",
+        "Vary": "Accept",
+        "Content-Disposition": "attachment; filename=\"svartid-waiting-room.webp\""
+      },
+      "received": 17908,
+      "finishedBytes": 18345,
+      "bytes": 18345
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=4I7bHgFcyxmCZPo1",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 321,
+      "finishedBytes": 713,
+      "bytes": 713
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=boXgjTnnDNKfVraJ",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 781,
+      "finishedBytes": 1178,
+      "bytes": 1178
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=AW2IHd2WeUyzqdUe",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 1053,
+      "finishedBytes": 1450,
+      "bytes": 1450
+    },
+    {
+      "url": "http://127.0.0.1:3100/?_rsc=isL1XsvOuUGL-3AG",
+      "status": 200,
+      "mime": "text/x-component",
+      "headers": {
+        "x-nextjs-postponed": "2",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "s-maxage=31536000",
+        "Content-Encoding": "gzip",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=5",
+        "x-nextjs-cache": "HIT",
+        "x-nextjs-prerender": "1",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Content-Type": "text/x-component",
+        "Vary": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch, Accept-Encoding"
+      },
+      "received": 490,
+      "finishedBytes": 887,
+      "bytes": 887
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2efcj7x7n5p82.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"4066-1a07f0234d4\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 6292,
+      "finishedBytes": 6671,
+      "bytes": 6671
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/08d5nm27n6c04.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"1bd07-1a07f02361f\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 34924,
+      "finishedBytes": 35304,
+      "bytes": 35304
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/43ypyj1ngpd0q.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"7477-1a07f023425\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:05 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 10421,
+      "finishedBytes": 10800,
+      "bytes": 10800
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/2slkcx5_t7zxy.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"22f82-1a07f0235c7\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 45788,
+      "finishedBytes": 46168,
+      "bytes": 46168
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0vrk5obp2n1z6.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"2ea16-1a07f023568\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 62889,
+      "finishedBytes": 63269,
+      "bytes": 63269
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/23-osay-bduqw.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"115a9-1a07f023575\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 27600,
+      "finishedBytes": 27980,
+      "bytes": 27980
+    },
+    {
+      "url": "http://127.0.0.1:3100/_next/static/chunks/0n4hdvr1jjose.js",
+      "status": 200,
+      "mime": "application/javascript",
+      "headers": {
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Encoding": "gzip",
+        "ETag": "W/\"a96e-1a07f023614\"",
+        "Connection": "keep-alive",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Date": "Tue, 08 Sep 2026 03:31:10 GMT",
+        "Last-Modified": "Tue, 08 Sep 2026 03:14:06 GMT",
+        "Content-Type": "application/javascript; charset=UTF-8",
+        "Vary": "Accept-Encoding"
+      },
+      "received": 17511,
+      "finishedBytes": 17890,
+      "bytes": 17890
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/clock-ai.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"32ddef-1a05058e9de\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-3333614/3333615",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "3333615",
+        "Date": "Tue, 08 Sep 2026 03:31:15 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 3333615,
+      "finishedBytes": 3333953,
+      "bytes": 3333953
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/traffic-light-higgsfield.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"19473f-1a05058eb40\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 0-1656638/1656639",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "1656639",
+        "Date": "Tue, 08 Sep 2026 03:31:21 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 200366,
+      "bytes": 200366
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/traffic-light-higgsfield.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"19473f-1a05058eb40\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 1638400-1656638/1656639",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "18239",
+        "Date": "Tue, 08 Sep 2026 03:31:21 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 18239,
+      "finishedBytes": 18581,
+      "bytes": 18581
+    },
+    {
+      "url": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/traffic-light-higgsfield.mp4",
+      "status": 206,
+      "mime": "video/mp4",
+      "headers": {
+        "Cache-Control": "public, max-age=0",
+        "ETag": "W/\"19473f-1a05058eb40\"",
+        "Connection": "keep-alive",
+        "Content-Range": "bytes 262144-1656638/1656639",
+        "Accept-Ranges": "bytes",
+        "Keep-Alive": "timeout=5",
+        "Content-Length": "1394495",
+        "Date": "Tue, 08 Sep 2026 03:31:21 GMT",
+        "Last-Modified": "Sun, 30 Aug 2026 01:46:39 GMT",
+        "Content-Type": "video/mp4"
+      },
+      "received": 1376256,
+      "bytes": 1376256
+    }
+  ],
+  "name": "desktop-response-time"
+}

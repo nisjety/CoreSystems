@@ -14,6 +14,14 @@ export interface ProtocolConnectOptions {
   readonly deviceId: string;
   readonly authenticator: SessionAuthenticator;
   readonly signal?: AbortSignal;
+  /**
+   * Satt når kallet kommer fra den automatiske gjenoppkoblingen, ikke fra en
+   * bruker. En protokoll skal da IKKE be om interaktiv legitimasjon (f.eks.
+   * en tofaktorkode): fem bakgrunnsforsøk ville gitt fem dialogbokser
+   * operatøren ikke ba om. Feil raskt i stedet, så økten lander i 'failed'
+   * og operatøren kan koble til på nytt selv.
+   */
+  readonly isAutomaticRetry?: boolean;
 }
 
 /**

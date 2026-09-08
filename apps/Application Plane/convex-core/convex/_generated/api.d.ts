@@ -44,6 +44,8 @@ import type * as spaceDeletionReceipts from "../spaceDeletionReceipts.js";
 import type * as spaceLifecycle from "../spaceLifecycle.js";
 import type * as spaceMembers from "../spaceMembers.js";
 import type * as spaceMembershipSync from "../spaceMembershipSync.js";
+import type * as spacePresence from "../spacePresence.js";
+import type * as spaceReadMarkers from "../spaceReadMarkers.js";
 import type * as spaceRegistration from "../spaceRegistration.js";
 import type * as spaces from "../spaces.js";
 import type * as users from "../users.js";
@@ -91,6 +93,8 @@ declare const fullApi: ApiFromModules<{
   spaceLifecycle: typeof spaceLifecycle;
   spaceMembers: typeof spaceMembers;
   spaceMembershipSync: typeof spaceMembershipSync;
+  spacePresence: typeof spacePresence;
+  spaceReadMarkers: typeof spaceReadMarkers;
   spaceRegistration: typeof spaceRegistration;
   spaces: typeof spaces;
   users: typeof users;

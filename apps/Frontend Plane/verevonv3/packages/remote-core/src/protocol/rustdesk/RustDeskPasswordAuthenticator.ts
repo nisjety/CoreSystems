@@ -11,7 +11,14 @@ import type { AuthenticationChallenge, AuthenticationResponse, SessionAuthentica
  * riktig" — den skiller ikke mellom kildene.
  */
 export class RustDeskPasswordAuthenticator implements SessionAuthenticator {
-  constructor(private readonly secret: string) {}
+  readonly provideSecondFactor: (() => Promise<string>) | undefined;
+
+  constructor(
+    private readonly secret: string,
+    options: { readonly secondFactor?: () => Promise<string> } = {},
+  ) {
+    this.provideSecondFactor = options.secondFactor;
+  }
 
   async authenticate(challenge: AuthenticationChallenge): Promise<AuthenticationResponse> {
     const h1 = await sha256(concat(utf8(this.secret), utf8(challenge.salt)));

@@ -2301,6 +2301,32 @@ textarea:focus-visible {
   box-shadow: inset 2px 0 0 rgb(28 28 30 / 42%);
 }
 
+/* Found while verifying item 4b (2026-09-08): in dark, every non-active
+   sidebar panel link painted its text in `--verevon-dark-border`, which
+   resolves to the SAME value as `--verevon-dark-sidebar` (#34363d on #34363d,
+   1.0:1). Only the active row was readable, via the override below. "Nytt
+   rom", the other rooms and every thread row were invisible. Pre-existing:
+   the org room has had no threads, so the pinned/unread rows 4b adds are the
+   first sidebar rows anyone would look for in dark. Placed BEFORE the active
+   override so the active row keeps winning at equal specificity. */
+.dark .core-sidebar-panel-link {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .core-sidebar-panel-link:hover {
+  background: rgb(255 255 255 / 8%);
+  color: var(--panel);
+}
+
+.dark .core-sidebar-panel-link__icon {
+  color: color-mix(in srgb, var(--verevon-sidebar-text) 72%, transparent);
+}
+
+.dark .core-sidebar-panel-link:hover .core-sidebar-panel-link__icon,
+.dark .core-sidebar-panel-link__icon--active {
+  color: var(--panel);
+}
+
 .dark .verevon-sidebar-panel-active {
   background: rgb(255 255 255 / 8%);
   color: var(--panel);
@@ -2314,6 +2340,13 @@ textarea:focus-visible {
   padding: 24px 16px;
   color: var(--subtle);
   text-align: center;
+}
+
+/* Same surface, same finding: the dashed empty-state read 1.88:1 in dark. */
+.dark .core-sidebar-empty {
+  border-color: rgb(255 255 255 / 20%);
+  background: rgb(255 255 255 / 6%);
+  color: var(--verevon-sidebar-text);
 }
 
 .core-chat-sidebar {
@@ -43021,7 +43054,11 @@ body.verevon-chat-canvas-resizing * {
   background: var(--verevon-text-subtle);
 }
 
-.verevon-space-pulse__signal[aria-label="Active work"] {
+/* Keyed on `data-active`, not on the aria-label. The previous selector matched
+   `[aria-label="Active work"]` — the ENGLISH label — so in Norwegian, the
+   default locale, the signal never lit no matter how busy the room was.
+   Style must never read a translated string. */
+.verevon-space-pulse__signal[data-active] {
   background: var(--verevon-accent);
   box-shadow: 0 0 0 4px rgb(238 122 80 / 13%);
 }
@@ -43167,6 +43204,22 @@ so it
   border-color: rgb(255 255 255 / 10%);
 }
 
+/* Found while verifying presence (2026-09-08): `--verevon-text-muted` is only
+   redefined for dark mode inside `.dark .verevon-chat-page`'s own scope, so on
+   every OTHER dark surface — this header's meta row included — it stays the
+   light-mode value (#66615b, meant for a white card) against the near-black
+   canvas: 2.92:1, below AA for text. Pre-existing on "Rom · Aktiv · Din
+   rolle:" before presence added a fourth item to the same line; fixed here
+   rather than only for the new span, since leaving neighbours broken while a
+   new addition happens to inherit the same fix would be no fix at all. */
+.dark .verevon-space-meta {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-space-presence__dot {
+  background: var(--verevon-success, #4fae76);
+}
+
 .dark .verevon-space-header h1,
 .dark .verevon-space-view h2,
 .dark .verevon-space-pulse h2,
@@ -43194,7 +43247,7 @@ so it
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .verevon-space-pulse__signal[aria-label="Active work"] {
+  .verevon-space-pulse__signal[data-active] {
     animation: verevon-space-pulse-signal 2.4s ease-in-out infinite;
   }
 }
@@ -46031,4 +46084,748 @@ so it
 
 .dark .verevon-activity-detail {
   color: rgb(255 255 255 / 62%);
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* Support › Remote support (fjernhjelp) — live screen session surface        */
+/* ------------------------------------------------------------------------- */
+
+.verevon-support-workspace > .verevon-remote-support {
+  flex: 1;
+  min-height: 0;
+}
+
+.verevon-remote-support {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(480px, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: var(--verevon-surface, #fff);
+}
+
+.verevon-remote-support > * {
+  min-width: 0;
+  background: var(--verevon-surface, #fff);
+}
+
+.verevon-remote-support__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  border-right: 1px solid var(--verevon-border-warm);
+  overflow-y: auto;
+}
+
+.verevon-remote-support__rail header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.verevon-remote-support__rail header svg {
+  width: 18px;
+  height: 18px;
+  color: var(--verevon-coral, #ee7a50);
+}
+
+.verevon-remote-support__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__field input {
+  padding: 9px 11px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 8px;
+  background: var(--verevon-surface, #fff);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.verevon-remote-support__field input:focus-visible {
+  outline: 2px solid var(--ring, #ee7a50);
+  outline-offset: 1px;
+}
+
+.verevon-remote-support__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.verevon-remote-support__notice {
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__notice--error {
+  border-color: rgba(220, 68, 68, 0.35);
+  background: rgba(220, 68, 68, 0.06);
+  color: #a83232;
+}
+
+.verevon-remote-support__notice code {
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.verevon-remote-support__status {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.verevon-remote-support__status > div {
+  padding: 8px 10px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 8px;
+}
+
+.verevon-remote-support__status dt {
+  font-size: 11px;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__status dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.verevon-remote-support__permissions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-remote-support__permission {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__permission svg {
+  width: 12px;
+  height: 12px;
+}
+
+.verevon-remote-support__permission--granted {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+  background: rgba(238, 122, 80, 0.08);
+}
+
+.verevon-remote-support__field small {
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.verevon-remote-support__displays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-remote-support__display {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 8px;
+  background: var(--verevon-surface, #fff);
+  color: var(--verevon-text-muted, #6b6b6b);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-remote-support__display svg {
+  width: 12px;
+  height: 12px;
+}
+
+.verevon-remote-support__display small {
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.verevon-remote-support__display:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+}
+
+.verevon-remote-support__display--active {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+  background: rgba(238, 122, 80, 0.08);
+  cursor: default;
+}
+
+.verevon-remote-support__display:disabled:not(.verevon-remote-support__display--active) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.verevon-remote-support__quality {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.verevon-remote-support__quality-label {
+  width: 100%;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__quality small {
+  width: 100%;
+  font-size: 11px;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__quality-option {
+  padding: 4px 10px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 999px;
+  background: var(--verevon-surface, #fff);
+  color: var(--verevon-text-muted, #6b6b6b);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.verevon-remote-support__quality-option:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+}
+
+.verevon-remote-support__quality-option--active {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+  background: rgba(238, 122, 80, 0.08);
+}
+
+.verevon-remote-support__quality-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.verevon-remote-support__stage {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.verevon-remote-support__stage-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 48px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--verevon-border-warm);
+  font-size: 12px;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__stage-bar strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.verevon-remote-support__screen {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background: #0f1115;
+}
+
+.verevon-remote-support__screen canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  cursor: crosshair;
+}
+
+.verevon-remote-support__screen canvas[data-view-only='true'] {
+  cursor: default;
+}
+
+.verevon-remote-support__screen-empty {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 380px;
+  padding: 24px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-remote-support__screen-empty svg {
+  width: 28px;
+  height: 28px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+@media (max-width: 960px) {
+  .verevon-remote-support {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(320px, 1fr);
+  }
+
+  .verevon-remote-support__rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--verevon-border-warm);
+  }
+}
+
+/* ── Item 1b: a working room is visibly working, and a stop is a stop ────────
+   The sender already had a live exchange in their composer. Every OTHER
+   member saw nothing until the poll delivered a finished reply — the room went
+   dark exactly when it was busiest. These rules give the post, the composer
+   bar and the sidebar one shared, quiet signal for "an agent is producing
+   output here right now". Quiet on purpose: it is ambient state, not an
+   alert, and it must not compete with a failure or an approval. */
+
+/* The live row under a post's turns. Same shape as an agent turn, so it reads
+   as "the next turn, arriving" rather than as a status bar. */
+.verevon-room-turn--working .verevon-room-turn__working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* Three dots, drawn with box-shadow so it is one element and one animation.
+   Only the middle dot's opacity moves; the row itself never shifts. */
+.verevon-room-turn__working-dots {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--verevon-accent-ink);
+  box-shadow: 7px 0 0 var(--verevon-accent-ink), 14px 0 0 var(--verevon-accent-ink);
+  opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-room-turn__working-dots {
+    animation: verevon-working-dots 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes verevon-working-dots {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.95; }
+}
+
+/* Stop, inside the streaming exchange. Deliberately not styled as danger: a
+   stop is a normal thing to do to a reply, and red would make every member
+   hesitate to use it. Outlined so it never outweighs the answer it sits under. */
+.verevon-space-room-exchange__stop {
+  align-self: flex-start;
+  margin-top: 6px;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 4px 12px;
+  color: var(--verevon-text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-space-room-exchange__stop:hover {
+  border-color: var(--verevon-text);
+}
+
+.verevon-space-room-exchange__stop:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}
+
+/* The stopped line: neither the error red nor the finished grey. It states
+   whether the stop was RECORDED, which is the fact the room cares about. */
+.verevon-space-room-exchange__stopped {
+  margin: 6px 0 0;
+  border-left: 2px solid var(--verevon-border-strong);
+  padding-left: 10px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+/* Other members' agent work, above the textarea. */
+.verevon-space-room-composer__working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-composer__working-dot,
+.core-sidebar-working-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--verevon-accent);
+  box-shadow: 0 0 0 3px rgb(238 122 80 / 14%);
+}
+
+/* The sidebar dot sits at the row's trailing edge, like a channel's unread
+   marker — it is the same kind of information. */
+.core-sidebar-panel-link[data-working] .core-sidebar-working-dot {
+  margin-left: auto;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-space-room-composer__working-dot,
+  .core-sidebar-working-dot {
+    animation: verevon-space-pulse-signal 2.4s ease-in-out infinite;
+  }
+}
+
+/* Only the composer line gets a dark override: it sits on the dark panel. The
+   working row, the Stop button and the stopped line sit INSIDE
+   `.verevon-room-post` / `.verevon-space-room-exchange`, which have no dark
+   variant anywhere in this sheet and stay `--verevon-surface` (white) in dark
+   mode — their own turn text is deliberately dark-on-white. A first draft
+   painted these three white too, and measured 1.0:1 / 1.1:1 / 1.0:1 against
+   the real page; matching the card they sit on is the honest fix here, and
+   the cards' missing dark variant is recorded as its own finding. */
+.dark .verevon-space-room-composer__working {
+  color: rgb(255 255 255 / 66%);
+}
+
+/* ── Item 4b: room hygiene — pin, new-since-arrival, auto-title ────────────
+   Slack's channel affordances, for a room: a pinned post reads as pinned
+   before you read it, a post that is new since your last visit says so, and
+   both are stated as facts about the post rather than as chrome around it.
+   The post is a white card in both themes (it has no dark variant anywhere in
+   this sheet — see item 1b's note), so everything here uses the card's own
+   ink and stays readable regardless of the shell's theme. */
+
+.verevon-room-post[data-pinned] {
+  border-color: color-mix(in srgb, var(--verevon-accent-ink) 34%, var(--verevon-border));
+}
+
+.verevon-room-post__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-room-post__flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.6;
+}
+
+/* Pinned: the accent's readable ink on a faint accent tint. Measured on the
+   card: `--verevon-accent-ink` on a 10% tint was 4.54:1 — AA by 0.04 — so the
+   tint is 6%, which measures 4.7+; the accent itself would not pass at all
+   (2.79:1, the approve-button trap). */
+.verevon-room-post__flag--pinned {
+  background: color-mix(in srgb, var(--verevon-accent) 6%, transparent);
+  color: var(--verevon-accent-ink);
+}
+
+/* New: plain strong ink on a neutral tint. Not the accent — "new" is
+   information, and giving it the same colour as "pinned" would make two
+   different facts read as one. */
+.verevon-room-post__flag--new {
+  background: color-mix(in srgb, var(--verevon-text) 8%, transparent);
+  color: var(--verevon-text);
+}
+
+/* The author's pin control, in the post's meta row beside Reply. Styled as
+   the sibling text control it is, not as a button that competes with Send. */
+.verevon-room-post__pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.verevon-room-post__pin:hover {
+  color: var(--verevon-text);
+}
+
+.verevon-room-post__pin[aria-pressed="true"] {
+  color: var(--verevon-accent-ink);
+}
+
+.verevon-room-post__pin:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.verevon-room-post__pin:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.verevon-room-post__pin-error {
+  color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
+  font-size: 11px;
+}
+
+/* Sidebar rows. A pinned thread swaps its glyph rather than adding one, so the
+   row does not get wider; the new-since-arrival dot reuses the working dot's
+   geometry in the neutral ink, and yields to the working dot when both apply
+   — work in progress is the more urgent of the two facts. */
+.core-sidebar-panel-link__icon--pinned {
+  color: var(--verevon-accent-ink);
+}
+
+.core-sidebar-unread-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--verevon-text);
+  opacity: 0.7;
+}
+
+.core-sidebar-panel-link[data-unread] .core-sidebar-panel-link__label {
+  font-weight: 650;
+}
+
+.dark .core-sidebar-panel-link__icon--pinned {
+  color: var(--verevon-accent);
+}
+
+.dark .core-sidebar-unread-dot {
+  background: var(--verevon-sidebar-text);
+}
+
+/* ── Later tier: `/` skills in the room composer ───────────────────────────
+   The picker is the mention list with a highlighted row (it used to be
+   mouse-only), a picked skill is a chip above the textarea, and the scope badge
+   states the two scopes the registry actually has. Theme tokens throughout: the
+   composer follows the shell's theme, unlike the room's white post cards. */
+
+.verevon-space-room-mentions button[aria-selected="true"] {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-space-room-mentions__icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-room-mentions__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space-room-mentions__empty {
+  padding: 6px 10px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-skill-scope {
+  flex: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--verevon-text) 8%, transparent);
+  padding: 1px 7px;
+  color: var(--verevon-text);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.verevon-space-room-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-room-skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 3px 6px 3px 9px;
+  color: var(--verevon-text);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.verevon-space-room-skill-chip__icon {
+  width: 13px;
+  height: 13px;
+  color: var(--verevon-accent-ink);
+}
+
+.verevon-space-room-skill-chip__remove {
+  display: inline-flex;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  padding: 2px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-room-skill-chip__remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+.verevon-space-room-skill-chip__remove:hover {
+  background: color-mix(in srgb, var(--verevon-text) 8%, transparent);
+  color: var(--verevon-text);
+}
+
+.verevon-space-room-skill-chip__remove:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 1px;
+}
+
+/* Work tab: where routines are managed (later tier). A footnote, not a form. */
+.verevon-space-work__routines {
+  margin: 12px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.verevon-space-work__routines a {
+  color: var(--verevon-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ── Presence: who is in the room, and who is writing ──────────────────────
+   The header line is a fact among the room's other facts, so it inherits the
+   meta row's ink rather than introducing a colour. The typing line sits above
+   the composer, matching the agent working line's geometry so the two read as
+   one family — a colleague on top, Verevon below. */
+
+.verevon-space-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.verevon-space-presence__dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--verevon-success, #2f7d4f);
+}
+
+.verevon-space-room-composer__typing {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 6px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-composer__typing-dots {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 8px;
+}
+
+.verevon-space-room-composer__typing-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: verevon-typing-bounce 1.2s ease-in-out infinite;
+}
+
+.verevon-space-room-composer__typing-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.verevon-space-room-composer__typing-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes verevon-typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.55; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+/* Motion is decoration here: the sentence carries the whole meaning. */
+@media (prefers-reduced-motion: reduce) {
+  .verevon-space-room-composer__typing-dots span {
+    animation: none;
+    opacity: 0.75;
+  }
+}
+
+.dark .verevon-space-room-composer__typing {
+  color: var(--verevon-sidebar-text);
 }

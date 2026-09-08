@@ -10,6 +10,7 @@ Focused planes:
 - `apps/Model Plane`
 - `apps/Ingestion Plane`
 - `apps/Frontend Plane/verevonv3`
+- `apps/Support Plane` — RustDesk-compatible hbbs/hbbr backend for `@verevon/remote-core` (`apps/Frontend Plane/verevonv3/packages/remote-core`); see its README
 
 ## Tech Stack
 - Rust: latency-sensitive runtime, retrieval, browser, protocol, gateway, and hot-path services.
@@ -26,6 +27,7 @@ Focused planes:
 - Model Plane owns reasoning, sessions/runs, inference, execution loops, capabilities, sandboxes, browser grants, and cost.
 - Application Plane owns collaborative/realtime workspace projections and notifications.
 - Frontend Plane owns Verevon v3 UI plus same-origin gateway/BFF normalization.
+- Support Plane owns the RustDesk-compatible rendezvous/relay backend (`hbbs`/`hbbr`, run unmodified — see `apps/Support Plane/README.md` and `packages/remote-core/docs/licensing.md`). It owns no session, user or billing state; the live remote session runs browser→hbbs/hbbr over WSS and never transits the gateway, which only serves connection config (`/api/v1/remote-support/config`).
 - Channel Plane is future/docs-only today; do not build against it as if runtime exists.
 - No direct database crossing between planes.
 - No independent embeddings/reranking outside isolated labs.

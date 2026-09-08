@@ -13,8 +13,13 @@ import {
   encodeClipboard,
   decodeClipboard,
   decodeMisc,
+  encodeTestDelay,
+  decodeTestDelay,
+  encodeSwitchDisplayRequest,
+  encodeAuth2FA,
 } from '../../../../src/protocol/rustdesk/messages/controlCodec.js';
 import { decodeVideoFrame } from '../../../../src/protocol/rustdesk/messages/videoCodec.js';
+import { decodeCursorData, decodeCursorPosition } from '../../../../src/protocol/rustdesk/messages/cursorCodec.js';
 import {
   encodePunchHoleRequest,
   decodePunchHoleResponse,
@@ -166,6 +171,58 @@ describe('controlCodec', () => {
     const otherMisc = new ProtoWriter().bool(10, true).finish();
     expect(decodeMisc(otherMisc)).toEqual({ kind: 'other' });
   });
+
+  it('decodes Misc.switch_display (5) with the host\'s geometry and original resolution', () => {
+    const resolution = new ProtoWriter().int32(1, 3840).int32(2, 2160).finish();
+    const switchDisplay = new ProtoWriter()
+      .int32(1, 1)
+      .sint32(2, -1920)
+      .sint32(3, 0)
+      .int32(4, 2560)
+      .int32(5, 1440)
+      .bool(6, true)
+      .message(8, resolution)
+      .finish();
+    const misc = new ProtoWriter().message(5, switchDisplay).finish();
+
+    expect(decodeMisc(misc)).toEqual({
+      kind: 'switchDisplay',
+      value: {
+        display: 1,
+        x: -1920,
+        y: 0,
+        width: 2560,
+        height: 1440,
+        cursorEmbedded: true,
+        originalResolution: { width: 3840, height: 2160 },
+      },
+    });
+  });
+
+  it('encodes a SwitchDisplay request as Misc field 5 carrying only the display index', () => {
+    const misc = encodeSwitchDisplayRequest(2);
+    const reader = new ProtoReader(misc);
+    const tag = reader.readTag();
+    expect(tag.fieldNumber).toBe(5);
+    const inner = new ProtoReader(reader.readLengthDelimited());
+    expect(inner.readTag().fieldNumber).toBe(1);
+    expect(inner.readInt32()).toBe(2);
+    expect(inner.eof()).toBe(true);
+  });
+
+  it('round-trips TestDelay including the int64 timestamp', () => {
+    const value = { time: 1_725_000_000_123n, fromClient: true, lastDelay: 42, targetBitrate: 3_000 };
+    expect(decodeTestDelay(encodeTestDelay(value))).toEqual(value);
+  });
+
+  it('encodes Auth2FA with code (1) and hwid (2)', () => {
+    const wire = encodeAuth2FA({ code: '123456', hwid: new Uint8Array([9, 8]) });
+    const reader = new ProtoReader(wire);
+    expect(reader.readTag().fieldNumber).toBe(1);
+    expect(reader.readString()).toBe('123456');
+    expect(reader.readTag().fieldNumber).toBe(2);
+    expect([...reader.readLengthDelimited()]).toEqual([9, 8]);
+  });
 });
 
 describe('videoCodec', () => {
@@ -220,15 +277,57 @@ describe('rendezvousCodec', () => {
     });
     expect(requestWire.length).toBeGreaterThan(0);
 
-    const responseWire = new ProtoWriter().string(3, 'relay.verevon.com').string(7, '1.4.9').finish();
+    const responseWire = new ProtoWriter()
+      .string(2, 'session-uuid')
+      .string(3, 'relay.verevon.com')
+      .bytes(5, new Uint8Array([9, 9]))
+      .string(7, '1.4.9')
+      .finish();
     const decoded = decodeRelayResponse(responseWire);
-    expect(decoded).toEqual({ relayServer: 'relay.verevon.com', refuseReason: '', version: '1.4.9' });
+    expect(decoded).toMatchObject({
+      uuid: 'session-uuid',
+      relayServer: 'relay.verevon.com',
+      refuseReason: '',
+      version: '1.4.9',
+    });
+    expect([...decoded.pk]).toEqual([9, 9]);
   });
 
   it('round-trips KeyExchange with multiple keys', () => {
     const value = { keys: [new Uint8Array([1]), new Uint8Array([2, 2])] };
     const decoded = decodeKeyExchange(encodeKeyExchange(value));
     expect(decoded.keys.map((k) => [...k])).toEqual([[1], [2, 2]]);
+  });
+});
+
+describe('cursorCodec', () => {
+  it('decodes CursorData fields including the uint64 id and signed hotspot', () => {
+    const wire = new ProtoWriter()
+      .uint64(1, 18_446_744_073_709_551_615n)
+      .sint32(2, -1)
+      .sint32(3, 7)
+      .int32(4, 32)
+      .int32(5, 32)
+      .bytes(6, new Uint8Array([9, 9]))
+      .finish();
+    const decoded = decodeCursorData(wire);
+    expect(decoded).toMatchObject({ id: 18_446_744_073_709_551_615n, hotx: -1, hoty: 7, width: 32, height: 32 });
+    expect([...decoded.colors]).toEqual([9, 9]);
+  });
+
+  it('decodes CursorPosition with negative (multi-monitor) coordinates', () => {
+    const wire = new ProtoWriter().sint32(1, -1920).sint32(2, 40).finish();
+    expect(decodeCursorPosition(wire)).toEqual({ x: -1920, y: 40 });
+  });
+
+  it('dispatches cursor_data (12), cursor_position (13) and the bare cursor_id (14) through the envelope', () => {
+    const data = new ProtoWriter().uint64(1, 5n).int32(4, 1).int32(5, 1).finish();
+    expect(decodeMessage(new ProtoWriter().message(12, data).finish())).toMatchObject({ kind: 'cursorData', value: { id: 5n } });
+    expect(decodeMessage(new ProtoWriter().message(13, new ProtoWriter().sint32(1, 3).finish()).finish())).toEqual({
+      kind: 'cursorPosition',
+      value: { x: 3, y: 0 },
+    });
+    expect(decodeMessage(new ProtoWriter().uint64(14, 77n).finish())).toEqual({ kind: 'cursorId', value: 77n });
   });
 });
 
@@ -259,6 +358,24 @@ describe('envelope dispatch', () => {
     const wire = new ProtoWriter().message(9, inner).finish();
     const decoded = decodeMessage(wire);
     expect(decoded).toEqual({ kind: 'hash', value: { salt: 's', challenge: 'c' } });
+  });
+
+  it('dispatches Message.test_delay (5), Misc.switch_display and Message.auth_2fa (27)', () => {
+    const testDelay = encodeMessage({
+      kind: 'testDelay',
+      value: { time: 5n, fromClient: false, lastDelay: 12, targetBitrate: 0 },
+    });
+    expect(decodeMessage(testDelay)).toEqual({
+      kind: 'testDelay',
+      value: { time: 5n, fromClient: false, lastDelay: 12, targetBitrate: 0 },
+    });
+
+    const switchDisplay = encodeMessage({ kind: 'switchDisplay', display: 1 });
+    expect(decodeMessage(switchDisplay)).toMatchObject({ kind: 'switchDisplay', value: { display: 1 } });
+
+    const auth2fa = encodeMessage({ kind: 'auth2fa', value: { code: '000000', hwid: new Uint8Array(0) } });
+    const reader = new ProtoReader(auth2fa);
+    expect(reader.readTag().fieldNumber).toBe(27);
   });
 
   it('decodes an unrecognized Message field as unknown rather than throwing', () => {

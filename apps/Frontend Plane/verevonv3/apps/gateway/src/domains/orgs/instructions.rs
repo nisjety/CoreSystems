@@ -165,9 +165,9 @@ mod tests {
             })))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
 
@@ -184,8 +184,6 @@ mod tests {
             request.body(Body::empty()).unwrap()
         };
         let response = crate::build_router(state).oneshot(request).await.unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())

@@ -1,6 +1,5 @@
 import type {
   ActionResult,
-  CaptureFrameOptions,
   RemoteAction,
   RemoteDisplay,
   RemotePermission,
@@ -47,7 +46,7 @@ export class MockProtocol implements RemoteProtocol {
     return result;
   }
 
-  async captureFrame(_options?: CaptureFrameOptions): Promise<RemoteVideoFrame> {
+  async captureFrame(): Promise<RemoteVideoFrame> {
     return { width: 0, height: 0, timestamp: 0 };
   }
 

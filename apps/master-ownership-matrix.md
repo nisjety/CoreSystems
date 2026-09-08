@@ -32,6 +32,7 @@
 | Is it latency-sensitive, CPU/memory-sensitive, parsing-heavy, retrieval-heavy, browser-runtime-heavy, or protocol-heavy? | **Rust** |
 | Is it durable workflow, registry, policy, scheduling, resource CRUD, grants, billing, or operator control? | **Go** |
 | Is it eval/research/model-lab/provider-specific ML glue only? | **Python** |
+| Does it rendezvous or relay a live remote-desktop session between a support agent's browser and a customer's machine? | **Support Plane** (unmodified RustDesk `hbbs`/`hbbr`); the browser-side protocol is `@verevon/remote-core` in the Frontend Plane |
 
 ## 1. Canonical Plane Matrix
 
@@ -117,6 +118,16 @@
 | `cost-core` | Go | Token/cost ledger, budgets, usage events |
 | `graph-lab-py` / `eval-lab-py` | Python | LangGraph/LangChain/Deep Agents/eval prototyping; no production hot path |
 
+### Support Plane target
+
+| Component | Language / runtime | Owner scope |
+|---|---|---|
+| `hbbs` / `hbbr` | Rust, upstream `rustdesk/rustdesk-server` run **unmodified** (AGPL-3.0 — run-as-a-process, never copied; see `packages/remote-core/docs/licensing.md`) | Peer rendezvous and relay only; no Verevon identity, session or billing state |
+| Caddy `proxy` | Docker | TLS termination for the two plaintext WebSocket ports (21118/21119) — the only internet-facing entry for browsers |
+| `readiness` | busybox sidecar | TCP-probes all four ports; the upstream image is `FROM scratch` with no shell, so in-container healthchecks cannot work |
+| `@verevon/remote-core` | TypeScript (Frontend Plane, `packages/remote-core`) | Clean-room RustDesk wire protocol, crypto, codecs, permission model, AI frame sampling; framework-agnostic, no UI |
+| Gateway `remote_support` domain | Rust (Frontend Plane gateway) | Serves connection config only (`/api/v1/remote-support/config`); the live session never transits the gateway |
+
 ### CoreSystem Infra Plane target
 
 | Component | Language / runtime | Owner scope |
@@ -141,6 +152,8 @@
 11. **Notification intake is Application Plane-owned.** The canonical contract is `POST /api/v1/notification-requests`; Ingestion support workers and the Frontend gateway own their client calls and must propagate authentication, tenant, retention, and delivery failures honestly.
 12. **Provider execution never invents approval authority.** Conversation owns its durable human intent or approved-AI action; Ingestion Integration owns provider execution and the single-use receipt. An effectful call requires a tenant-bound service bearer plus a short-lived signature over the exact durable authorization, actor, tenant, provider effect, payload digest, and idempotency key. Every other issuer, including Model Plane, fails closed until it implements an equivalent durable contract.
 13. **Core Infra is traffic-only.** It may expose a local HTTP route to a plane-owned public gateway, but it never shares or administers a plane database, cache, broker, object store, tenant scope, provider credential, or user authority. A service on `coresystem-edge` is not granted access to another plane.
+
+14. **Support Plane is transport-only for remote sessions.** It rendezvous-matches and relays end-to-end-encrypted RustDesk sessions and grants nothing: who may reach which customer device, and any durable record that a session happened, are Control/Application concerns. Until an owning core persists remote-session records there is deliberately **no** action-registry contract for "start remote session" — a dispatcher with nothing behind it would be fabricated state. Control permissions (mouse/keyboard) come from the customer's machine per session and are never inferred from screen-view permission.
 
 ## 4. Research Notes Used
 

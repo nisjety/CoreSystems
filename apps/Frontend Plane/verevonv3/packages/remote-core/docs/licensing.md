@@ -43,6 +43,10 @@ Practical read for Support Plane:
 
 A quick pass over the client's `Cargo.toml`/`vcpkg.json` found the dependency tree overwhelmingly permissive (MIT/Apache-2.0/BSD/ISC — `serde`, `tokio`, `rustls`, `sodiumoxide`, `libvpx`, `libaom`, `libyuv`, `opus`). **One notable exception, flagged for completeness even though it doesn't touch this project**: the official client vendors its own FFmpeg build (`res/vcpkg/ffmpeg/portfile.cmake`) compiled with `--enable-gpl`, which reclassifies that specific FFmpeg build from its default LGPL-2.1+ to full **GPL** — a stronger copyleft than everything else in the tree, used for the client's hardware H264/H265 codec path on at least Windows. `remote-core` never touches this Rust codebase, this build, or any FFmpeg output, so it does not attach to anything in this repository — it's recorded here only because it directly answers "is any GPL, as opposed to AGPL/MIT/Apache, code involved anywhere," and because it would matter immediately if anyone later considered vendoring or linking against the official client's native build artifacts.
 
+## `remote-core`'s own runtime dependencies
+
+Two, both permissively licensed and neither derived from RustDesk: `libsodium-wrappers` (ISC — the crypto primitives) and `fzstd` (MIT — a pure-JS Zstandard *decompressor*, added 2026-09-08 because RustDesk always zstd-compresses cursor bitmaps). Zstandard itself is an open format (RFC 8878); using a decoder for it creates no relationship to RustDesk's code.
+
 ## What this means in practice for `@verevon/remote-core`
 
 - `packages/remote-core` contains **zero lines copied from any RustDesk repository**. Its protocol layer is an independent, original implementation informed by documented protocol facts (scenario c).

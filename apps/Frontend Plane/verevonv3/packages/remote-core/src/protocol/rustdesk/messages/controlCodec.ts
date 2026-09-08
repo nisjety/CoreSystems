@@ -1,6 +1,17 @@
 import { ProtoWriter } from '../wire/ProtoWriter.js';
 import { ProtoReader } from '../wire/ProtoReader.js';
-import type { RdClipboard, RdKeyEvent, RdMouseEvent, RdPermissionInfo } from './types.js';
+import type {
+  RdAuth2FA,
+  RdClipboard,
+  RdOptionMessage,
+  RdSupportedDecoding,
+  RdKeyEvent,
+  RdMouseEvent,
+  RdPermissionInfo,
+  RdResolution,
+  RdSwitchDisplay,
+  RdTestDelay,
+} from './types.js';
 
 // ---------- MouseEvent (sendes) ----------
 
@@ -105,17 +116,169 @@ function decodePermissionInfo(data: Uint8Array): RdPermissionInfo {
   return { permission, enabled };
 }
 
-export type RdMiscPayload = { readonly kind: 'permissionInfo'; readonly info: RdPermissionInfo } | { readonly kind: 'other' };
+// ---------- SwitchDisplay (sendes og mottas via Misc felt 5) ----------
 
-/** `Misc` (message.proto) er selv et oneof med ~30 varianter; vi dekoder kun permission_info (felt 6) og hopper over resten. */
+const MISC_SWITCH_DISPLAY = 5;
+const MISC_PERMISSION_INFO = 6;
+
+function decodeResolution(data: Uint8Array): RdResolution {
+  const reader = new ProtoReader(data);
+  let width = 0;
+  let height = 0;
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.fieldNumber === 1) width = reader.readInt32();
+    else if (tag.fieldNumber === 2) height = reader.readInt32();
+    else reader.skip(tag.wireType);
+  }
+  return { width, height };
+}
+
+/** Klientens forespørsel trenger bare `display`; øvrige felt er vertens svar-geometri. */
+export function encodeSwitchDisplayRequest(display: number): Uint8Array {
+  const switchDisplay = new ProtoWriter().int32(1, display).finish();
+  return new ProtoWriter().message(MISC_SWITCH_DISPLAY, switchDisplay).finish();
+}
+
+function decodeSwitchDisplay(data: Uint8Array): RdSwitchDisplay {
+  const reader = new ProtoReader(data);
+  let display = 0;
+  let x = 0;
+  let y = 0;
+  let width = 0;
+  let height = 0;
+  let cursorEmbedded = false;
+  let originalResolution: RdResolution | undefined;
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    switch (tag.fieldNumber) {
+      case 1:
+        display = reader.readInt32();
+        break;
+      case 2:
+        x = reader.readSint32();
+        break;
+      case 3:
+        y = reader.readSint32();
+        break;
+      case 4:
+        width = reader.readInt32();
+        break;
+      case 5:
+        height = reader.readInt32();
+        break;
+      case 6:
+        cursorEmbedded = reader.readBool();
+        break;
+      case 8:
+        originalResolution = decodeResolution(reader.readLengthDelimited());
+        break;
+      default:
+        reader.skip(tag.wireType);
+    }
+  }
+  return { display, x, y, width, height, cursorEmbedded, originalResolution };
+}
+
+export type RdMiscPayload =
+  | { readonly kind: 'permissionInfo'; readonly info: RdPermissionInfo }
+  | { readonly kind: 'switchDisplay'; readonly value: RdSwitchDisplay }
+  | { readonly kind: 'other' };
+
+/**
+ * `Misc` (message.proto) er selv et oneof med ~30 varianter; vi dekoder
+ * permission_info (felt 6) og switch_display (felt 5) og hopper over resten.
+ */
 export function decodeMisc(data: Uint8Array): RdMiscPayload {
   const reader = new ProtoReader(data);
   while (!reader.eof()) {
     const tag = reader.readTag();
-    if (tag.fieldNumber === 6) {
+    if (tag.fieldNumber === MISC_PERMISSION_INFO) {
       return { kind: 'permissionInfo', info: decodePermissionInfo(reader.readLengthDelimited()) };
+    }
+    if (tag.fieldNumber === MISC_SWITCH_DISPLAY) {
+      return { kind: 'switchDisplay', value: decodeSwitchDisplay(reader.readLengthDelimited()) };
     }
     reader.skip(tag.wireType);
   }
   return { kind: 'other' };
+}
+
+// ---------- OptionMessage ----------
+
+const MISC_OPTION = 7;
+
+function encodeSupportedDecoding(value: RdSupportedDecoding): Uint8Array {
+  // Rekkefølgen følger feltnumrene, ikke deklarasjonsrekkefølgen i vår type.
+  // `i444` (7) og `prefer_chroma` (8) utelates bevisst — se RdSupportedDecoding.
+  return new ProtoWriter()
+    .int32(1, value.abilityVp9 ? 1 : 0)
+    .int32(2, value.abilityH264 ? 1 : 0)
+    .int32(3, value.abilityH265 ? 1 : 0)
+    .enum(4, value.prefer)
+    .int32(5, value.abilityVp8 ? 1 : 0)
+    .int32(6, value.abilityAv1 ? 1 : 0)
+    .finish();
+}
+
+export function encodeOptionMessage(value: RdOptionMessage): Uint8Array {
+  const writer = new ProtoWriter();
+  if (value.imageQuality !== undefined) writer.enum(1, value.imageQuality);
+  if (value.showRemoteCursor !== undefined) writer.enum(3, value.showRemoteCursor);
+  if (value.disableAudio !== undefined) writer.enum(7, value.disableAudio);
+  if (value.disableClipboard !== undefined) writer.enum(8, value.disableClipboard);
+  if (value.supportedDecoding !== undefined) {
+    writer.message(10, encodeSupportedDecoding(value.supportedDecoding));
+  }
+  return writer.finish();
+}
+
+/** Endringer midt i økten går som `Misc.option` (felt 7). */
+export function encodeMiscOption(value: RdOptionMessage): Uint8Array {
+  return new ProtoWriter().message(MISC_OPTION, encodeOptionMessage(value)).finish();
+}
+
+// ---------- TestDelay (sendes og mottas) ----------
+
+export function encodeTestDelay(value: RdTestDelay): Uint8Array {
+  return new ProtoWriter()
+    .int64(1, value.time)
+    .bool(2, value.fromClient)
+    .uint32(3, value.lastDelay)
+    .uint32(4, value.targetBitrate)
+    .finish();
+}
+
+export function decodeTestDelay(data: Uint8Array): RdTestDelay {
+  const reader = new ProtoReader(data);
+  let time = 0n;
+  let fromClient = false;
+  let lastDelay = 0;
+  let targetBitrate = 0;
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    switch (tag.fieldNumber) {
+      case 1:
+        time = reader.readInt64();
+        break;
+      case 2:
+        fromClient = reader.readBool();
+        break;
+      case 3:
+        lastDelay = reader.readUint32();
+        break;
+      case 4:
+        targetBitrate = reader.readUint32();
+        break;
+      default:
+        reader.skip(tag.wireType);
+    }
+  }
+  return { time, fromClient, lastDelay, targetBitrate };
+}
+
+// ---------- Auth2FA (sendes) ----------
+
+export function encodeAuth2FA(value: RdAuth2FA): Uint8Array {
+  return new ProtoWriter().string(1, value.code).bytes(2, value.hwid).finish();
 }

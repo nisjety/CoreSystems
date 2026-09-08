@@ -28,40 +28,49 @@ export function HeroParallax() {
 			return;
 		}
 
-		const reduceMotion = window.matchMedia(
-			"(prefers-reduced-motion: reduce)",
-		).matches;
+		const matchMedia = gsap.matchMedia();
+		let refreshFrame: number | null = null;
 
-		if (reduceMotion) {
-			gsap.set([media, copy], { clearProps: "transform" });
-			return;
-		}
+		matchMedia.add(
+			{ reduceMotion: "(prefers-reduced-motion: reduce)" },
+			(context) => {
+				const { reduceMotion } = context.conditions as {
+					reduceMotion: boolean;
+				};
 
-		const context = gsap.context(() => {
-			const timeline = gsap.timeline({
-				defaults: { ease: "none", force3D: true },
-				scrollTrigger: {
-					trigger: hero,
-					start: "top top",
-					end: "bottom top",
-					scrub: true,
-					id: "verevon-hero-parallax",
-					invalidateOnRefresh: true,
-				},
-			});
+				if (reduceMotion) {
+					gsap.set([media, copy], { clearProps: "transform" });
+					return;
+				}
 
-			timeline
-				.fromTo(media, { yPercent: 0 }, { yPercent: 80, duration: 1 }, 0)
-				.fromTo(copy, { yPercent: 0 }, { yPercent: 40, duration: 1 }, 0);
-		}, hero);
+				const timeline = gsap.timeline({
+					defaults: { ease: "none", force3D: true },
+					scrollTrigger: {
+						trigger: hero,
+						start: "top top",
+						end: "bottom top",
+						scrub: true,
+						id: "verevon-hero-parallax",
+						invalidateOnRefresh: true,
+					},
+				});
 
-		const refreshFrame = window.requestAnimationFrame(() =>
-			ScrollTrigger.refresh(),
+				timeline
+					.fromTo(media, { yPercent: 0 }, { yPercent: 80, duration: 1 }, 0)
+					.fromTo(copy, { yPercent: 0 }, { yPercent: 40, duration: 1 }, 0);
+
+				refreshFrame = window.requestAnimationFrame(() =>
+					ScrollTrigger.refresh(),
+				);
+			},
 		);
 
 		return () => {
-			window.cancelAnimationFrame(refreshFrame);
-			context.revert();
+			if (refreshFrame !== null) {
+				window.cancelAnimationFrame(refreshFrame);
+			}
+
+			matchMedia.revert();
 		};
 	}, []);
 

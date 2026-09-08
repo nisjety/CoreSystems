@@ -1,7 +1,11 @@
 import { ProtoWriter } from '../wire/ProtoWriter.js';
 import { ProtoReader } from '../wire/ProtoReader.js';
 import type {
+  RdAuth2FA,
   RdClipboard,
+  RdCursorData,
+  RdCursorPosition,
+  RdOptionMessage,
   RdHash,
   RdKeyEvent,
   RdKeyExchange,
@@ -15,11 +19,25 @@ import type {
   RdRelayResponse,
   RdRequestRelay,
   RdSignedId,
+  RdSwitchDisplay,
+  RdTestDelay,
   RdVideoFrame,
 } from './types.js';
 import { MessageField, decodeHash, decodeLoginResponse, encodeLoginRequest, encodePublicKey, decodePublicKey, encodeSignedId, decodeSignedId } from './sessionCodec.js';
-import { encodeClipboard, decodeClipboard, encodeKeyEvent, encodeMouseEvent, decodeMisc } from './controlCodec.js';
+import {
+  encodeClipboard,
+  decodeClipboard,
+  encodeKeyEvent,
+  encodeMouseEvent,
+  decodeMisc,
+  encodeSwitchDisplayRequest,
+  encodeTestDelay,
+  decodeTestDelay,
+  encodeAuth2FA,
+  encodeMiscOption,
+} from './controlCodec.js';
 import { decodeVideoFrame } from './videoCodec.js';
+import { decodeCursorData, decodeCursorPosition } from './cursorCodec.js';
 import {
   RendezvousField,
   encodeKeyExchange,
@@ -38,11 +56,27 @@ export type OutgoingMessage =
   | { readonly kind: 'loginRequest'; readonly value: RdLoginRequest }
   | { readonly kind: 'mouseEvent'; readonly value: RdMouseEvent }
   | { readonly kind: 'keyEvent'; readonly value: RdKeyEvent }
-  | { readonly kind: 'clipboard'; readonly value: RdClipboard };
+  | { readonly kind: 'clipboard'; readonly value: RdClipboard }
+  | { readonly kind: 'testDelay'; readonly value: RdTestDelay }
+  | { readonly kind: 'switchDisplay'; readonly display: number }
+  | { readonly kind: 'auth2fa'; readonly value: RdAuth2FA }
+  | { readonly kind: 'option'; readonly value: RdOptionMessage };
 
 export function encodeMessage(message: OutgoingMessage): Uint8Array {
   const writer = new ProtoWriter();
   switch (message.kind) {
+    case 'testDelay':
+      writer.message(MessageField.TestDelay, encodeTestDelay(message.value));
+      break;
+    case 'switchDisplay':
+      writer.message(MessageField.Misc, encodeSwitchDisplayRequest(message.display));
+      break;
+    case 'option':
+      writer.message(MessageField.Misc, encodeMiscOption(message.value));
+      break;
+    case 'auth2fa':
+      writer.message(MessageField.Auth2FA, encodeAuth2FA(message.value));
+      break;
     case 'signedId':
       writer.message(MessageField.SignedId, encodeSignedId(message.value));
       break;
@@ -73,6 +107,11 @@ export type IncomingMessage =
   | { readonly kind: 'videoFrame'; readonly value: RdVideoFrame }
   | { readonly kind: 'clipboard'; readonly value: RdClipboard }
   | { readonly kind: 'permissionInfo'; readonly value: RdPermissionInfo }
+  | { readonly kind: 'switchDisplay'; readonly value: RdSwitchDisplay }
+  | { readonly kind: 'testDelay'; readonly value: RdTestDelay }
+  | { readonly kind: 'cursorData'; readonly value: RdCursorData }
+  | { readonly kind: 'cursorPosition'; readonly value: RdCursorPosition }
+  | { readonly kind: 'cursorId'; readonly value: bigint }
   | { readonly kind: 'unknown'; readonly fieldNumber: number };
 
 /**
@@ -100,11 +139,19 @@ export function decodeMessage(data: Uint8Array): IncomingMessage {
       }
       case MessageField.Clipboard:
         return { kind: 'clipboard', value: decodeClipboard(reader.readLengthDelimited()) };
+      case MessageField.TestDelay:
+        return { kind: 'testDelay', value: decodeTestDelay(reader.readLengthDelimited()) };
+      case MessageField.CursorData:
+        return { kind: 'cursorData', value: decodeCursorData(reader.readLengthDelimited()) };
+      case MessageField.CursorPosition:
+        return { kind: 'cursorPosition', value: decodeCursorPosition(reader.readLengthDelimited()) };
+      case MessageField.CursorId:
+        return { kind: 'cursorId', value: reader.readUint64() };
       case MessageField.Misc: {
         const misc = decodeMisc(reader.readLengthDelimited());
-        return misc.kind === 'permissionInfo'
-          ? { kind: 'permissionInfo', value: misc.info }
-          : { kind: 'unknown', fieldNumber: tag.fieldNumber };
+        if (misc.kind === 'permissionInfo') return { kind: 'permissionInfo', value: misc.info };
+        if (misc.kind === 'switchDisplay') return { kind: 'switchDisplay', value: misc.value };
+        return { kind: 'unknown', fieldNumber: tag.fieldNumber };
       }
       default:
         // `Message` is a pure oneof — exactly one field is ever populated —

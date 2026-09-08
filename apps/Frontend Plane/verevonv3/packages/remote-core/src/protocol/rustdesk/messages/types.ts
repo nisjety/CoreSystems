@@ -50,6 +50,7 @@ export interface RdLoginRequest {
   readonly hwid: Uint8Array;
   readonly avatar: string;
   readonly osLogin?: RdOSLogin;
+  readonly option?: RdOptionMessage;
 }
 
 export type RdLoginResult =
@@ -251,6 +252,136 @@ export interface RdPermissionInfo {
   readonly enabled: boolean;
 }
 
+// ---------- Forsinkelsesmåling ----------
+
+/**
+ * Verten sender `TestDelay` periodisk og forventer den ekkoet tilbake (slik
+ * måler den RTT og justerer bitrate). Vi kan også sende våre egne med
+ * `fromClient: true`; verten ekkoer dem, og vi måler vår egen forsinkelse.
+ */
+export interface RdTestDelay {
+  readonly time: bigint;
+  readonly fromClient: boolean;
+  readonly lastDelay: number;
+  readonly targetBitrate: number;
+}
+
+// ---------- Skjermbytte ----------
+
+/**
+ * Går begge veier under `Misc.switch_display`: klienten ber om bytte ved å
+ * sette `display`; verten bekrefter/annonserer med full geometri.
+ */
+export interface RdSwitchDisplay {
+  readonly display: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly cursorEmbedded: boolean;
+  readonly originalResolution?: RdResolution;
+}
+
+// ---------- Markør ----------
+
+/**
+ * `colors` er ALLTID zstd-komprimert på ledningen (uten noe flagg i
+ * meldingen) og pakker ut til nøyaktig width*height*4 byte ikke-
+ * premultiplisert RGBA, rad for rad ovenfra. Verifisert mot vertens
+ * markørfangst for Windows/X11/macOS 2026-09-07.
+ */
+export interface RdCursorData {
+  readonly id: bigint;
+  readonly hotx: number;
+  readonly hoty: number;
+  readonly width: number;
+  readonly height: number;
+  readonly colors: Uint8Array;
+}
+
+/** Vertens GLOBALE skjermkoordinater (kan være negative) — ikke skjermlokale. */
+export interface RdCursorPosition {
+  readonly x: number;
+  readonly y: number;
+}
+
+// ---------- Innstillinger (OptionMessage) ----------
+
+/**
+ * MERK FELTVERDIENE. `BoolOption` er IKKE en boolsk verdi: 0 = «ikke satt»,
+ * 1 = NEI, 2 = JA. Den intuitive-men-gale koblingen (1 = ja) sender altså et
+ * eksplisitt NEI, og et eksplisitt nei er ikke det samme som fraværende —
+ * verten skiller på dem. Verifisert mot message.proto (nestet i
+ * OptionMessage) og mot vertens `q != BoolOption::NotSet`-lesning.
+ */
+export const BoolOption = {
+  NotSet: 0,
+  No: 1,
+  Yes: 2,
+} as const;
+
+/** `ImageQuality` hopper over 1 — verdiene er dem protokollen faktisk bruker. */
+export const ImageQuality = {
+  NotSet: 0,
+  Low: 2,
+  Balanced: 3,
+  Best: 4,
+} as const;
+
+export const PreferCodec = {
+  Auto: 0,
+  VP9: 1,
+  H264: 2,
+  H265: 3,
+  VP8: 4,
+  AV1: 5,
+} as const;
+
+/**
+ * Hvilke kodeker VI kan dekode. Feltene er `int32` i protokollen, men brukes
+ * som 0/1-flagg: verten tester bare `> 0`. Vi sender derfor eksakt 1.
+ *
+ * To fakta som er lette å ta feil av, begge verifisert mot vertens
+ * `Encoder::update`:
+ *  - `ability_vp9` LESES ALDRI av verten. VP9 er den hardkodede grunnlinjen,
+ *    og det finnes ingen måte å be seg fritatt fra den. En nettleser som ikke
+ *    kan dekode VP9 kan altså ikke sikres av protokollen.
+ *  - `i444`/`prefer_chroma` utelates bevisst. Referanseklienten sender
+ *    `i444 { vp9: true, av1: true }`, men gjør vi det samme, kan en vert med
+ *    bare oss som seer sende VP9 profil 1 (4:4:4) — som de fleste
+ *    WebCodecs-dekodere avviser, uten noe flagg på ledningen som forklarer det.
+ */
+export interface RdSupportedDecoding {
+  readonly abilityVp8: boolean;
+  readonly abilityVp9: boolean;
+  readonly abilityAv1: boolean;
+  readonly abilityH264: boolean;
+  readonly abilityH265: boolean;
+  readonly prefer: number;
+}
+
+/**
+ * Delvis `OptionMessage`. Vi sender bare feltene vi faktisk mener noe med:
+ * alt utelatt leses av verten som «ikke satt», og verten har egne standarder
+ * for dem. Merk at `Misc.option` har en egen kompatibilitetssjekk hos verten
+ * som krever at et `supported_decoding`-oppdrag sendes ALENE — ikke slå
+ * sammen kodek-oppdateringer og kvalitetsendringer i én melding.
+ */
+export interface RdOptionMessage {
+  readonly imageQuality?: number;
+  readonly showRemoteCursor?: number;
+  readonly disableAudio?: number;
+  readonly disableClipboard?: number;
+  readonly supportedDecoding?: RdSupportedDecoding;
+}
+
+// ---------- Tofaktor ----------
+
+export interface RdAuth2FA {
+  readonly code: string;
+  readonly hwid: Uint8Array;
+}
+
 // ---------- Video ----------
 
 export interface RdEncodedVideoFrame {
@@ -324,9 +455,17 @@ export interface RdRequestRelay {
   readonly token: string;
 }
 
-/** `refuseReason` ikke-tom er den eneste utvetydige feilindikatoren her. */
+/**
+ * `refuseReason` ikke-tom er den eneste utvetydige feilindikatoren her.
+ * `peerId` (felt 4) og `pk` (felt 5) er to grener av samme oneof — kun én er
+ * satt av avsenderen. `pk` er serverens signerte vouch for motparten når den
+ * finnes; se SecureChannel.verifyServerVouch.
+ */
 export interface RdRelayResponse {
+  readonly uuid: string;
   readonly relayServer: string;
+  readonly peerId: string;
+  readonly pk: Uint8Array;
   readonly refuseReason: string;
   readonly version: string;
 }

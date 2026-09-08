@@ -1,0 +1,38 @@
+{
+  "reduced": true,
+  "videos": [
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/verevon-hero-premiere-light.mp4",
+      "time": 4.699109,
+      "paused": false
+    },
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/problem-waiting/waiting-room-ai.mp4",
+      "time": 0,
+      "paused": true
+    },
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/problem-scattered/archive-catalog-6549263.mp4",
+      "time": 0,
+      "paused": true
+    },
+    {
+      "src": "http://127.0.0.1:3100/verevon-vibe/problem-control/autonomous-car-ai.mp4",
+      "time": 0,
+      "paused": true
+    }
+  ],
+  "logoSection": {
+    "html": "<section aria-label=\"Systemer Verevon kobler til\" class=\"grid h-[clamp(112px,12vw,154px)] grid-cols-[minmax(138px,220px)_minmax(0,1fr)] items-center gap-[clamp(34px,4.8vw,92px)] overflow-hidden border-b border-[color-mix(in_srgb,var(--verevon-j-text)_7%,transparent)] bg-background px-[clamp(56px,5.55vw,208px)] max-[760px]:h-auto max-[760px]:grid-cols-1 max-[760px]:gap-4 max-[760px]:px-[clamp(24px,4vw,56px)] max-[760px]:py-7\"><p class=\"m-0 grid justify-self-start border-r border-[color-mix(in_srgb,var(--verevon-j-text)_10%,transparent)] pr-[clamp(18px,2vw,34px)] text-left font-protokoll text-[clamp(0.78rem,0.72vw,0.92rem)] font-medium uppercase leading-[1.12] tracking-[0.025em] text-[color-mix(in_srgb,var(--verevon-j-text)_58%,transparent)] max-[760px]:flex max-[760px]:gap-1.5 max-[760px]:border-r-0 max-[760px]:pr-0\"><span>Koblet til</span><span>systemene deres</span></p><div class=\"flex h-full min-w-0 items-center overflow-hidden max-[760px]:h-12\" style=\"-webkit-mask-image:linear-gradient(to right, transparent, black 80px, black calc(100% - 80px), transparent);mask-image:linear-gradient(to right, transparent, black 80px, black calc(100% - 80px), transparent)\"><div><div class=\"flex w-max items-center will-change-transform\" style=\"flex-direction:row;gap:112px;transform:none\"><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-medium tracking-[-0.045em]\">Enhetsregisteret</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]\">Slack</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-light tracking-[0.02em]\">Gmail</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]\">Notion</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1rem,1.55vw,1.48rem)] font-medium tracking-[-0.01em]\">SharePoint</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-light tracking-[0.02em]\">OneDrive</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-medium tracking-[-0.045em]\">Outlook</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]\">Microsoft 365</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-medium tracking-[-0.045em]\">Enhetsregisteret</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]\">Slack</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-light tracking-[0.02em]\">Gmail</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]\">Notion</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1rem,1.55vw,1.48rem)] font-medium tracking-[-0.01em]\">SharePoint</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-light tracking-[0.02em]\">OneDrive</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-medium tracking-[-0.045em]\">Outlook</span><span class=\"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)] font-arbeit text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]\">Microsoft 365</span></div></div></div></section>",
+    "rect": {
+      "x": 0,
+      "y": 844,
+      "width": 390,
+      "height": 134.96875,
+      "top": 844,
+      "right": 390,
+      "bottom": 978.96875,
+      "left": 0
+    }
+  }
+}

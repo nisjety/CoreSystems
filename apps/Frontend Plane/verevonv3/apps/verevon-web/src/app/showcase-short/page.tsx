@@ -5,6 +5,10 @@ export const metadata: Metadata = {
 	title: "Showcase Short",
 	description:
 		"A vertical Verevon product showcase built for recording as a short-form video.",
+	robots: {
+		follow: false,
+		index: false,
+	},
 };
 
 export default function ShowcaseShortPage() {

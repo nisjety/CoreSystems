@@ -586,13 +586,42 @@ type WireToolSpec = { name: string; description: string; parameters_json: string
 function buildToolSpecs(request: ChatInvokeRequest): WireToolSpec[] {
   return createSelectedAgentToolSpecs({
     browseWeb: request.browseWeb,
-    actions: request.actions,
+    // Skills are guidance, not tools. model-gateway injects a picked skill's
+    // body as system context from `skill_ids` (see buildChatWireBody). The old
+    // path synthesized a no-op tool spec named after the skill: the model was
+    // offered something to call, and nothing steered the answer.
+    actions: request.actions?.filter((action) => action.kind !== 'skill'),
     explicitTools: request.tools,
   }).map((tool) => ({
     name: tool.name,
     description: tool.description,
     parameters_json: tool.parametersJson,
   }))
+}
+
+/** Mirrors model-gateway `MAX_REQUESTED_SKILLS`; the server caps again. */
+const MAX_SKILL_IDS = 4
+
+/**
+ * The skills the member picked explicitly (`/` in a composer), as ids for the
+ * wire. Trimmed, de-duplicated, capped. The server resolves each against the
+ * org's catalogue and the ownership rule and drops what the caller may not use
+ * — this list is a request, never a grant.
+ */
+function skillIdsField(actions: readonly ChatAction[] | undefined): { skill_ids?: string[] } {
+  const ids = pickedSkillIds(actions)
+  return ids.length > 0 ? { skill_ids: ids } : {}
+}
+
+function pickedSkillIds(actions: readonly ChatAction[] | undefined): string[] {
+  const out: string[] = []
+  for (const action of actions ?? []) {
+    if (action.kind !== 'skill') continue
+    const id = action.id.trim()
+    if (id && !out.includes(id)) out.push(id)
+    if (out.length >= MAX_SKILL_IDS) break
+  }
+  return out
 }
 
 /**
@@ -655,6 +684,10 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     session_key: request.sessionKey?.trim() || threadId,
     space_ref: request.spaceRef?.trim() || undefined,
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
+    // Explicit skill picks. The KEY is absent when none — not `undefined`, not
+    // `[]` — so a turn that names no skill is byte-for-byte what it was before
+    // this field existed.
+    ...(supportReadOnly || subscriptionBacked ? {} : skillIdsField(request.actions)),
     browse_web: supportReadOnly || subscriptionBacked ? false : request.browseWeb ?? false,
     generate_image: supportReadOnly || subscriptionBacked ? false : request.generateImage ?? false,
     // Sent as a real field, not just as the `agentic` feature above: the

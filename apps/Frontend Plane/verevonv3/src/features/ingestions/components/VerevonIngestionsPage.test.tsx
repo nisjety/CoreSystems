@@ -114,7 +114,10 @@ describe('VerevonIngestionsPage', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /start kjøring/i }))
 
-    await waitFor(() => expect(screen.getByText('https://example.com/new-page')).toBeTruthy())
+    // The reconciled run renders its target in the runs table and in the
+    // evidence-focus rail (plus the active-runs strip while it is queued) —
+    // several elements by design, so assert presence, not uniqueness.
+    await waitFor(() => expect(screen.getAllByText('https://example.com/new-page').length).toBeGreaterThan(0))
     expect(screen.queryByRole('alert')).toBeNull()
   })
 

@@ -73,14 +73,27 @@ export function encodeRequestRelay(value: RdRequestRelay): Uint8Array {
 
 export function decodeRelayResponse(data: Uint8Array): RdRelayResponse {
   const reader = new ProtoReader(data);
+  let uuid = '';
   let relayServer = '';
+  let peerId = '';
+  let pk: Uint8Array = new Uint8Array(0);
   let refuseReason = '';
   let version = '';
   while (!reader.eof()) {
     const tag = reader.readTag();
     switch (tag.fieldNumber) {
+      case 2:
+        uuid = reader.readString();
+        break;
       case 3:
         relayServer = reader.readString();
+        break;
+      // Felt 4 (id) og 5 (pk) er to grener av samme oneof — bare én er satt.
+      case 4:
+        peerId = reader.readString();
+        break;
+      case 5:
+        pk = reader.readLengthDelimited();
         break;
       case 6:
         refuseReason = reader.readString();
@@ -92,7 +105,7 @@ export function decodeRelayResponse(data: Uint8Array): RdRelayResponse {
         reader.skip(tag.wireType);
     }
   }
-  return { relayServer, refuseReason, version };
+  return { uuid, relayServer, peerId, pk, refuseReason, version };
 }
 
 // ---------- KeyExchange (sendes og mottas) ----------

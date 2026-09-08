@@ -1,6 +1,6 @@
 # Verevon Support Plane
 
-**Status:** Initial infrastructure scaffold — deployable locally, not yet operated in production
+**Status:** Runs locally (verified 2026-09-07: both services start, readiness healthy, `remote-core` reaches hbbs over WebSocket) — not yet operated in production
 **Last updated:** 2026-09-01
 **Product owner:** Support / Remote Assistance
 **Runtime position:** Backend infrastructure for `@verevon/remote-core` (`apps/Frontend Plane/verevonv3/packages/remote-core`)
@@ -49,6 +49,23 @@ See `.env.example` for the full list. The load-bearing ones:
 | `SUPPORT_PLANE_RELAY_ADDR` | Advertised relay address (`RELAY` env var passed to hbbs) — must be the address clients can actually reach hbbr on |
 | `SUPPORT_PLANE_KEY` | The `-k` license/access key both hbbs and hbbr require to match — generate a real secret per environment, never reuse the local-dev default |
 
+## Connecting the Verevon gateway to this plane
+
+The SPA never hardcodes these addresses: the gateway's `remote_support` domain
+(`apps/Frontend Plane/verevonv3/apps/gateway/src/domains/remote_support.rs`)
+serves them from `GET /api/v1/remote-support/config`. Set these on the
+**gateway**, not on the SPA:
+
+| Gateway variable | Value |
+|---|---|
+| `REMOTE_SUPPORT_RENDEZVOUS_URL` | `wss://<SUPPORT_PLANE_RENDEZVOUS_DOMAIN>` (Caddy fronts hbbs:21118) — `ws://localhost:21118` for a local rig |
+| `REMOTE_SUPPORT_RELAY_URL` | `wss://<SUPPORT_PLANE_RELAY_DOMAIN>` (Caddy fronts hbbr:21119). Optional; overrides the address hbbs advertises |
+| `REMOTE_SUPPORT_SERVER_PUBLIC_KEY` | The `Key:` value hbbs logs at first start (see above). **Required** — without it the gateway reports `configured: false` and the UI refuses to connect, because the peer could not be authenticated |
+
+The gateway reports `configured: false` plus the missing variable names rather
+than inventing a default host, and the Support › Remote support surface shows
+exactly that state until all required values are present.
+
 ## What Verevon still needs to build on top of this
 
 Per `remote-core`'s own architecture doc, the connect flow through this infrastructure is: Verevon's backend issues a short-lived session token → the browser passes it as `auth.token` to `@verevon/remote-core` → it's used exactly like a RustDesk temporary password (`RustDeskPasswordAuthenticator`, already implemented and tested in `remote-core`). **Support Plane itself does not know anything about Verevon sessions, tickets, or users** — that mapping (which support agent is allowed to reach which customer's device ID, issuing/rotating temporary passwords on the Verevon Agent side) is Convex/Control-Plane-owned product logic, not something this infrastructure plane does.
@@ -58,11 +75,35 @@ Per `remote-core`'s own architecture doc, the connect flow through this infrastr
 ```bash
 cd "apps/Support Plane"
 cp .env.example .env   # fill in real values before running anywhere but localhost
-docker compose up -d
+docker compose up -d hbbs hbbr readiness   # omit Caddy locally: it wants real DNS + certs
 docker compose ps
 ```
 
-For local-only testing, point `remote-core`'s `rendezvousUrl`/`relayUrl` at `ws://localhost:21118` / `ws://localhost:21119` directly (skipping Caddy) — TLS is only required once a real browser origin other than `localhost` is involved.
+`SUPPORT_PLANE_KEY=_` is fine locally — hbbs then generates its own key pair on first start.
+
+### Getting the server key clients need
+
+hbbs generates one Ed25519 pair at first start and logs its public half:
+
+```bash
+docker compose logs hbbs | grep 'Key:'
+```
+
+That single base64 string is **both** the access key clients must present *and* the key used to verify peer identity — `remote-core` takes it as `serverPublicKey` and reuses it as `licenceKey` automatically. Verified empirically: send an empty key and hbbs answers `LICENSE_MISMATCH`.
+
+### Reaching the WebSocket ports locally
+
+Ports 21118/21119 are deliberately **not** published to the host — only Caddy (same Docker network) may reach them, because they are plaintext `ws://`. For local testing either run your client inside the network:
+
+```bash
+docker run --rm --network support-plane_support-plane node:24-alpine ...
+```
+
+or add a throwaway override that publishes them to `127.0.0.1` only. Do not publish them in any shared environment.
+
+### A note on health
+
+The `rustdesk-server` image is built `FROM scratch` — it has no `/bin/sh` and no `nc`, so an in-container healthcheck is impossible (it fails with `stat /bin/sh: no such file or directory` and marks a perfectly healthy service as unhealthy). That is why hbbs/hbbr carry no healthcheck and a small `readiness` sidecar TCP-probes all four ports over the network instead. Gate on `readiness`, not on hbbs/hbbr.
 
 ## Known gaps
 

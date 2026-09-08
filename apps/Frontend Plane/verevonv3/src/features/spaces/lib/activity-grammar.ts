@@ -605,20 +605,26 @@ export function activityFromApproval(
 }
 
 /**
- * A run's own cost and effort, as a detail line under its sentence.
+ * A run's own effort, and its cost when a real figure exists, as a detail line
+ * under its sentence.
  *
- * `RunDetail` has carried `input_tokens`, `output_tokens` and `steps_completed`
- * since the contract was written; the Work tab simply never read them. This is
- * the "run proof/cost" half of S2.5, and it is deliberately tokens rather than
- * a currency figure: pricing is a Control-owned concern and a browser-side
- * multiplication would be an invented number.
+ * `RunDetail` carries `input_tokens`, `output_tokens` and `steps_completed`.
+ * Only the steps are real today: session-core does not track token usage and
+ * reports both token fields as a literal `0` ("owned by the inference path",
+ * `run_service_grpc.rs`). The actual per-run cost lives in cost-core's
+ * `cost_entries.run_id` and is not joined into the run listing by any plane.
+ * So a zero total is treated as "no figure", never printed — `0 tokens` under
+ * every run was a false statement this adapter made until 2026-09-08. When the
+ * fields are non-zero they are printed as tokens, not currency: pricing is a
+ * Control-owned concern and a browser-side multiplication would be an invented
+ * number.
  */
 function runCostDetail(source: RunLikeActivitySource): string[] {
   const detail: string[] = []
-  const input = typeof source.input_tokens === 'number' ? source.input_tokens : undefined
-  const output = typeof source.output_tokens === 'number' ? source.output_tokens : undefined
-  if (input !== undefined || output !== undefined) {
-    detail.push(`${(input ?? 0) + (output ?? 0)} tokens`)
+  const input = typeof source.input_tokens === 'number' ? source.input_tokens : 0
+  const output = typeof source.output_tokens === 'number' ? source.output_tokens : 0
+  if (input + output > 0) {
+    detail.push(`${input + output} tokens`)
   }
   if (typeof source.steps_completed === 'number' && source.steps_completed > 0) {
     detail.push(`${source.steps_completed} steg`)

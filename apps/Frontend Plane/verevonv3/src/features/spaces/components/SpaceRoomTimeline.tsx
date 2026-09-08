@@ -1,16 +1,17 @@
-import { Bot, MessageCircle, Sparkles } from '@/shared/icons'
-import { createMemo, For, Show } from 'solid-js'
+import { Bot, MessageCircle, Pin, PinOff, Sparkles } from '@/shared/icons'
+import { createMemo, createSignal, For, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import {
   AWAITING_APPROVAL_RUN_STATUS,
   FAILED_RUN_STATUSES,
+  LIVE_RUN_STATUSES,
   formatWhen,
   stripMarkdownPreview,
   threadStatus,
 } from '@/features/spaces/lib/space-thread-presentation'
 import { SpaceApprovalPanel } from './SpaceApprovalPanel'
-import { getSpaceThreadTranscript } from '@/shared/api/spaces-client'
+import { getSpaceThreadTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -120,6 +121,14 @@ export interface SpaceRoomTimelineProps {
   /** Called after an approval settles, so the room re-reads its projection and
    * the post's status stops saying it is waiting. */
   readonly onApprovalSettled?: () => void
+  /**
+   * Posts new since the reader arrived (item 4b), derived by the page from its
+   * arrival-time read marker. Absent means "unknown", and nothing is badged.
+   */
+  readonly unreadThreadIds?: () => ReadonlySet<string>
+  /** Called after a pin or retitle lands, so the room re-reads its projection
+   * and the new order and name come from the server rather than this browser. */
+  readonly onPresentationChanged?: () => void
 }
 
 export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
@@ -156,6 +165,8 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
               roster={props.roster}
               viewerSubjectId={props.viewerSubjectId}
               agentName={agentName()}
+              unread={() => props.unreadThreadIds?.().has(thread.thread_id) === true}
+              onPresentationChanged={props.onPresentationChanged}
               onReply={props.onReply}
               onApprovalSettled={props.onApprovalSettled}
             />
@@ -174,6 +185,9 @@ function SpaceRoomPost(props: {
   readonly agentName: string
   readonly onReply?: (thread: SpaceThread) => void
   readonly onApprovalSettled?: () => void
+  /** New since the reader arrived — see `SpaceRoomTimelineProps.unreadThreadIds`. */
+  readonly unread?: () => boolean
+  readonly onPresentationChanged?: () => void
 }) {
   const i18n = useI18n()
   const [transcript] = createResource(
@@ -196,6 +210,14 @@ function SpaceRoomPost(props: {
   const starterName = () =>
     resolveAuthorName(props.thread.owner_subject_id, props.roster(), props.viewerSubjectId?.(), i18n.tr)
   const isFailed = () => FAILED_RUN_STATUSES.has(props.thread.latest_run_status ?? '')
+  // Someone's agent is producing output in this post right now, per the
+  // server's projection. This is what every OTHER member sees while a turn
+  // streams — the sender has the live exchange in their own composer, but
+  // until this row existed the rest of the room saw nothing until the poll
+  // delivered a finished reply, and the room went dark exactly when it was
+  // busiest. Paused-for-approval is deliberately not "working": nobody is
+  // producing anything, a person is being waited for.
+  const isWorking = () => LIVE_RUN_STATUSES.has(props.thread.latest_run_status ?? '')
   // Only a run that is actually paused gets a decision surface, and only when
   // the projection named the run — an approval card with no run to decide on
   // would be a control that cannot do anything.
@@ -203,9 +225,63 @@ function SpaceRoomPost(props: {
     props.thread.latest_run_status === AWAITING_APPROVAL_RUN_STATUS
     && Boolean(props.thread.latest_run_id?.trim())
   const when = () => props.thread.updated_at ?? props.thread.latest_run_updated_at
+  // Pinning is owner-bound in Session Core, so the control is offered only to
+  // the member who started the post. Anyone else sees the pin, not the button:
+  // a control that would be refused every time is a control that lies.
+  const isAuthor = () => {
+    const viewer = props.viewerSubjectId?.()?.trim()
+    return Boolean(viewer) && props.thread.owner_subject_id?.trim() === viewer
+  }
+  const [pinBusy, setPinBusy] = createSignal(false)
+  const [pinError, setPinError] = createSignal<string | undefined>(undefined)
+  async function togglePin(): Promise<void> {
+    if (pinBusy()) return
+    setPinBusy(true)
+    setPinError(undefined)
+    try {
+      await updateSpaceThreadPresentation(props.spaceRef, props.thread.thread_id, {
+        pinned: !props.thread.pinned,
+      })
+      // The server owns the order and the flag; re-read rather than flipping a
+      // local copy that the next poll would then have to agree with.
+      props.onPresentationChanged?.()
+    } catch {
+      setPinError(
+        i18n.tr(
+          'Innlegget kunne ikke festes. Ingenting ble endret.',
+          'The post could not be pinned. Nothing was changed.',
+        ),
+      )
+    } finally {
+      setPinBusy(false)
+    }
+  }
 
   return (
-    <li class="verevon-room-post" data-failed={isFailed() || undefined}>
+    <li
+      class="verevon-room-post"
+      data-failed={isFailed() || undefined}
+      data-pinned={props.thread.pinned === true ? 'true' : undefined}
+      data-unread={props.unread?.() ? 'true' : undefined}
+    >
+      {/* Pinned and new are facts about the post, stated before its content so
+          a reader scanning the room sees them first — the way Slack's pin and
+          "new" markers sit above a message rather than in its footer. */}
+      <Show when={props.thread.pinned === true || props.unread?.()}>
+        <div class="verevon-room-post__flags">
+          <Show when={props.thread.pinned === true}>
+            <span class="verevon-room-post__flag verevon-room-post__flag--pinned">
+              <Pin size={12} aria-hidden="true" />
+              {i18n.tr('Festet', 'Pinned')}
+            </span>
+          </Show>
+          <Show when={props.unread?.()}>
+            <span class="verevon-room-post__flag verevon-room-post__flag--new">
+              {i18n.tr('Ny', 'New')}
+            </span>
+          </Show>
+        </div>
+      </Show>
       <Show
         when={turns().length > 0}
         fallback={
@@ -270,12 +346,38 @@ function SpaceRoomPost(props: {
         )}
       </Show>
 
+      {/* The live row. `aria-live="polite"` so a reader using assistive tech
+          hears that work started without the row shouting over the transcript;
+          it disappears on its own when the projection reports a terminal
+          status, which is the "mutate in place" rule from the activity grammar
+          rather than a new line per transition. */}
+      <Show when={isWorking()}>
+        <div class="verevon-room-turn verevon-room-turn--working" role="status" aria-live="polite">
+          <span class="verevon-room-turn__avatar verevon-room-turn__avatar--agent" aria-hidden="true">
+            <Sparkles size={14} />
+          </span>
+          <div class="verevon-room-turn__content">
+            <PostTurnHeader author={props.agentName} isAgent />
+            <p class="verevon-room-turn__working">
+              <span class="verevon-room-turn__working-dots" aria-hidden="true" />
+              {props.thread.latest_run_status === 'queued'
+                ? i18n.tr('venter på å starte', 'waiting to start')
+                : i18n.tr('jobber …', 'is working…')}
+            </p>
+          </div>
+        </div>
+      </Show>
+
       <div class="verevon-room-post__meta">
         <span
           class={[
             {
               'verevon-space-status': true,
               'verevon-space-status--failed': isFailed(),
+              // Defined in the sheet since the cockpit shipped and never
+              // applied by anything — a working post read in the same grey as
+              // a finished one.
+              'verevon-space-status--active': isWorking(),
             },
           ]}
         >
@@ -290,6 +392,23 @@ function SpaceRoomPost(props: {
               {i18n.tr('Svar', 'Reply')}
             </button>
           )}
+        </Show>
+        <Show when={isAuthor()}>
+          <button
+            type="button"
+            class="verevon-room-post__pin"
+            onClick={() => { void togglePin() }}
+            disabled={pinBusy()}
+            aria-pressed={props.thread.pinned === true ? 'true' : 'false'}
+          >
+            <Show when={props.thread.pinned === true} fallback={<Pin size={12} aria-hidden="true" />}>
+              <PinOff size={12} aria-hidden="true" />
+            </Show>
+            {props.thread.pinned === true ? i18n.tr('Løsne', 'Unpin') : i18n.tr('Fest', 'Pin')}
+          </button>
+        </Show>
+        <Show when={pinError()}>
+          {(message) => <span class="verevon-room-post__pin-error" role="alert">{message()}</span>}
         </Show>
       </div>
     </li>

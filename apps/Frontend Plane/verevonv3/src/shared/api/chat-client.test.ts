@@ -1074,3 +1074,33 @@ describe('recalled-memory provenance', () => {
     })
   })
 })
+
+describe('buildChatWireBody — explicit skills (the composer `/` picker)', () => {
+  it('sends picked skills as skill_ids, and never as tool specs', () => {
+    const body = buildChatWireBody({
+      content: 'hi',
+      actions: [
+        { id: 'sk-1', name: 'Innkjøpsrutine', kind: 'skill' },
+        { id: 'cap-1', name: 'Some capability', kind: 'capability' },
+      ],
+    })
+    expect(body.skill_ids).toEqual(['sk-1'])
+    const tools = body.tools as Array<{ name: string }>
+    expect(tools.some((tool) => tool.name === 'sk-1')).toBe(false)
+  })
+
+  it('trims, de-duplicates and caps skill ids at four', () => {
+    const body = buildChatWireBody({
+      content: 'hi',
+      actions: ['a', ' a ', 'b', 'c', 'd', 'e'].map((id) => ({ id, name: id, kind: 'skill' as const })),
+    })
+    expect(body.skill_ids).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('omits the field entirely when no skill was picked', () => {
+    expect('skill_ids' in buildChatWireBody({ content: 'hi' })).toBe(false)
+    expect(
+      'skill_ids' in buildChatWireBody({ content: 'hi', actions: [{ id: 'cap-1', name: 'Cap', kind: 'capability' }] }),
+    ).toBe(false)
+  })
+})

@@ -112,6 +112,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::orgs::router(state.clone()))
         .merge(domains::ownership::router(state.clone()))
         .merge(domains::privacy::router(state.clone()))
+        .merge(domains::remote_support::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
         .merge(domains::run_watchers::router(state.clone()))
         .merge(domains::search::router(state.clone()))
@@ -319,6 +320,8 @@ mod tests {
             leads_core_url: "http://127.0.0.1:1".into(),
             shipping_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
+            application_convex_url: String::new(),
+            application_convex_service_key: String::new(),
             graph_index_url: "http://127.0.0.1:1".into(),
             quarry_edge_url: "http://127.0.0.1:1".into(),
             model_recommend_url: "http://127.0.0.1:1".into(),
@@ -343,6 +346,9 @@ mod tests {
             autocomplete_token: String::new(),
             zammad_api_url: "http://127.0.0.1:1".into(),
             zammad_api_token: String::new(),
+            remote_support_rendezvous_url: String::new(),
+            remote_support_relay_url: String::new(),
+            remote_support_server_public_key: String::new(),
             audience_token_cache: crate::audience_tokens::new_audience_token_cache(),
             browser_run_store: crate::domains::browser::new_browser_run_store(),
             cache: crate::cache::ResultCache::disabled(),

@@ -80,3 +80,21 @@ button:disabled {
   font-size: 0.9rem;
   color: #a0a0a0;
 }
+
+.second-factor {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.displays {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+
+.displays button[aria-pressed='true'] {
+  font-weight: 600;
+}

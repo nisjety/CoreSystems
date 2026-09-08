@@ -581,6 +581,9 @@ describe('AgentRunConsole chat thread origin', () => {
     renderConsole()
 
     fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Book a shipment' } })
+    // Solid 2 batches the goal-signal write; without flushing, runTask() reads
+    // an empty goal and returns before ever calling streamChat.
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
 
     await waitFor(() => expect(mockStreamChat).toHaveBeenCalled())
@@ -678,6 +681,8 @@ describe('BrowserObservationShot', () => {
     const img = container.querySelector('img')
     expect(img).toBeTruthy()
     img!.dispatchEvent(new Event('error'))
+    // The failed-state render is batched in Solid 2; flush before asserting.
+    flush()
     expect(container.textContent).toContain('Kunne ikke laste skjermbildet')
     expect(container.querySelector('img')).toBeNull()
     unmount()

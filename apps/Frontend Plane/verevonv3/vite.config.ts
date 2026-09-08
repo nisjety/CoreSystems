@@ -79,6 +79,12 @@ export default defineConfig({
       // tests against this SolidJS-oriented config, regardless of what
       // worktrees exist on disk.
       '**/.claude/worktrees/**',
+      // Workspace packages and sub-apps own their own vitest config and runner
+      // (`pnpm --filter <name> test`). Sweeping them in here runs them under
+      // jsdom, where e.g. remote-core's libsodium WASM fails on cross-realm
+      // Uint8Array checks that never occur in its real (node) environment.
+      'packages/**',
+      'apps/remote-dev/**',
     ],
     // Default per-test budget. The A8 fabrication-guard test spins up the real
     // ESLint flat config (cold-start ~8s), which exceeds vitest's 5s default when

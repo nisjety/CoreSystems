@@ -5,11 +5,15 @@ export const metadata: Metadata = {
 	title: "Svartid",
 	description:
 		"Svaret er raskt. Prosessen rundt det er ikke — se hvordan Verevon lar en agent gjøre de fire stegene samtidig.",
+	alternates: {
+		canonical: "/produkt/svartid",
+	},
 	openGraph: {
 		title: "Svartid — Verevon",
 		description: "Agenten gjør stegene. Dere godkjenner resultatet.",
 		locale: "nb_NO",
 		type: "website",
+		url: "/produkt/svartid",
 	},
 };
 

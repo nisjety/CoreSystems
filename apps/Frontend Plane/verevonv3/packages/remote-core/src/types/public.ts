@@ -32,6 +32,30 @@ export interface RemoteDisplay {
   readonly height: number;
   readonly isPrimary: boolean;
   readonly scaleFactor: number;
+  /**
+   * Sant når verten allerede maler musepekeren inn i videobildet. Da skal en
+   * renderer IKKE tegne sin egen (to markører). Ingen kjent RustDesk-
+   * fangstmotor setter dette i dag, men flagget finnes i protokollen.
+   */
+  readonly cursorEmbedded: boolean;
+}
+
+// ---------- Remote cursor ----------
+
+/**
+ * Fjernmaskinens markørform. `rgba` er ikke-premultiplisert RGBA, rad for
+ * rad ovenfra, nøyaktig `width * height * 4` byte — kan gis rett til
+ * `new ImageData(...)`. Hotspot er offset fra bitmapets øvre venstre hjørne
+ * og skal TREKKES FRA posisjonen når formen tegnes.
+ */
+export interface RemoteCursorShape {
+  /** Opak, gyldig kun i denne økten (vertens egen håndtak-/serienummer-id). */
+  readonly id: string;
+  readonly width: number;
+  readonly height: number;
+  readonly hotspotX: number;
+  readonly hotspotY: number;
+  readonly rgba: Uint8Array;
 }
 
 // ---------- Permissions ----------
@@ -77,6 +101,22 @@ export type RemoteAction =
       readonly button: PointerButton;
       readonly displayId?: string;
     })
+  // Separate down/up er nødvendig for dra-operasjoner (flytte vinduer, markere
+  // tekst) — `pointer.click` alene kan ikke uttrykke dem.
+  | (ActionBase & {
+      readonly type: 'pointer.down';
+      readonly x: number;
+      readonly y: number;
+      readonly button: PointerButton;
+      readonly displayId?: string;
+    })
+  | (ActionBase & {
+      readonly type: 'pointer.up';
+      readonly x: number;
+      readonly y: number;
+      readonly button: PointerButton;
+      readonly displayId?: string;
+    })
   | (ActionBase & {
       readonly type: 'pointer.scroll';
       readonly x: number;
@@ -89,7 +129,11 @@ export type RemoteAction =
   | (ActionBase & { readonly type: 'keyboard.keyUp'; readonly key: string })
   | (ActionBase & { readonly type: 'keyboard.type'; readonly text: string })
   | (ActionBase & { readonly type: 'clipboard.write'; readonly text: string })
-  | (ActionBase & { readonly type: 'display.select'; readonly displayId: string });
+  | (ActionBase & { readonly type: 'display.select'; readonly displayId: string })
+  // Å kunne skru ned kvaliteten er ikke pynt for en nettleserklient: på en
+  // treg linje er det forskjellen mellom brukbar og ubrukelig. 'auto' lar
+  // vertens egen ABR styre (som er standard hvis vi aldri ber om noe).
+  | (ActionBase & { readonly type: 'quality.set'; readonly level: QualityLevel });
 
 export type RemoteActionType = RemoteAction['type'];
 
@@ -165,6 +209,12 @@ export interface AuthenticationResponse {
  */
 export interface SessionAuthenticator {
   authenticate(challenge: AuthenticationChallenge): Promise<AuthenticationResponse>;
+  /**
+   * Kalles når fjernmaskinen krever en andre faktor etter godkjent passord
+   * (RustDesk: vertslokal TOTP). Uten denne avvises innloggingen med en
+   * typet AuthenticationError i stedet for å henge i vente på en kode.
+   */
+  provideSecondFactor?(): Promise<string>;
 }
 
 // ---------- Connect options ----------
@@ -172,7 +222,11 @@ export interface SessionAuthenticator {
 export interface ConnectOptions {
   readonly deviceId: string;
   readonly authenticator?: SessionAuthenticator;
-  readonly auth?: { readonly token: string };
+  readonly auth?: {
+    readonly token: string;
+    /** Se SessionAuthenticator.provideSecondFactor. */
+    readonly secondFactor?: () => Promise<string>;
+  };
   readonly signal?: AbortSignal;
 }
 
@@ -187,9 +241,24 @@ export interface RemoteEventMap extends Record<string, unknown> {
   readonly frame: RemoteVideoFrame;
   readonly 'display-change': { readonly displays: readonly RemoteDisplay[] };
   readonly latency: { readonly latencyMs: number };
-  readonly quality: { readonly level: QualityLevel };
+  /**
+   * `level` er nivået som FAKTISK gjelder: 'auto' så lenge vi ikke har bedt om
+   * et bestemt, ellers det vi ba om. `targetBitrateKbps` er vertens egen,
+   * live måltall for enkoderen (kbps), som den oppgir én gang i sekundet — vi
+   * gjetter altså ikke et nivå ut av tallet, vi rapporterer begge.
+   */
+  readonly quality: { readonly level: QualityLevel; readonly targetBitrateKbps?: number };
   readonly 'permission-change': { readonly permissions: readonly RemotePermission[] };
   readonly clipboard: { readonly text?: string };
+  /** En ny (eller gjenvalgt) markørform. Sendes før første posisjon kan forventes. */
+  readonly 'cursor-shape': RemoteCursorShape;
+  /**
+   * Pekerposisjon i den strømmede skjermens LOKALE koordinater (samme rom som
+   * `frame`/`pointer.move`). Kommer bare når pekeren faktisk flytter seg — det
+   * finnes ingen startposisjon — og ikke mens vi selv styrer musen (verten
+   * ekkoer ikke posisjon til den som sendte input de siste 300 ms).
+   */
+  readonly 'cursor-position': { readonly x: number; readonly y: number; readonly displayId: string };
   readonly error: RemoteError;
   readonly disconnect: { readonly reason: DisconnectReason };
 }
@@ -237,6 +306,8 @@ export interface PointerController {
     y?: number;
     displayId?: string;
   }): Promise<ActionResult>;
+  down(options: { button: PointerButton; x?: number; y?: number; displayId?: string }): Promise<ActionResult>;
+  up(options: { button: PointerButton; x?: number; y?: number; displayId?: string }): Promise<ActionResult>;
   scroll(delta: { deltaX: number; deltaY: number; x?: number; y?: number; displayId?: string }): Promise<ActionResult>;
 }
 

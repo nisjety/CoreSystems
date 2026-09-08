@@ -32,6 +32,9 @@ const spacesClient = vi.hoisted(() => ({
   getSpaceWork: vi.fn(),
   getSpaceKnowledge: vi.fn(),
   getSpaceActivity: vi.fn(),
+  markSpaceRead: vi.fn(),
+  recordSpacePresence: vi.fn(),
+  updateSpaceThreadPresentation: vi.fn(),
 }))
 
 vi.mock('@/shared/api/spaces-client', () => ({
@@ -53,6 +56,9 @@ vi.mock('@/shared/api/spaces-client', () => ({
   getSpaceWork: spacesClient.getSpaceWork,
   getSpaceKnowledge: spacesClient.getSpaceKnowledge,
   getSpaceActivity: spacesClient.getSpaceActivity,
+  markSpaceRead: spacesClient.markSpaceRead,
+  recordSpacePresence: spacesClient.recordSpacePresence,
+  updateSpaceThreadPresentation: spacesClient.updateSpaceThreadPresentation,
 }))
 
 vi.mock('@/features/chat/lib/chat-thread-history', () => ({
@@ -71,11 +77,13 @@ vi.mock('@/shared/api/orchestration-client', () => orchestration)
 const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
   getChatThreadTranscript: vi.fn(),
+  cancelInvocation: vi.fn(),
 }))
 
 vi.mock('@/shared/api/chat-client', () => ({
   streamChat: chatClient.streamChat,
   getChatThreadTranscript: chatClient.getChatThreadTranscript,
+  cancelInvocation: chatClient.cancelInvocation,
 }))
 
 const personalContext = {
@@ -159,6 +167,12 @@ describe('SpacePage', () => {
       space: personalContext.space, membership: personalContext.membership,
       binding: null, documents: [], documents_truncated: false, wiki_pages: [], unavailable: [],
     })
+    spacesClient.markSpaceRead.mockReset()
+    spacesClient.recordSpacePresence.mockReset()
+    spacesClient.recordSpacePresence.mockResolvedValue({ present: [], ttl_seconds: 30 })
+    spacesClient.markSpaceRead.mockResolvedValue({ last_read_at: 1 })
+    spacesClient.updateSpaceThreadPresentation.mockReset()
+    spacesClient.updateSpaceThreadPresentation.mockResolvedValue({ thread_id: 't' })
     spacesClient.getSpaceActivity.mockReset()
     spacesClient.getSpaceActivity.mockResolvedValue({
       space: personalContext.space, membership: personalContext.membership,
@@ -274,7 +288,7 @@ describe('SpacePage', () => {
     // The room's own composer targets this exact, unencoded Space reference —
     // no href-encoding step to get right or wrong, since it is a component
     // prop reaching `streamChat` directly rather than text baked into a link.
-    fireEvent.input(screen.getByPlaceholderText('Skriv i rommet. Skriv @ for å nevne noen.'), {
+    fireEvent.input(screen.getByPlaceholderText('Skriv i rommet. @ nevner noen, / velger en ferdighet.'), {
       target: { value: 'Hei' },
     })
     flush()
@@ -303,7 +317,7 @@ describe('SpacePage', () => {
     expect(screen.queryByRole('link', { name: 'Chat' })).toBeNull()
     expect(screen.queryByRole('link', { name: 'Åpne Agent Studio' })).toBeNull()
 
-    const composer = screen.getByPlaceholderText('Skriv i rommet. Skriv @ for å nevne noen.')
+    const composer = screen.getByPlaceholderText('Skriv i rommet. @ nevner noen, / velger en ferdighet.')
     const [introStart] = screen.getAllByRole('button', { name: /Start en samtale/ }).reverse()
     fireEvent.click(introStart!)
     flush()
@@ -741,7 +755,7 @@ describe('SpacePage', () => {
 
     // The banner names the target and the cursor lands in the composer.
     expect(screen.getByText(/Svarer i/)).toBeTruthy()
-    const composer = screen.getByPlaceholderText('Skriv i rommet. Skriv @ for å nevne noen.')
+    const composer = screen.getByPlaceholderText('Skriv i rommet. @ nevner noen, / velger en ferdighet.')
     expect(document.activeElement).toBe(composer)
 
     fireEvent.input(composer, { target: { value: 'Og lagerstatus?' } })
@@ -846,7 +860,7 @@ describe('SpacePage', () => {
     flush()
     expect(screen.queryByText(/Svarer i/)).toBeNull()
 
-    fireEvent.input(screen.getByPlaceholderText('Skriv i rommet. Skriv @ for å nevne noen.'), {
+    fireEvent.input(screen.getByPlaceholderText('Skriv i rommet. @ nevner noen, / velger en ferdighet.'), {
       target: { value: 'Ny sak' },
     })
     flush()
@@ -1026,7 +1040,7 @@ describe('SpacePage', () => {
    * person mention never does — only an agent mention may invoke anything.
    */
   describe('the room composer', () => {
-    const composerPlaceholder = 'Skriv i rommet. Skriv @ for å nevne noen.'
+    const composerPlaceholder = 'Skriv i rommet. @ nevner noen, / velger en ferdighet.'
 
     beforeEach(() => {
       spacesClient.getSpaceContext.mockResolvedValue(personalContext)
@@ -1157,7 +1171,7 @@ describe('SpacePage', () => {
   // These tests pin the count and the composer's survival rather than the
   // mechanism, so they keep holding if the shell's plumbing changes again.
   describe('panel identity across context rechecks', () => {
-    const composerPlaceholder = 'Skriv i rommet. Skriv @ for å nevne noen.'
+    const composerPlaceholder = 'Skriv i rommet. @ nevner noen, / velger en ferdighet.'
 
     // The real gateway returns a freshly parsed object on every call, so a
     // recheck always changes the context's identity even when nothing about
@@ -1234,6 +1248,120 @@ describe('SpacePage', () => {
       const afterRecheck = screen.getByPlaceholderText(composerPlaceholder) as HTMLTextAreaElement
       expect(afterRecheck).toBe(composer)
       expect(afterRecheck.value).toBe('halvskrevet melding')
+    })
+  })
+
+  // Item 4b: "new since your last visit". The listing carries the reader's
+  // arrival marker; a post another member changed after it is badged, the
+  // reader's own is not, and having the room open advances the marker.
+  it('badges posts new since arrival and records that the room was read', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      read_marker: { last_read_at: Date.parse('2026-09-07T10:00:00Z') },
+      threads: [
+        { thread_id: 'theirs', space_id: 'space_personal_1', title: 'Ny sak fra kollega', owner_subject_id: 'user_2',
+          updated_at: '2026-09-07T11:00:00Z', latest_run_status: 'completed' },
+        { thread_id: 'mine', space_id: 'space_personal_1', title: 'Min egen sak', owner_subject_id: 'user_1',
+          updated_at: '2026-09-07T11:30:00Z', latest_run_status: 'completed' },
+        { thread_id: 'old', space_id: 'space_personal_1', title: 'Gammel sak', owner_subject_id: 'user_2',
+          updated_at: '2026-09-07T09:00:00Z', latest_run_status: 'completed' },
+      ],
+    })
+    renderSpacePage()
+
+    // Scoped to the timeline: the header's activity pulse names the same post.
+    const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+    await timeline.findByText('Ny sak fra kollega')
+    const badged = [...document.querySelectorAll('.verevon-room-post[data-unread]')].map((n) => n.textContent ?? '')
+    expect(badged.length).toBe(1)
+    expect(badged[0]).toContain('Ny sak fra kollega')
+    await waitFor(() => expect(spacesClient.markSpaceRead).toHaveBeenCalledWith('space_personal_1'))
+  })
+
+  // A first visit has no last visit to be new since — nothing is badged, and
+  // the marker is still recorded so the NEXT visit has one.
+  it('badges nothing on a first visit but still records it', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      read_marker: { last_read_at: null },
+      threads: [
+        { thread_id: 'theirs', space_id: 'space_personal_1', title: 'Første sak', owner_subject_id: 'user_2',
+          updated_at: '2026-09-07T11:00:00Z', latest_run_status: 'completed' },
+      ],
+    })
+    renderSpacePage()
+    const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+    await timeline.findByText('Første sak')
+    expect(document.querySelector('.verevon-room-post[data-unread]')).toBeNull()
+    await waitFor(() => expect(spacesClient.markSpaceRead).toHaveBeenCalled())
+  })
+
+
+  // Presence. The room already polls; the heartbeat rides that beat and its
+  // answer is who else is here, so there is no second timer and no second read.
+  describe('who else is in the room', () => {
+    const withRoster = () => {
+      spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+      spacesClient.getSpaceRoster.mockResolvedValue([
+        { subject_type: 'user', subject_id: 'user_1', role: 'owner', revision: 1, display_name: 'Kari Nordmann' },
+        { subject_type: 'user', subject_id: 'user_2', role: 'editor', revision: 1, display_name: 'Ola Nordmann' },
+      ])
+    }
+
+    it('beats presence on a visible listing and says who else is here', async () => {
+      withRoster()
+      spacesClient.recordSpacePresence.mockResolvedValue({
+        present: [{ subject_id: 'user_2', status: 'online', last_seen_at: 1 }],
+        ttl_seconds: 30,
+      })
+      renderSpacePage()
+
+      await waitFor(() =>
+        expect(spacesClient.recordSpacePresence).toHaveBeenCalledWith('space_personal_1', 'online'),
+      )
+      expect(await screen.findByText('Ola Nordmann er her nå')).toBeTruthy()
+    })
+
+    it('shows the room’s own typing line for a member who is writing', async () => {
+      withRoster()
+      spacesClient.recordSpacePresence.mockResolvedValue({
+        present: [{ subject_id: 'user_2', status: 'typing', last_seen_at: 1 }],
+        ttl_seconds: 30,
+      })
+      renderSpacePage()
+      expect(await screen.findByText('Ola Nordmann skriver …')).toBeTruthy()
+    })
+
+    // An unreadable answer and an empty room are different facts. Rendering the
+    // first as the second would tell a member they are alone.
+    it('says nothing at all when presence cannot be read', async () => {
+      withRoster()
+      spacesClient.recordSpacePresence.mockRejectedValue(new Error('application down'))
+      renderSpacePage()
+
+      await waitFor(() => expect(spacesClient.recordSpacePresence).toHaveBeenCalled())
+      // Level 1: the room has no threads, so the empty-state intro card also
+      // names the room, as an h3 — a second, legitimate "Personlig rom" that
+      // an unqualified query would trip over.
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      expect(screen.queryByText(/er her nå/)).toBeNull()
+      expect(screen.queryByText(/skriver …/)).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+    })
+
+    // The roster names people; presence only carries identifiers. A subject the
+    // roster does not know is counted, never labelled with its raw id.
+    it('counts a present subject the roster cannot name, and never prints the id', async () => {
+      withRoster()
+      spacesClient.recordSpacePresence.mockResolvedValue({
+        present: [{ subject_id: 'user_ghost', status: 'online', last_seen_at: 1 }],
+        ttl_seconds: 30,
+      })
+      renderSpacePage()
+      expect(await screen.findByText('1 person er her nå')).toBeTruthy()
+      expect(screen.queryByText(/user_ghost/)).toBeNull()
     })
   })
 })

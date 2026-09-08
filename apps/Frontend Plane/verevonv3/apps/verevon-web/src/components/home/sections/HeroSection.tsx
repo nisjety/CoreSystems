@@ -1,10 +1,14 @@
+"use client";
+
+import { useEffect, useRef } from "react";
 import { HeroParallax } from "./HeroParallax";
 import { SignalPathLayer } from "./SignalPathLayer";
 import { VerevonMarkOutline } from "./VerevonMark";
 import { ArrowButton } from "@/components/ui/ArrowButton";
+import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion";
 
 /**
- * HeroSectionV2 — calm, ambient, fast.
+ * HeroSection — calm, ambient, fast.
  *
  * One continuous video loop as ambient background (TYDE/Terminal pattern) —
  * NO staged reveal choreography (video→image→copy stagger). All copy is
@@ -15,6 +19,25 @@ import { ArrowButton } from "@/components/ui/ArrowButton";
  * media carry the atmosphere; keep explanatory copy for the sections below.
  */
 export function HeroSection() {
+	const videoRef = useRef<HTMLVideoElement>(null);
+	const prefersReducedMotion = usePrefersReducedMotion();
+
+	useEffect(() => {
+		const video = videoRef.current;
+		if (!video) {
+			return;
+		}
+
+		if (prefersReducedMotion) {
+			video.pause();
+			return;
+		}
+
+		void video.play().catch(() => {
+			// The supporting copy remains usable when autoplay is blocked.
+		});
+	}, [prefersReducedMotion]);
+
 	return (
 		<section
 			className="relative isolate flex min-h-svh flex-col justify-end overflow-hidden bg-verevon-h-ink-warm text-verevon-c-white"
@@ -27,12 +50,12 @@ export function HeroSection() {
 				data-hero-parallax-media=""
 			>
 				<video
-					autoPlay
 					className="size-full object-cover object-center max-[760px]:object-left"
 					loop
 					muted
 					playsInline
 					preload="metadata"
+					ref={videoRef}
 				>
 					<source
 						src="/verevon-vibe/verevon-hero-premiere-light.mp4"

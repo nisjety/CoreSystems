@@ -1,7 +1,9 @@
+import type { RemoteError } from '../errors/RemoteError.js';
 import type {
   DisconnectReason,
   QualityLevel,
   RemoteAction,
+  RemoteCursorShape,
   RemoteDisplay,
   RemotePermission,
   RemotePermission as Permission,
@@ -29,9 +31,23 @@ export interface ProtocolEventMap extends Record<string, unknown> {
   readonly frame: RemoteVideoFrame;
   readonly 'display-change': { readonly displays: readonly RemoteDisplay[] };
   readonly latency: { readonly latencyMs: number };
-  readonly quality: { readonly level: QualityLevel };
+  readonly quality: { readonly level: QualityLevel; readonly targetBitrateKbps?: number };
+  /**
+   * Rå medietall fra protokollaget, per innkommende videomelding.
+   * `encodedBytes` er faktiske bytes vi tok imot (grunnlaget for en ekte
+   * bitrate), `droppedFramesTotal` er akkumulert, ikke et inkrement.
+   */
+  readonly 'media-stats': { readonly encodedBytes: number; readonly droppedFramesTotal: number };
+  readonly 'cursor-shape': RemoteCursorShape;
+  readonly 'cursor-position': { readonly x: number; readonly y: number; readonly displayId: string };
   readonly 'permission-change': { readonly permissions: readonly RemotePermission[] };
   readonly clipboard: { readonly text?: string };
+  /**
+   * En feil som IKKE avslutter økten (typisk en dekoderfeil). Uten denne
+   * kunne videostrømmen dø permanent mens økten fortsatt rapporterte
+   * 'connected' — se docs/architecture.md, "Status".
+   */
+  readonly error: RemoteError;
   readonly disconnect: { readonly reason: DisconnectReason };
 }
 
@@ -43,6 +59,8 @@ export function requiredPermissionFor(action: RemoteAction): Permission {
     case 'pointer.move':
     case 'pointer.click':
     case 'pointer.doubleClick':
+    case 'pointer.down':
+    case 'pointer.up':
     case 'pointer.scroll':
       return 'input.pointer';
     case 'keyboard.keyDown':
@@ -52,12 +70,29 @@ export function requiredPermissionFor(action: RemoteAction): Permission {
     case 'clipboard.write':
       return 'clipboard.write';
     case 'display.select':
+    case 'quality.set':
       return 'screen.view';
     default: {
       const exhaustive: never = action;
       throw new Error(`Unhandled action type: ${JSON.stringify(exhaustive)}`);
     }
   }
+}
+
+/**
+ * Hvordan en renderer melder inn at den faktisk MALTE en frame. Bevisst holdt
+ * utenfor den offentlige `RemoteSession`-typen: det er en intern
+ * rapporteringskanal, ikke noe kallere skal bruke. CanvasRenderer oppdager
+ * den ved behov, slik at en egendefinert renderer også kan implementere den
+ * uten at API-et vokser.
+ */
+export interface RenderStatsSink {
+  recordRenderedFrame(): void;
+}
+
+export function asRenderStatsSink(value: unknown): RenderStatsSink | undefined {
+  const candidate = value as Partial<RenderStatsSink> | null | undefined;
+  return typeof candidate?.recordRenderedFrame === 'function' ? (candidate as RenderStatsSink) : undefined;
 }
 
 const RETRYABLE_DISCONNECT_REASONS: ReadonlySet<DisconnectReason> = new Set([

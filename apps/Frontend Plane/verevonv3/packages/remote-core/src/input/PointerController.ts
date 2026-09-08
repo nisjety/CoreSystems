@@ -51,6 +51,20 @@ export class PointerControllerImpl implements PointerController {
     });
   }
 
+  down(options: { button: PointerButton; x?: number; y?: number; displayId?: string }): Promise<ActionResult> {
+    const { x, y, displayId } = this.resolvePosition(options);
+    this.lastX = x;
+    this.lastY = y;
+    return this.executor.execute({ type: 'pointer.down', actor: this.actor, x, y, button: options.button, displayId });
+  }
+
+  up(options: { button: PointerButton; x?: number; y?: number; displayId?: string }): Promise<ActionResult> {
+    const { x, y, displayId } = this.resolvePosition(options);
+    this.lastX = x;
+    this.lastY = y;
+    return this.executor.execute({ type: 'pointer.up', actor: this.actor, x, y, button: options.button, displayId });
+  }
+
   scroll(delta: { deltaX: number; deltaY: number; x?: number; y?: number; displayId?: string }): Promise<ActionResult> {
     const { x, y, displayId } = this.resolvePosition(delta);
     return this.executor.execute({

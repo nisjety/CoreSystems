@@ -145,6 +145,26 @@ export function SpaceWorkPanel(props: SpaceWorkPanelProps) {
           )}
         />
       </Show>
+
+      {/* Routines (later tier, §6.3). What exists is the read side above: a
+          schedule bound to this room shows here, and its fired runs get a
+          thread in this room. Creating or changing one is an org-admin write
+          that lives in Settings, and creating it FROM the room is a scheduled
+          effect the release gates still hold closed — so the room says where
+          routines are managed instead of offering a form it cannot honour. */}
+      <p class="verevon-space-work__routines">
+        {i18n.tr(
+          'Rutiner (planlagte kjøringer) opprettes og endres av en administrator under ',
+          'Routines (scheduled runs) are created and changed by an administrator under ',
+        )}
+        <a href="/settings/cron" link>
+          {i18n.tr('Innstillinger › Planlagte kjøringer', 'Settings › Scheduled runs')}
+        </a>
+        {i18n.tr(
+          '. En rutine knyttet til dette rommet vises her, og kjøringene dens lander i rommet.',
+          '. A routine bound to this Space shows here, and its runs land in the Space.',
+        )}
+      </p>
     </section>
   )
 }

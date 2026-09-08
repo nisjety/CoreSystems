@@ -30,6 +30,7 @@ pub mod orchestration;
 pub mod orgs;
 pub mod ownership;
 pub mod privacy;
+pub mod remote_support;
 pub mod router_policy;
 pub mod run_watchers;
 pub mod search;

@@ -13,11 +13,15 @@ import {
   getSpaceInstructions,
   getSpaceRoster,
   getSpaceThreads,
+  markSpaceRead,
+  recordSpacePresence,
   requestPersonalSpaceDeletion,
   revokeSpaceAgent,
   setSpaceAgentState,
   updateSpaceInstructions,
   type SpaceAgent,
+  type SpacePresence,
+  type SpaceReadMarker,
   type SpaceDeletionReceipt,
   type SpaceRosterMember,
   type SpaceThread,
@@ -38,6 +42,9 @@ import { SpaceMemberControls, SpaceMemberRemoveButton } from './SpaceMemberContr
 import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
 import { SpaceRoomComposer } from './SpaceRoomComposer'
 import { SpaceRoomTimeline } from './SpaceRoomTimeline'
+import { publishSpaceThreads, publishSpaceUnread, retractSpaceThreads } from '../lib/space-live-work'
+import { unreadThreadIds } from '../lib/space-unread'
+import { hereSentence, readPresence, typingSentence } from '../lib/space-presence'
 import { SpaceActivityPanel } from './SpaceActivityPanel'
 import { SpaceKnowledgePanel } from './SpaceKnowledgePanel'
 import { SpaceWorkPanel } from './SpaceWorkPanel'
@@ -121,6 +128,129 @@ export default function SpacePage() {
   const [deletionSubmitting, setDeletionSubmitting] = createSignal(false)
   const currentThreads = () => threads()?.threads ?? []
   const activeRun = () => currentThreads().find((thread) => ACTIVE_RUN_STATUSES.has(thread.latest_run_status ?? ''))
+
+  // Where the reader had caught up when they ARRIVED in this room (item 4b).
+  // Snapshotted from the first successful listing per room and then held: the
+  // durable marker keeps advancing while the room stays open, but "new since
+  // your last visit" must keep pointing at what was new on arrival, or every
+  // badge would vanish on the first poll before anyone had read anything.
+  const [arrival, setArrival] = createSignal<{ ref: string; marker: SpaceReadMarker | undefined } | undefined>(undefined)
+  // A plain variable, not a second read of `arrival()`. The original guard
+  // read the `arrival` signal from inside the effect's untracked half — a
+  // read Solid's dev build flags (STRICT_READ_UNTRACKED) precisely because it
+  // will not update, and which manifested here as a real bug: it could leave
+  // two render passes live at once (caught by a presence test, but the
+  // exposure predates presence — this is item 4b's original code).
+  let arrivalRef: string | undefined
+  createEffect(
+    () => ({ ref: spaceRef(), projection: threads.error ? undefined : threads() }),
+    ({ ref, projection }) => {
+      if (!ref || !projection) return
+      // `read_marker` absent means the marker could not be read (named as a
+      // gap by the gateway) — hold nothing rather than badge against a guess.
+      if (arrivalRef !== ref) {
+        arrivalRef = ref
+        setArrival({ ref, marker: projection.read_marker })
+      }
+    },
+  )
+  const unreadIds = createMemo(() => {
+    const snapshot = arrival()
+    if (!snapshot || snapshot.ref !== spaceRef()) return new Set<string>()
+    return unreadThreadIds(currentThreads(), snapshot.marker, context()?.membership.subject_id)
+  })
+
+  // Publish the projection this page already polls, so the sidebar and the
+  // composer see the same live state at the same moment without a second
+  // fetch or a second timer (item 1b: "both need the same refresh path").
+  // Retracted on leave: a projection nobody is refreshing must not keep
+  // telling the sidebar a room is busy. The unread set rides along so the
+  // sidebar badges the same rows the timeline does.
+  createEffect(
+    () => ({ ref: spaceRef(), projection: threads.error ? undefined : threads(), unread: unreadIds() }),
+    ({ ref, projection, unread }) => {
+      if (!ref || !projection) return undefined
+      publishSpaceThreads(ref, projection.threads)
+      publishSpaceUnread(ref, unread)
+      return () => retractSpaceThreads(ref)
+    },
+  )
+
+  // Having the room open IS reading it. Advance the durable marker on every
+  // successful listing while the tab is visible — the listing only runs then —
+  // fire-and-forget: a marker write failing must never cost the room anything,
+  // and the gateway answers it as its own honest 503 if it does.
+  createEffect(
+    () => ({ ref: spaceRef(), loaded: !threads.error && threads() !== undefined }),
+    ({ ref, loaded }) => {
+      if (!ref || !loaded) return
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      void markSpaceRead(ref).catch(() => undefined)
+    },
+  )
+
+  // Who else is in the room. `undefined` means unknown — Application could not
+  // be reached, or the beat has not landed yet — and is rendered as nothing at
+  // all. Drawing an empty room on an unreadable answer would tell a member
+  // they are alone, which is a different and worse claim than saying nothing.
+  const [presence, setPresence] = createSignal<SpacePresence | undefined>(undefined)
+  let lastBeatAt = 0
+  // The room this browser currently has open, as a PLAIN variable rather than
+  // a second call to `spaceRef()`. `beat`'s continuation runs after an
+  // `await`, well outside any tracked scope — reading a signal there is
+  // exactly what trips Solid's own untracked-read diagnostic, and it is not
+  // just a lint complaint here: it can leave two competing render passes
+  // live at once. Written only from the effect's tracked half below, which is
+  // a legitimate tracking scope, so setting it there is a plain, ungraded read.
+  let currentSpaceRef: string | undefined
+  async function beat(ref: string, status: 'online' | 'typing' | 'offline'): Promise<void> {
+    if (!ref) return
+    lastBeatAt = Date.now()
+    try {
+      const next = await recordSpacePresence(ref, status)
+      // The room may have changed while this request was in flight; a late
+      // answer for the room the reader just left must not paint over the one
+      // they are looking at now.
+      if (currentSpaceRef === ref && status !== 'offline') setPresence(next)
+    } catch {
+      if (currentSpaceRef === ref) setPresence(undefined)
+    }
+  }
+  // Rides the listing the room already polls, so presence costs one small
+  // request per beat and no second timer. Only while the tab is visible: a
+  // background tab is not somebody being in the room.
+  createEffect(
+    () => {
+      const ref = spaceRef()
+      currentSpaceRef = ref || undefined
+      return { ref, loaded: !threads.error && threads() !== undefined }
+    },
+    ({ ref, loaded }) => {
+      if (!ref || !loaded) return undefined
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return undefined
+      void beat(ref, 'online')
+      // Leaving the room says so, so the others do not wait out the expiry.
+      // Best-effort by construction: a closed tab never gets here, which is
+      // exactly why the server expires a heartbeat that stops coming.
+      return () => {
+        setPresence(undefined)
+        void recordSpacePresence(ref, 'offline').catch(() => undefined)
+      }
+    },
+  )
+  // Typing is worth its own beat: waiting for the next poll would put "is
+  // writing" on screen up to six seconds after the person started. Throttled,
+  // because a keystroke is not a network event.
+  const TYPING_BEAT_MS = 3_000
+  function noteTyping(): void {
+    const ref = spaceRef()
+    if (!ref) return
+    if (Date.now() - lastBeatAt < TYPING_BEAT_MS) return
+    void beat(ref, 'typing')
+  }
+  const presenceReading = createMemo(() =>
+    readPresence(presence()?.present, roster.error ? [] : roster() ?? []),
+  )
 
   async function requestDeletion() {
     const selectedSpace = context()?.space
@@ -235,6 +365,17 @@ export default function SpacePage() {
                     <span>{spaceLifecycleLabel(current().space.lifecycle, i18n.tr)}</span>
                     <span aria-hidden="true">·</span>
                     <span>{i18n.tr('Din rolle: ', 'Your role: ')}{spaceRoleLabel(current().membership.role, i18n.tr)}</span>
+                    <Show when={hereSentence(presenceReading(), i18n.tr)}>
+                      {(sentence) => (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span class="verevon-space-presence">
+                            <span class="verevon-space-presence__dot" aria-hidden="true" />
+                            {sentence()}
+                          </span>
+                        </>
+                      )}
+                    </Show>
                   </div>
                 </div>
               </header>
@@ -276,6 +417,9 @@ export default function SpacePage() {
                       unavailable={threadsUnavailable}
                       roster={() => (roster.error ? [] : roster() ?? [])}
                       agents={() => (agents.error ? [] : agents() ?? [])}
+                      unreadThreadIds={unreadIds}
+                      typingSentence={() => typingSentence(presenceReading(), i18n.tr)}
+                      onTyping={noteTyping}
                       onExchangeSettled={() => {
                         void refetchThreads()
                       }}
@@ -363,6 +507,12 @@ function SpaceConversationPanel(props: {
   readonly agents: () => readonly SpaceAgent[]
   readonly onExchangeSettled?: () => void
   readonly onCreateAgent?: () => void
+  /** Posts new since the reader arrived (item 4b). */
+  readonly unreadThreadIds?: () => ReadonlySet<string>
+  /** "Kari skriver …", from the room's presence beat. */
+  readonly typingSentence?: () => string | undefined
+  /** The member typed just now, so the room can say so before the next poll. */
+  readonly onTyping?: () => void
 }) {
   const i18n = useI18n()
   let focusComposer: (() => void) | undefined
@@ -432,6 +582,10 @@ function SpaceConversationPanel(props: {
               focusComposer?.()
             }}
             onApprovalSettled={props.onExchangeSettled}
+            unreadThreadIds={props.unreadThreadIds}
+            // A pin or retitle changes the server's order and names; re-read
+            // rather than trust this browser's copy of either.
+            onPresentationChanged={props.onExchangeSettled}
           />
         </Show>
       </Show>
@@ -440,8 +594,11 @@ function SpaceConversationPanel(props: {
         spaceRef={props.spaceRef}
         roster={props.roster}
         agents={props.agents}
+        threads={props.threads}
         onExchangeSettled={props.onExchangeSettled}
         registerFocusHandle={(focus) => { focusComposer = focus }}
+        typingSentence={props.typingSentence}
+        onTyping={props.onTyping}
         replyTarget={replyTargetWithStatus}
         onClearReplyTarget={() => setReplyTarget(undefined)}
       />
@@ -1106,8 +1263,14 @@ function SpacePulse(props: {
           <p class="verevon-space-eyebrow">{i18n.tr('Kort oppsummert', 'At a glance')}</p>
           <h2 id="space-pulse-title">{i18n.tr('Rompuls', 'Room pulse')}</h2>
         </div>
+        {/* `data-active` carries the state; the aria-label is for people. The
+            sheet used to key the lit style on `[aria-label="Active work"]` —
+            the ENGLISH label — so in Norwegian, the default, the signal never
+            lit no matter how busy the room was. Style must never read a
+            translated string. */}
         <span
           class="verevon-space-pulse__signal"
+          data-active={props.activeRun() ? 'true' : undefined}
           aria-label={props.activeRun() ? i18n.tr('Aktivt arbeid', 'Active work') : i18n.tr('Ingen aktivt arbeid', 'No active work')}
         />
       </div>

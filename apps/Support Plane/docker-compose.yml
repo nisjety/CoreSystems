@@ -34,11 +34,11 @@ services:
       - "21118"
     networks:
       - support-plane
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 21116 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    # Ingen healthcheck her: dette bildet er bygget FROM scratch og har
+    # verken /bin/sh eller nc, så enhver in-container-sjekk feiler med
+    # "stat /bin/sh: no such file or directory" og markerer en fullt
+    # fungerende tjeneste som unhealthy. `readiness`-sidecaren under prober
+    # portene over nettverket i stedet.
 
   # --- hbbr: relay server ---
   hbbr:
@@ -57,11 +57,29 @@ services:
       - "21119"
     networks:
       - support-plane
+    # Se kommentaren om healthcheck på hbbs.
+
+  # --- readiness: gir stacken et ekte helsesignal ---
+  # hbbs/hbbr kan ikke sjekke seg selv (scratch-bilde, ingen shell), så denne
+  # sidecaren prober alle fire portene over nettverket — inkludert
+  # WS-portene, som er de nettleseren faktisk trenger.
+  readiness:
+    <<: *runtime-defaults
+    image: busybox:1.37
+    depends_on:
+      - hbbs
+      - hbbr
+    command: ["sh", "-c", "while true; do sleep 3600; done"]
+    networks:
+      - support-plane
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 21117 || exit 1"]
-      interval: 10s
+      test:
+        - CMD-SHELL
+        - nc -z hbbs 21116 && nc -z hbbs 21118 && nc -z hbbr 21117 && nc -z hbbr 21119
+      interval: 15s
       timeout: 5s
-      retries: 5
+      retries: 3
+      start_period: 20s
 
   # --- Caddy: TLS termination for the two WS ports only ---
   # hbbs/hbbr's WebSocket listeners are plaintext ws:// by design (they expect

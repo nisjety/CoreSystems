@@ -71,6 +71,7 @@ Frontend presents and normalizes access.
 | L4 | Model Plane | `apps/Model Plane` | AI gateway, sessions, inference, execution loop, Temporal orchestration, capabilities |
 | L5 | Application Plane | `apps/Application Plane` | Convex workspace, realtime sync, notifications, conversation/information/social services |
 | L6 | Frontend Plane | `apps/Frontend Plane/verevonv3` | Solid/Vite Verevon UI, Rust same-origin gateway, nested Verevon web app |
+| L6-adjacent | Support Plane | `apps/Support Plane` | RustDesk-compatible rendezvous/relay backend (unmodified `hbbs`/`hbbr` behind Caddy TLS) for live remote-support sessions driven by `@verevon/remote-core`; owns no user/session/billing state |
 | Future | Channel Plane | `apps/Channel Plane` | Planned widgets, adapters, public visitor conversations, inbox/handoff runtime |
 
 ## Architecture Map
@@ -317,6 +318,27 @@ Primary docs:
 - `apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml`
 - `apps/Frontend Plane/verevonv3/apps/verevon-web/package.json`
 
+### Support Plane
+
+Purpose: the network backend for live remote-support sessions — a support agent in the Verevon SPA views and, with the customer's explicit permission, controls the customer's computer. It runs the **official, unmodified** RustDesk server binaries (`hbbs` rendezvous + `hbbr` relay) behind a Caddy TLS terminator, because hbbs/hbbr's own WebSocket listeners are plaintext and a browser served over `https://` cannot open `ws://`.
+
+Authority contract: Support Plane owns **no** user, session, ticket or billing state and is never consulted for authorization. The live session runs browser→hbbs/hbbr over WSS and never transits the Frontend gateway; the gateway only serves connection config (`GET /api/v1/remote-support/config`, `apps/gateway/src/domains/remote_support.rs`). A durable remote-session audit record has no owning core yet and is therefore deliberately not fabricated — see the Status section of `packages/remote-core/docs/architecture.md`.
+
+Primary components:
+- `hbbs` — rendezvous/ID server (TCP+UDP 21116, WS 21118). Peer registration is UDP-only, so a browser can only ever be the *connecting* side; the customer's machine needs a native host.
+- `hbbr` — relay (TCP 21117, WS 21119); a raw byte pipe once two peers are paired.
+- `proxy` (Caddy) — TLS termination in front of the two WS ports only.
+- `readiness` — busybox sidecar that TCP-probes all four ports; the RustDesk image is `FROM scratch` (no shell), so in-container healthchecks are impossible.
+
+Client library: `apps/Frontend Plane/verevonv3/packages/remote-core` (`@verevon/remote-core`) — an independent, clean-room reimplementation of the RustDesk wire protocol (no AGPL source copied; see its `docs/licensing.md`). Verified live against a real `rustdesk-server` for the rendezvous half; the full session path awaits a live registered host.
+
+Primary docs:
+- `apps/Support Plane/README.md`
+- `apps/Frontend Plane/verevonv3/packages/remote-core/docs/rustdesk-protocol.md`
+- `apps/Frontend Plane/verevonv3/packages/remote-core/docs/architecture.md`
+- `apps/Frontend Plane/verevonv3/packages/remote-core/docs/security.md`
+- `apps/Frontend Plane/verevonv3/packages/remote-core/docs/licensing.md`
+
 ### Channel Plane
 
 Purpose: future runtime and deployment surface for external-facing Verevon agents.
@@ -373,6 +395,8 @@ This is future scope. Channel Plane should eventually own adapter install/runtim
 | `apps/Model Plane` | Reasoning, agent runtime, model gateway, sessions, inference, execution |
 | `apps/Ingestion Plane` | Evidence capture, web/search scraping, file imports, OAuth/connectors |
 | `apps/Frontend Plane/verevonv3` | Current Verevon UI and gateway |
+| `apps/Frontend Plane/verevonv3/packages/remote-core` | `@verevon/remote-core` — browser-first RustDesk-protocol client library (transport, crypto, codecs, permissions, AI frame sampling); consumed by the Support › Remote support surface |
+| `apps/Support Plane` | RustDesk-compatible hbbs/hbbr backend + TLS termination for remote-support sessions |
 | `apps/Channel Plane` | Future external channel runtime documentation |
 
 ## Coding Conventions Detected
@@ -474,6 +498,7 @@ curl --fail http://127.0.0.1:8090/infra/health
 | Add model gateway/session/inference/execution behavior | `apps/Model Plane/rust/services/*` |
 | Add orchestration/capability/sandbox/browser/cost behavior | `apps/Model Plane/go/services/*` |
 | Add realtime workspace or notification behavior | `apps/Application Plane/convex-core`, `notification-core`, `conversation-core`, `social-core` |
+| Add remote-support (screen view/control) behavior | `apps/Frontend Plane/verevonv3/packages/remote-core/src` (library), `src/features/support/components/RemoteSupportPage.tsx` (UI), `apps/gateway/src/domains/remote_support.rs` (config), `apps/Support Plane` (backend) |
 | Plan external widget/channel runtime | `apps/Channel Plane/docs/vision.md` |
 
 ## Current Audit Snapshot

@@ -1,19 +1,24 @@
 import type { SessionStats } from '../types/public.js';
 
 /**
- * All statistikk starter på ærlige nulltall. `bitrateKbps`, `renderedFrames`
- * og `droppedFrames` har ingen reell datakilde før dekode-/render-pipelinen
- * (fase 3/6 i planen) faktisk mater dem — se docs/architecture.md for status.
- * Å late som disse tallene betyr noe før den koblingen finnes ville brutt
- * "do not fake functionality".
+ * Alle tallene har nå en reell kilde:
+ *  - `decodedFrames`/`fps` fra dekoderens utgang.
+ *  - `bitrateKbps` fra faktiske mottatte bytes over et rullende sekund — vår
+ *    egen måling, ikke vertens måltall (det rapporteres separat i
+ *    'quality'-hendelsen).
+ *  - `droppedFrames` fra dekoderen (frames forkastet før første keyframe).
+ *  - `renderedFrames` fra rendereren, som melder inn hver maling.
+ * Er ingen renderer koblet på, blir `renderedFrames` stående på 0 — det er
+ * korrekt, ikke et hull: da males ingenting.
  */
 export class SessionStatsTracker {
   private decodedFrames = 0;
   private renderedFrames = 0;
   private droppedFrames = 0;
   private latencyMs = 0;
-  private bitrateKbps = 0;
   private readonly frameTimestamps: number[] = [];
+  /** [tidspunkt, bytes] over det siste sekundet. */
+  private readonly byteSamples: Array<readonly [number, number]> = [];
   private readonly now: () => number;
 
   constructor(now: () => number = () => Date.now()) {
@@ -44,11 +49,37 @@ export class SessionStatsTracker {
     this.latencyMs = ms;
   }
 
+  /** Faktiske bytes tatt imot for en videomelding. */
+  recordEncodedBytes(bytes: number): void {
+    if (!Number.isFinite(bytes) || bytes <= 0) return;
+    const timestamp = this.now();
+    this.byteSamples.push([timestamp, bytes]);
+    this.pruneByteSamples(timestamp);
+  }
+
+  /** Dekoderen teller kumulativt, så dette er et absolutt tall — ikke et inkrement. */
+  setDroppedFrames(total: number): void {
+    if (!Number.isFinite(total) || total < 0) return;
+    this.droppedFrames = total;
+  }
+
+  private pruneByteSamples(nowMs: number): void {
+    const windowStart = nowMs - 1000;
+    while (true) {
+      const oldest = this.byteSamples[0];
+      if (oldest === undefined || oldest[0] >= windowStart) break;
+      this.byteSamples.shift();
+    }
+  }
+
   getSnapshot(): SessionStats {
+    this.pruneByteSamples(this.now());
+    const bytesInWindow = this.byteSamples.reduce((sum, [, bytes]) => sum + bytes, 0);
     return {
       latencyMs: this.latencyMs,
       fps: this.frameTimestamps.length,
-      bitrateKbps: this.bitrateKbps,
+      // bytes/s -> kilobit/s
+      bitrateKbps: Math.round((bytesInWindow * 8) / 1000),
       droppedFrames: this.droppedFrames,
       decodedFrames: this.decodedFrames,
       renderedFrames: this.renderedFrames,

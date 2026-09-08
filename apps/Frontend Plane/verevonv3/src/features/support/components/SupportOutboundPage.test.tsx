@@ -193,7 +193,14 @@ describe('SupportOutboundPage', () => {
     ))
 
     expect((await screen.findByRole('region', { name: /verevon answer|verevon-svar/i })).textContent).toMatch(/delivery remains unconfirmed/i)
-    expect(screen.getByRole('link', { name: /open in chat|åpne i chat/i }).getAttribute('href')).toBe('/chat?thread_id=support_outbound_1')
+    // Chat owns its route: a `/chat?thread_id=` deep link would adopt a thread
+    // Chat does not own and render it read-only (chat-route-ownership.test.ts).
+    // The rail therefore points back at the source conversation, never at Chat.
+    expect(screen.queryByRole('link', { name: /open in chat|åpne i chat/i })).toBeNull()
+    expect(
+      screen.getAllByRole('link', { name: /open source conversation|åpne kildesamtale/i })
+        .some((link) => link.getAttribute('href') === '/support?view=all&conversation_id=conv_1'),
+    ).toBe(true)
     expect(screen.queryByRole('button', { name: /prepare customer reply|forbered kundesvar|retry|prøv igjen/i })).toBeNull()
     expect(screen.getByText(/cannot send|kan ikke sende/i)).toBeTruthy()
   })

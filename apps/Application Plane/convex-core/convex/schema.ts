@@ -823,6 +823,21 @@ export default defineSchema({
     .index("by_space_ref", ["spaceRef"])
     .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
 
+  // Where a member last caught up with a room (item 4b, "unread per thread").
+  // One row per member per Space: opening the room is reading it, and "new"
+  // means "since you last had it open" — Slack's channel model. Stores a
+  // timestamp against identifiers only, never a thread list and never content,
+  // so it records WHEN someone caught up and nothing about WHAT they read.
+  // Threads live in Model Plane and membership in Control; what a person has
+  // seen is a workspace projection, which is this plane's to own.
+  spaceReadMarkers: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    lastReadAt: v.number(),
+  })
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+
   spaceRecipientAudiences: defineTable({
     audienceRef: v.string(),
     audienceHash: v.string(),
@@ -966,6 +981,22 @@ export default defineSchema({
   })
     .index("by_conversation", ["conversationId"])
     .index("by_user", ["externalUserId"]),
+
+  /**
+   * Who is in a room right now (see `convex/spacePresence.ts`). Separate from
+   * the dormant `conversationPresence` below, which is keyed per conversation:
+   * a room's presence is a fact about the room, not about one of its threads.
+   * Stores a status and a timestamp against identifiers — never content.
+   */
+  spacePresence: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    status: v.union(v.literal("online"), v.literal("typing"), v.literal("offline")),
+    updatedAt: v.number(),
+  })
+    .index("by_space", ["spaceRef"])
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
 
   conversationAiActions: defineTable({
     externalOrgId: v.string(),

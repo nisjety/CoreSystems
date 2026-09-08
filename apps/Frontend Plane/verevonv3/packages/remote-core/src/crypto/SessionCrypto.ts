@@ -84,6 +84,26 @@ export async function verifyDetached(
 }
 
 /**
+ * Åpner en PÅHENGT (attached) Ed25519-signatur: 64-byte signatur etterfulgt av
+ * selve meldingen, slik sodiumoxide sin `sign::sign()` produserer. RustDesk
+ * bruker denne formen for `SignedId.id` og for serverens vouch i
+ * `PunchHoleResponse.pk` — ikke detached — så en detached-verifisering ville
+ * feilet på ellers gyldige data. Kaster ved ugyldig signatur i stedet for å
+ * returnere noe som kan forveksles med gyldig innhold.
+ */
+export async function openSignedMessage(
+  signedMessage: Uint8Array,
+  publicKey: Uint8Array,
+): Promise<Uint8Array> {
+  const s = await ready();
+  try {
+    return s.crypto_sign_open(signedMessage, publicKey);
+  } catch {
+    throw new EncryptionError('Signature verification failed — wrong signer key or tampered payload');
+  }
+}
+
+/**
  * ⚠️ REPLIKERER EN BEKREFTET SVAKHET I RUSTDESK SELV — se docs/security.md,
  * "Nonce reuse in RustDesk's own peer-to-peer encryption" for full forklaring
  * og kildehenvisning. Kort versjon: hbb_common/src/tcp.rs sin Encrypt-struct

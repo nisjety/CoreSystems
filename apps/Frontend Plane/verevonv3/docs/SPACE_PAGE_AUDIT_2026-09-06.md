@@ -47,16 +47,24 @@ the comparison plan's (`VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md`).
 | Org room auto-provision + Slack-shaped landing | Done | `SpacesIndexPage.pickDefaultSpace`, `ensureOrganizationRoom` |
 | Personal Space deletion with per-plane receipts | Done (frontend) | `SpaceMembersPanel` danger zone; migrations still `[ ]` in the tracker |
 | Members tab: roster | Done, read-only | `getSpaceRoster` |
-| Members tab: invitations, removals, role changes (comparison plan tab spec) | Not built | Control has `PUT /internal/spaces/:ref/memberships`; no gateway route, no UI |
-| Create a shared room / project / case Space from the UI | Not built | only personal + org room exist client-side; Control accepts all four kinds |
-| Pause / resume / remove an agent binding in the room (§10 intents) | Not built | no gateway route, no Convex mutation, no UI |
+| Members tab: add and remove a person | Done (§10) | `POST/DELETE /api/v1/spaces/:ref/members[/:id]`, `addSpaceMember` / `removeSpaceMember`, owner/manager gated |
+| Members tab: change a person's role in the room | Not built | `addSpaceMember` sends only `member_id`; no role field on the gateway route, no UI. Control owns the role, so this needs a membership-role write, not a projection change |
+| Create a shared room from the UI | Done (§10) | `POST /api/v1/spaces` with `kind`, "Nytt rom" in the sidebar |
+| Create a project / case Space from the UI | Not built | the client sends `kind: 'room'` only; Control accepts all four kinds, and nothing in the product yet distinguishes a project from a room |
+| Pause / resume / remove an agent binding in the room | Done (§9) | `PATCH/DELETE /api/v1/spaces/:ref/agents/:binding_ref`, `setSpaceAgentState` / `revokeSpaceAgent`, agent card controls |
 | UI-2c agent-to-agent delegation | Not started | plan says "no safe partial slice"; correct to leave |
 | Activity tab from receipts, approvals, cost (S2.5) | Done (§14) | five sources, one ordering: threads, runs with token/step cost, approvals, owner receipts correlated through the grant that authorized them, and authority grants. `GET /spaces/:ref/activity` + Conversation Core's `/spaces/:ref/activity`. Closes S2.3 slice 5 |
-| Work tab (S4.5) | Blocked on Model Plane | `ListRunsRequest` has no `space_id`; cron listing is org-scoped although rows carry `space_ref` |
+| Work tab (S4.5) | Done (§12) | the Model Plane block was removed as part of it: `ListRunsRequest.space_id` and a `space_ref` filter on the cron listing, then `GET /spaces/:ref/work` |
 | Knowledge tab | Done (§13) | `documents.space_ref` is the edge `documents-api` was verifying and discarding; `POST /v1/knowledge/space-sources`, `GET /spaces/:ref/knowledge`, `SpaceKnowledgePanel`. Enforcement widened from 3 paths to 10, each with real enforcement |
 | Sub-routes `/spaces/:id/chat|work|…` | Deviated, accepted | hash tabs with legacy aliases; the wiring doc endorses this |
-| Presence (`conversationPresence` schema) | Dormant | zero functions, zero readers, as the research doc already flagged |
-| Realtime / shared-thread continuity | Not built | 30 s membership recheck is the only refresh |
+| Presence: who else is in the room, and who is writing | Done (§18) | `spacePresence` + `POST /spaces/:ref/presence` (one heartbeat that also answers "who else is here"); the older `conversationPresence` table stays dormant — it is keyed per conversation, not per room |
+| Shared-thread continuity | Done (§7) | a visible-tab 6 s poll of the thread projection, published once and read by the room, the sidebar and the composer |
+| Realtime as a push transport | Not built | everything live is polled. A server push (SSE or Convex subscription) would remove the 6 s floor on how fast the room reacts; nothing depends on it today |
+| Skills: `/` picker in the room composer with a real scope badge (later tier) | Done (§17) | model-gateway `InvokeRequest.skill_ids` resolved server-side and injected ahead of keyword matches; `GET /api/v1/skills` already open to members; badges `Organisasjon` / `Personlig` — the two scopes the registry has |
+| Cost: allowance with a hard stop (later tier) | Hard stop legible; allowance blocked (§17) | `budget_exceeded` rendered as a refusal with the way to Settings › Forbrukstak; no used-vs-limit pair reaches a member and no per-Space cost exists |
+| Routines posting back into the room (later tier) | Read side only (§17) | schedules bound to the room already list on the Work tab; creation stays in Settings behind the scheduled-effect gate |
+| Memory page with revision restore (later tier) | Blocked on a plane decision (§17) | no revision store anywhere; ADR-0003 deferred versioning; ownership split Model vs Data unresolved |
+| Room hygiene: unread since last visit, pin, persisted auto-title (4b) | Done (§16) | Convex `spaceReadMarkers` + `GET /threads` `read_marker`, `POST /spaces/:ref/read`, `PATCH /spaces/:ref/threads/:id/presentation`; badges in timeline and sidebar from one derivation |
 
 Release-gate reality has not changed since the 2026-08-17 reconciliation: R-1
 to R-5 are `[~]`, the Model allowlist is empty, and the docs are explicit that
@@ -145,6 +153,12 @@ this endpoint it would present org authority as Space authority.
 
 Ordered so each step is useful on its own and none requires the release gates
 to move first.
+
+**Status, 2026-09-08.** Items 1 to 6 are done — §7, §8, §9, §10, §11 and §12
+respectively — and 7 and 8 are struck through below. One piece of item 4 is
+not: per-member *role changes*. Rooms, add-person and remove-person shipped;
+`addSpaceMember` sends only a `member_id`, so a member's role in a room is
+still whatever Control assigned at join. The progress table above says so.
 
 1. **Make the org room readable and live.** Server-side author attribution on
    transcript turns, shared-thread transcript read gated on Space membership
@@ -259,15 +273,21 @@ Status tags: **have** = built in the Space page, **partial**, **no**.
 The reference check confirms the order of items 1 to 4 and adds three items that
 every reference ships and we lack. Insert them as follows:
 
-- **1b. Working indicator and interruptible turns.** A live "agent is working"
+- ~~**1b. Working indicator and interruptible turns.** A live "agent is working"
   signal (thread projection poll now, delivery outbox later) shown on the
   sidebar row, the post, and the composer bar, plus Stop recorded as a stop.
-  Comes with item 1 since both need the same refresh path.
+  Comes with item 1 since both need the same refresh path.~~ Done — see §15.
+  The refresh path is shared exactly as predicted: the page publishes the
+  projection it already polls, and the sidebar and composer read it.
 - **2b. Approval card verbs.** Use `Allow once / Allow for this conversation /
   Always allow / Deny` and lock the composer with "Approve or deny to continue".
   Every reference converged on this wording; do not invent a fourth.
-- **4b. Room hygiene.** Unread per thread, auto-title from the opening
-  exchange, pin. Small, and it is what makes the sidebar read as channels.
+- ~~**4b. Room hygiene.** Unread per thread, auto-title from the opening
+  exchange, pin. Small, and it is what makes the sidebar read as channels.~~
+  Done — see §16. Unread is a room-level "since you last had it open" marker
+  owned by Application Plane; pin is owner-bound because Session Core's
+  presentation write is; the AI title is now persisted for the room instead
+  of held in the sender's browser.
 
 Later tier, unchanged in order but sharpened by the references: routines that
 post back into the room (QM's consent notice and settings deep link), a Memory
@@ -275,6 +295,14 @@ page with revision restore (QM), skills with `/` autocomplete and scope badge
 (QM, openbot, Grok), cost shown as an allowance with a hard stop (all four),
 and the QM-style "lives in Slack, open in Slack" banner as the first Channel
 Plane surface.
+
+Worked through on 2026-09-08 — see §17. Skills: done, and the mechanism under
+it made real first. Cost: the hard stop is now legible in the room and a false
+figure in Activity is corrected; the allowance display is recorded as blocked
+with the exact missing pair. Routines: the read side already existed; the room
+now says where routines are managed, and creation from the room stays behind
+the scheduled-effect gate. Memory: blocked on a plane decision, recorded.
+Slack banner: no data source, not started.
 
 ## 7. Item 1 implementation, 2026-09-06
 
@@ -1121,6 +1149,12 @@ Work tab never read them. Deliberately tokens rather than a currency figure —
 pricing is Control-owned, and a browser-side multiplication would be an invented
 number.
 
+> **Corrected 2026-09-08 (§17).** The token half of this was false in
+> practice: session-core does not track token usage and reports both fields
+> as a literal `0` for every run, so this line rendered "0 tokens" under
+> every run in the room. Only `steps_completed` was ever real. The adapter now
+> treats a zero total as "no figure" and prints nothing.
+
 ### Three defects found on the way, none of them in the new code
 
 **Conversation Core could not verify a Control decision at all.** Its config
@@ -1189,3 +1223,707 @@ still make the selection unambiguous. Dark mode: 13.79:1 active, 8.28:1 idle.
   "Levering: Leveringstilstand publiseres ikke ennå.", "Overvåkinger:
   Overvåkinger publiseres ikke ennå."), the lens control works, and every new
   class was measured in both themes.
+
+## 15. Item 1b, 2026-09-07 — the room is visibly working, and Stop is a stop
+
+Item 1b as the reference check phrased it: a live "agent is working" signal on
+the sidebar row, the post and the composer bar, plus Stop recorded as a stop.
+Both halves turned out to need no backend work at all — everything they need
+already existed and had simply never been wired together.
+
+### What was true before
+
+- A member who sent a message could only wait. The composer had no Stop.
+- Every *other* member saw nothing while a turn streamed. The sender had a live
+  exchange in their own composer; the rest of the room saw a finished reply
+  arrive on the poll, and nothing before it. The room went dark exactly when it
+  was busiest.
+- The sidebar's "Jobber" label was true at the moment the panel mounted and
+  stale for the rest of the session: it fetched the thread list once and never
+  again.
+- A recorded stop rendered as the untranslated enum token **"Cancelled"** in a
+  Norwegian room — `threadStatus` had no case for it.
+- The pulse signal never lit in Norwegian. Its lit style was keyed on
+  `[aria-label="Active work"]` — the *English* label — so in the default locale
+  the selector never matched, however busy the room was. Style must never read
+  a translated string.
+- `.verevon-space-status--active` had been defined since the cockpit shipped
+  and was applied by nothing, so a working post read in the same grey as a
+  finished one.
+
+### Why Stop needs two calls, in this order
+
+Model Plane's disconnect handling deliberately *detaches and finishes* a
+stream whose client went away, so a closed tab can resume. That is correct for
+resume and exactly wrong for Stop: an `AbortController` alone leaves the run
+generating and its status `running` for every other member. The recorded stop
+is the second call — `POST /api/v1/chat/invocations/{requestId}/cancel`, which
+the gateway proxies to model-gateway's owner-bound cancel registry, which flips
+the stream's cooperative flag, emits `stopped`, and calls
+`cancel_direct_inference_run_authenticated` so Session Core writes
+`cancelled`. That is what the room's projection shows on its next poll.
+
+The `requestId` arrives on the stream's `connected` frame. If Stop lands before
+it there is nothing to cancel with, and the composer says so plainly — "cut off
+before the reply started; the run may still finish server-side" — rather than
+claiming a stop it cannot prove. A cancel the gateway refuses stays in the
+"stopped here, recording…" wording and never flips to recorded. And a trailing
+`done` after `stopped` no longer overwrites it; a server-side stop used to be
+routed to `onDone` and render a halted answer as a finished one.
+
+### One shared refresh path, not a second poll
+
+`space-live-work.ts` is a module-level Solid store. `SpacePage` publishes the
+projection it already polls every six seconds; the sidebar and the composer
+read it. Nothing fetches twice, nothing runs a second timer, and the two
+surfaces cannot show two different answers to one question.
+
+Two judgements in the store worth naming:
+
+- **Absence is not idleness.** The store only holds rooms whose page has
+  published. An unobserved room returns an empty list, and the sidebar draws no
+  dot for it rather than a calm one — a test asserts exactly that, against a
+  mounted thread list that still says `running`.
+- **The browser's own stream and the server's projection stay separate.** The
+  sender's indicator is immediate; everyone else's arrives on the poll. Merging
+  them would let a local signal masquerade as a server fact.
+
+"Working" is `queued | running`, deliberately *not* `awaiting_approval`. A run
+paused on a person is active but nobody is producing anything; calling it
+"working" would make a blocked room look busy — the opposite of the truth.
+
+### Two defects found on the way
+
+**Two literal NUL bytes were committed in `SpaceApprovalPanel.tsx`.** Where the
+source meant the two-character escape `\0` as a resource-key separator, an
+earlier Python patch had written real NUL bytes — the same root cause as the
+`grpc.rs` incident. It ran fine (a NUL inside a template literal is a valid
+string, and `split` on the same NUL matches), which is why every gate passed
+and commit `aae03af5` carries it; but git treats the file as binary, so every
+future diff of that component was blind. `grep` calling a `.tsx` file "binary"
+was the tell. Fixed to `\u0000`, the form `SpaceRoomTimeline` already uses.
+
+**The room post and the exchange are white cards in dark mode.** The whole
+sheet has no `.dark .verevon-room-post` or `.dark .verevon-space-room-exchange`;
+they stay `--verevon-surface` (white) with their own text correctly dark-on-
+white. My first draft gave the new working row, Stop and stopped line white
+text — measured 1.0 / 1.1 / 1.0 against the real page. The honest fix here is
+to match the card they sit on (now 6.13 / 17.4 / 6.13 in dark); re-skinning the
+card surfaces themselves is the same class of defect as item 5's agent card
+and needs its own measurement pass over every existing turn, so it is recorded
+here rather than done.
+
+### A verification hazard, since it cost a false conclusion
+
+After the CSS fix, `docker restart` plus a page reload measured the *old*
+numbers to the pixel, and I nearly concluded the rules were wrong. Vite was
+serving the new sheet — `curl` proved it — but the browser was holding
+`global.css` in its HTTP cache. `fetch(url, { cache: 'reload' })` before the
+reload cleared it and the new numbers appeared. The Vite-restart note in memory
+now carries this second step.
+
+### Verification
+
+- Frontend: `pnpm typecheck` clean; lint 0 errors, and the three touched files
+  carry 6 `solid/reactivity` warnings against 9 on their committed versions —
+  none introduced. 255 tests pass across `features/spaces` and `features/core`
+  (29 new: 6 store, 10 composer, 6 timeline, 3 sidebar, plus 4 lines of
+  `flush()` where Solid 2's deferred writes would otherwise read stale).
+- Live at `/spaces/p574enc94gj1c99ejjtet33zrn8dx21e#chat`: idle state renders
+  exactly right — pulse `data-active` absent, no Stop, no working line, no
+  dots. Every new class probed against the real stylesheet in both themes:
+  light 6.13 / 4.99 / 17.4 / 6.13 / 6.13, dark 6.13 / 4.99 / 17.4 / 6.13 /
+  8.28, pulse lit and animating under `data-active`, sidebar dot at the row's
+  trailing edge. Not driven with a real message: sending one would write into
+  the org room, and the stop chain is covered end to end by tests instead.
+- Not addressed, deliberately: 2b's four approval verbs. Item 2 recorded why —
+  Model Plane records one decision per approval and has no scope to remember a
+  standing answer, so "Always allow" would be a button that lies.
+
+## 16. Item 4b implementation, 2026-09-08
+
+§6.3 called this "small, and it is what makes the sidebar read as channels".
+Small is right for the UI. It was not small underneath: none of the three
+facts — *new since you were last here*, *pinned*, *what this post is called*
+— had an owner, and each turned out to belong to a different plane.
+
+### What was true before
+
+- Nothing anywhere recorded that a member had seen a room. There was no
+  "new" to show, so the sidebar's thread rows were a flat list of names that
+  looked identical whether the room had been quiet for a week or three
+  colleagues had posted since lunch.
+- `pinned_at` existed in Session Core's thread listing and ordering
+  (`pinned_at IS NOT NULL DESC`) and the gateway's personal-chat path could
+  set it, but the Space projection dropped the flag and no room surface
+  showed or set it.
+- The AI-generated title was an SSE `title` event and nothing more: Chat
+  keeps it in a browser-local snapshot. In a room that meant the *sender*
+  saw "Innkjøp av pallevekt" while every other member saw the raw first
+  message as the post's name, because the room's listing reads
+  `COALESCE(presentation_title, first_user.content)` and nobody had written
+  the first half.
+
+### Three owners, named
+
+**Unread lives in Application Plane.** Threads are Model Plane's, membership
+is Control's, and neither owns "what has this person seen" — that is a
+workspace projection, which is Application's job by the ownership matrix.
+`spaceReadMarkers` stores one row per member per room: `spaceRef`,
+`externalOrgId`, `externalAuthId`, `lastReadAt`. Only a timestamp against
+identifiers — never a thread list and never content — so it says nothing
+about *what* was read, only *when*, and Zero Data Retention has nothing to
+propagate through. One marker per room rather than per thread because the
+room renders every post inline: a per-thread marker would be a write per
+post per visit for no extra truth, and it is not what Slack does either.
+
+**Pin stays owner-bound, on purpose.** Session Core's
+`UpdateThreadPresentation` authorizes through `authorize_thread_owner …
+OwnerIntent::Mutate`. The gateway's new `PATCH
+/spaces/:ref/threads/:id/presentation` checks room lifecycle and membership
+first, then relays an upstream 403/404 as `thread_presentation_owner_only`.
+The room shows the pin to everyone and the pin *control* only to the post's
+author: a button every other member could press and be refused every time
+is a control that lies. A room-wide pin ("any member may pin any post") needs
+a Space-authorized presentation write in Session Core — a decision-bearing
+path like `model.thread.append` — and is recorded here rather than faked by
+having the gateway impersonate the owner.
+
+**The title becomes a room fact.** When the composer opened the thread
+(`openedNewThread`) and the stream's `title` event arrives, the composer
+writes it back through the same presentation route, then asks the page to
+re-read. The sender is by construction the owner, so the owner-bound write
+is exactly right here. Other members see the name on their next poll. Chat's
+browser-local snapshot is untouched; a personal thread has no other reader
+to disagree with.
+
+### What shipped
+
+- Application Plane: `convex/schema.ts` `spaceReadMarkers` with
+  `by_space_and_subject`; `convex/spaceReadMarkers.ts` — `unreadThreadIds`
+  (pure, tested), `advanceMarker` (never moves backwards),
+  `spaceReadMarkerForGateway`, `markSpaceReadForGateway`, both behind
+  `assertServiceKey` + `requireGatewayMember`.
+- Gateway `domains/spaces.rs`: `GET /spaces/:ref/threads` now carries
+  `read_marker` and, when Convex cannot answer, an `unavailable` entry with
+  code `read_marker_unavailable` instead of a guessed marker; `POST
+  /spaces/:ref/read` (503 `read_marker_unavailable` on failure); `PATCH
+  /spaces/:ref/threads/:id/presentation` with `{ title?, pinned? }`, 400
+  `invalid_presentation` for an empty body or a title over 200 characters.
+  `chat/history.rs`'s `update_durable_presentation` is reused, not copied.
+- `spaces-client.ts`: `SpaceThread.pinned`, `SpaceReadMarker`,
+  `updateSpaceThreadPresentation`, `markSpaceRead`.
+- `features/spaces/lib/space-unread.ts`: the browser mirror of the Convex
+  derivation, so the room badges the moment the listing arrives rather than
+  after a second round trip. The file says which side owns the rule.
+- `SpacePage.tsx`: snapshots the marker on *arrival* in a room and derives
+  the unread set against that snapshot; advances the durable marker on each
+  visible listing (having the room open is reading it); publishes the set
+  through the item-1b store so the sidebar badges the same rows.
+- `SpaceRoomTimeline.tsx`: "Festet" and "Ny" flags stated *before* the
+  post's content; author-only Fest/Løsne control that re-reads rather than
+  flipping a local copy; a refused pin says "Ingenting ble endret".
+- `CoreSidebarSpacesPanel.tsx`: pinned rows swap the glyph for a pin rather
+  than adding one, so the row does not widen; a neutral unread dot that
+  yields to the working dot when both apply — work in progress is the more
+  urgent fact. The label reads "Festet. Ny siden sist." before the status.
+- `SpaceRoomComposer.tsx`: persists the opening exchange's title as above.
+
+### Four judgements worth naming
+
+- **Badges are pinned to arrival, not to the live marker.** The marker
+  advances every six seconds while the room is open. If the badges read the
+  live marker they would all vanish on the first poll, before anyone had read
+  anything. The page snapshots the marker once per room and holds it.
+- **A first visit badges nothing.** There is no last visit to be new since,
+  and badging a hundred posts at once teaches people to ignore the badge. The
+  marker is still recorded so the *next* visit has one.
+- **Your own posts are never new to you**, and a post with no readable
+  timestamp is left alone rather than guessed at.
+- **An unreadable marker is a named gap, not a zero.** Convex down must not
+  read as "you have seen everything": the listing says `read_marker_unavailable`
+  and the room badges nothing, the same shape items 6 to 8 use.
+
+### What remains open
+
+- **Cross-room unread in the sidebar.** The sidebar only badges the room whose
+  page is open, because the derivation needs that room's thread listing and
+  the sidebar must not start a poll per room. A "3 unread in Lager" badge on a
+  room you are *not* in needs a per-Space activity aggregate from Model Plane
+  (latest activity per Space, one call) joined to the markers — the same
+  missing aggregate that blocks the Work tab. Recorded, not approximated.
+- **Room-wide pin**, as above: Session Core presentation write with a Space
+  decision instead of owner-only.
+- **Unpin/retitle by anyone but the author**, same root.
+
+### Found while verifying, and fixed
+
+**In dark mode, every sidebar row except the active one was invisible.**
+`.core-sidebar-panel-link` paints its text in `--verevon-dark-border`, which
+resolves to `#34363d` — the same value as `--verevon-dark-sidebar`, the
+sidebar's dark background. Measured 1.0:1 on the real "Nytt rom" link and the
+real non-active org-room link, not only on my probe rows; the active row
+read 9.41 only because `.dark .verevon-sidebar-panel-active` overrides it. It
+went unnoticed because the org room has never had a thread, so the row
+type this item adds is the first anyone would look for there in dark. Fixed
+with a `.dark .core-sidebar-panel-link` rule placed *before* the active
+override so the active row keeps winning at equal specificity, plus icon and
+hover variants; rows now measure 10.99 in dark. The dashed empty-state
+paragraph on the same surface read 1.88 in dark and got the same treatment
+(9.13). Its *light* value is 3.22 against a 4.5 target — pre-existing, in the
+light sidebar palette, and recorded here rather than changed in passing.
+
+**The pinned flag cleared AA by 0.04.** Accent ink on a 10% accent tint over
+the white card measured 4.54:1 at 11px. The tint is now 6% and measures
+4.72. Not a failure, but a margin that thin is one palette tweak from one.
+
+### Verification
+
+- Application: 7 new `node:test` cases (`test/space-read-markers.test.cjs`),
+  67 pass in the package; functions pushed and "Convex functions ready!"
+  confirmed after a `convex-gateway` restart.
+- Gateway: 7 new tests through a wiremock Convex routed on `body_partial_json`
+  (marker present / null / unavailable, mark-read records the moment and
+  nothing else, presentation validation, owner-only relay, membership gate);
+  91 pass in `domains::spaces`.
+- Frontend: `pnpm typecheck` clean; lint 0 errors, 7 `solid/reactivity`
+  warnings of which 6 exist at HEAD and the seventh was mine and is fixed.
+  142 tests pass across the nine touched files (6 `space-unread`, 7 timeline
+  hygiene, 2 sidebar pin/unread, 3 composer title, 2 page arrival/mark-read).
+  The two page tests first failed for a reason worth recording: they never
+  set the context mock, so the page rendered an empty section — the
+  fixture's fault, not the feature's — and then found the post's title twice,
+  because the header's activity pulse names the same post. Scoped to the
+  timeline list.
+- Live at `/spaces/p574enc94gj1c99ejjtet33zrn8dx21e#chat`: the redeployed gateway answers `GET /threads` with
+  `read_marker` and an empty `unavailable`; the marker was `null` on this
+  member's first read, `POST /read` recorded the moment and returned it, and
+  the next `GET` carried it back — the round trip through Convex is real.
+  `PATCH …/presentation` with an empty body returns 400 `invalid_presentation`
+  ("A title or a pin state is required"). The room has no threads, so the pin
+  and title paths were not driven live; they are covered by the gateway and
+  component tests and a real run would write into the org room. Every new
+  class was probed against the live stylesheet in both themes after a
+  cache-bypassed reload — light / dark: pinned flag 4.72 / 4.72, new flag
+  14.82 / 14.82, pin control 6.13 / 6.13, unpin control 4.99 / 4.99, refusal
+  line 6.48 / 6.48, sidebar thread label 10.96 / 10.99, sidebar pin glyph
+  4.54 / 4.33 (graphic, 3.0 target), unread dot 6.13 / 6.29. The in-app
+  browser pane reports `document.visibilityState === "hidden"`, so the page's
+  own mark-read effect correctly did not fire there; the route was exercised
+  directly instead.
+
+## 17. The later tier, 2026-09-08
+
+Four items, surveyed across every plane before a line was written. Three
+turned out to be startable in some honest form and one is not. The order below
+is the order of what has a real data source today, which is not the order the
+references suggested.
+
+### Skills: the `/` picker, and the mechanism that had to be made real first
+
+The room composer's `/` now opens a picker of the skills this member may use,
+each badged with its real scope, and a picked skill becomes a chip that rides
+to the server as an id. That is the visible part. It could not be built as a
+mirror of the dashboard composer's existing `/` picker, because that picker
+did not do what it appeared to do.
+
+**What was true before.** A skill picked in the dashboard composer was sent
+as a *tool spec* named after the skill, with an empty parameter schema
+(`chat-client.ts::buildToolSpecs` → `dynamicActionTool`). Model-gateway has
+no idea what to do with a tool named after a skill; skills reach a turn only
+through keyword matching (`sse.rs::fetch_skill_context` → `handle_match_skills`),
+which scores the *message text* against name, tags and body and applies each
+skill's `min_score`. Picking "Innkjøpsrutine" therefore steered nothing unless
+the message happened to contain its trigger words — and in that case it would
+have been injected anyway. The picker was a control that lied, and a room
+picker built on top of it would have lied in a second place.
+
+**What shipped, Model Plane.** `InvokeRequest` gains `skill_ids` (aliased
+`skillIds`). `skills::resolve_requested_skills` resolves each id against the
+org's catalogue — a stale or foreign id is dropped with a warning, never an
+error, because a turn must not fail over a label — and against the same SKILL-1
+ownership rule matching uses (`usable_or_untracked`), so a private skill cannot
+be pulled into a turn by guessing its id. Explicit picks are injected first, in
+the order picked, with no `min_score`; keyword matches fill in behind them
+minus anything already picked; the existing size budget still bounds the total.
+The cap is four (`MAX_REQUESTED_SKILLS`), above the three-match cap on purpose:
+a deliberate pick outranks a guess. The turn registry records the resolved
+explicit ids ahead of the matches, so a thumbs-up credits what actually shaped
+the answer. 4 new unit tests; the crate's 1020 lib tests pass; deployed.
+
+**What shipped, Frontend Plane.** `chat-client.ts` puts picked skills on the
+wire as `skill_ids` and *removes* them from the tool specs — the key is absent
+when none is picked, so a turn that names no skill is byte-for-byte what it
+was. The dashboard composer's existing picker becomes truthful by this alone.
+The Verevon gateway forwards the field untouched (only named fields are
+stripped on the chat path; a forged id is harmless because the server decides).
+`skills-client.ts` learns `scope`, `owner_user_id` and `shared_with`, which
+capability-core has returned all along and the composer normalizer dropped.
+`SpaceRoomComposer.tsx`: the `@` and `/` pickers share one list, one
+highlighted row and one set of keys — arrows, Enter, Tab, Escape, with
+`aria-activedescendant` — so the mention picker is no longer mouse-only. The
+catalogue is fetched on the first `/`, never on mount. A picked skill is a
+chip above the textarea with its scope and a remove control; the `/query`
+leaves the message. The `/` box opens on zero matches too, to say *why*:
+loading, could not be loaded, none available to you, none match.
+
+**The scope badge states two scopes because two exist.** `agent_skills.scope`
+is CHECK-constrained to `org | user`; `capability_scopes.scope_kind` to
+`run | thread | workspace | user | org | global | agent`. There is no `space`
+anywhere, and the adoption plan names that as the unresolved blocker for S3.5
+(itself behind S1.4, S3.4 and S2.1). So the badge reads "Organisasjon" or
+"Personlig", and there is deliberately no "dette rommet" — a badge for a scope
+the registry cannot store would be the same lie as the old picker. Recorded,
+not approximated: a Space-scoped skill needs a schema change in Model Plane
+and a Space-aware resolver, and the plan says to consolidate the two existing
+registries rather than add a third.
+
+**Found on the way.** model-gateway's lib test target did not compile at HEAD:
+a normalize test assigned `Vec<String>` to `InvokeRequest.tools`, which is
+`Vec<ToolSpec>`. Fixed in the test so the suite runs; the "two known-broken
+targets" note in memory was one short.
+
+### Cost: the hard stop made legible, a false figure removed, the allowance recorded as blocked
+
+**What exists.** Exactly one hard stop on spend exists anywhere: model-gateway's
+pre-flight budget guard (`budget.rs` + `org_quota.rs` → cost-core
+`/api/v1/budget/check`), which refuses a turn with 402 `budget_exceeded` before
+it starts, against the ceiling an org admin sets under Settings › Forbrukstak.
+It is pre-flight only — nothing stops a run mid-way on cost. Control Plane
+enforces nothing spend-related: billing-core's `IsExceeded` is advisory and
+its `PublishQuotaExceeded` has no producer; `org_quotas.quota_value` is never
+written. No per-Space budget or per-Space cost exists: `cost_entries` has no
+Space column.
+
+**What shipped.** The refusal now reads as what it is. The room composer keeps
+the gateway's error *code* beside its message; `budget_exceeded` renders as
+"Forbrukstaket er nådd, så agenten startet ikke" with a link to Settings ›
+Forbrukstak, and explicitly not as "the reply stopped before it finished" —
+nothing was replied. `budget_unavailable` likewise says the check could not
+run. Unknown codes keep the server's message rather than a generic line that
+hides it. And the Activity feed no longer prints "0 tokens" under every run
+(see the §14 correction): a zero total is no figure.
+
+**Why the allowance itself is not built.** "Used of allowance" needs two
+numbers on one surface for the member reading the room. The limit lives in
+org-core and is readable only by org admins; the usage lives in cost-core and
+is joined to the limit in exactly one place, the POST budget check, which
+returns a boolean plus totals and is not exposed by the Verevon gateway. A
+member-readable "X of Y" would need a new read route joining the two — a
+reasonable read — but the number it would show is not the number the label
+promises, which is the real blocker:
+
+- the ceiling is *named* per run (`max_cost_per_run_usd_micros`, and the
+  Settings label says "per kjøring") but cost-core compares it against a
+  **lifetime** org-or-user aggregate with no time window and no honoured
+  `reset_period` — once crossed, every turn is refused forever;
+- reading the ceiling **fails open** (org-core down ⇒ uncapped) while checking
+  it fails closed;
+- the **ZDR** streaming path returns before the check and is never budgeted;
+- a stored ceiling of `0` is treated as *unset*, contradicting the frontend's
+  "zero means no allowance" copy.
+
+Displaying an allowance over those semantics would either restate the label's
+promise (false) or expose the mismatch as if it were the design. These are
+Model and Control Plane defects, recorded here for their owners; the room
+shows the refusal truthfully and nothing more.
+
+### Routines: the read side existed; the room now says where the write side lives
+
+The schedule spine is real and Space-bound end to end — Space-scoped cron
+rows with a full authority envelope, fail-closed re-authorization at every
+fire, and a fired run gets a thread in the Space owned by the orchestrator
+service, which the room's listing can see under a shared read decision. The
+Work tab (§12) already lists a room's schedules. What does not exist: any
+write of a result *message* into the room, a "routine" concept above raw cron
+rows, a consent surface, in-room creation (org-admin only, and the plan is
+explicit that scheduled effects are not yet safe to make), and any link from a
+room to where routines are managed.
+
+**What shipped.** The Work tab now ends with where routines are created and
+changed — Settings › Planlagte kjøringer, the existing page — and states that
+a routine bound to the room shows here and its runs land in the room. A
+footnote, not a form: offering "Ny rutine" in the room would be a scheduled
+effect the release gates still hold closed, in a UI that could not show a run
+history (`cron_fires` is never read by any API) or a consent notice (no
+consent model exists). The `delivery_target_ref` and `approval_policy_ref`
+columns on `cron_schedules` exist and are never written; posting back needs
+S4.4 delivery, the same chain §14 traced for watches.
+
+### Memory: blocked on a decision no frontend change can make
+
+A per-user memory store exists end to end — Model Plane `agent_memory`, the
+gateway's `GET/DELETE /api/v1/memory`, Settings › Minne with provenance and
+ZDR-aware degradation. Nothing anywhere keeps revisions: memories are
+mutable-in-place, Space and org instructions are last-write-wins Convex fields
+(ADR-0003 deferred versioning "until a real versioning consumer is scoped"),
+and the one revision store in the repo — wiki page versions in Data Plane v2 —
+has list and diff but no restore. The adoption plan assigns revisioned authored
+memory to Data Plane v2, which has no memory store; the ownership matrix gives
+memory to Model Plane. A Memory page with revision restore therefore needs a
+plane decision and a new history store first. Building the page over a store
+that cannot restore anything would be a page with a button that lies. Recorded
+with the dependency; not started.
+
+### Verification
+
+- Model Plane: `cargo test --lib` for model-gateway — 1020 passed (4 new);
+  redeployed with `compose.sh`, container healthy.
+- Frontend: `pnpm typecheck` clean; lint 0 errors on every touched file (the
+  composer's one pre-existing `solid/reactivity` warning remains); 532 tests
+  pass across `features/spaces`, `features/core`, `shared/api` and
+  `shared/actions` — 7 new picker tests, 2 hard-stop tests, 3 wire-body tests,
+  3 zero-token tests, 1 Work-tab test.
+- Live at `/spaces/p574enc94gj1c99ejjtet33zrn8dx21e#chat` after a
+  cache-bypassed reload: `GET /api/v1/skills` answers 200 with an empty list
+  for this org, and typing `/` in the real composer opens the listbox labelled
+  "Velg en ferdighet" reading "Ingen ferdigheter er tilgjengelige for deg";
+  Escape closes it. Every new class probed against the live stylesheet in both
+  themes — chip text 17.4, scope badge 14.82, remove control 6.13, highlighted
+  row 15.81 with its badge 13.5, empty line 6.13, hard-stop line and link 6.0,
+  routines footnote 5.77 with its link 16.38 — identical light and dark, since
+  the composer's tokens resolve the same on both. Not driven with a real turn:
+  a message would write into the org room, and the org has no skills to pick;
+  the injection path is covered by the model-gateway unit tests and the wire
+  shape by the client tests.
+
+## 18. Presence, 2026-09-08 — and a correction to §2's own ledger
+
+Before building this, the progress table in §2 was re-checked against §7
+through §12, since those sections record work the table still called "Not
+built". Six rows were stale:
+
+| Row | Table said | Sections actually show |
+|---|---|---|
+| Members: invitations, removals, role changes | Not built | Add/remove shipped in §10; only role changes are open |
+| Create a shared room / project / case | Not built | Room creation shipped in §10; project/case did not |
+| Pause / resume / remove an agent binding | Not built | Shipped in §9 |
+| Work tab (S4.5) | Blocked on Model Plane | The block was removed as part of §12 |
+| Presence (`conversationPresence`) | Dormant | True of that table; the claim is now split into what this section builds |
+| Realtime / shared-thread continuity | Not built | The 6 s poll (§7) is exactly this, as a poll rather than a push |
+
+§4's status line and the table now say this. The one row that stayed open —
+per-member role changes in a room — is real: `addSpaceMember` sends only a
+`member_id`, with no role field anywhere on the path.
+
+### What presence is, and what it deliberately is not
+
+"Who is in the room" and "who is writing" — the two facts every reference
+product states about a shared space and this one did not.
+
+**Application Plane owns it**, for the same reason item 4b's read markers do:
+threads are Model Plane's, membership is Control's, and "who is looking at
+this right now" is a workspace projection that belongs to neither. A new
+table, `spacePresence`, rather than reusing the dormant `conversationPresence`
+— that one is keyed per *conversation*, and a room's presence is a fact about
+the room, the same reasoning that made read markers room-level rather than
+per-thread.
+
+**Absence is derived, never stored.** A browser that crashes, sleeps, or is
+killed by the OS sends no goodbye. So a row is a heartbeat with a 30-second
+expiry — five times the room's 6-second poll, so one dropped request never
+flickers a member out of the room — and "present" is a query-time computation
+over freshness, not a stored boolean. `offline` exists for the tab that does
+get to say it is leaving; nothing depends on it arriving.
+
+**One request answers both directions.** `POST /spaces/:ref/presence` writes
+the caller's own status and returns who else is present in the same round
+trip, riding the six-second poll the room already runs. A heartbeat that only
+wrote would need a second request on the same timer to be worth anything.
+
+**Typing gets its own beat, throttled.** Waiting for the next scheduled poll
+would put "is writing…" on screen up to six seconds after someone started —
+worse than not having the feature. The composer reports typing through
+`onTyping`, throttled to once per three seconds, so a keystroke is not a
+network event. A `typing` status decays to plain presence after eight
+seconds without a fresh one: the person is still in the room, they only
+stopped typing, and saying "is writing" about them long after is a lie the
+room would be telling on their behalf.
+
+**Names come from the roster the room already has; presence carries only
+identifiers.** A subject the roster does not know — someone who just left, or
+a roster still loading — is counted and never labelled with a raw id.
+"Kari, Ola and 2 others" states the truth; inventing a name would not.
+
+**Unreadable presence renders as nothing, not as an empty room.** The two are
+different facts, and the second is a claim about who is NOT there. A failed
+beat sets the reading to `undefined` and the header line simply does not
+appear — the same "named gap, not a zero" rule item 4b's read marker and
+item 6's Knowledge and Work tabs already use.
+
+### What shipped
+
+- Application Plane: `convex/schema.ts` `spacePresence` with `by_space` and
+  `by_space_and_subject` indexes; `convex/spacePresence.ts` —
+  `presentMembers` (pure, tested: freshness window, typing decay, the
+  viewer excluded from their own list, stable alphabetical order rather than
+  recency so the line does not reshuffle on every beat), `normalizeStatus`,
+  `recordSpacePresenceForGateway` (write-then-read-back in one mutation).
+- Gateway `domains/spaces.rs`: `POST /spaces/:ref/presence`, body
+  `{status?: "online"|"typing"|"offline"}` defaulting to `online`; 400
+  `invalid_presence` for anything else; the same lifecycle-then-membership
+  gate as every other Space write; 503 `presence_unavailable` when
+  Application cannot be reached, worded so it never reads as "you are alone".
+- `spaces-client.ts`: `SpacePresence`, `SpacePresentMember`,
+  `recordSpacePresence`.
+- `features/spaces/lib/space-presence.ts`: `readPresence` (roster lookup,
+  viewer exclusion, count vs. names), `hereSentence`, `typingSentence`,
+  `nameList` ("Kari", "Kari og Ola", "Kari, Ola og 2 andre").
+- `SpacePage.tsx`: the heartbeat effect, riding the same tracked trigger as
+  the read-marker effect; a header line ("Kari og Ola er her nå") beside the
+  existing role/lifecycle facts; wires `typingSentence` and `onTyping` down
+  to the composer.
+- `SpaceRoomComposer.tsx`: a typing line above the textarea, matching the
+  agent working line's geometry so the two read as one family — a colleague
+  above, Verevon below, never merged into one sentence.
+
+### What remains open
+
+**No sidebar presence.** The sidebar shows a room's working and unread dots
+for every room in the list, because item 1b's live-work store publishes a
+projection for any room whose page has published — including rooms nobody
+currently has open, as long as SOMEONE'S page is polling it. Presence has no
+equivalent: `recordSpacePresenceForGateway` answers "who else is in *this*
+room" only for the room the caller is beating, because a beat only makes
+sense from inside the room you are looking at. A sidebar badge ("3 people in
+Lager right now") for a room that is not open would need a cross-room
+aggregate from Application Plane — the same missing piece §16 recorded for
+cross-room unread. Recorded here rather than approximated by having the
+sidebar beat presence for every room in its list, which would turn one
+request per open room into one request per row.
+
+### A pre-existing bug this work exposed, not caused
+
+Item 4b's arrival-marker effect (`SpacePage.tsx`, `unreadIds`'s snapshot
+logic) read its OWN signal — `arrival()?.ref !== ref` — from inside the
+untracked half of a `createEffect`. Solid's dev build has a diagnostic for
+exactly this (`STRICT_READ_UNTRACKED`) precisely because the read will not
+update; here it did something worse under specific timing (a rejected
+promise resolving on an early microtask, which a new presence test happened
+to construct) — the page's render pass restarted, live at first alongside a
+stale one, so `findByRole('heading', …)` briefly saw the title twice. Fixed
+with the pattern this file already uses elsewhere for a fire-and-forget
+continuation that needs to know "is this still the current room": a plain
+variable set from the effect's tracked half, never a second signal read from
+its untracked half. The same defect class as the composer's `settled`
+callback fix in item 4b (§16) — a value captured once at the boundary,
+instead of re-read across it.
+
+Found alongside, and not a bug: the room's own empty-state intro card
+(`SpaceRoomIntro`, `SpaceRoomTimeline.tsx`) names the room as an `<h3>`. A
+personal Space with no threads yet legitimately has two elements reading
+"Personlig rom" — the page's `<h1>` and the intro card's `<h3>` — and a test
+query needs `level: 1` to mean the page title specifically.
+
+### Verification
+
+- Application: 8 new `node:test` cases (`test/space-presence.test.cjs`), 83
+  pass in the package; functions pushed and confirmed ready after a
+  `convex-gateway` restart.
+- Gateway: 4 new tests (answers who-else from the same beat, defaults to
+  online, refuses an unoffered status, fails as its own gap rather than
+  drawing an empty room) plus a fix that outlasts this feature — see below.
+- Frontend: `pnpm typecheck` clean (excluding a concurrent, unrelated,
+  uncommitted change to `DashboardComposer.tsx` from another initiative in
+  this worktree); lint 0 errors; the full suite passes with 8 new tests
+  (4 page-level presence, 2 composer typing-line, plus the 8 pure-function
+  tests above counted once).
+- Live at `/spaces/p574enc94gj1c99ejjtet33zrn8dx21e#chat` after a
+  cache-bypassed reload: `POST /presence` answers 200 with the caller's own
+  status and an empty `present` array (the org has one member online — this
+  session) and a `ttl_seconds` of 30; `typing` is accepted the same way; an
+  invalid status (`away`, the older schema's word) is refused with
+  `invalid_presence`. The in-app browser pane reports
+  `document.visibilityState === "hidden"` regardless of front/back state —
+  the same environment limit item 4b's live check already recorded — so the
+  page's own heartbeat correctly never fired there; the route was exercised
+  directly instead, and no threads mean nobody else was there to render.
+  Every new class probed against the live stylesheet in both themes after
+  the fix below: header presence line 6.13 light / 16.33 dark, presence dot
+  5.04 / 6.53, composer typing line 6.13 / 16.33.
+
+**A third instance of the dark-mode contrast bug items 4b and this section's
+own sidebar fix already found twice.** `--verevon-text-muted` is redefined
+for dark mode only inside `.dark .verevon-chat-page`'s own scope; everywhere
+else — this header's meta row included — it stays the light-mode value
+(`#66615b`, meant for a white card) against the near-black canvas, measuring
+2.92:1. Pre-existing on "Rom · Aktiv · Din rolle: Eier" before presence
+added a fourth item to the same line; the probe caught it because the new
+line sits beside the old ones. Fixed with a scoped `.dark .verevon-space-meta`
+override mirroring the sibling `.dark .verevon-space-header h1` rule two
+lines above it in the sheet, rather than only for the new span — leaving
+three neighbours broken while the fourth happened to inherit the same fix
+would not have been a fix.
+
+### A live outage found after this section shipped, unrelated to it
+
+Shortly after this section's gateway redeploy, the SAME live org started
+getting a real 503 on `GET /spaces/:ref/threads` and `GET /spaces/:ref/context`
+— reported directly from the browser console, not caught by any test. Root
+cause: `docker exec verevon-gateway-rs printenv` showed
+`APPLICATION_CONVEX_SERVICE_KEY` empty in the running container, though
+`APPLICATION_CONVEX_URL` was correct. Both are `${VAR:-default}` substitutions
+in `docker-compose.yml`, sourced from `CONVEX_INTERNAL_SERVICE_KEY` in
+`convex-core/.env` / `.env.local` — files the deploy script's env-file chain
+already includes, and which hold the correct value (`docker compose config`
+run with that exact chain resolves it correctly). The redeploy that shipped
+presence evidently ran before that secret was in place, or against a state
+where compose did not recompute the environment section; a second, otherwise
+unchanged `deploy_frontend.sh gateway` run against the same files fixed it
+immediately, confirmed by re-checking the container's environment and
+re-requesting both routes (200/200). Not caused by the `AppState` refactor
+below: a direct `docker compose config` check with the same file chain
+resolved the secret correctly before the fix, which is what pointed at a
+deploy-timing issue rather than a code path. Recorded here because the same
+symptom — a route this section owns 503ing with no gateway-side WARN/ERROR
+beyond the terminal status — is worth recognizing immediately as a secret-
+provisioning gap rather than re-diagnosed as a logic bug.
+
+### A repo-wide test-isolation defect, found and fixed as part of shipping this
+
+`domains/spaces.rs`'s test module read `APPLICATION_CONVEX_URL` /
+`APPLICATION_CONVEX_SERVICE_KEY` from **process environment** inside
+production handlers (`personal_space_record`, the instructions handlers),
+and 22 tests set and unset those same two process-global variables around
+each request. Every other upstream URL and token lives on `AppState`; these
+two did not. Adding four presence tests pushed the module over some
+scheduling threshold and the suite started failing 1-5 tests per run,
+non-deterministically, always ones that happened to run concurrently with
+another test's `set_var`/`remove_var` pair — a real race, not flakiness in
+the tests themselves.
+
+Fixed at the root: `application_convex_url` and `application_convex_service_key`
+moved onto `AppState`, read once from the environment at startup like every
+other upstream, with the two production call sites and all 22 test fixtures
+(across `domains/spaces.rs` and `domains/orgs/instructions.rs`) updated to
+read and set them there instead. No test needed to start take the module's
+`TEST_ENV_LOCK` for this specific hazard, because the hazard no longer
+exists — the lock still guards the environment reads that remain genuinely
+global (dev-auth bypass and similar). Two other `AppState` construction
+sites (`domains/browser.rs`, `onboarding/crawl_preview/stream_e2e.rs`)
+needed the two new fields to keep compiling, confirmed by `cargo build
+--tests`. `cargo test domains::spaces` — the feature's own scope — passes
+95/95 repeatably across every run in this session, including immediately
+after the fix.
+
+**A second, separate flake surfaced while confirming the first fix, and is
+NOT this session's to claim fixed.** Running the entire gateway binary with
+no filter (500+ tests) failed 1-2 tests per run, always with the same
+signature — `assertion left == right failed, left: 503, right: 200`, the
+gateway's own upstream-unreachable fallback — and always a DIFFERENT test
+from the `room_4b_fixture` family, across three separate full-binary runs
+(two at default parallelism, one at `--test-threads=4`): first
+`space_threads_carry_the_readers_marker_and_pin_state` and
+`space_threads_separate_never_caught_up_from_marker_unavailable` twice
+identically, then `mark_space_read_records_the_moment_and_nothing_else`
+under reduced parallelism. Every one of these tests passes 100% reliably
+alone or scoped to `domains::spaces`. The pattern — a mocked upstream timing
+out, a different test each time, present before and after this session's
+`AppState` fix — points to the aggregate load of running 500+ tests that
+each spin up several real `wiremock` servers in one binary, not to test
+logic or to anything this session changed. Filed as its own task rather than
+chased further inside a Space-page session: `apps/Frontend Plane/verevonv3/
+apps/gateway`'s test suite needs either a higher client timeout in its test
+profile, fewer concurrent mock servers per fixture, or a lower default
+thread count, and none of those are a one-line fix worth making without its
+own verification pass.

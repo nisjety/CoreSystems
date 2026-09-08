@@ -705,6 +705,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(space_thread_transcript),
         )
         .route(
+            "/api/v1/spaces/{space_ref}/threads/{thread_id}/presentation",
+            axum::routing::patch(space_thread_presentation),
+        )
+        .route("/api/v1/spaces/{space_ref}/read", post(mark_space_read))
+        .route(
+            "/api/v1/spaces/{space_ref}/presence",
+            post(record_space_presence),
+        )
+        .route(
             "/api/v1/spaces/{space_ref}/deletion-requests",
             post(request_personal_space_deletion),
         )
@@ -1193,6 +1202,22 @@ async fn list_space_threads(
             )),
         );
     }
+    // Where this member last caught up (item 4b). Read alongside the listing so
+    // "new since your last visit" is one round trip. Application answering
+    // slowly or not at all must never cost the room its threads, so a failed
+    // marker read is a named gap beside the list, not a failed list.
+    let mut unavailable: Vec<Value> = Vec::new();
+    let read_marker = match space_read_marker(&state, &user, &org_id, space_ref).await {
+        Some(marker) => marker,
+        None => {
+            unavailable.push(json!({
+                "section": "read_marker",
+                "code": "read_marker_unavailable",
+                "reason": "Application Plane could not return where you last caught up.",
+            }));
+            Value::Null
+        }
+    };
     (
         StatusCode::OK,
         Json(json!({
@@ -1200,6 +1225,8 @@ async fn list_space_threads(
                 "space": public_space(&space),
                 "membership": crate::envelope::unwrap_data(&membership),
                 "threads": thread_items,
+                "read_marker": read_marker,
+                "unavailable": unavailable,
             }
         })),
     )
@@ -1835,6 +1862,427 @@ async fn space_knowledge(
             }
         })),
     )
+}
+
+/// The caller's read marker for a room, as `{"last_read_at": <epoch ms>|null}`.
+/// `None` when Application could not be asked at all — distinct from a member
+/// who has never caught up, which is `Some(null)`.
+async fn space_read_marker(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Option<Value> {
+    let result = convex_gateway_call(
+        state,
+        "query",
+        "spaceReadMarkers:spaceReadMarkerForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+        }),
+    )
+    .await
+    .ok()?;
+    let value = result.get("value").unwrap_or(&result);
+    Some(json!({
+        "last_read_at": value.get("lastReadAt").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// `POST /api/v1/spaces/{space_ref}/presence` — "I am here", and in the same
+/// answer, "who else is?".
+///
+/// One request per beat rather than a write plus a read: the room already runs
+/// a six-second poll, and a heartbeat that only wrote would need a second
+/// request on the same timer to be worth anything. The answer is necessarily
+/// as fresh as the write that produced it.
+///
+/// Body: `{ "status": "online" | "typing" | "offline" }`, defaulting to
+/// `online`. `offline` is the polite goodbye a closing tab can send; it is
+/// never required, because Application expires a heartbeat that stops coming.
+///
+/// The same lifecycle and membership checks as every other Space call run
+/// first, so someone removed from a room stops appearing in it. Application is
+/// only ever told the caller's own identity — presence cannot be written for
+/// anyone else.
+async fn record_space_presence(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to read a Space.",
+            )),
+        );
+    }
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    // Only the three statuses this route offers. An unknown one is refused
+    // rather than coerced to `online`: a client sending something else has a
+    // bug, and quietly reporting them as present would hide it.
+    let status = match body.get("status").and_then(Value::as_str) {
+        None => "online",
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "online" => "online",
+            "typing" => "typing",
+            "offline" => "offline",
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(error(
+                        "invalid_presence",
+                        "Presence is one of online, typing or offline.",
+                    )),
+                )
+            }
+        },
+    };
+    match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+    let Ok(result) = convex_gateway_call(
+        &state,
+        "mutation",
+        "spacePresence:recordSpacePresenceForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "status": status,
+        }),
+    )
+    .await
+    else {
+        // Presence is the least important thing in the room. It fails as its
+        // own named gap so the caller can say "who is here is unknown" rather
+        // than draw an empty room, which would read as "you are alone".
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "presence_unavailable",
+                "Who else is in this room could not be read. Nothing else was altered.",
+            )),
+        );
+    };
+    let value = result.get("value").unwrap_or(&result);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "space_ref": space_ref,
+                "status": status,
+                "present": value.get("present").cloned().unwrap_or(Value::Array(vec![])),
+                "ttl_seconds": value.get("ttlSeconds").cloned().unwrap_or(Value::Null),
+            }
+        })),
+    )
+}
+
+/// `POST /api/v1/spaces/{space_ref}/read` — the caller has this room open now.
+///
+/// Records a timestamp against identifiers in Application Plane and nothing
+/// else: not which threads exist, not what they say. The same lifecycle and
+/// membership checks as every other Space read run first, so a former member
+/// cannot keep advancing a marker in a room they were removed from.
+async fn mark_space_read(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to read a Space.",
+            )),
+        );
+    }
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+    let Ok(result) = convex_gateway_call(
+        &state,
+        "mutation",
+        "spaceReadMarkers:markSpaceReadForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+        }),
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "read_marker_unavailable",
+                "Where you last caught up could not be recorded. Nothing else was altered.",
+            )),
+        );
+    };
+    let value = result.get("value").unwrap_or(&result);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "space_ref": space_ref,
+                "last_read_at": value.get("lastReadAt").cloned().unwrap_or(Value::Null),
+            }
+        })),
+    )
+}
+
+/// `PATCH /api/v1/spaces/{space_ref}/threads/{thread_id}/presentation` — retitle
+/// or pin a post in the room.
+///
+/// # Why the room needs its own route for this
+///
+/// Chat's `PUT /api/v1/chat/threads/{id}` performs the same Model Gateway
+/// write and then re-reads the caller's thread list with `origin=chat` to
+/// return the updated session. Room threads carry `origin="space"` (Session
+/// Core enforces the pairing with a CHECK), so that re-read can never find
+/// one: the title would be written and the request would still answer 404.
+/// This route runs the room's own lifecycle and membership checks, performs
+/// the identical write, and returns a receipt rather than a re-read.
+///
+/// # Owner-bound, and said so
+///
+/// Session Core's `UpdateThreadPresentation` authorizes the thread's OWNER. So
+/// today the member who started a post can retitle or pin it, and everyone in
+/// the room sees the result on the next poll — the listing already orders
+/// pinned posts first and relays `pinned`. A member pinning someone else's
+/// post is refused by Session Core, and this route relays that as a 403 with a
+/// sentence about who may, not as a generic error. Letting any editor pin any
+/// post is the next slice: it needs a Space-authorized presentation write in
+/// Session Core, mirroring how a room reply is admitted through a Control
+/// `model.thread.append` decision, and is deliberately not faked here.
+async fn space_thread_presentation(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
+    Path((space_ref, thread_id)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    let thread_id = thread_id.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to change a Space thread.",
+            )),
+        );
+    }
+    if space_ref.is_empty() || thread_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space and thread reference are required.")),
+        );
+    }
+    let title = body
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let pinned = body.get("pinned").and_then(Value::as_bool);
+    if title.is_none() && pinned.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_presentation",
+                "A title or a pin state is required.",
+            )),
+        );
+    }
+    if title.is_some_and(|value| value.chars().count() > 200) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_presentation", "A title is at most 200 characters.")),
+        );
+    }
+    match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+    match crate::domains::chat::history::update_durable_presentation(
+        &state, &user, &headers, thread_id, title, None, pinned,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "data": {
+                    "space_ref": space_ref,
+                    "thread_id": thread_id,
+                    "title": title,
+                    "pinned": pinned,
+                }
+            })),
+        ),
+        Err(response) => {
+            let status = response.status();
+            if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
+                // Session Core refused because the caller does not own the post,
+                // or answered as if it does not exist for them — the same thing
+                // from the room's side. Say who may, rather than "forbidden".
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(error(
+                        "thread_presentation_owner_only",
+                        "Only the member who started this post can retitle or pin it.",
+                    )),
+                );
+            }
+            (
+                status,
+                Json(error(
+                    "thread_presentation_unavailable",
+                    "The post could not be changed. Nothing was altered.",
+                )),
+            )
+        }
+    }
 }
 
 /// `GET /api/v1/spaces/{space_ref}/work` — what this room has running and
@@ -4022,8 +4470,8 @@ async fn personal_space_record(
     user: &AuthenticatedUser,
     org_id: &str,
 ) -> Result<Option<Value>, ()> {
-    let convex_url = std::env::var("APPLICATION_CONVEX_URL").unwrap_or_default();
-    let service_key = std::env::var("APPLICATION_CONVEX_SERVICE_KEY").unwrap_or_default();
+    let convex_url = state.application_convex_url.clone();
+    let service_key = state.application_convex_service_key.clone();
     if org_id.trim().is_empty() || convex_url.trim().is_empty() || service_key.trim().is_empty() {
         return Err(());
     }
@@ -4103,8 +4551,8 @@ pub(crate) async fn convex_gateway_call(
     path: &str,
     mut args: Value,
 ) -> Result<Value, ()> {
-    let convex_url = std::env::var("APPLICATION_CONVEX_URL").unwrap_or_default();
-    let service_key = std::env::var("APPLICATION_CONVEX_SERVICE_KEY").unwrap_or_default();
+    let convex_url = state.application_convex_url.clone();
+    let service_key = state.application_convex_service_key.clone();
     if convex_url.trim().is_empty() || service_key.trim().is_empty() {
         return Err(());
     }
@@ -5034,9 +5482,9 @@ mod tests {
                 "spaceRef":"space-personal", "name":"Personal Space", "kind":"personal", "lifecycle":"active"
             }})))
             .mount(&application).await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -5049,8 +5497,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -5112,9 +5558,9 @@ mod tests {
             ]})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -5127,8 +5573,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert_eq!(
             response.status(),
@@ -5215,9 +5659,9 @@ mod tests {
             .respond_with(receipts)
             .mount(&conversation)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.model_gateway_url = model_gateway.uri();
@@ -5232,8 +5676,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -5429,6 +5871,437 @@ mod tests {
         );
     }
 
+    /// Shared scaffolding for the item-4b routes: a signed-in editor of
+    /// `space-room`, a Control membership, an Application (Convex) server whose
+    /// `/api/query` answers the Space lookup and whose read-marker answers are
+    /// given, and a Model Gateway whose presentation endpoint answers as given.
+    async fn room_4b_fixture(
+        convex_marker_query: ResponseTemplate,
+        convex_marker_mutation: ResponseTemplate,
+        presentation: ResponseTemplate,
+    ) -> (crate::config::AppState, MockServer, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor", "subject_id": "user-1"}
+            })))
+            .mount(&user_core)
+            .await;
+        // Control declines the shared read: the thread listing then takes the
+        // owner-bound path, which is enough for these tests.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "forbidden"}})))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        // The Space lookup and the read-marker query share `/api/query`; route
+        // on the function path in the body.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wiremock::matchers::body_partial_json(json!({"path": "spaceReadMarkers:spaceReadMarkerForGateway"})))
+            .respond_with(convex_marker_query)
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(convex_marker_mutation)
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/threads/thread-1/presentation"))
+            .respond_with(presentation)
+            .mount(&model_gateway)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/threads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"threads": [
+                {"thread_id": "thread-1", "space_id": "space-room", "title": "Innkjøp", "pinned": true,
+                 "updated_at": "2026-09-07T11:00:00Z", "owner_subject_id": "user-1"}
+            ]})))
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        (state, application, model_gateway)
+    }
+
+    async fn room_4b_request(
+        state: crate::config::AppState,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Body::from(body.map(|value| value.to_string()).unwrap_or_default()))
+            .unwrap();
+        let response = crate::build_router(state).oneshot(request).await.unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    /// Item 4b: the room's thread listing carries where the reader last caught
+    /// up, alongside the threads, so "new since your last visit" is one round
+    /// trip — and `pinned` flows through from Session Core's ordering.
+    #[tokio::test]
+    async fn space_threads_carry_the_readers_marker_and_pin_state() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, _mg) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1_757_240_000_000_i64}})),
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1}})),
+            ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-1"})),
+        )
+        .await;
+        let (status, body) = room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["read_marker"]["last_read_at"], 1_757_240_000_000_i64);
+        assert_eq!(body["data"]["threads"][0]["pinned"], true);
+        assert_eq!(body["data"]["unavailable"], json!([]));
+    }
+
+    /// A member who has never opened the room has a marker of `null` — a real
+    /// answer ("nothing is new yet"), distinct from the marker being unreadable.
+    #[tokio::test]
+    async fn space_threads_separate_never_caught_up_from_marker_unavailable() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, _mg) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        assert_eq!(status, 200);
+        assert!(body["data"]["read_marker"]["last_read_at"].is_null());
+        assert_eq!(body["data"]["unavailable"], json!([]));
+
+        let (state, _app, _mg) = room_4b_fixture(
+            ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        // Application being down must never cost the room its threads.
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["threads"][0]["thread_id"], "thread-1");
+        assert!(body["data"]["read_marker"].is_null());
+        assert_eq!(body["data"]["unavailable"][0]["code"], "read_marker_unavailable");
+    }
+
+    async fn presence_fixture(
+        convex_presence: ResponseTemplate,
+    ) -> (crate::config::AppState, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor", "subject_id": "user-1"}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"path": "spacePresence:recordSpacePresenceForGateway"}),
+            ))
+            .respond_with(convex_presence)
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        (state, application)
+    }
+
+    #[tokio::test]
+    async fn presence_answers_who_else_is_here_from_the_same_beat() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = presence_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {
+                "present": [
+                    {"subject_id": "user-2", "status": "typing", "last_seen_at": 1_788_000_000_000i64}
+                ],
+                "ttlSeconds": 30
+            }})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/presence",
+            Some(json!({"status": "typing"})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["status"], "typing");
+        assert_eq!(body["data"]["present"][0]["subject_id"], "user-2");
+        assert_eq!(body["data"]["present"][0]["status"], "typing");
+        assert_eq!(body["data"]["ttl_seconds"], 30);
+    }
+
+    #[tokio::test]
+    async fn presence_defaults_to_online_when_the_body_says_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = presence_fixture(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"present": [], "ttlSeconds": 30}})),
+        )
+        .await;
+        let (status, body) =
+            room_4b_request(state, "POST", "/api/v1/spaces/space-room/presence", Some(json!({})))
+                .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["status"], "online");
+        assert_eq!(body["data"]["present"], json!([]));
+    }
+
+    // Coercing an unknown status to `online` would report someone as present
+    // while hiding the client bug that sent it.
+    #[tokio::test]
+    async fn presence_refuses_a_status_it_does_not_offer() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = presence_fixture(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"present": [], "ttlSeconds": 30}})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/presence",
+            Some(json!({"status": "away"})),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_presence");
+    }
+
+    // An empty room and an unreadable one are different facts. Reporting the
+    // second as the first would tell a member they are alone.
+    #[tokio::test]
+    async fn presence_fails_as_its_own_gap_rather_than_drawing_an_empty_room() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = presence_fixture(ResponseTemplate::new(500)).await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/presence",
+            Some(json!({"status": "online"})),
+        )
+        .await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "presence_unavailable");
+    }
+
+    #[tokio::test]
+    async fn mark_space_read_records_the_moment_and_nothing_else() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, application, _mg) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1_757_240_100_000_i64}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(state, "POST", "/api/v1/spaces/space-room/read", Some(json!({}))).await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["last_read_at"], 1_757_240_100_000_i64);
+        // The mutation carries identifiers only — never a thread list or content.
+        let mutation = application
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .find(|request| request.url.path() == "/api/mutation")
+            .expect("mutation request");
+        let sent: Value = serde_json::from_slice(&mutation.body).unwrap();
+        assert_eq!(sent["path"], "spaceReadMarkers:markSpaceReadForGateway");
+        assert_eq!(sent["args"]["spaceRef"], "space-room");
+        assert!(sent["args"].get("threads").is_none() && sent["args"].get("threadIds").is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_space_read_fails_honestly_when_application_is_down() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, _mg) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(state, "POST", "/api/v1/spaces/space-room/read", Some(json!({}))).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "read_marker_unavailable");
+    }
+
+    /// The room's own presentation route: same Model Gateway write Chat uses,
+    /// without Chat's `origin=chat` re-read that can never find a room thread.
+    #[tokio::test]
+    async fn space_thread_presentation_writes_a_title_and_a_pin_through_model_gateway() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, model_gateway) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-1"})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "PATCH",
+            "/api/v1/spaces/space-room/threads/thread-1/presentation",
+            Some(json!({"title": "Innkjøp av pumper", "pinned": true})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["thread_id"], "thread-1");
+        assert_eq!(body["data"]["title"], "Innkjøp av pumper");
+        assert_eq!(body["data"]["pinned"], true);
+        let write = model_gateway
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .find(|request| request.url.path() == "/v1/threads/thread-1/presentation")
+            .expect("presentation write");
+        let sent: Value = serde_json::from_slice(&write.body).unwrap();
+        assert_eq!(sent["title"], "Innkjøp av pumper");
+        assert_eq!(sent["pinned"], true);
+        // Preview is Chat's concern and is never sent from the room.
+        assert!(sent["preview"].is_null());
+    }
+
+    /// Session Core is owner-bound. A refusal is relayed as a sentence about
+    /// who may, not as a generic forbidden — and a 404 from upstream means the
+    /// same thing from the room's side.
+    #[tokio::test]
+    async fn space_thread_presentation_says_who_may_when_the_caller_is_not_the_author() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for upstream in [403_u16, 404_u16] {
+            let (state, _app, _mg) = room_4b_fixture(
+                ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+                ResponseTemplate::new(200).set_body_json(json!({})),
+                ResponseTemplate::new(upstream).set_body_json(json!({"error": "not the owner"})),
+            )
+            .await;
+            let (status, body) = room_4b_request(
+                state,
+                "PATCH",
+                "/api/v1/spaces/space-room/threads/thread-1/presentation",
+                Some(json!({"pinned": true})),
+            )
+            .await;
+            assert_eq!(status, 403, "upstream {upstream}");
+            assert_eq!(body["error"]["code"], "thread_presentation_owner_only");
+        }
+    }
+
+    #[tokio::test]
+    async fn space_thread_presentation_refuses_an_empty_change() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, model_gateway) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "PATCH",
+            "/api/v1/spaces/space-room/threads/thread-1/presentation",
+            Some(json!({"title": "   "})),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_presentation");
+        assert!(
+            model_gateway.received_requests().await.expect("requests").is_empty(),
+            "nothing to change means nothing is sent upstream"
+        );
+    }
+
     /// Drive `GET /spaces/space-room/knowledge` with a given Control answer to
     /// the retrieval decision and a given Data Plane listing outcome.
     async fn space_knowledge_response(
@@ -5489,9 +6362,9 @@ mod tests {
             .respond_with(listing)
             .mount(&retrieval)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.retrieval_engine_url = retrieval.uri();
@@ -5505,8 +6378,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -5738,9 +6609,9 @@ mod tests {
             .respond_with(schedules)
             .mount(&model_gateway)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.model_gateway_url = model_gateway.uri();
@@ -5754,8 +6625,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -5897,9 +6766,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": sync})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let uri = if method == "DELETE" {
@@ -5925,8 +6794,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let payload: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -6025,9 +6892,9 @@ mod tests {
             })))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -6042,8 +6909,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let payload: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -6152,9 +7017,9 @@ mod tests {
             })))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let mut request = Request::builder()
@@ -6175,8 +7040,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let payload: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -6327,9 +7190,9 @@ mod tests {
             })))
             .mount(&model_gateway)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.model_gateway_url = model_gateway.uri();
@@ -6343,8 +7206,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -6463,9 +7324,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": confirmation})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -6480,8 +7341,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -6600,9 +7459,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": definitions})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -6615,8 +7474,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -6713,9 +7570,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": confirmation})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -6730,8 +7587,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -6857,9 +7712,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -6872,8 +7727,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -6913,9 +7766,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": registry_rows})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -6928,8 +7781,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -7045,8 +7896,6 @@ mod tests {
         // No APPLICATION_CONVEX_URL / APPLICATION_CONVEX_SERVICE_KEY set, so
         // `convex_gateway_call` fails closed with `Err(())` before ever
         // issuing an HTTP request.
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let mut state = crate::tests::test_state(false);
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
@@ -7257,9 +8106,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.user_core_url = user_core.uri();
         (state, application, user_core)
     }
@@ -7316,8 +8165,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok(), "an active bound agent must be authorized");
         assert_eq!(body["agent_name"], "Kundestøtte");
@@ -7363,8 +8210,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         let (status, payload) = result.expect_err("a blocked binding must refuse");
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
@@ -7406,8 +8251,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         let (status, payload) = result.expect_err("a non-mention binding must refuse");
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
@@ -7461,8 +8304,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(
             result.is_ok(),
@@ -7529,8 +8370,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(
             result.is_ok(),
@@ -7596,8 +8435,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(
             result.is_ok(),
@@ -7628,8 +8465,6 @@ mod tests {
         let result =
             inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
                 .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         let (status, response) = result.expect_err("an unbound mention must be rejected");
         assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
@@ -7668,8 +8503,6 @@ mod tests {
         let result =
             inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
                 .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         let (status, _) = result.expect_err("a paused binding must not answer");
         assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
@@ -7754,9 +8587,9 @@ mod tests {
             }})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -7773,8 +8606,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -7835,9 +8666,9 @@ mod tests {
             ]})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -7850,8 +8681,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -7919,9 +8748,9 @@ mod tests {
             }]})))
             .mount(&model)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.model_gateway_url = model.uri();
@@ -7935,8 +8764,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -8063,8 +8890,6 @@ mod tests {
             )
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         // Any turn carrying a `space_ref` now has its Space layer gated on a
         // live Control membership check (`resolve_space_role`) before Convex
         // is even asked — this default "viewer" response lets a scoped test
@@ -8079,6 +8904,8 @@ mod tests {
             .mount(&user_core)
             .await;
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.user_core_url = user_core.uri();
         (state, application, user_core)
     }
@@ -8094,8 +8921,6 @@ mod tests {
         let mut body = json!({"content": "hello"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok());
         assert_eq!(body["org_instructions"], "Always answer in Norwegian.");
@@ -8116,8 +8941,6 @@ mod tests {
         let mut body = json!({"content": "hello", "space_ref": "space-1"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok());
         assert_eq!(body["org_instructions"], "Org rule.");
@@ -8140,8 +8963,6 @@ mod tests {
         let mut body = json!({"content": "hello", "space_ref": "someone-elses-space"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(
             result.is_err(),
@@ -8165,8 +8986,6 @@ mod tests {
         });
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok());
         assert!(
@@ -8185,8 +9004,6 @@ mod tests {
         let mut body = json!({"content": "hello"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok());
         assert!(body.get("org_instructions").is_none());
@@ -8243,9 +9060,9 @@ mod tests {
             })))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
 
@@ -8262,8 +9079,6 @@ mod tests {
             request.body(Body::empty()).unwrap()
         };
         let response = crate::build_router(state).oneshot(request).await.unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())

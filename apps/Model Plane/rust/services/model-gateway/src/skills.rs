@@ -254,6 +254,54 @@ pub fn skill_ownership_entries(
 /// Format a matched skill as a system-context block for live prompt injection.
 /// This is the shape the SSE chat path prepends so a triggered skill steers the
 /// model (Claude-Code skill semantics).
+/// Skills the member named explicitly for this turn — the composer's `/`
+/// picker — in the order named, capped at `max`.
+///
+/// Explicit selection is the one way a skill reaches a turn WITHOUT keyword
+/// overlap: a member who picked "Innkjøpsrutine" gets it whether or not their
+/// message happens to contain its trigger words, and `min_score` does not
+/// apply. Two things are still never trusted from the client:
+///
+/// - the id must exist in this org's catalogue — a stale or foreign id is
+///   dropped, with a warning, rather than failing the turn over a label;
+/// - the caller must be allowed to use it, by the same SKILL-1 ownership rule
+///   [`handle_match_skills`] applies (`usable_or_untracked`), so a private
+///   skill cannot be pulled into a turn by guessing its id.
+///
+/// Duplicates collapse to the first mention. Empty bodies are kept here and
+/// dropped where blocks are formatted, exactly as matched skills are.
+#[must_use]
+pub fn resolve_requested_skills(
+    store: &SkillStore,
+    org_id: &str,
+    ownership: &crate::ownership::OwnershipStore,
+    caller_user_id: &str,
+    requested: &[String],
+    max: usize,
+) -> Vec<Skill> {
+    let mut out: Vec<Skill> = Vec::new();
+    for raw in requested {
+        if out.len() >= max {
+            tracing::warn!(%org_id, max, "explicit skill selection exceeded its cap; extra ids ignored");
+            break;
+        }
+        let id = raw.trim();
+        if id.is_empty() || out.iter().any(|s| s.id == id) {
+            continue;
+        }
+        let Some(skill) = store.get(org_id, id) else {
+            tracing::warn!(%org_id, skill_id = %id, "requested skill is not in this org's catalogue; ignored");
+            continue;
+        };
+        if !ownership.usable_or_untracked(org_id, crate::ownership::KIND_SKILL, id, caller_user_id) {
+            tracing::warn!(%org_id, skill_id = %id, "requested skill is not usable by the caller; ignored");
+            continue;
+        }
+        out.push(skill);
+    }
+    out
+}
+
 #[must_use]
 pub fn format_skill_block(s: &Skill) -> String {
     format!("## Skill: {}\n{}", s.name, s.body)
@@ -796,5 +844,98 @@ mod skill_budget_tests {
             block("NoRoom", MIN_SKILL_CHARS * 4),
         ]);
         assert_eq!(fitted.dropped, 1, "omissions must be counted, never silent");
+    }
+
+    use super::{resolve_requested_skills, Skill, SkillStore};
+
+    fn owned(id: &str, name: &str, body: &str) -> Skill {
+        Skill {
+            id: id.into(),
+            name: name.into(),
+            body: body.into(),
+            tags: Vec::new(),
+            source_path: String::new(),
+            min_score: 0.0,
+        }
+    }
+
+    #[test]
+    fn explicit_selection_needs_no_keyword_overlap_and_keeps_order() {
+        let store = SkillStore::new();
+        store.upsert("org", owned("sk-b", "Bravo", "b body"));
+        store.upsert("org", owned("sk-a", "Alpha", "a body"));
+        let ownership = crate::ownership::OwnershipStore::new();
+        let got = resolve_requested_skills(
+            &store,
+            "org",
+            &ownership,
+            "user-1",
+            &["sk-b".to_owned(), "sk-a".to_owned(), "sk-b".to_owned()],
+            4,
+        );
+        let ids: Vec<&str> = got.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["sk-b", "sk-a"], "named order, duplicates collapsed");
+    }
+
+    #[test]
+    fn explicit_selection_drops_unknown_ids_instead_of_failing() {
+        let store = SkillStore::new();
+        store.upsert("org", owned("sk-a", "Alpha", "a body"));
+        let ownership = crate::ownership::OwnershipStore::new();
+        let got = resolve_requested_skills(
+            &store,
+            "org",
+            &ownership,
+            "user-1",
+            &["nope".to_owned(), "sk-a".to_owned()],
+            4,
+        );
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "sk-a");
+    }
+
+    #[test]
+    fn explicit_selection_cannot_pull_in_another_users_private_skill() {
+        let store = SkillStore::new();
+        store.upsert("org", owned("sk-private", "Private", "p body"));
+        store.upsert("org", owned("sk-org", "Org wide", "o body"));
+        let ownership = crate::ownership::OwnershipStore::new();
+        ownership.replace_org_kind(
+            "org",
+            crate::ownership::KIND_SKILL,
+            vec![
+                (
+                    "sk-private".to_owned(),
+                    crate::ownership::Ownership {
+                        scope: crate::ownership::Scope::User,
+                        owner_user_id: "someone-else".to_owned(),
+                        shared_with: Vec::new(),
+                    },
+                ),
+                ("sk-org".to_owned(), crate::ownership::Ownership::org()),
+            ],
+        );
+        let got = resolve_requested_skills(
+            &store,
+            "org",
+            &ownership,
+            "user-1",
+            &["sk-private".to_owned(), "sk-org".to_owned()],
+            4,
+        );
+        let ids: Vec<&str> = got.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["sk-org"]);
+    }
+
+    #[test]
+    fn explicit_selection_is_capped() {
+        let store = SkillStore::new();
+        for i in 0..6 {
+            store.upsert("org", owned(&format!("sk-{i}"), &format!("S{i}"), "body"));
+        }
+        let ownership = crate::ownership::OwnershipStore::new();
+        let requested: Vec<String> = (0..6).map(|i| format!("sk-{i}")).collect();
+        let got = resolve_requested_skills(&store, "org", &ownership, "user-1", &requested, 4);
+        assert_eq!(got.len(), 4);
     }
 }
