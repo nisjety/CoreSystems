@@ -54,30 +54,34 @@ name: Quarry-v2 CI
 #   already-generated prost output from some earlier point when protoc
 #   (or a cache seeded elsewhere) was available; build.rs only reruns when
 #   its proto inputs change, so cargo-check was silently coasting on a warm
-#   cache, not evidence protoc actually works there. rust-coverage's
-#   separate `target/llvm-cov-target` had no such cache and hit the real gap
-#   every time. Fixed both jobs with `arduino/setup-protoc@v3`, matching the
-#   convention already used by dataplane-v2-ci.yml and
-#   model-plane-rust-ci.yml — pending verification that cargo-check doesn't
-#   silently regress once its cache is eventually invalidated for real.
+#   cache, not evidence protoc actually works there. Fixed both jobs with
+#   `arduino/setup-protoc@v3`, matching the convention already used by
+#   dataplane-v2-ci.yml and model-plane-rust-ci.yml — confirmed live: both
+#   jobs get past their build.rs step now.
 #
-# - cargo-check + test (hard-blocking, NOT report-only): separately, `Test
-#   workspace` was also dying on a linker crash — "collect2: fatal error: ld
-#   terminated with signal 7 [Bus error], core dumped" linking quarry-
-#   runtime's `dom_summary_proptest` binary, reproduced identically across 4
-#   separate runs (2026-09-03/04/07/08). That one binary statically links
-#   quarry-runtime's full dependency graph — chromiumoxide, the AWS S3 SDK,
+# - cargo-check + test (hard-blocking, NOT report-only): `Test workspace` was
+#   dying on a linker crash — "collect2: fatal error: ld terminated with
+#   signal 7 [Bus error], core dumped" linking quarry-runtime's
+#   `dom_summary_proptest` binary, reproduced identically across 4 separate
+#   runs (2026-09-03/04/07/08). That one binary statically links quarry-
+#   runtime's full dependency graph — chromiumoxide, the AWS S3 SDK,
 #   tantivy, lopdf, zip — several hundred rlibs in one `cc` invocation; a Bus
 #   error mid-link on a GitHub-hosted runner is the standard signature of
-#   the job's disk filling up during linking, not a source defect. Applied
-#   the two standard mitigations together rather than one at a time to
-#   save CI cycles: a disk-cleanup step (ubuntu-latest ships far more
-#   preinstalled toolchain bulk than this workspace needs) and
+#   the job's disk filling up during linking, not a source defect. Fixed by
+#   adding a disk-cleanup step (ubuntu-latest ships far more preinstalled
+#   toolchain bulk than this workspace needs) plus
 #   `CARGO_PROFILE_TEST_DEBUG=0` scoped to just this job (debug info is most
-#   of a debug binary's size, and this workspace's own dev machine couldn't
-#   reproduce the crash to test a fix against, being Windows). Pending
-#   verification against a real run; if it recurs, the `df -h` step above
-#   the build will show whether disk is still the bottleneck.
+#   of a debug binary's size) — confirmed live 2026-09-08: all 4 steps in
+#   this job, including `Test workspace`, passed for the first time across 5
+#   runs checked.
+#
+# - rust-coverage hit the identical linker crash after the protoc fix let it
+#   get that far — same Bus-error signature, this time linking quarry-
+#   runtime's `publisher_integration` test (a second binary in the same
+#   crate that also links its full dependency graph). Unlike cargo-check,
+#   this job can't also shrink debug info — cargo-llvm-cov's coverage
+#   mapping depends on it — so it gets only the disk-cleanup step. Not yet
+#   verified against a real run.
 #
 # - go-coverage floors: still real, unresolved debt (quarry-control 41.6%,
 #   quarry-orchestrator 37.2%, against the 80% floor, confirmed 2026-09-08).
@@ -261,6 +265,19 @@ jobs:
           version: '27.x'
 
       - uses: taiki-e/install-action@cargo-llvm-cov
+
+      # This job hits the same disk-exhaustion linker crash as cargo-check
+      # (confirmed 2026-09-08: same "Bus error" signature, on
+      # publisher_integration this time rather than dom_summary_proptest —
+      # quarry-runtime has more than one test binary that statically links
+      # its full dependency graph). Unlike cargo-check, this job cannot also
+      # shrink debug info: cargo-llvm-cov's coverage mapping depends on it,
+      # so freeing disk is the only lever available here.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force || true
+          df -h /
 
       - name: Enforce Rust coverage floor (80%)
         run: cargo llvm-cov --workspace --all-features --fail-under-lines 80
