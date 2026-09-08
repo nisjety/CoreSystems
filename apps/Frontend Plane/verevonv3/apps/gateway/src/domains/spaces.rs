@@ -5879,7 +5879,22 @@ mod tests {
         convex_marker_query: ResponseTemplate,
         convex_marker_mutation: ResponseTemplate,
         presentation: ResponseTemplate,
-    ) -> (crate::config::AppState, MockServer, MockServer) {
+    ) -> (
+        crate::config::AppState,
+        MockServer,
+        MockServer,
+        MockServer,
+        MockServer,
+    ) {
+        // Every server this starts is returned, including the two the caller
+        // never looks at. A `MockServer` shuts down when it drops, so keeping
+        // `auth` and `user_core` here while `state.auth_core_url` and
+        // `state.user_core_url` still pointed at them left the gateway talking
+        // to dead ports: session validation failed (403) or the space could not
+        // be resolved and the route failed closed (503). It looked like a race
+        // because wiremock tears down asynchronously — under light load the
+        // request sometimes beat the shutdown, so the suite passed
+        // single-threaded and failed under parallel load.
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/auth/get-session"))
@@ -5961,7 +5976,7 @@ mod tests {
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.model_gateway_url = model_gateway.uri();
-        (state, application, model_gateway)
+        (state, application, model_gateway, auth, user_core)
     }
 
     async fn room_4b_request(
@@ -5994,7 +6009,7 @@ mod tests {
     #[tokio::test]
     async fn space_threads_carry_the_readers_marker_and_pin_state() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (state, _app, _mg) = room_4b_fixture(
+        let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1_757_240_000_000_i64}})),
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1}})),
             ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-1"})),
@@ -6012,7 +6027,7 @@ mod tests {
     #[tokio::test]
     async fn space_threads_separate_never_caught_up_from_marker_unavailable() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (state, _app, _mg) = room_4b_fixture(
+        let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
             ResponseTemplate::new(200).set_body_json(json!({})),
             ResponseTemplate::new(200).set_body_json(json!({})),
@@ -6023,7 +6038,7 @@ mod tests {
         assert!(body["data"]["read_marker"]["last_read_at"].is_null());
         assert_eq!(body["data"]["unavailable"], json!([]));
 
-        let (state, _app, _mg) = room_4b_fixture(
+        let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
             ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
             ResponseTemplate::new(200).set_body_json(json!({})),
             ResponseTemplate::new(200).set_body_json(json!({})),
@@ -6180,7 +6195,7 @@ mod tests {
     #[tokio::test]
     async fn mark_space_read_records_the_moment_and_nothing_else() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (state, application, _mg) = room_4b_fixture(
+        let (state, application, _mg, _auth, _user_core) = room_4b_fixture(
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1_757_240_100_000_i64}})),
             ResponseTemplate::new(200).set_body_json(json!({})),
@@ -6206,7 +6221,7 @@ mod tests {
     #[tokio::test]
     async fn mark_space_read_fails_honestly_when_application_is_down() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (state, _app, _mg) = room_4b_fixture(
+        let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
             ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
             ResponseTemplate::new(200).set_body_json(json!({})),
@@ -6222,7 +6237,7 @@ mod tests {
     #[tokio::test]
     async fn space_thread_presentation_writes_a_title_and_a_pin_through_model_gateway() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (state, _app, model_gateway) = room_4b_fixture(
+        let (state, _app, model_gateway, _auth, _user_core) = room_4b_fixture(
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
             ResponseTemplate::new(200).set_body_json(json!({})),
             ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-1"})),
@@ -6260,7 +6275,7 @@ mod tests {
     async fn space_thread_presentation_says_who_may_when_the_caller_is_not_the_author() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         for upstream in [403_u16, 404_u16] {
-            let (state, _app, _mg) = room_4b_fixture(
+            let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
                 ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
                 ResponseTemplate::new(200).set_body_json(json!({})),
                 ResponseTemplate::new(upstream).set_body_json(json!({"error": "not the owner"})),
@@ -6281,7 +6296,7 @@ mod tests {
     #[tokio::test]
     async fn space_thread_presentation_refuses_an_empty_change() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (state, _app, model_gateway) = room_4b_fixture(
+        let (state, _app, model_gateway, _auth, _user_core) = room_4b_fixture(
             ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
             ResponseTemplate::new(200).set_body_json(json!({})),
             ResponseTemplate::new(200).set_body_json(json!({})),

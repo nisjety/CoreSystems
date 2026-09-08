@@ -840,6 +840,10 @@ mod tests {
     /// process-global env var.
     #[test]
     fn session_validation_ttl_is_clamped_to_safe_band() {
+        // The comment above already notes this var is process-global; the lock
+        // is what stops a concurrent test validating a session against the
+        // values this test writes.
+        let _env = crate::config::TEST_ENV_LOCK.blocking_lock();
         let key = "GATEWAY_SESSION_CACHE_TTL_SECS";
         let prev = std::env::var(key).ok();
 

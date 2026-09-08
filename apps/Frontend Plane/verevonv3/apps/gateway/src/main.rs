@@ -1143,6 +1143,11 @@ mod tests {
     /// derived from the validated session + the header is stripped at ingress.
     #[tokio::test]
     async fn forged_org_header_never_reaches_upstream() {
+        // This test asserts over EVERY request its mock recorded, and the
+        // upstream URLs come from process-global env — so without the lock a
+        // concurrent test's traffic lands on this mock and the loop asserts
+        // on a foreign request (observed: `Some("inbox-org")`).
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         use axum::body::Body;
         use axum::http::Request;
         use http_body_util::BodyExt;
@@ -2463,6 +2468,9 @@ mod tests {
 
     #[tokio::test]
     async fn knowledge_routes_fail_closed_when_data_plane_token_cannot_be_minted() {
+        // Same reason as `forged_org_header_never_reaches_upstream`: the
+        // routes under test resolve their upstream from global env.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         use axum::body::Body;
         use axum::http::Request;
         use http_body_util::BodyExt;
