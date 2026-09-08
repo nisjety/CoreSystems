@@ -1772,12 +1772,21 @@ export function DashboardComposer(props: {
 									<summary>
 										{i18n.tr('Velg modell selv', 'Choose a model yourself')}
 									</summary>
-									<For each={chatModelGroups()}>
-										{(group) => (
-											<div class="dashboard-composer-model-group">
-											<p class="dashboard-composer-model-group__label">
+									<div
+										class="dashboard-composer-model-catalog"
+										role="region"
+										aria-label={i18n.tr(
+											"Tilgjengelige AI-modeller",
+											"Available AI models",
+										)}
+										tabindex={0}
+									>
+										<For each={chatModelGroups()}>
+											{(group) => (
+												<div class="dashboard-composer-model-group">
+													<p class="dashboard-composer-model-group__label">
 												{group.label}
-											</p>
+													</p>
 											<For each={group.models}>
 												{(model) => (
 													<button
@@ -1786,18 +1795,15 @@ export function DashboardComposer(props: {
 															`Bruk ${model.name}`,
 															`Use ${model.name}`,
 														)}
-													onClick={() =>
-														selectModel(
-															model.id,
-															model.provider,
-														)
-														}
-														class={{
-													"dashboard-composer-model-menu__item--active":
-														selectedModel() ===
-															model.id &&
-														selectedModelProvider() === model.provider,
-														}}
+																onClick={() =>
+																	selectModel(model.id, model.provider)
+																}
+																class={{
+																	"dashboard-composer-model-menu__item--active":
+																		selectedModel() ===
+																			model.id &&
+																		selectedModelProvider() === model.provider,
+																}}
 													>
 														<span>
 															<span>
@@ -1846,16 +1852,19 @@ export function DashboardComposer(props: {
 																	$$
 																</span>
 															</Show>
-															<Show when={selectedModel() === model.id && selectedModelProvider() === model.provider}>
+															<Show
+																when={selectedModel() === model.id && selectedModelProvider() === model.provider}
+															>
 																<Check class="size-4" />
 															</Show>
 														</span>
 													</button>
 												)}
 											</For>
-											</div>
-										)}
-									</For>
+												</div>
+											)}
+										</For>
+									</div>
 								</details>
 								<Show when={selectedPrivacyTier() === "sovereign"}>
 									<p class="dashboard-composer-model-tier-note" role="note">

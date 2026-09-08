@@ -7581,9 +7581,19 @@ textarea:focus-visible {
 
 .dashboard-composer-model-menu {
   max-height: min(480px, calc(100vh - 96px));
+  max-height: min(480px, calc(100dvh - 96px));
+  overflow: hidden;
+}
+
+.dashboard-composer-model-catalog {
+  max-height: min(300px, calc(100vh - 280px));
+  max-height: min(300px, calc(100dvh - 280px));
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scroll-padding-block: 6px;
   scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
 .dashboard-composer-model-group {

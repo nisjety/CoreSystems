@@ -83,6 +83,7 @@ describe('connected subscription model picker', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /choose ai model|velg ai-modell/i }))
     fireEvent.click(screen.getByText(/choose a model yourself|velg modell selv/i))
+    expect(screen.getByRole('region', { name: /available ai models|tilgjengelige ai-modeller/i }).tabIndex).toBe(0)
     expect(await screen.findByText('GPT 6 Astra Subscription')).toBeTruthy()
     const choice = await screen.findByRole('button', { name: /gpt 5\.6 luna subscription/i })
     expect(choice.closest('details')).not.toBeNull()
