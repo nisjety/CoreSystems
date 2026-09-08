@@ -1073,8 +1073,18 @@ pub async fn invoke_stream_sse(
     // learned) and inject the top matches as system context so a triggered skill
     // actually steers the model. This is the load-bearing Claude-Code skill
     // behaviour that was previously absent (MatchSkills had no internal caller).
-    let skill_context =
-        fetch_skill_context(&state, &model_bearer, &org_id, &user_id, &req.content).await;
+    let SkillContext {
+        blocks: skill_context,
+        requested_ids: requested_skill_ids,
+    } = fetch_skill_context(
+        &state,
+        &model_bearer,
+        &org_id,
+        &user_id,
+        &req.content,
+        &req.skill_ids,
+    )
+    .await;
     // Remember which skills this turn injected, keyed by the request_id the SPA
     // already has. A thumbs-up has to credit the skills that actually shaped the
     // answer, and the client must not be trusted to name them — so the mapping
@@ -1086,6 +1096,7 @@ pub async fn invoke_stream_sse(
         &user_id,
         &session_run.run_id,
         &req.content,
+        &requested_skill_ids,
         MAX_INJECTED_SKILLS,
     );
     // Implicit dissatisfaction: did this turn signal that the PREVIOUS answer
@@ -2768,6 +2779,19 @@ const CONTEXT_LENGTH_KEEP_TAIL: usize = 4;
 /// Cap on skills injected as system context per turn (keeps the prompt bounded;
 /// the matcher already ranks by keyword overlap so the top few are the relevant ones).
 const MAX_INJECTED_SKILLS: i32 = 3;
+/// How many skills a member may name explicitly on one turn. Above the
+/// keyword-match cap on purpose: a deliberate pick outranks a guess, but the
+/// context budget (`skills::SKILL_CONTEXT_BUDGET_CHARS`) still bounds the total.
+const MAX_REQUESTED_SKILLS: usize = 4;
+
+/// What `fetch_skill_context` injected: the formatted blocks, plus the ids of
+/// the member's explicit picks that actually resolved — the server's list, for
+/// the turn registry, never the client's claim.
+#[derive(Default)]
+struct SkillContext {
+    blocks: Vec<String>,
+    requested_ids: Vec<String>,
+}
 const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
 const MAX_CONTEXT_ASSEMBLY_TOKENS: u32 = 32_768;
@@ -3381,18 +3405,55 @@ async fn load_recent_thread_messages(
             Vec::new()
         }
     };
-    // Pinned turns become leading `system` context here, BEFORE either shedder
-    // can see them: `plan_head_summary` below and `drop_oldest_group` on a
-    // provider rejection both start at the first non-system message, so this is
-    // what makes a pin mean "not dropped for length".
-    // Counted with the same filter the hoist applies, so the log cannot claim a
-    // pin the hoist declined (an empty id, or a `system` turn that is already
-    // protected).
-    let resolved_pins = if pinned_message_ids.is_empty() {
+    // The current turn is spliced in while the durable ids are still attached,
+    // so the indices the pin bound is measured against are the ones the hoist
+    // will see.
+    let mut loaded = loaded;
+    match loaded
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.message.role == "user")
+    {
+        Some(entry) => current_user_content.clone_into(&mut entry.message.content),
+        None => loaded.push(crate::compaction::IdentifiedMessage {
+            // No durable id: session-core has not persisted this turn yet, and an
+            // empty id matches no pin.
+            id: String::new(),
+            message: ChatMessage {
+                role: "user".to_owned(),
+                content: current_user_content.to_owned(),
+                name: String::new(),
+            },
+        }),
+    }
+
+    // How far the load-time shedder will reach. Measured with the real planner
+    // over a role-only projection -- `plan_head_summary` reads only the length
+    // and the position of the first non-system message, so this costs no content
+    // clones and cannot drift from the planner that runs for real below.
+    let shape: Vec<ChatMessage> = loaded
+        .iter()
+        .map(|entry| ChatMessage {
+            role: entry.message.role.clone(),
+            content: String::new(),
+            name: String::new(),
+        })
+        .collect();
+    let protect_below = crate::compaction::plan_head_summary(
+        &shape,
+        MAX_THREAD_CONTEXT_MESSAGES,
+        COMPACTED_TAIL_MESSAGES,
+    )
+    .map_or(0, |head| head.end);
+
+    // Counted with the same filters the hoist applies -- including the index
+    // bound -- so the log cannot claim a pin the hoist declined.
+    let resolved_pins = if pinned_message_ids.is_empty() || protect_below == 0 {
         0
     } else {
         loaded
             .iter()
+            .take(protect_below)
             .filter(|entry| {
                 !entry.id.trim().is_empty()
                     && entry.message.role != "system"
@@ -3400,29 +3461,17 @@ async fn load_recent_thread_messages(
             })
             .count()
     };
-    if resolved_pins > 0 || !pinned_message_ids.is_empty() {
+    if !pinned_message_ids.is_empty() {
         tracing::debug!(
             %thread_id,
             requested = pinned_message_ids.len(),
-            resolved = resolved_pins,
-            "pinned messages hoisted into protected context"
+            hoisted = resolved_pins,
+            protect_below,
+            "pins resolved; hoisting only what load-time compaction would remove"
         );
     }
     let mut messages: Vec<ChatMessage> =
-        crate::compaction::hoist_pinned_messages(loaded, pinned_message_ids);
-
-    match messages
-        .iter_mut()
-        .rev()
-        .find(|message| message.role == "user")
-    {
-        Some(message) => current_user_content.clone_into(&mut message.content),
-        None => messages.push(ChatMessage {
-            role: "user".to_owned(),
-            content: current_user_content.to_owned(),
-            name: String::new(),
-        }),
-    }
+        crate::compaction::hoist_pinned_messages(loaded, pinned_message_ids, protect_below);
 
     // A long thread used to lose its head to a bare `drain`, which took the
     // user's earlier constraints with it and left no trace that anything was
@@ -3488,11 +3537,12 @@ async fn fetch_skill_context(
     org_id: &str,
     user_id: &str,
     query: &str,
-) -> Vec<String> {
-    use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest};
+    requested: &[String],
+) -> SkillContext {
+    use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest, Skill};
 
     if org_id.trim().is_empty() {
-        return Vec::new();
+        return SkillContext::default();
     }
     // §G7 read path: pull this org's LEARNED skills (session-core agent_skills)
     // into the match cache, re-pulling once the cached copy goes stale so an
@@ -3537,7 +3587,21 @@ async fn fetch_skill_context(
             }
         }
     }
-    let Ok(matched) = crate::skills::handle_match_skills(
+    // Explicit picks first (the composer's `/` picker), resolved against the
+    // catalogue and the ownership rule; then keyword matches fill in behind
+    // them, minus anything already picked. A match that fails is not a reason
+    // to drop what the member deliberately asked for.
+    let requested_skills = crate::skills::resolve_requested_skills(
+        &state.skills,
+        org_id,
+        &state.ownership,
+        user_id,
+        requested,
+        MAX_REQUESTED_SKILLS,
+    );
+    let requested_ids: Vec<String> = requested_skills.iter().map(|s| s.id.clone()).collect();
+    let mut chosen: Vec<Skill> = requested_skills;
+    if let Ok(matched) = crate::skills::handle_match_skills(
         &state.skills,
         MatchSkillsRequest {
             request_id: String::new(),
@@ -3548,15 +3612,17 @@ async fn fetch_skill_context(
         },
         &state.ownership,
         user_id,
-    ) else {
-        return Vec::new();
-    };
+    ) {
+        for skill in matched.matches.into_iter().filter_map(|m| m.skill) {
+            if !chosen.iter().any(|c| c.id == skill.id) {
+                chosen.push(skill);
+            }
+        }
+    }
     // Bounded by SIZE as well as count — see `skills::fit_skill_blocks`.
     let fitted = crate::skills::fit_skill_blocks(
-        matched
-            .matches
+        chosen
             .into_iter()
-            .filter_map(|m| m.skill)
             .filter(|s| !s.body.trim().is_empty())
             .map(|s| crate::skills::format_skill_block(&s))
             .collect(),
@@ -3570,7 +3636,10 @@ async fn fetch_skill_context(
             "skill guidance exceeded its context budget; degraded to fit"
         );
     }
-    fitted.blocks
+    SkillContext {
+        blocks: fitted.blocks,
+        requested_ids,
+    }
 }
 
 /// SSE stream for a multimodal (vision) turn: route the image + the user's
