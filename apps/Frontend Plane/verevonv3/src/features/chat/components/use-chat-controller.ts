@@ -41,6 +41,7 @@ import {
 import {
   consumePendingChatLaunch,
 } from '@/features/chat/lib/pending-chat-launch'
+import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import {
   bindSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
@@ -1576,10 +1577,16 @@ export function useChatController() {
    *
    * Held rather than dropped: the 404 that produces this arrives BEFORE the SPA
    * has processed the stream's terminal event, so re-sending immediately would
-   * just hit the streaming guard again. Flushed by the effect below, as one turn
-   * so two missed messages cannot race two runs against each other.
+   * just hit the streaming guard again. Flushed by the effect below one turn at
+   * a time, so two missed messages cannot race two runs against each other and
+   * each keeps the model/provider route selected when it was submitted.
    */
-  const [deferredSends, setDeferredSends] = createSignal<string[]>([])
+  type DeferredSend = {
+    content: string
+    modelOverride?: string
+    options: SendOptions
+  }
+  const [deferredSends, setDeferredSends] = createSignal<DeferredSend[]>([])
 
   const noteQueuedInput = (id: string, next: QueuedInput['state'], note?: string) => {
     setState((s) => {
@@ -1589,7 +1596,11 @@ export function useChatController() {
     })
   }
 
-  const deliverMidRun = async (content: string) => {
+  const deliverMidRun = async (
+    content: string,
+    modelOverride: string | undefined,
+    options: SendOptions,
+  ) => {
     const requestId = state.requestId
     const id = createId('queued')
     setState((s) => { s.queuedInputs = [...s.queuedInputs, { id, content, state: 'pending' }] })
@@ -1597,7 +1608,7 @@ export function useChatController() {
       // Streaming but no request id yet — the stream is still opening, so there
       // is nothing to deliver to. Deferring is right: the run is about to exist
       // and will take it as an ordinary next turn.
-      setDeferredSends((pending) => [...pending, content])
+      setDeferredSends((pending) => [...pending, { content, modelOverride, options: { ...options } }])
       noteQueuedInput(id, 'pending', 'Venter på at kjøringen starter.')
       return
     }
@@ -1614,7 +1625,7 @@ export function useChatController() {
       return
     }
     if (result.outcome === 'run_ended') {
-      setDeferredSends((pending) => [...pending, content])
+      setDeferredSends((pending) => [...pending, { content, modelOverride, options: { ...options } }])
       noteQueuedInput(id, 'pending', 'Kjøringen ble ferdig – sendes som ny melding.')
       return
     }
@@ -1635,7 +1646,7 @@ export function useChatController() {
     // agent at its next tool-round boundary, where the agent decides whether it
     // redirects the work or follows it (see the Model Plane's `queued_input`).
     if (state.status === 'streaming') {
-      await deliverMidRun(content)
+      await deliverMidRun(content, modelOverride, options)
       return
     }
     // A new turn owns the mid-run strip: whatever the previous run showed there
@@ -2049,7 +2060,11 @@ export function useChatController() {
             // provider. Only when a model was set (`model` non-empty) — the retry
             // runs with model "" so it can never re-trigger this branch — and
             // never on a user-aborted stream.
-            if (model && !controller.signal.aborted) {
+            if (
+              model &&
+              options.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER &&
+              !controller.signal.aborted
+            ) {
               settled = true
               // An SSE error frame can share a buffered response with trailing
               // frames. End this failed connection before opening the fallback
@@ -2301,9 +2316,13 @@ export function useChatController() {
       // this effect, and a queue still holding the same text would send it
       // twice. The send itself is an event-style operation, so keep its
       // internal reactive reads untracked.
-      const content = deferred.join('\n\n')
-      setDeferredSends([])
-      untrack(() => { void sendContent(content) })
+      const next = deferred[0]
+      if (!next) return
+      const remaining = deferred.slice(1)
+      setDeferredSends(remaining)
+      untrack(() => {
+        void sendContent(next.content, next.modelOverride, next.options)
+      })
     },
   )
 

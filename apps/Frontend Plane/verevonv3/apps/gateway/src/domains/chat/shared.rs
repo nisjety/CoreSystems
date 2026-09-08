@@ -33,6 +33,26 @@ pub(crate) fn zdr_flag(headers: &HeaderMap) -> bool {
 
 pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Value {
     if let Some(object) = body.as_object_mut() {
+        // Model Gateway's privacy boundary is protobuf-backed and therefore
+        // accepts the numeric PrivacyTier ordinal. Older SPA tabs sent the
+        // readable catalogue name instead (for example `"global"`), which
+        // Axum rejected as 422 before the invoke handler could report a useful
+        // error. Keep that deployed-client compatibility here at the BFF
+        // boundary. Unknown values are deliberately preserved so Model Gateway
+        // still fails closed rather than silently weakening the requested tier.
+        if let Some(tier) = object.get("min_privacy_tier").and_then(Value::as_str) {
+            let ordinal = match tier.trim().to_ascii_lowercase().as_str() {
+                "unspecified" => Some(0),
+                "global" => Some(1),
+                "eu_resident" | "euresident" => Some(2),
+                "zdr_contractual" | "zdrcontractual" => Some(3),
+                "sovereign" => Some(4),
+                _ => None,
+            };
+            if let Some(ordinal) = ordinal {
+                object.insert("min_privacy_tier".to_owned(), Value::from(ordinal));
+            }
+        }
         match object.get("zdr") {
             None => {
                 object.insert("zdr".to_owned(), Value::Bool(zdr_flag(headers)));
@@ -767,6 +787,38 @@ mod tests {
             normalized_model_body(json!({"content": "q", "zdr": "true"}), &HeaderMap::new());
 
         assert_eq!(normalized["zdr"], "true");
+    }
+
+    #[test]
+    fn legacy_named_privacy_tiers_are_normalized_to_proto_ordinals() {
+        for (legacy, ordinal) in [
+            ("unspecified", 0),
+            ("global", 1),
+            ("eu_resident", 2),
+            ("euResident", 2),
+            ("zdr_contractual", 3),
+            ("zdrContractual", 3),
+            ("sovereign", 4),
+        ] {
+            let normalized = normalized_model_body(
+                json!({"content": "q", "min_privacy_tier": legacy}),
+                &HeaderMap::new(),
+            );
+            assert_eq!(
+                normalized["min_privacy_tier"], ordinal,
+                "legacy tier: {legacy}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_privacy_tier_is_preserved_for_fail_closed_rejection() {
+        let normalized = normalized_model_body(
+            json!({"content": "q", "min_privacy_tier": "future-tier"}),
+            &HeaderMap::new(),
+        );
+
+        assert_eq!(normalized["min_privacy_tier"], "future-tier");
     }
 
     #[test]

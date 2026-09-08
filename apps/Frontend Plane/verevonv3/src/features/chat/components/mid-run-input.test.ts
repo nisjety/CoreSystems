@@ -103,12 +103,37 @@ describe('mid-run input is never dropped', () => {
     )
     expect(start, 'the deferred-send flush effect is gone').toBeGreaterThan(-1)
     const effect = text.slice(start, text.indexOf('  const addAssistantCitation', start))
-    expect(effect.indexOf('setDeferredSends([])')).toBeGreaterThan(-1)
+    expect(effect.indexOf('setDeferredSends(remaining)')).toBeGreaterThan(-1)
     expect(
-      effect.indexOf('setDeferredSends([])') <
-        effect.indexOf('sendContent(content)'),
-      'clearing after sending re-runs this effect over the same text and sends it twice',
+      effect.indexOf('setDeferredSends(remaining)') <
+        effect.indexOf('sendContent(next.content, next.modelOverride, next.options)'),
+      'advancing after sending re-runs this effect over the same item and sends it twice',
     ).toBe(true)
+  })
+
+  it('preserves the selected model and subscription route when a missed delivery is replayed', async () => {
+    const text = await source(CONTROLLER)
+    const delivery = text.slice(
+      text.indexOf('const deliverMidRun'),
+      text.indexOf('const sendContent = async'),
+    )
+    const start = text.indexOf(
+      "createEffect(\n    () => ({\n      status: state.status,\n      deferred: deferredSends(),",
+    )
+    const effect = text.slice(start, text.indexOf('  const addAssistantCitation', start))
+
+    expect(delivery).toContain('{ content, modelOverride, options: { ...options } }')
+    expect(effect).toContain('sendContent(next.content, next.modelOverride, next.options)')
+  })
+
+  it('never retries a subscription selection through a platform-paid fallback provider', async () => {
+    const text = await source(CONTROLLER)
+    const handler = text.slice(
+      text.indexOf('onError: ({ message })'),
+      text.indexOf('onFrameId:', text.indexOf('onError: ({ message })')),
+    )
+
+    expect(handler).toContain('options.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER')
   })
 
   it('renders the strip, so a queued message is visible while it is in flight', async () => {
