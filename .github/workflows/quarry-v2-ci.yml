@@ -80,8 +80,19 @@ name: Quarry-v2 CI
 #   runtime's `publisher_integration` test (a second binary in the same
 #   crate that also links its full dependency graph). Unlike cargo-check,
 #   this job can't also shrink debug info — cargo-llvm-cov's coverage
-#   mapping depends on it — so it gets only the disk-cleanup step. Not yet
-#   verified against a real run.
+#   mapping depends on it — so it got only the disk-cleanup step, which
+#   surfaced a real bug in that step: `Free disk space` was deleting
+#   $AGENT_TOOLSDIRECTORY, which is exactly where the `arduino/setup-protoc`
+#   step immediately above it had just installed protoc — so the very next
+#   build.rs invocation hit "Could not find protoc" again despite the setup
+#   step having (correctly) run. cargo-check has the identical ordering bug
+#   but never showed it, purely because its build.rs output was warm-cached
+#   from an earlier run and never needed to re-invoke protoc at all — so
+#   cargo-check's protoc fix was never actually exercised by any run so far,
+#   only masked as working. Fixed in both jobs by dropping
+#   $AGENT_TOOLSDIRECTORY from the cleanup list; the other paths
+#   (/usr/share/dotnet, /usr/local/lib/android, /opt/ghc) are untouched by
+#   any setup-* action in this workflow and stay. Not yet re-verified.
 #
 # - go-coverage floors: still real, unresolved debt (quarry-control 41.6%,
 #   quarry-orchestrator 37.2%, against the 80% floor, confirmed 2026-09-08).
@@ -171,9 +182,19 @@ jobs:
       # headroom regardless of how large target/ grows. `|| true` on each: a
       # runner image that has already dropped one of these (image updates
       # change what's preinstalled) must not fail the job over it.
+      #
+      # Do NOT add $AGENT_TOOLSDIRECTORY (aka $RUNNER_TOOL_CACHE) to this
+      # list: it's exactly where setup-protoc above just installed protoc,
+      # and every other setup-* action installs into the same directory.
+      # Deleting it here silently wiped out that install — confirmed live
+      # 2026-09-08: this job's own warm build.rs cache masked the breakage
+      # (no proto recompile needed, so the missing protoc never got hit),
+      # but rust-coverage's separate, always-cold cache hit it immediately
+      # and came back to "Could not find `protoc`" despite the setup step
+      # having just run.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "$AGENT_TOOLSDIRECTORY" || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
           sudo docker image prune --all --force || true
           df -h /
 
@@ -275,7 +296,7 @@ jobs:
       # so freeing disk is the only lever available here.
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "$AGENT_TOOLSDIRECTORY" || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
           sudo docker image prune --all --force || true
           df -h /
 
