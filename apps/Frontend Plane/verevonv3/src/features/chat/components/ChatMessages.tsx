@@ -2125,6 +2125,22 @@ export function EmptyChatState(props: {
   userName?: string
 }) {
   const i18n = useI18n()
+  // Solid 2 evaluates component bodies untracked. Capture the prop through a
+  // memo before handing it to <Show>, instead of reading the reactive prop
+  // directly in the component body (STRICT_READ_UNTRACKED).
+  const orgName = createMemo(() => props.orgName?.trim() || null)
+  const scopeDescription = createMemo(() => {
+    const name = orgName()
+    return name
+      ? i18n.tr(
+          `Verevon søker i kunnskapsbasen og systemene til ${name}, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.`,
+          `Verevon searches ${name}'s knowledge base and systems, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.`,
+        )
+      : i18n.tr(
+          'Verevon søker i kildene og systemene dere allerede bruker, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.',
+          'Verevon searches the sources and systems you already use, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.',
+        )
+  })
 
   /**
    * A greeting instead of a question. "Hva vil du få gjort?" asked the user to
@@ -2192,17 +2208,7 @@ export function EmptyChatState(props: {
             <span>Verevon</span>
           </div>
           <h1>{greeting()}</h1>
-          <p>
-            <Show
-              when={props.orgName?.trim()}
-              fallback={i18n.tr('Verevon søker i kildene og systemene dere allerede bruker, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.', 'Verevon searches the sources and systems you already use, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.')}
-            >
-              {(orgName) => i18n.tr(
-                `Verevon søker i kunnskapsbasen og systemene til ${orgName()}, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.`,
-                `Verevon searches ${orgName()}'s knowledge base and systems, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.`,
-              )}
-            </Show>
-          </p>
+          <p>{scopeDescription()}</p>
           {/* The suggested first move. Plan item 17 / designpixil's "two
               sentences and a suggestion": the scope line above says what
               Verevon can reach, this says what to do with it right now.

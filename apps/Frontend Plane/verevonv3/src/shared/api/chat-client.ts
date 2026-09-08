@@ -43,6 +43,10 @@ export type ChatAttachment = {
 export type ChatInvokeRequest = {
   content: string
   model?: string
+  /** Explicit provider route for a user-owned model subscription. */
+  provider?: string
+  /** Opaque Integration Core connection id; never a ChatGPT token. */
+  subscriptionConnectionId?: string
   threadId?: string
   /** The requested personal Space for a new durable chat thread. The BFF
    * exchanges this selection for a Control-signed, effect-bound decision. */
@@ -614,7 +618,8 @@ export function shouldRequestSupportContext(content: string): boolean {
 export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
   const threadId = request.threadId?.trim() || undefined
   const supportReadOnly = isSupportChatThread(threadId)
-  const tools = supportReadOnly ? [] : buildToolSpecs(request)
+  const subscriptionBacked = request.provider === 'openai-codex-subscription'
+  const tools = supportReadOnly || subscriptionBacked ? [] : buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
   // Request the tools family by default, even with zero client-declared specs.
   // Support-derived threads are the exception because their durable history
@@ -627,12 +632,12 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   // to also toggle Browse or an action first. web_search stays gated behind
   // its own explicit-Search-toggle check server-side, so this does not grant
   // unrestricted web access — only the safe, always-useful builtins turn on.
-  if (supportReadOnly) features.delete('tools')
+  if (supportReadOnly || subscriptionBacked) features.delete('tools')
   else features.add('tools')
   // Plan mode → agentic run path (orchestration-backed, supports approval gates
   // + run pause/resume). Without it the gateway uses the direct tool loop, which
   // never pauses for human approval.
-  if (request.planMode && !supportReadOnly) features.add('agentic')
+  if (request.planMode && !supportReadOnly && !subscriptionBacked) features.add('agentic')
   else features.delete('agentic')
 
   const supportContextQuery = !supportReadOnly && shouldRequestSupportContext(request.content)
@@ -642,24 +647,26 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   return {
     content: request.content,
     model: request.model,
+    provider: request.provider,
+    subscription_connection_id: request.subscriptionConnectionId,
     profile: request.profile ?? 'chat',
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
     space_ref: request.spaceRef?.trim() || undefined,
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
-    browse_web: supportReadOnly ? false : request.browseWeb ?? false,
-    generate_image: supportReadOnly ? false : request.generateImage ?? false,
+    browse_web: supportReadOnly || subscriptionBacked ? false : request.browseWeb ?? false,
+    generate_image: supportReadOnly || subscriptionBacked ? false : request.generateImage ?? false,
     // Sent as a real field, not just as the `agentic` feature above: the
     // gateway needs it to mark the run itself (in-memory plan-mode store +
     // session-core's durable `run.mode`). Without this the toggle only widened
     // the feature set and nothing server-side could tell a planning run from an
     // executing one.
-    plan_mode: supportReadOnly ? false : request.planMode ?? false,
+    plan_mode: supportReadOnly || subscriptionBacked ? false : request.planMode ?? false,
     // Deep research is its OWN field, not just `browse_web`. "Dyp research"
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
     // multi-round research pipeline off this flag.
-    deep_research: supportReadOnly ? false : (request.deepResearch ?? false),
+    deep_research: supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
     // Omitted entirely when unset or `standard`: the gateway treats an absent
     // effort as "no thinking", and sending `standard` explicitly would be a
     // no-op field on every ordinary turn.
@@ -672,7 +679,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(request.verbosity && request.verbosity !== 'balanced'
       ? { verbosity: request.verbosity }
       : {}),
-    attachments: request.attachments ?? [],
+    attachments: subscriptionBacked ? [] : request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
     // what it was before pinning existed. Support threads have this
@@ -1849,7 +1856,9 @@ export async function listModels(): Promise<ModelInfo[]> {
       const privacyTier = normalizePrivacyTier(item.privacy_tier ?? item.privacyTier)
       return {
         id,
-        name,
+        name: provider === 'openai-codex-subscription'
+          ? subscriptionModelDisplayName(id)
+          : name,
         capabilities: Array.isArray(item.features)
           ? (item.features as unknown[]).filter((f): f is string => typeof f === 'string')
           : Array.isArray(item.capabilities)
@@ -1864,6 +1873,18 @@ export async function listModels(): Promise<ModelInfo[]> {
       }
     })
     .filter((model) => model.id.length > 0)
+}
+
+/** Product-facing label for a ChatGPT-plan model. `codex` is an implementation
+ * detail of the broker, not the entitlement the user selected. */
+export function subscriptionModelDisplayName(id: string): string {
+  const words = id
+    .split('-')
+    .filter((word) => word && word.toLocaleLowerCase() !== 'codex')
+    .map((word) => word.toLocaleLowerCase() === 'gpt'
+      ? 'GPT'
+      : word.charAt(0).toLocaleUpperCase() + word.slice(1))
+  return `${words.join(' ') || 'GPT'} Subscription`
 }
 
 /**
@@ -1932,6 +1953,7 @@ export function cheapDefaultModelId(models: readonly ModelInfo[]): string {
 }
 
 const PROVIDER_GROUP_ORDER: readonly { label: string; test: (m: ModelInfo) => boolean }[] = [
+  { label: 'Subscription', test: (m) => m.provider === 'openai-codex-subscription' },
   { label: 'Claude', test: (m) => m.provider === 'anthropic' || /claude/i.test(`${m.id} ${m.name}`) },
   { label: 'OpenAI GPT', test: (m) => m.provider === 'openai' || /gpt|^o[0-9]|model-router/i.test(`${m.id} ${m.name}`) },
   { label: 'DeepSeek', test: (m) => m.provider === 'deepseek' || /deepseek/i.test(`${m.id} ${m.name}`) },

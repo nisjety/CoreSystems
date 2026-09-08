@@ -347,6 +347,10 @@ export type StreamAttachment = {
 
 export type SendOptions = {
   actions?: ChatAction[]
+  /** Explicit provider route for a connected user-owned model subscription. */
+  provider?: string
+  /** Opaque Integration Core connection id; never a ChatGPT token. */
+  subscriptionConnectionId?: string
   /** Reasoning effort from the composer's response-mode selector. */
   effort?: 'quick' | 'deep'
   /**

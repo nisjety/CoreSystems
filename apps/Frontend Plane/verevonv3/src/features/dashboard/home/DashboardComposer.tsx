@@ -84,6 +84,10 @@ import {
 	type ModelInfo,
 } from "@/shared/api/chat-client";
 import {
+	listChatGptSubscriptions,
+	OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
+} from "@/shared/api/chatgpt-subscription-client";
+import {
 	isClaimedPrivacyTier,
 	isSelectablePrivacyTier,
 	privacyTierBadgeLabel,
@@ -93,6 +97,7 @@ import {
 } from "@/shared/api/privacy-tier";
 import { useI18n } from "@/shared/i18n";
 import { cn } from "@/shared/lib/cn";
+import { getSession } from "@/shared/session/session-store";
 
 type ResponseMode = "auto" | "quick" | "deep";
 
@@ -197,6 +202,10 @@ export type DashboardComposerSubmitPayload = {
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
+	/** Provider route used only for a connected, user-owned model subscription. */
+	provider?: string;
+	/** Opaque Integration Core connection id; this is not a ChatGPT credential. */
+	subscriptionConnectionId?: string;
 	text: string;
 	tools: Array<"image" | "research" | "search">;
 	/**
@@ -564,6 +573,7 @@ export function DashboardComposer(props: {
 	const [selectedModel, setSelectedModel] = createSignal<string>(
 		VEREVON_BALANCE_MODE_ID,
 	);
+	const [selectedModelProvider, setSelectedModelProvider] = createSignal<string>();
 	const [models] = createResource(async () => {
 		try {
 			return await listModels();
@@ -573,10 +583,28 @@ export function DashboardComposer(props: {
 			return [] as ModelInfo[];
 		}
 	});
+	const activeOrgId = () => getSession().activeOrg?.id?.trim() || false;
+	const [subscriptionConnections] = createResource(
+		activeOrgId,
+		async (orgId) => {
+			try {
+				return await listChatGptSubscriptions(orgId);
+			} catch {
+				return [];
+			}
+		},
+	);
+	const activeSubscriptionConnection = createMemo(() =>
+		(subscriptionConnections() ?? []).find(
+			(connection) => connection.status.toLocaleLowerCase() === "active",
+		),
+	);
 	// Chat-capable models grouped by family/provider. Non-chat modalities
 	// (image/video/embeddings/transcribe) are filtered out by `groupChatModels`.
 	const chatModelGroups = createMemo<ModelGroup[]>(() =>
-		groupChatModels(models() ?? []),
+		groupChatModels(models() ?? []).filter(
+			(group) => group.label !== "Subscription" || activeSubscriptionConnection(),
+		),
 	);
 	// Temporary chat is only offerable if some deployment is ATTESTED zero-retention.
 	// inference-core fails a ZDR request closed — it skips every provider whose
@@ -595,24 +623,37 @@ export function DashboardComposer(props: {
 	const flatChatModels = createMemo<ModelInfo[]>(() =>
 		chatModelGroups().flatMap((group) => group.models),
 	);
+	const selectedCatalogModel = createMemo(() => {
+		const provider = selectedModelProvider();
+		if (!provider) return undefined;
+		return flatChatModels().find(
+			(model) => model.id === selectedModel() && model.provider === provider,
+		);
+	});
 	const selectedModelLabel = () => {
 		const id = selectedModel();
 		// Empty id → backend treats it as Verevon Balance (resilient fallback).
 		if (!id) return "Verevon Balance";
 		return (
 			verevonModeById(id)?.label ??
-			flatChatModels().find((model) => model.id === id)?.name ??
+			selectedCatalogModel()?.name ??
 			id
 		);
 	};
 	// The selected model's attested privacy tier, if any. Only a real catalog
 	// selection can carry one: the pinned intent modes are resolved server-side,
 	// so they never claim a tier here.
-	const selectedPrivacyTier = createMemo(() =>
-		flatChatModels().find((model) => model.id === selectedModel())?.privacyTier,
-	);
-	const selectModel = (id: string) => {
+	const selectedPrivacyTier = createMemo(() => selectedCatalogModel()?.privacyTier);
+	const selectedSubscriptionRoute = createMemo(() => {
+		const model = selectedCatalogModel();
+		const connection = activeSubscriptionConnection();
+		return model?.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && connection
+			? { provider: OPENAI_CODEX_SUBSCRIPTION_PROVIDER, connectionId: connection.id }
+			: undefined;
+	});
+	const selectModel = (id: string, provider?: string) => {
 		setSelectedModel(id);
+		setSelectedModelProvider(provider);
 		setModelOpen(false);
 	};
 	const [settings, setSettings] = createSignal<ComposerSettings>({
@@ -1524,6 +1565,7 @@ export function DashboardComposer(props: {
 			message: snapshot.body,
 		});
 		const effectiveDeepSearch = deepSearch() || productResearch;
+		const subscriptionRoute = selectedSubscriptionRoute();
 		const payload = createComposerSubmitPayload({
 			actions: snapshot.actions,
 			browseWeb: browseWeb(),
@@ -1532,7 +1574,9 @@ export function DashboardComposer(props: {
 			imageMode: imageMode(),
 			minPrivacyTier: selectedPrivacyTier(),
 			model: selectedModel(),
+			provider: subscriptionRoute?.provider,
 			responseMode: responseMode(),
+			subscriptionConnectionId: subscriptionRoute?.connectionId,
 			text: snapshot.submittedText,
 			tone: settings().tone,
 			trimmedMessage: snapshot.body,
@@ -1666,10 +1710,10 @@ export function DashboardComposer(props: {
 												onClick={() =>
 													selectModel(mode.id)
 												}
-												class={{
-													"dashboard-composer-model-menu__item--active":
-														selectedModel() ===
-														mode.id,
+											class={{
+												"dashboard-composer-model-menu__item--active":
+													!selectedModelProvider() && selectedModel() ===
+													mode.id,
 												}}
 											>
 												<span>
@@ -1704,9 +1748,9 @@ export function DashboardComposer(props: {
 														</span>
 													</Show>
 													<Show
-														when={
-															selectedModel() ===
-															mode.id
+												when={
+													!selectedModelProvider() && selectedModel() ===
+													mode.id
 														}
 													>
 														<Check class="size-4" />
@@ -1728,9 +1772,9 @@ export function DashboardComposer(props: {
 									<summary>
 										{i18n.tr('Velg modell selv', 'Choose a model yourself')}
 									</summary>
-								<For each={chatModelGroups()}>
-									{(group) => (
-										<div class="dashboard-composer-model-group">
+									<For each={chatModelGroups()}>
+										{(group) => (
+											<div class="dashboard-composer-model-group">
 											<p class="dashboard-composer-model-group__label">
 												{group.label}
 											</p>
@@ -1742,15 +1786,17 @@ export function DashboardComposer(props: {
 															`Bruk ${model.name}`,
 															`Use ${model.name}`,
 														)}
-														onClick={() =>
-															selectModel(
-																model.id,
-															)
+													onClick={() =>
+														selectModel(
+															model.id,
+															model.provider,
+														)
 														}
 														class={{
-															"dashboard-composer-model-menu__item--active":
-																selectedModel() ===
-																model.id,
+													"dashboard-composer-model-menu__item--active":
+														selectedModel() ===
+															model.id &&
+														selectedModelProvider() === model.provider,
 														}}
 													>
 														<span>
@@ -1800,16 +1846,16 @@ export function DashboardComposer(props: {
 																	$$
 																</span>
 															</Show>
-															<Show when={selectedModel() === model.id}>
+															<Show when={selectedModel() === model.id && selectedModelProvider() === model.provider}>
 																<Check class="size-4" />
 															</Show>
 														</span>
 													</button>
 												)}
 											</For>
-										</div>
-									)}
-								</For>
+											</div>
+										)}
+									</For>
 								</details>
 								<Show when={selectedPrivacyTier() === "sovereign"}>
 									<p class="dashboard-composer-model-tier-note" role="note">
@@ -2553,7 +2599,9 @@ function createComposerSubmitPayload(input: {
 	imageMode: boolean;
 	minPrivacyTier?: PrivacyTier;
 	model: string;
+	provider?: string;
 	responseMode: ResponseMode;
+	subscriptionConnectionId?: string;
 	text: string;
 	tone: ComposerTone;
 	trimmedMessage: string;
@@ -2569,6 +2617,10 @@ function createComposerSubmitPayload(input: {
 			url: file.url,
 		})),
 			model: input.model || undefined,
+			...(input.provider ? { provider: input.provider } : {}),
+			...(input.subscriptionConnectionId
+				? { subscriptionConnectionId: input.subscriptionConnectionId }
+				: {}),
 			// Key omitted entirely when no tier applies (intent modes, unspecified):
 			// callers and tests treat presence as "the user pinned a tier".
 			...(input.minPrivacyTier ? { minPrivacyTier: input.minPrivacyTier } : {}),

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildChatWireBody,
+  groupChatModels,
   listModels,
   shouldRequestSupportContext,
   describeFeedbackFailure,
@@ -10,6 +11,7 @@ import {
   queueInvocationInput,
   saveChatThreadSnapshot,
   streamChat,
+  subscriptionModelDisplayName,
   submitFeedback,
 } from './chat-client'
 import type { ChatStreamHandlers } from './chat-client'
@@ -397,6 +399,42 @@ describe('chat-client tool wiring', () => {
     expect(body.tools).toEqual([
       expect.objectContaining({ name: 'web_search' }),
     ])
+  })
+
+  it('routes a connected subscription without incompatible tool features', () => {
+    const body = buildChatWireBody({
+      content: 'hello from my plan',
+      model: 'gpt-5.6-luna',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn-subscription-1',
+      browseWeb: true,
+      generateImage: true,
+      planMode: true,
+      attachments: [{ kind: 'image', data_base64: 'abc' }],
+    })
+
+    expect(body).toMatchObject({
+      model: 'gpt-5.6-luna',
+      provider: 'openai-codex-subscription',
+      subscription_connection_id: 'conn-subscription-1',
+      browse_web: false,
+      generate_image: false,
+      plan_mode: false,
+      attachments: [],
+      tools: [],
+    })
+    expect(body.features).not.toContain('tools')
+    expect(body.features).not.toContain('agentic')
+  })
+
+  it('names and groups ChatGPT-plan models as subscriptions, not Codex products', () => {
+    expect(subscriptionModelDisplayName('gpt-5.6-luna')).toBe('GPT 5.6 Luna Subscription')
+    expect(subscriptionModelDisplayName('gpt-5.3-codex-spark')).toBe('GPT 5.3 Spark Subscription')
+    expect(groupChatModels([{
+      id: 'gpt-5.6-luna',
+      name: 'GPT 5.6 Luna Subscription',
+      provider: 'openai-codex-subscription',
+    }])[0]?.label).toBe('Subscription')
   })
 
   it('sends only a requested Space reference for a new thread, never authority metadata', () => {

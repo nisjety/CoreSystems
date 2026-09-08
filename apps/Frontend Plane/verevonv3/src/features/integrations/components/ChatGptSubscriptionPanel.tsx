@@ -8,6 +8,7 @@ import {
   type ChatGptSubscriptionConnection,
 } from '@/shared/api/chatgpt-subscription-client'
 import { useI18n } from '@/shared/i18n'
+import { ApiError } from '@/shared/api/http'
 import { Button } from '@/shared/ui/Button'
 
 type ChatGptSubscriptionPanelProps = {
@@ -37,6 +38,9 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
   const [busy, setBusy] = createSignal<'starting' | 'disconnecting' | null>(null)
   const [notice, setNotice] = createSignal<string | null>(null)
   let pollTimer: number | undefined
+  let disposed = false
+  let loginAttempt = 0
+  let pollingLoginId: string | undefined
 
   const stopPolling = () => {
     if (pollTimer !== undefined) window.clearTimeout(pollTimer)
@@ -49,7 +53,7 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
     if (!orgId.trim()) return
     try {
       const subscriptions = await listChatGptSubscriptions(orgId)
-      if (orgId !== props.orgId) return
+      if (disposed || orgId !== props.orgId) return
       const active = subscriptions.find((candidate) => isConnected(candidate.status))
       if (active) setConnection(active)
     } catch {
@@ -74,18 +78,27 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
   }
 
   const pollLogin = async () => {
+    stopPolling()
     const currentLogin = login()
     const targetOrgId = props.orgId
-    if (!currentLogin || !targetOrgId.trim()) return
+    if (disposed || !currentLogin || !targetOrgId.trim() || pollingLoginId === currentLogin.loginId) return
+    if (currentLogin.expiresAt && Date.parse(currentLogin.expiresAt) <= Date.now()) {
+      setLogin(undefined)
+      setNotice(i18n.tr('Påloggingskoden utløp. Start på nytt for å få en ny kode.', 'The sign-in code expired. Start again for a new code.'))
+      return
+    }
+    pollingLoginId = currentLogin.loginId
     try {
       const result = await getChatGptSubscriptionStatus(
         targetOrgId,
         currentLogin.connectionId,
         currentLogin.loginId,
       )
-      if (targetOrgId !== props.orgId || login()?.loginId !== currentLogin.loginId) return
+      if (disposed || targetOrgId !== props.orgId || login()?.loginId !== currentLogin.loginId) return
       setConnection(result.connection)
-      setLogin(result.login)
+      // Polling returns status only. Keep the one-time code, URL, and expiry
+      // from the start response for the lifetime of this login attempt.
+      setLogin({ ...currentLogin, status: result.login.status })
 
       const loginStatus = result.login.status
       if (loginStatus === 'connected' || loginStatus === 'failed' || loginStatus === 'expired') {
@@ -93,11 +106,21 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
         return
       }
       pollTimer = window.setTimeout(() => void pollLogin(), 2_500)
-    } catch {
+    } catch (error) {
+      if (disposed || targetOrgId !== props.orgId || login()?.loginId !== currentLogin.loginId) return
+      if (error instanceof ApiError && [400, 401, 403, 404, 409, 410].includes(error.status)) {
+        setLogin(undefined)
+        setNotice(error.status === 401 || error.status === 403
+          ? i18n.tr('Verevon-økten eller tilgangen er ikke lenger gyldig. Logg inn i Verevon igjen.', 'Your Verevon session or access is no longer valid. Sign in to Verevon again.')
+          : i18n.tr('Påloggingskoden er utløpt eller ikke lenger gyldig. Start på nytt for å få en ny kode.', 'The sign-in code has expired or is no longer valid. Start again for a new code.'))
+        return
+      }
       // Retain the displayed code and retry once the temporary gateway/network
       // failure has cleared. Never surface a provider's raw auth response.
       setNotice(i18n.tr('Venter fortsatt på at ChatGPT-påloggingen skal fullføres.', 'Still waiting for ChatGPT sign-in to finish.'))
       pollTimer = window.setTimeout(() => void pollLogin(), 4_000)
+    } finally {
+      if (pollingLoginId === currentLogin.loginId) pollingLoginId = undefined
     }
   }
 
@@ -110,11 +133,13 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
       ? null
       : window.open('about:blank', 'verevon-chatgpt-subscription', 'popup,width=560,height=760')
     stopPolling()
+    const attempt = ++loginAttempt
+    setLogin(undefined)
     setBusy('starting')
     setNotice(null)
     try {
       const result = await startChatGptSubscription(targetOrgId)
-      if (targetOrgId !== props.orgId) {
+      if (disposed || attempt !== loginAttempt || targetOrgId !== props.orgId) {
         if (loginWindow && !loginWindow.closed) loginWindow.close()
         return
       }
@@ -124,9 +149,10 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
       pollTimer = window.setTimeout(() => void pollLogin(), 1_000)
     } catch {
       if (loginWindow && !loginWindow.closed) loginWindow.close()
+      if (disposed || attempt !== loginAttempt || targetOrgId !== props.orgId) return
       setNotice(i18n.tr('Kunne ikke starte ChatGPT-påloggingen. Prøv igjen.', 'We could not start ChatGPT sign-in. Please try again.'))
     } finally {
-      setBusy(null)
+      if (!disposed && attempt === loginAttempt) setBusy(null)
     }
   }
 
@@ -152,7 +178,9 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
   createEffect(
     () => props.orgId,
     (orgId) => {
+      loginAttempt++
       stopPolling()
+      setBusy(null)
       setConnection(undefined)
       setLogin(undefined)
       setNotice(null)
@@ -160,7 +188,11 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
     },
   )
 
-  onCleanup(stopPolling)
+  onCleanup(() => {
+    disposed = true
+    loginAttempt++
+    stopPolling()
+  })
 
   const connected = () => Boolean(connection() && isConnected(connection()!.status))
   const awaitingSignIn = () => Boolean(login() && !isTerminalLogin(login()!.status))
@@ -190,6 +222,18 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
           {statusLabel()}
         </span>
       </div>
+
+      <Show when={!connected()}>
+        <p class="verevon-chatgpt-subscription__privacy">
+          {i18n.tr(
+            'Første gang: Aktiver autorisasjon med enhetskode for Codex i ChatGPTs sikkerhetsinnstillinger. Kom deretter tilbake hit og hent en ny kode. For en administrert ChatGPT-konto kan administratoren måtte aktivere dette.',
+            'First time: Enable device code authorization for Codex in ChatGPT security settings. Then return here and get a new code. For a managed ChatGPT account, your administrator may need to enable this.',
+          )}{' '}
+          <a href="https://chatgpt.com/#settings/Security" target="_blank" rel="noreferrer">
+            {i18n.tr('Åpne ChatGPTs sikkerhetsinnstillinger', 'Open ChatGPT security settings')}
+          </a>
+        </p>
+      </Show>
 
       <Show
         when={login()}
@@ -223,6 +267,9 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
               </a>
               <Button size="sm" disabled={busy() !== null} onClick={() => void pollLogin()}>
                 {i18n.tr('Jeg har logget inn', 'I have signed in')}
+              </Button>
+              <Button size="sm" disabled={busy() !== null} onClick={() => void start()}>
+                {i18n.tr('Hent ny kode', 'Get a new code')}
               </Button>
             </div>
           </div>

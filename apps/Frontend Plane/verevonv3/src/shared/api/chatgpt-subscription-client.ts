@@ -30,7 +30,10 @@ export type ChatGptSubscriptionStart = {
 
 export type ChatGptSubscriptionStatus = {
   connection: ChatGptSubscriptionConnection
-  login: ChatGptDeviceLogin
+  // Integration Core does not repeat the device code or URL on status polls.
+  login: Pick<ChatGptDeviceLogin, 'loginId' | 'connectionId'> & {
+    status: NonNullable<ChatGptDeviceLogin['status']>
+  }
 }
 
 function headers(orgId: string): HeadersInit | undefined {

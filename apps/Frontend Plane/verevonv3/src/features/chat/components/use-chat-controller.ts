@@ -1786,6 +1786,8 @@ export function useChatController() {
         {
           content,
           model,
+          provider: options.provider,
+          subscriptionConnectionId: options.subscriptionConnectionId,
           // A scoped first turn lets Session Core mint the durable thread ID.
           // The local provisional ID remains only a UI correlation key until
           // `onConnected` replaces it; sending it as a thread ID would make
@@ -2137,6 +2139,8 @@ export function useChatController() {
       generateImage: payload.tools.includes('image'),
       tools: payload.tools,
       actions,
+      provider: payload.provider,
+      subscriptionConnectionId: payload.subscriptionConnectionId,
       zdr: payload.zdr,
       effort: payload.effort,
       tone: payload.tone,

@@ -352,14 +352,21 @@ export default function ChatPage() {
    */
   const [streamAnnouncement, setStreamAnnouncement] = createSignal('')
   createEffect(
-    () => isStreaming(),
-    (streaming) => {
+    () => {
+      const streaming = isStreaming()
+      const completedAnswer = streaming
+        ? ''
+        : [...state.turns]
+            .reverse()
+            .find((turn) => turn.role === 'assistant')
+            ?.content?.trim() ?? ''
+      return { completedAnswer, streaming }
+    },
+    ({ completedAnswer, streaming }) => {
       if (!streaming) {
-        const latest = [...state.turns].reverse().find((turn) => turn.role === 'assistant')
-        const answer = latest?.content?.trim() ?? ''
         // The answer itself is in the transcript to navigate; this is the cue
         // that it is there, plus enough of it to know whether it is worth reading.
-        setStreamAnnouncement(answer ? `Svar fullført. ${answer.slice(0, 180)}` : '')
+        setStreamAnnouncement(completedAnswer ? `Svar fullført. ${completedAnswer.slice(0, 180)}` : '')
         return
       }
       setStreamAnnouncement('Verevon svarer …')

@@ -7496,17 +7496,18 @@ textarea:focus-visible {
   bottom: calc(100% + 8px);
   left: 0;
   z-index: 90;
-  width: 256px;
+  width: min(340px, calc(100vw - 24px));
   border-radius: 16px;
-  padding: 4px;
+  padding: 6px;
 }
 
 .dashboard-composer-model-menu button {
-  display: flex;
+  display: grid;
   width: 100%;
+  min-height: 38px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  column-gap: 10px;
   border: 0;
   border-radius: 12px;
   background: transparent;
@@ -7531,13 +7532,25 @@ textarea:focus-visible {
 }
 
 .dashboard-composer-model-menu button > span {
-  display: flex;
   min-width: 0;
   align-items: center;
-  gap: 12px;
 }
 
-.dashboard-composer-model-menu button > span > span:first-child {
+.dashboard-composer-model-menu button > span:first-child {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  column-gap: 10px;
+  overflow: hidden;
+}
+
+.dashboard-composer-model-menu button > span:first-child > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-composer-model-menu button > span:first-child > span:first-child {
   display: grid;
   width: 24px;
   height: 24px;
@@ -7561,14 +7574,16 @@ textarea:focus-visible {
   color: var(--panel) !important;
 }
 
-.dark .dashboard-composer-model-menu button > span > span:first-child {
+.dark .dashboard-composer-model-menu button > span:first-child > span:first-child {
   background: rgba(255, 255, 255, 0.1);
   color: var(--verevon-border-warm);
 }
 
 .dashboard-composer-model-menu {
-  max-height: 360px;
+  max-height: min(480px, calc(100vh - 96px));
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .dashboard-composer-model-group {
@@ -45168,7 +45183,7 @@ so it
 
 .dashboard-composer-root--chat .dashboard-composer-model-button {
   height: 32px;
-  max-width: 164px;
+  max-width: 240px;
   border-color: transparent;
   border-radius: 9px;
   background: transparent;
@@ -45734,7 +45749,7 @@ so it
   }
 
   .dashboard-composer-root--chat .dashboard-composer-model-button {
-    max-width: 130px;
+    max-width: 180px;
   }
 
   .dashboard-composer-root--chat .dashboard-composer-toolbar__left > :not(.dashboard-composer-attach):not(.dashboard-composer-web-button) {

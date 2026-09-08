@@ -108,7 +108,7 @@ function RequireWorkspaceAdmin(props: { children: JSX.Element }) {
   const session = getSession()
 
   createEffectRedirect(
-    () => ({ status: session.status, onboardingStatus: session.onboardingStatus, session }),
+    () => ({ status: session.status, onboardingStatus: session.onboardingStatus, isWorkspaceAdmin: hasWorkspaceAdminAccess(session) }),
     (curr) => {
       if (curr.status === 'unauthenticated') {
         navigate('/login', { replace: true })
@@ -118,7 +118,7 @@ function RequireWorkspaceAdmin(props: { children: JSX.Element }) {
         navigate('/onboarding', { replace: true })
         return
       }
-      if (curr.status === 'authenticated' && !hasWorkspaceAdminAccess(curr.session)) {
+      if (curr.status === 'authenticated' && !curr.isWorkspaceAdmin) {
         navigate('/dashboard', { replace: true })
       }
     },
