@@ -24,7 +24,7 @@ use crate::{
     contracts::ActionActor,
     envelope::error,
     middleware::{require_session, AuthenticatedUser},
-    upstream::proxy_json,
+    upstream::{proxy_json, send_with_retry},
 };
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -4471,19 +4471,15 @@ async fn personal_space_record(
         return Err(());
     }
     let url = format!("{}/api/query", convex_url.trim_end_matches('/'));
-    let response = state
-        .client
-        .post(url)
-        .json(&json!({
-            "path": "spaces:getPersonalSpaceForGateway",
-            "args": {
-                "externalAuthId": user.user_id,
-                "externalOrgId": org_id,
-                "serviceKey": service_key,
-            }
-        }))
-        .send()
-        .await;
+    let request = state.client.post(url).json(&json!({
+        "path": "spaces:getPersonalSpaceForGateway",
+        "args": {
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "serviceKey": service_key,
+        }
+    }));
+    let response = send_with_retry(request).await;
     let Ok(response) = response else {
         return Err(());
     };
@@ -4553,16 +4549,17 @@ pub(crate) async fn convex_gateway_call(
     }
     let object = args.as_object_mut().ok_or(())?;
     object.insert("serviceKey".to_owned(), Value::String(service_key));
-    let response = state
-        .client
-        .post(format!(
-            "{}/api/{operation}",
-            convex_url.trim_end_matches('/')
-        ))
-        .json(&json!({"path": path, "args": args}))
-        .send()
-        .await
-        .map_err(|_| ())?;
+    let response = send_with_retry(
+        state
+            .client
+            .post(format!(
+                "{}/api/{operation}",
+                convex_url.trim_end_matches('/')
+            ))
+            .json(&json!({"path": path, "args": args})),
+    )
+    .await
+    .map_err(|_| ())?;
     if !response.status().is_success() {
         return Err(());
     }
