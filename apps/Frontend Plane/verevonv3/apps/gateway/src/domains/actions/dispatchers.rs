@@ -204,7 +204,7 @@ fn owner_contract_is_human_executable(action: &Value) -> bool {
 
 fn canonical_schema_sha256(schema: &Value) -> Option<String> {
     let canonical = serde_json::to_vec(schema).ok()?;
-    Some(format!("sha256:{:x}", Sha256::digest(canonical)))
+    Some(format!("sha256:{}", hex::encode(Sha256::digest(canonical))))
 }
 
 pub(super) async fn dispatch_recrawl(

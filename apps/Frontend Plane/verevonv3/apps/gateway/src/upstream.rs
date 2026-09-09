@@ -13,7 +13,7 @@ use axum::{
     Json,
 };
 use futures_util::StreamExt;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Method;
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};

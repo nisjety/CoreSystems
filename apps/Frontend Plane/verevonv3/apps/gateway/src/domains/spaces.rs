@@ -137,7 +137,7 @@ pub(crate) async fn inject_personal_thread_context(
             "{}/api/v1/internal/spaces/thread-append-decision",
             state.user_core_url
         );
-        let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let content_digest = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
         let (status, Json(response)) = proxy_json(
             state,
             Method::POST,
@@ -517,7 +517,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
             )),
         )
     })?;
-    let template_digest = format!("sha256:{:x}", Sha256::digest(template_bytes));
+    let template_digest = format!("sha256:{}", hex::encode(Sha256::digest(template_bytes)));
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
