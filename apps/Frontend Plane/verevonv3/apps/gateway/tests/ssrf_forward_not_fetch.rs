@@ -88,6 +88,25 @@ fn has_configured_url_anchor(window: &str) -> bool {
     false
 }
 
+/// A second, equally-trusted anchor shape: a local `let <name>_url =
+/// std::env::var("...")` binding. `domains/spaces.rs`'s Convex/Application-plane
+/// calls (`convex_gateway_call`, `personal_space_record`) resolve
+/// `APPLICATION_CONVEX_URL` fresh at call time instead of caching it on
+/// `AppState` at startup like every other upstream, but it is exactly as
+/// operator-controlled as a `state.*_url` field — an env var, never caller
+/// input — so a dial built from it is not the regression this scan looks for.
+fn has_env_var_url_anchor(window: &str) -> bool {
+    window.match_indices("std::env::var(").any(|(idx, _)| {
+        let prefix = window[..idx].trim_end();
+        let prefix = prefix.strip_suffix('=').unwrap_or(prefix).trim_end();
+        let ident_start = prefix
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map(|pos| pos + 1)
+            .unwrap_or(0);
+        prefix[ident_start..].ends_with("_url")
+    })
+}
+
 fn gateway_src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
@@ -347,7 +366,7 @@ fn every_direct_dial_is_anchored_to_a_configured_base_url_not_caller_input() {
             }
 
             let window = call_expression_window(&lines, fn_start, idx, marker);
-            if !has_configured_url_anchor(&window) {
+            if !has_configured_url_anchor(&window) && !has_env_var_url_anchor(&window) {
                 violations.push(format!(
                     "{}:{}: `{}` — no `state.<..._url>` anchor found in its enclosing \
                      function (scanned from line {}):\n    {}",

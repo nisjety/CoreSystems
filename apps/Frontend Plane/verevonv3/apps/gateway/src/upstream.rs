@@ -332,7 +332,7 @@ pub(crate) async fn authorized_org_id(_state: &AppState, user: &AuthenticatedUse
 /// error is ambiguous: the upstream may already have accepted a non-idempotent
 /// request, so replaying it can duplicate external actions. Streaming bodies
 /// that cannot be cloned also skip the retry.
-async fn send_with_retry(
+pub(crate) async fn send_with_retry(
     builder: reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let retry = builder.try_clone();
