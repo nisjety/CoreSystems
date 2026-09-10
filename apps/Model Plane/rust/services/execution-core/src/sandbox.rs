@@ -396,6 +396,27 @@ mod tests {
         assert_eq!(profile.credential_mode, "credential_free");
     }
 
+    /// The S3.2 close-out design's "backend loss/downgrade" verification
+    /// scenario: `backend` must never claim `"bubblewrap"` while
+    /// `local_isolation_available` is false, or vice versa — the field pair
+    /// is what `http_health::capability_profile` gates a decision request on
+    /// (never requesting one when isolation is unavailable), so a
+    /// disagreement here would be exactly the kind of silent backend
+    /// downgrade this substrate contract exists to rule out. `is_supported()`
+    /// is a real, cached, non-overridable probe (Linux-only, `None` result on
+    /// every other OS including this Windows dev host), so this asserts the
+    /// invariant against whatever it genuinely reports here rather than
+    /// forcing a specific branch.
+    #[test]
+    fn capability_profile_backend_field_agrees_with_local_isolation_available() {
+        let profile = capability_profile();
+        if profile.local_isolation_available {
+            assert_eq!(profile.backend, "bubblewrap");
+        } else {
+            assert_eq!(profile.backend, "unavailable");
+        }
+    }
+
     #[test]
     fn read_only_no_network_blocks_writes_and_egress() {
         let p = MpSandboxPolicy::ReadOnly {

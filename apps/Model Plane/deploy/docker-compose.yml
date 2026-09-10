@@ -854,6 +854,14 @@ services:
       CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN: ${CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN:-}
       EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN: ${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:-}
       EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK:-false}
+      # Signed Space sandbox capability decision (S3.2 close-out design,
+      # apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md).
+      # Shares CONTROL_PLANE_USER_CORE_URL above — same Control Plane, a
+      # different endpoint. Blank keeps /capability-profile reporting the
+      # plain measurement with no attached decision, a valid disabled state.
+      EXECUTION_CORE_CONTROL_SANDBOX_CAPABILITY_TOKEN: ${EXECUTION_CORE_CONTROL_SANDBOX_CAPABILITY_TOKEN:-}
+      # Optional; falls back to $HOSTNAME (this container's id) when unset.
+      EXECUTION_CORE_BACKEND_ID: ${EXECUTION_CORE_BACKEND_ID:-}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
@@ -1234,6 +1242,18 @@ services:
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
       MINIO_SECRET_KEY: ${MODEL_MINIO_ROOT_PASSWORD:?MODEL_MINIO_ROOT_PASSWORD is required}
+      # Space capability decision verification (S3.2 close-out design,
+      # apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md).
+      # Verify-only: sandbox-manager never calls Control's HTTP API, only
+      # checks the signature on the decision execution-core already
+      # obtained, with the same shared public key every other Space-decision
+      # recipient plane uses. Blank here is fatal at startup unless
+      # SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT is set (see
+      # docker-compose.override.yml) — a production instance must always be
+      # able to verify, since any AcquireLease request could carry a space_id.
+      SANDBOX_MANAGER_BACKEND_ID: ${SANDBOX_MANAGER_BACKEND_ID:-}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
     depends_on:
       dragonfly:
         condition: service_healthy

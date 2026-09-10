@@ -2,6 +2,7 @@ package lease
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -239,5 +240,62 @@ func TestReleaseIsIdempotentAndDestroyedLeaseRejectsFurtherSnapshotAndActivate(t
 	}
 	if _, err := store.Activate(created.ID, "org-a", "user-a", "backend-a"); !errors.Is(err, ErrLeaseNotFound) {
 		t.Fatalf("Activate after destroy: error = %v, want ErrLeaseNotFound", err)
+	}
+}
+
+// TestFreshStoreRejectsPreRestartLeaseID is the S3.2 close-out design's
+// named "restart" scenario: this store is in-memory only (no durable
+// backend — see cmd/main.go's ephemeral-development gate), so a restart
+// discards it entirely. A lease id from the discarded store must fail
+// closed as not-found in a fresh one, never be treated as expired,
+// mismatched, or any other state that would imply the id was ever known.
+func TestFreshStoreRejectsPreRestartLeaseID(t *testing.T) {
+	before := NewStore()
+	created, err := before.Create("scope-a", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := NewStore()
+	if _, err := after.GetScoped(created.ID, "org-a", "user-a", "backend-a"); !errors.Is(err, ErrLeaseNotFound) {
+		t.Fatalf("error = %v, want ErrLeaseNotFound", err)
+	}
+}
+
+// TestStoreConcurrentCreateIsRaceFree is the S3.2 close-out design's named
+// "concurrent provision" scenario. Ideally gated under `go test -race` in
+// CI; this Windows dev host has CGO_ENABLED=0, where -race cannot run at
+// all (see memory: model-plane-build-and-deploy), so this only proves
+// correctness (unique ids, no lost ExpiresAt) under plain concurrent
+// execution here — it does not by itself prove the absence of a data race.
+func TestStoreConcurrentCreateIsRaceFree(t *testing.T) {
+	store := NewStore()
+	const concurrency = 50
+	var wg sync.WaitGroup
+	leases := make([]*Lease, concurrency)
+	errs := make([]error, concurrency)
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			leases[i], errs[i] = store.Create("scope-a", "agent", "org-a", "user-a", "", "", time.Minute)
+		}(i)
+	}
+	wg.Wait()
+
+	seen := make(map[string]bool, concurrency)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Create[%d]: unexpected error: %v", i, err)
+		}
+		if leases[i].ID == "" {
+			t.Fatalf("Create[%d]: empty lease id", i)
+		}
+		if seen[leases[i].ID] {
+			t.Fatalf("Create[%d]: duplicate lease id %q", i, leases[i].ID)
+		}
+		seen[leases[i].ID] = true
+		if leases[i].ExpiresAt.IsZero() {
+			t.Fatalf("Create[%d]: lost ExpiresAt", i)
+		}
 	}
 }
