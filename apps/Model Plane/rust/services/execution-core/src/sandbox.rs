@@ -274,6 +274,23 @@ pub struct SandboxCapabilityProfile {
     pub credential_mode: &'static str,
 }
 
+/// A canonical, order-stable digest of the measured profile, bound into the
+/// Control-issued Space capability decision's payload digest (see
+/// `apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md`
+/// §1). Serializing the struct directly (rather than hand-listing fields) is
+/// safe here only because every field has a fixed, small set of possible
+/// values and `#[derive(Serialize)]` emits struct fields in declaration
+/// order, which `serde_json` preserves — this is not a general-purpose
+/// canonicalization and must not be copied for a type with a `HashMap` field
+/// or other genuinely unordered data.
+#[must_use]
+pub fn capability_profile_digest(profile: &SandboxCapabilityProfile) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical =
+        serde_json::to_vec(profile).expect("SandboxCapabilityProfile fields are all primitives");
+    format!("sha256:{:x}", Sha256::digest(canonical))
+}
+
 /// Return the substrate contract measured on this process. This is intentionally
 /// independent of a Space lease: a lease must pin this profile (or a stronger
 /// external profile) before it is used for an effect.
