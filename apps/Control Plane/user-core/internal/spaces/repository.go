@@ -1117,7 +1117,8 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
 		       p.third_party_processing_allowed, p.retention_class, p.residency,
 		       p.deletion_scope, p.zero_data_retention, p.thread_create_entitled,
-		       p.retrieval_read_entitled, p.import_write_entitled, p.agent_action_entitled, p.schedule_fire_entitled
+		       p.retrieval_read_entitled, p.import_write_entitled, p.agent_action_entitled, p.schedule_fire_entitled,
+		       p.sandbox_capability_entitled
 		FROM registered_spaces s
 		JOIN space_memberships m ON m.space_ref=s.space_ref
 		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
@@ -1140,6 +1141,7 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
 		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadCreateEntitled,
 		&evidence.RetrievalReadEntitled, &evidence.ImportWriteEntitled, &evidence.AgentActionEntitled, &evidence.ScheduleFireEntitled,
+		&evidence.SandboxCapabilityEntitled,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
@@ -1177,13 +1179,14 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		SELECT org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
 		       third_party_processing_allowed, retention_class, residency,
 		       deletion_scope, zero_data_retention, thread_create_entitled, retrieval_read_entitled,
-		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled
+		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled,
+		       sandbox_capability_entitled
 		FROM space_effect_policies WHERE org_id=$1 FOR UPDATE`, policy.OrgID,
 	).Scan(&current.OrgID, &current.PrivacyPolicyRef, &current.Purpose, &current.LawfulBasis,
 		&current.PrivacyClass, &current.ThirdPartyProcessingAllowed, &current.RetentionClass,
 		&current.Residency, &current.DeletionScope, &current.ZeroDataRetention,
 		&current.ThreadCreateEntitled, &current.RetrievalReadEntitled, &current.ImportWriteEntitled, &current.AgentActionEntitled, &current.ScheduleFireEntitled,
-		&current.ThreadReadEntitled)
+		&current.ThreadReadEntitled, &current.SandboxCapabilityEntitled)
 	if err != nil && err != pgx.ErrNoRows {
 		return false, fmt.Errorf("read Space effect policy: %w", err)
 	}
@@ -1193,13 +1196,13 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 			(org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
 			 third_party_processing_allowed, retention_class, residency, deletion_scope,
 			 zero_data_retention, thread_create_entitled, retrieval_read_entitled, import_write_entitled, agent_action_entitled, schedule_fire_entitled,
-			 thread_read_entitled)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+			 thread_read_entitled, sandbox_capability_entitled)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 			policy.OrgID, policy.PrivacyPolicyRef, policy.Purpose, policy.LawfulBasis,
 			policy.PrivacyClass, policy.ThirdPartyProcessingAllowed, policy.RetentionClass,
 			policy.Residency, policy.DeletionScope, policy.ZeroDataRetention,
 			policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled,
-			policy.ThreadReadEntitled); err != nil {
+			policy.ThreadReadEntitled, policy.SandboxCapabilityEntitled); err != nil {
 			return false, fmt.Errorf("insert Space effect policy: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1223,21 +1226,22 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		current.ImportWriteEntitled != policy.ImportWriteEntitled ||
 		current.AgentActionEntitled != policy.AgentActionEntitled ||
 		current.ScheduleFireEntitled != policy.ScheduleFireEntitled ||
-		current.ThreadReadEntitled != policy.ThreadReadEntitled
+		current.ThreadReadEntitled != policy.ThreadReadEntitled ||
+		current.SandboxCapabilityEntitled != policy.SandboxCapabilityEntitled
 	if _, err := tx.Exec(ctx, `
 		UPDATE space_effect_policies SET privacy_policy_ref=$2, purpose=$3, lawful_basis=$4,
 		privacy_class=$5, third_party_processing_allowed=$6, retention_class=$7,
 		residency=$8, deletion_scope=$9, zero_data_retention=$10,
 		thread_create_entitled=$11, retrieval_read_entitled=$12, import_write_entitled=$13, agent_action_entitled=$14, schedule_fire_entitled=$15,
-		thread_read_entitled=$16,
-		policy_revision=policy_revision + CASE WHEN $17 THEN 1 ELSE 0 END,
-		entitlement_revision=entitlement_revision + CASE WHEN $18 THEN 1 ELSE 0 END,
+		thread_read_entitled=$16, sandbox_capability_entitled=$17,
+		policy_revision=policy_revision + CASE WHEN $18 THEN 1 ELSE 0 END,
+		entitlement_revision=entitlement_revision + CASE WHEN $19 THEN 1 ELSE 0 END,
 		updated_at=NOW() WHERE org_id=$1`,
 		policy.OrgID, policy.PrivacyPolicyRef, policy.Purpose, policy.LawfulBasis,
 		policy.PrivacyClass, policy.ThirdPartyProcessingAllowed, policy.RetentionClass,
 		policy.Residency, policy.DeletionScope, policy.ZeroDataRetention,
 		policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled,
-		policy.ThreadReadEntitled, privacyChanged, entitlementChanged); err != nil {
+		policy.ThreadReadEntitled, policy.SandboxCapabilityEntitled, privacyChanged, entitlementChanged); err != nil {
 		return false, fmt.Errorf("update Space effect policy: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `

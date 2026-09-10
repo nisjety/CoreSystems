@@ -131,6 +131,22 @@ func (s *Server) requireSpaceScheduleFireReauthorizer(c *gin.Context) {
 	c.Next()
 }
 
+// requireSpaceSandboxCapabilityReauthorizer gives only execution-core's
+// service identity access to the sandbox capability decision endpoint. A
+// Space's standing sandbox entitlement does not let a backend silently
+// upgrade what it claims to offer: execution-core must present a freshly
+// measured substrate claim on every request, and Control independently
+// checks that claim against policy before signing.
+func (s *Server) requireSpaceSandboxCapabilityReauthorizer(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != executionCorePrincipal ||
+		!hasServiceScope(c, "spaces:sandbox:capability") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "execution-core sandbox capability principal required"})
+		return
+	}
+	c.Next()
+}
+
 // requireSpaceScheduledRunExecutor gives only Orchestrator Core a fresh,
 // effect-time decision for a run Capability Core has already prepared. It is
 // deliberately distinct from the scheduler's reauthorization capability.
@@ -1106,6 +1122,111 @@ func (s *Server) issueScheduleFireDecision(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
+type sandboxCapabilityDecisionRequest struct {
+	Intent sandboxCapabilityIntent `json:"intent"`
+}
+
+type sandboxCapabilityIntent struct {
+	OrgID          string `json:"org_id"`
+	SpaceRef       string `json:"space_ref"`
+	SubjectID      string `json:"subject_id"`
+	BackendID      string `json:"backend_id"`
+	ProfileDigest  string `json:"profile_digest"`
+	Persistence    string `json:"persistence"`
+	Processes      string `json:"processes"`
+	Backup         bool   `json:"backup"`
+	Egress         string `json:"egress"`
+	CredentialMode string `json:"credential_mode"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// sandboxCapabilityClaims is the unsigned sidecar returned alongside the
+// signed decision token. The decision's PayloadDigest binds to exactly these
+// values (see spaces.spaceCapabilityPayloadDigest); sandbox-manager
+// recomputes that digest from this JSON before trusting BackendID, so
+// tampering with the plaintext claims invalidates the digest check even
+// though the claims are not signed directly.
+type sandboxCapabilityClaims struct {
+	BackendID      string `json:"backend_id"`
+	ProfileDigest  string `json:"profile_digest"`
+	Persistence    string `json:"persistence"`
+	Processes      string `json:"processes"`
+	Backup         bool   `json:"backup"`
+	Egress         string `json:"egress"`
+	CredentialMode string `json:"credential_mode"`
+}
+
+// issueSpaceCapabilityDecision is deliberately execution-core-only. It
+// re-checks current personal-Space sandbox entitlement before binding a
+// freshly measured substrate claim to one backend, closing S3.2's "bind this
+// substrate truth to a signed Space capability profile and backend-pinned
+// lease" requirement — see
+// apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md.
+func (s *Server) issueSpaceCapabilityDecision(c *gin.Context) {
+	if s.spaceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+		return
+	}
+	var request sandboxCapabilityDecisionRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid space capability intent is required"})
+		return
+	}
+	intent := spaces.SpaceCapabilityIntent{
+		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef, SubjectID: request.Intent.SubjectID,
+		BackendID: request.Intent.BackendID, ProfileDigest: request.Intent.ProfileDigest,
+		Persistence: request.Intent.Persistence, Processes: request.Intent.Processes,
+		Backup: request.Intent.Backup, Egress: request.Intent.Egress,
+		CredentialMode: request.Intent.CredentialMode, IdempotencyKey: request.Intent.IdempotencyKey,
+	}
+	if err := intent.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid space capability intent is required"})
+		return
+	}
+	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(
+		c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID,
+	)
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space sandbox authority unavailable"})
+		return
+	}
+	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
+		return
+	}
+	decisionRef, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	nonce, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	decision, err := spaces.IssueSpaceCapabilityDecision(evidence, intent, decisionRef, nonce, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space sandbox capability is not authorized"})
+		return
+	}
+	token, err := spaces.SignDecision(key, decision)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+		return
+	}
+	claims := sandboxCapabilityClaims{
+		BackendID: intent.BackendID, ProfileDigest: intent.ProfileDigest,
+		Persistence: intent.Persistence, Processes: intent.Processes,
+		Backup: intent.Backup, Egress: intent.Egress, CredentialMode: intent.CredentialMode,
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": token, "claims": claims}})
 }
 
 // issueScheduledRunDecision authorizes only preparation of the service-owned

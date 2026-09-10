@@ -171,6 +171,13 @@ type EffectPolicy struct {
 	// ThreadCreateEntitled: being allowed to speak in a room is not the same
 	// permission as reading what everyone else said in it.
 	ThreadReadEntitled bool `json:"thread_read_entitled"`
+	// SandboxCapabilityEntitled is a standing, deny-by-default floor for a
+	// Space to have its agents acquire an execution sandbox lease at all. It
+	// is independent of every other entitlement here: a Space able to create
+	// threads, fire schedules, or read history must not automatically gain
+	// its own agents' compute. See
+	// apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md.
+	SandboxCapabilityEntitled bool `json:"sandbox_capability_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {

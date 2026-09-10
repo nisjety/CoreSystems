@@ -90,18 +90,19 @@ func (p PrivacyPolicySnapshot) Validate() error {
 // member as recipient. Linked documents, connectors, and shared Spaces have
 // different owners/audiences and must use their own issuer path.
 type PersonalThreadDecisionEvidence struct {
-	Membership               CurrentMembership
-	RecipientAudienceRef     string
-	RecipientAudienceHash    string
-	RecipientSubjectID       string
-	Privacy                  PrivacyPolicySnapshot
-	ThreadCreateEntitled     bool
-	ThreadReadEntitled       bool
-	RetrievalReadEntitled    bool
-	ImportWriteEntitled      bool
-	AgentActionEntitled      bool
-	ScheduleFireEntitled     bool
-	ResourceAuthorizationRef string
+	Membership                CurrentMembership
+	RecipientAudienceRef      string
+	RecipientAudienceHash     string
+	RecipientSubjectID        string
+	Privacy                   PrivacyPolicySnapshot
+	ThreadCreateEntitled      bool
+	ThreadReadEntitled        bool
+	RetrievalReadEntitled     bool
+	ImportWriteEntitled       bool
+	AgentActionEntitled       bool
+	ScheduleFireEntitled      bool
+	SandboxCapabilityEntitled bool
+	ResourceAuthorizationRef  string
 }
 
 func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {

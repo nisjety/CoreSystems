@@ -332,6 +332,7 @@ func (s *Server) setupRoutes() {
 				spaces.POST("/schedule-create-decision", s.requireVerifiedSpaceResolver, s.issueScheduleCreateDecision)
 				spaces.POST("/import-execution-decision", s.requireSpaceImportReauthorizer, s.issuePersonalImportExecutionDecision)
 				spaces.POST("/schedule-fire-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduleFireDecision)
+				spaces.POST("/sandbox-capability-decision", s.requireSpaceSandboxCapabilityReauthorizer, s.issueSpaceCapabilityDecision)
 				spaces.POST("/scheduled-run-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduledRunDecision)
 				spaces.POST("/scheduled-run-execution-decision", s.requireSpaceScheduledRunExecutor, s.issueScheduledRunExecutionDecision)
 				spaces.POST("/scheduled-step-decision", s.requireSpaceScheduledStepExecutor, s.issueScheduledStepDecision)
