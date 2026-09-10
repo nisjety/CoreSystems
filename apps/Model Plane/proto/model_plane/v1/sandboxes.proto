@@ -19,8 +19,26 @@ service SandboxManager {
   // Snapshot the current sandbox state for resumability.
   rpc SnapshotSandbox(SnapshotRequest) returns (SnapshotResponse);
 
+  // Move a lease from SCRATCH to ACTIVE once it needs more than the
+  // credential-free scratch allowlist (e.g. real backend network/egress
+  // permission per the capability decision's granted permissions). See
+  // docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
+  rpc ActivateLease(ActivateLeaseRequest) returns (ActivateLeaseResponse);
+
   // Health check.
   rpc Health(SandboxHealthRequest) returns (SandboxHealthResponse);
+}
+
+// Lifecycle of one sandbox lease. SCRATCH is the only state in which no
+// snapshot may exist (credential-free by construction — nothing durable
+// yet). SNAPSHOTTING always returns to ACTIVE, whether the snapshot write
+// succeeds or fails; a lease is never left stuck mid-snapshot.
+enum SandboxLifecycleState {
+  LIFECYCLE_UNSPECIFIED = 0;
+  SCRATCH = 1;
+  ACTIVE = 2;
+  SNAPSHOTTING = 3;
+  DESTROYED = 4;
 }
 
 message AcquireLeaseRequest {
@@ -35,6 +53,21 @@ message AcquireLeaseRequest {
 
   // Tenant identifier.
   string org_id = 4;
+
+  // Space this lease is scoped to. Empty for non-Space (thread/agent-only)
+  // leases predating S3.2.
+  string space_id = 5;
+
+  // Signed model.space.capability_profile decision from Control Plane
+  // (apps/Control Plane/user-core/internal/spaces), binding this lease to
+  // one attested backend. Required when space_id is set.
+  string capability_decision = 6;
+
+  // The unsigned SpaceCapabilityClaims JSON the decision's PayloadDigest
+  // was computed over (BackendID, ProfileDigest, Persistence, Processes,
+  // Backup, Egress, CredentialMode). Carried alongside the signature so
+  // the verifier can recompute and compare the digest.
+  string capability_claims_json = 7;
 }
 
 message AcquireLeaseResponse {
@@ -46,11 +79,23 @@ message AcquireLeaseResponse {
 
   // Lease expiry time.
   google.protobuf.Timestamp expires_at = 3;
+
+  // This sandbox-manager instance's own configured backend id. A
+  // ReleaseLease/SnapshotSandbox/ActivateLease call must present the same
+  // value; a mismatch fails closed rather than silently rerouting to
+  // whichever instance answered.
+  string backend_id = 4;
+
+  // Initial lifecycle state (always SCRATCH on a fresh acquire).
+  SandboxLifecycleState state = 5;
 }
 
 message ReleaseLeaseRequest {
   // Lease to release.
   string lease_id = 1;
+
+  // Caller's asserted backend id; must match the lease's pinned backend.
+  string backend_id = 2;
 }
 
 message ReleaseLeaseResponse {
@@ -64,6 +109,9 @@ message SnapshotRequest {
 
   // Label for this snapshot.
   string label = 2;
+
+  // Caller's asserted backend id; must match the lease's pinned backend.
+  string backend_id = 3;
 }
 
 message SnapshotResponse {
@@ -72,6 +120,19 @@ message SnapshotResponse {
 
   // MinIO object key for the snapshot.
   string object_key = 2;
+}
+
+message ActivateLeaseRequest {
+  // Lease to activate.
+  string lease_id = 1;
+
+  // Caller's asserted backend id; must match the lease's pinned backend.
+  string backend_id = 2;
+}
+
+message ActivateLeaseResponse {
+  // Lifecycle state after the transition (ACTIVE on success).
+  SandboxLifecycleState state = 1;
 }
 
 message SandboxHealthRequest {}

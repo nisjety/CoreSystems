@@ -23,6 +23,65 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Lifecycle of one sandbox lease. SCRATCH is the only state in which no
+// snapshot may exist (credential-free by construction — nothing durable
+// yet). SNAPSHOTTING always returns to ACTIVE, whether the snapshot write
+// succeeds or fails; a lease is never left stuck mid-snapshot.
+type SandboxLifecycleState int32
+
+const (
+	SandboxLifecycleState_LIFECYCLE_UNSPECIFIED SandboxLifecycleState = 0
+	SandboxLifecycleState_SCRATCH               SandboxLifecycleState = 1
+	SandboxLifecycleState_ACTIVE                SandboxLifecycleState = 2
+	SandboxLifecycleState_SNAPSHOTTING          SandboxLifecycleState = 3
+	SandboxLifecycleState_DESTROYED             SandboxLifecycleState = 4
+)
+
+// Enum value maps for SandboxLifecycleState.
+var (
+	SandboxLifecycleState_name = map[int32]string{
+		0: "LIFECYCLE_UNSPECIFIED",
+		1: "SCRATCH",
+		2: "ACTIVE",
+		3: "SNAPSHOTTING",
+		4: "DESTROYED",
+	}
+	SandboxLifecycleState_value = map[string]int32{
+		"LIFECYCLE_UNSPECIFIED": 0,
+		"SCRATCH":               1,
+		"ACTIVE":                2,
+		"SNAPSHOTTING":          3,
+		"DESTROYED":             4,
+	}
+)
+
+func (x SandboxLifecycleState) Enum() *SandboxLifecycleState {
+	p := new(SandboxLifecycleState)
+	*p = x
+	return p
+}
+
+func (x SandboxLifecycleState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SandboxLifecycleState) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_sandboxes_proto_enumTypes[0].Descriptor()
+}
+
+func (SandboxLifecycleState) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[0]
+}
+
+func (x SandboxLifecycleState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SandboxLifecycleState.Descriptor instead.
+func (SandboxLifecycleState) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{0}
+}
+
 type AcquireLeaseRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Thread or agent scope.
@@ -32,9 +91,21 @@ type AcquireLeaseRequest struct {
 	// Requested TTL.
 	Ttl *durationpb.Duration `protobuf:"bytes,3,opt,name=ttl,proto3" json:"ttl,omitempty"`
 	// Tenant identifier.
-	OrgId         string `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	OrgId string `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Space this lease is scoped to. Empty for non-Space (thread/agent-only)
+	// leases predating S3.2.
+	SpaceId string `protobuf:"bytes,5,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Signed model.space.capability_profile decision from Control Plane
+	// (apps/Control Plane/user-core/internal/spaces), binding this lease to
+	// one attested backend. Required when space_id is set.
+	CapabilityDecision string `protobuf:"bytes,6,opt,name=capability_decision,json=capabilityDecision,proto3" json:"capability_decision,omitempty"`
+	// The unsigned SpaceCapabilityClaims JSON the decision's PayloadDigest
+	// was computed over (BackendID, ProfileDigest, Persistence, Processes,
+	// Backup, Egress, CredentialMode). Carried alongside the signature so
+	// the verifier can recompute and compare the digest.
+	CapabilityClaimsJson string `protobuf:"bytes,7,opt,name=capability_claims_json,json=capabilityClaimsJson,proto3" json:"capability_claims_json,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *AcquireLeaseRequest) Reset() {
@@ -95,6 +166,27 @@ func (x *AcquireLeaseRequest) GetOrgId() string {
 	return ""
 }
 
+func (x *AcquireLeaseRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *AcquireLeaseRequest) GetCapabilityDecision() string {
+	if x != nil {
+		return x.CapabilityDecision
+	}
+	return ""
+}
+
+func (x *AcquireLeaseRequest) GetCapabilityClaimsJson() string {
+	if x != nil {
+		return x.CapabilityClaimsJson
+	}
+	return ""
+}
+
 type AcquireLeaseResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Lease identifier (ULID).
@@ -102,7 +194,14 @@ type AcquireLeaseResponse struct {
 	// Sandbox connection endpoint.
 	Endpoint string `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
 	// Lease expiry time.
-	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// This sandbox-manager instance's own configured backend id. A
+	// ReleaseLease/SnapshotSandbox/ActivateLease call must present the same
+	// value; a mismatch fails closed rather than silently rerouting to
+	// whichever instance answered.
+	BackendId string `protobuf:"bytes,4,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	// Initial lifecycle state (always SCRATCH on a fresh acquire).
+	State         SandboxLifecycleState `protobuf:"varint,5,opt,name=state,proto3,enum=model_plane.v1.SandboxLifecycleState" json:"state,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -158,10 +257,26 @@ func (x *AcquireLeaseResponse) GetExpiresAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *AcquireLeaseResponse) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
+	}
+	return ""
+}
+
+func (x *AcquireLeaseResponse) GetState() SandboxLifecycleState {
+	if x != nil {
+		return x.State
+	}
+	return SandboxLifecycleState_LIFECYCLE_UNSPECIFIED
+}
+
 type ReleaseLeaseRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Lease to release.
-	LeaseId       string `protobuf:"bytes,1,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	LeaseId string `protobuf:"bytes,1,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	// Caller's asserted backend id; must match the lease's pinned backend.
+	BackendId     string `protobuf:"bytes,2,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -199,6 +314,13 @@ func (*ReleaseLeaseRequest) Descriptor() ([]byte, []int) {
 func (x *ReleaseLeaseRequest) GetLeaseId() string {
 	if x != nil {
 		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *ReleaseLeaseRequest) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
 	}
 	return ""
 }
@@ -253,7 +375,9 @@ type SnapshotRequest struct {
 	// Lease to snapshot.
 	LeaseId string `protobuf:"bytes,1,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
 	// Label for this snapshot.
-	Label         string `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
+	Label string `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
+	// Caller's asserted backend id; must match the lease's pinned backend.
+	BackendId     string `protobuf:"bytes,3,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -298,6 +422,13 @@ func (x *SnapshotRequest) GetLeaseId() string {
 func (x *SnapshotRequest) GetLabel() string {
 	if x != nil {
 		return x.Label
+	}
+	return ""
+}
+
+func (x *SnapshotRequest) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
 	}
 	return ""
 }
@@ -356,6 +487,105 @@ func (x *SnapshotResponse) GetObjectKey() string {
 	return ""
 }
 
+type ActivateLeaseRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Lease to activate.
+	LeaseId string `protobuf:"bytes,1,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	// Caller's asserted backend id; must match the lease's pinned backend.
+	BackendId     string `protobuf:"bytes,2,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActivateLeaseRequest) Reset() {
+	*x = ActivateLeaseRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActivateLeaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActivateLeaseRequest) ProtoMessage() {}
+
+func (x *ActivateLeaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActivateLeaseRequest.ProtoReflect.Descriptor instead.
+func (*ActivateLeaseRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ActivateLeaseRequest) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *ActivateLeaseRequest) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
+	}
+	return ""
+}
+
+type ActivateLeaseResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Lifecycle state after the transition (ACTIVE on success).
+	State         SandboxLifecycleState `protobuf:"varint,1,opt,name=state,proto3,enum=model_plane.v1.SandboxLifecycleState" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ActivateLeaseResponse) Reset() {
+	*x = ActivateLeaseResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ActivateLeaseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ActivateLeaseResponse) ProtoMessage() {}
+
+func (x *ActivateLeaseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ActivateLeaseResponse.ProtoReflect.Descriptor instead.
+func (*ActivateLeaseResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ActivateLeaseResponse) GetState() SandboxLifecycleState {
+	if x != nil {
+		return x.State
+	}
+	return SandboxLifecycleState_LIFECYCLE_UNSPECIFIED
+}
+
 type SandboxHealthRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -364,7 +594,7 @@ type SandboxHealthRequest struct {
 
 func (x *SandboxHealthRequest) Reset() {
 	*x = SandboxHealthRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[6]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -376,7 +606,7 @@ func (x *SandboxHealthRequest) String() string {
 func (*SandboxHealthRequest) ProtoMessage() {}
 
 func (x *SandboxHealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[6]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -389,7 +619,7 @@ func (x *SandboxHealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SandboxHealthRequest.ProtoReflect.Descriptor instead.
 func (*SandboxHealthRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{6}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{8}
 }
 
 type SandboxHealthResponse struct {
@@ -402,7 +632,7 @@ type SandboxHealthResponse struct {
 
 func (x *SandboxHealthResponse) Reset() {
 	*x = SandboxHealthResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[7]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -414,7 +644,7 @@ func (x *SandboxHealthResponse) String() string {
 func (*SandboxHealthResponse) ProtoMessage() {}
 
 func (x *SandboxHealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[7]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -427,7 +657,7 @@ func (x *SandboxHealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SandboxHealthResponse.ProtoReflect.Descriptor instead.
 func (*SandboxHealthResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{7}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SandboxHealthResponse) GetStatus() string {
@@ -441,37 +671,61 @@ var File_model_plane_v1_sandboxes_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/sandboxes.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1egoogle/protobuf/duration.proto\"\x93\x01\n" +
+	"\x1emodel_plane/v1/sandboxes.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1egoogle/protobuf/duration.proto\"\x95\x02\n" +
 	"\x13AcquireLeaseRequest\x12\x19\n" +
 	"\bscope_id\x18\x01 \x01(\tR\ascopeId\x12\x1d\n" +
 	"\n" +
 	"scope_type\x18\x02 \x01(\tR\tscopeType\x12+\n" +
 	"\x03ttl\x18\x03 \x01(\v2\x19.google.protobuf.DurationR\x03ttl\x12\x15\n" +
-	"\x06org_id\x18\x04 \x01(\tR\x05orgId\"\x88\x01\n" +
+	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x19\n" +
+	"\bspace_id\x18\x05 \x01(\tR\aspaceId\x12/\n" +
+	"\x13capability_decision\x18\x06 \x01(\tR\x12capabilityDecision\x124\n" +
+	"\x16capability_claims_json\x18\a \x01(\tR\x14capabilityClaimsJson\"\xe4\x01\n" +
 	"\x14AcquireLeaseResponse\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
 	"\n" +
-	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"0\n" +
+	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x04 \x01(\tR\tbackendId\x12;\n" +
+	"\x05state\x18\x05 \x01(\x0e2%.model_plane.v1.SandboxLifecycleStateR\x05state\"O\n" +
 	"\x13ReleaseLeaseRequest\x12\x19\n" +
-	"\blease_id\x18\x01 \x01(\tR\aleaseId\"2\n" +
+	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x02 \x01(\tR\tbackendId\"2\n" +
 	"\x14ReleaseLeaseResponse\x12\x1a\n" +
-	"\breleased\x18\x01 \x01(\bR\breleased\"B\n" +
+	"\breleased\x18\x01 \x01(\bR\breleased\"a\n" +
 	"\x0fSnapshotRequest\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x14\n" +
-	"\x05label\x18\x02 \x01(\tR\x05label\"R\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x03 \x01(\tR\tbackendId\"R\n" +
 	"\x10SnapshotResponse\x12\x1f\n" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\x12\x1d\n" +
 	"\n" +
-	"object_key\x18\x02 \x01(\tR\tobjectKey\"\x16\n" +
+	"object_key\x18\x02 \x01(\tR\tobjectKey\"P\n" +
+	"\x14ActivateLeaseRequest\x12\x19\n" +
+	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x02 \x01(\tR\tbackendId\"T\n" +
+	"\x15ActivateLeaseResponse\x12;\n" +
+	"\x05state\x18\x01 \x01(\x0e2%.model_plane.v1.SandboxLifecycleStateR\x05state\"\x16\n" +
 	"\x14SandboxHealthRequest\"/\n" +
 	"\x15SandboxHealthResponse\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status2\xf3\x02\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status*l\n" +
+	"\x15SandboxLifecycleState\x12\x19\n" +
+	"\x15LIFECYCLE_UNSPECIFIED\x10\x00\x12\v\n" +
+	"\aSCRATCH\x10\x01\x12\n" +
+	"\n" +
+	"\x06ACTIVE\x10\x02\x12\x10\n" +
+	"\fSNAPSHOTTING\x10\x03\x12\r\n" +
+	"\tDESTROYED\x10\x042\xd1\x03\n" +
 	"\x0eSandboxManager\x12Y\n" +
 	"\fAcquireLease\x12#.model_plane.v1.AcquireLeaseRequest\x1a$.model_plane.v1.AcquireLeaseResponse\x12Y\n" +
 	"\fReleaseLease\x12#.model_plane.v1.ReleaseLeaseRequest\x1a$.model_plane.v1.ReleaseLeaseResponse\x12T\n" +
-	"\x0fSnapshotSandbox\x12\x1f.model_plane.v1.SnapshotRequest\x1a .model_plane.v1.SnapshotResponse\x12U\n" +
+	"\x0fSnapshotSandbox\x12\x1f.model_plane.v1.SnapshotRequest\x1a .model_plane.v1.SnapshotResponse\x12\\\n" +
+	"\rActivateLease\x12$.model_plane.v1.ActivateLeaseRequest\x1a%.model_plane.v1.ActivateLeaseResponse\x12U\n" +
 	"\x06Health\x12$.model_plane.v1.SandboxHealthRequest\x1a%.model_plane.v1.SandboxHealthResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eSandboxesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
@@ -487,35 +741,43 @@ func file_model_plane_v1_sandboxes_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_sandboxes_proto_rawDescData
 }
 
-var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_model_plane_v1_sandboxes_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_model_plane_v1_sandboxes_proto_goTypes = []any{
-	(*AcquireLeaseRequest)(nil),   // 0: model_plane.v1.AcquireLeaseRequest
-	(*AcquireLeaseResponse)(nil),  // 1: model_plane.v1.AcquireLeaseResponse
-	(*ReleaseLeaseRequest)(nil),   // 2: model_plane.v1.ReleaseLeaseRequest
-	(*ReleaseLeaseResponse)(nil),  // 3: model_plane.v1.ReleaseLeaseResponse
-	(*SnapshotRequest)(nil),       // 4: model_plane.v1.SnapshotRequest
-	(*SnapshotResponse)(nil),      // 5: model_plane.v1.SnapshotResponse
-	(*SandboxHealthRequest)(nil),  // 6: model_plane.v1.SandboxHealthRequest
-	(*SandboxHealthResponse)(nil), // 7: model_plane.v1.SandboxHealthResponse
-	(*durationpb.Duration)(nil),   // 8: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil), // 9: google.protobuf.Timestamp
+	(SandboxLifecycleState)(0),    // 0: model_plane.v1.SandboxLifecycleState
+	(*AcquireLeaseRequest)(nil),   // 1: model_plane.v1.AcquireLeaseRequest
+	(*AcquireLeaseResponse)(nil),  // 2: model_plane.v1.AcquireLeaseResponse
+	(*ReleaseLeaseRequest)(nil),   // 3: model_plane.v1.ReleaseLeaseRequest
+	(*ReleaseLeaseResponse)(nil),  // 4: model_plane.v1.ReleaseLeaseResponse
+	(*SnapshotRequest)(nil),       // 5: model_plane.v1.SnapshotRequest
+	(*SnapshotResponse)(nil),      // 6: model_plane.v1.SnapshotResponse
+	(*ActivateLeaseRequest)(nil),  // 7: model_plane.v1.ActivateLeaseRequest
+	(*ActivateLeaseResponse)(nil), // 8: model_plane.v1.ActivateLeaseResponse
+	(*SandboxHealthRequest)(nil),  // 9: model_plane.v1.SandboxHealthRequest
+	(*SandboxHealthResponse)(nil), // 10: model_plane.v1.SandboxHealthResponse
+	(*durationpb.Duration)(nil),   // 11: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
 }
 var file_model_plane_v1_sandboxes_proto_depIdxs = []int32{
-	8, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
-	9, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
-	0, // 2: model_plane.v1.SandboxManager.AcquireLease:input_type -> model_plane.v1.AcquireLeaseRequest
-	2, // 3: model_plane.v1.SandboxManager.ReleaseLease:input_type -> model_plane.v1.ReleaseLeaseRequest
-	4, // 4: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
-	6, // 5: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
-	1, // 6: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
-	3, // 7: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
-	5, // 8: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
-	7, // 9: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
-	6, // [6:10] is the sub-list for method output_type
-	2, // [2:6] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	11, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
+	12, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
+	0,  // 2: model_plane.v1.AcquireLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
+	0,  // 3: model_plane.v1.ActivateLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
+	1,  // 4: model_plane.v1.SandboxManager.AcquireLease:input_type -> model_plane.v1.AcquireLeaseRequest
+	3,  // 5: model_plane.v1.SandboxManager.ReleaseLease:input_type -> model_plane.v1.ReleaseLeaseRequest
+	5,  // 6: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
+	7,  // 7: model_plane.v1.SandboxManager.ActivateLease:input_type -> model_plane.v1.ActivateLeaseRequest
+	9,  // 8: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
+	2,  // 9: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
+	4,  // 10: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
+	6,  // 11: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
+	8,  // 12: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
+	10, // 13: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
+	9,  // [9:14] is the sub-list for method output_type
+	4,  // [4:9] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_sandboxes_proto_init() }
@@ -528,13 +790,14 @@ func file_model_plane_v1_sandboxes_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sandboxes_proto_rawDesc), len(file_model_plane_v1_sandboxes_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   8,
+			NumEnums:      1,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_model_plane_v1_sandboxes_proto_goTypes,
 		DependencyIndexes: file_model_plane_v1_sandboxes_proto_depIdxs,
+		EnumInfos:         file_model_plane_v1_sandboxes_proto_enumTypes,
 		MessageInfos:      file_model_plane_v1_sandboxes_proto_msgTypes,
 	}.Build()
 	File_model_plane_v1_sandboxes_proto = out.File

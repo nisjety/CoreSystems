@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcquireLeaseRequest, AcquireLeaseResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
+import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -46,6 +46,20 @@ export const SandboxManager = {
       name: "SnapshotSandbox",
       I: SnapshotRequest,
       O: SnapshotResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Move a lease from SCRATCH to ACTIVE once it needs more than the
+     * credential-free scratch allowlist (e.g. real backend network/egress
+     * permission per the capability decision's granted permissions). See
+     * docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.ActivateLease
+     */
+    activateLease: {
+      name: "ActivateLease",
+      I: ActivateLeaseRequest,
+      O: ActivateLeaseResponse,
       kind: MethodKind.Unary,
     },
     /**

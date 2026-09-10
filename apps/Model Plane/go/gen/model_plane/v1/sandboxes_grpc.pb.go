@@ -22,6 +22,7 @@ const (
 	SandboxManager_AcquireLease_FullMethodName    = "/model_plane.v1.SandboxManager/AcquireLease"
 	SandboxManager_ReleaseLease_FullMethodName    = "/model_plane.v1.SandboxManager/ReleaseLease"
 	SandboxManager_SnapshotSandbox_FullMethodName = "/model_plane.v1.SandboxManager/SnapshotSandbox"
+	SandboxManager_ActivateLease_FullMethodName   = "/model_plane.v1.SandboxManager/ActivateLease"
 	SandboxManager_Health_FullMethodName          = "/model_plane.v1.SandboxManager/Health"
 )
 
@@ -38,6 +39,11 @@ type SandboxManagerClient interface {
 	ReleaseLease(ctx context.Context, in *ReleaseLeaseRequest, opts ...grpc.CallOption) (*ReleaseLeaseResponse, error)
 	// Snapshot the current sandbox state for resumability.
 	SnapshotSandbox(ctx context.Context, in *SnapshotRequest, opts ...grpc.CallOption) (*SnapshotResponse, error)
+	// Move a lease from SCRATCH to ACTIVE once it needs more than the
+	// credential-free scratch allowlist (e.g. real backend network/egress
+	// permission per the capability decision's granted permissions). See
+	// docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
+	ActivateLease(ctx context.Context, in *ActivateLeaseRequest, opts ...grpc.CallOption) (*ActivateLeaseResponse, error)
 	// Health check.
 	Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error)
 }
@@ -80,6 +86,16 @@ func (c *sandboxManagerClient) SnapshotSandbox(ctx context.Context, in *Snapshot
 	return out, nil
 }
 
+func (c *sandboxManagerClient) ActivateLease(ctx context.Context, in *ActivateLeaseRequest, opts ...grpc.CallOption) (*ActivateLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ActivateLeaseResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_ActivateLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxManagerClient) Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SandboxHealthResponse)
@@ -103,6 +119,11 @@ type SandboxManagerServer interface {
 	ReleaseLease(context.Context, *ReleaseLeaseRequest) (*ReleaseLeaseResponse, error)
 	// Snapshot the current sandbox state for resumability.
 	SnapshotSandbox(context.Context, *SnapshotRequest) (*SnapshotResponse, error)
+	// Move a lease from SCRATCH to ACTIVE once it needs more than the
+	// credential-free scratch allowlist (e.g. real backend network/egress
+	// permission per the capability decision's granted permissions). See
+	// docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
+	ActivateLease(context.Context, *ActivateLeaseRequest) (*ActivateLeaseResponse, error)
 	// Health check.
 	Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error)
 	mustEmbedUnimplementedSandboxManagerServer()
@@ -123,6 +144,9 @@ func (UnimplementedSandboxManagerServer) ReleaseLease(context.Context, *ReleaseL
 }
 func (UnimplementedSandboxManagerServer) SnapshotSandbox(context.Context, *SnapshotRequest) (*SnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SnapshotSandbox not implemented")
+}
+func (UnimplementedSandboxManagerServer) ActivateLease(context.Context, *ActivateLeaseRequest) (*ActivateLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ActivateLease not implemented")
 }
 func (UnimplementedSandboxManagerServer) Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
@@ -202,6 +226,24 @@ func _SandboxManager_SnapshotSandbox_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxManager_ActivateLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActivateLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).ActivateLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_ActivateLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).ActivateLease(ctx, req.(*ActivateLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxManager_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SandboxHealthRequest)
 	if err := dec(in); err != nil {
@@ -238,6 +280,10 @@ var SandboxManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SnapshotSandbox",
 			Handler:    _SandboxManager_SnapshotSandbox_Handler,
+		},
+		{
+			MethodName: "ActivateLease",
+			Handler:    _SandboxManager_ActivateLease_Handler,
 		},
 		{
 			MethodName: "Health",
