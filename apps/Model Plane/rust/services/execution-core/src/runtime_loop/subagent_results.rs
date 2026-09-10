@@ -121,6 +121,12 @@ pub async fn execute_list(
             status_filter: String::new(),
             after_run_id: String::new(),
             limit: 100,
+            // This tool always lists one thread's runs — the calling run's
+            // own delegations — never a Space's, so the Space read-decision
+            // fields never apply here.
+            space_id: String::new(),
+            space_read_decision_ref: String::new(),
+            space_read_decision_token: String::new(),
         },
         &bearer,
     ) else {
