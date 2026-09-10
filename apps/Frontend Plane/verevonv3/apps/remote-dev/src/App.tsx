@@ -1,5 +1,5 @@
-import { createSignal, For, onCleanup, Show } from 'solid-js';
-import type { RemoteDisplay, RemoteSession, SessionState } from '@verevon/remote-core';
+import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
+import type { PointerButton, RemoteDisplay, RemoteSession, SessionState } from '@verevon/remote-core';
 import { CanvasRenderer, createRemoteClient } from '@verevon/remote-core';
 
 type DemoState = SessionState | 'idle';
@@ -27,6 +27,13 @@ const RENDEZVOUS_URL = import.meta.env.VITE_REMOTE_RENDEZVOUS_URL ?? '';
 const RELAY_URL = import.meta.env.VITE_REMOTE_RELAY_URL ?? '';
 const SERVER_PUBLIC_KEY = import.meta.env.VITE_REMOTE_SERVER_PUBLIC_KEY ?? '';
 
+function pointerButton(button: number): PointerButton | null {
+  if (button === 0) return 'left';
+  if (button === 1) return 'middle';
+  if (button === 2) return 'right';
+  return null;
+}
+
 export function App() {
   const [deviceId, setDeviceId] = createSignal('');
   const [token, setToken] = createSignal('');
@@ -35,6 +42,9 @@ export function App() {
   const [latencyMs, setLatencyMs] = createSignal<number>();
   const [fps, setFps] = createSignal<number>();
   const [displays, setDisplays] = createSignal<readonly RemoteDisplay[]>([]);
+  const [permissions, setPermissions] = createSignal<readonly string[]>([]);
+  const canPoint = createMemo(() => permissions().includes('input.pointer'));
+  const canType = createMemo(() => permissions().includes('input.keyboard'));
   // Tofaktor: feltet vises først når verten faktisk ber om en kode. Vi holder
   // både resolve og reject, slik at et avbrudd faktisk avvisser løftet
   // remote-core venter på i stedet for å forlate det.
@@ -58,7 +68,49 @@ export function App() {
     renderer = undefined;
     session = undefined;
     setDisplays([]);
+    setPermissions([]);
     setSecondFactorCode('');
+  }
+
+  function onPointerMove(event: PointerEvent): void {
+    if (!renderer || !session || !canPoint()) return;
+    const target = renderer.clientToRemote(event.clientX, event.clientY);
+    if (target) void session.pointer.move(target);
+  }
+
+  function onPointerDown(event: PointerEvent): void {
+    if (!renderer || !session || !canPoint()) return;
+    const button = pointerButton(event.button);
+    if (!button) return;
+    event.preventDefault();
+    canvasRef?.focus();
+    void session.pointer.down({ button, ...renderer.clientToRemote(event.clientX, event.clientY) });
+  }
+
+  function onPointerUp(event: PointerEvent): void {
+    if (!renderer || !session || !canPoint()) return;
+    const button = pointerButton(event.button);
+    if (!button) return;
+    event.preventDefault();
+    void session.pointer.up({ button, ...renderer.clientToRemote(event.clientX, event.clientY) });
+  }
+
+  function onWheel(event: WheelEvent): void {
+    if (!renderer || !session || !canPoint()) return;
+    event.preventDefault();
+    void session.pointer.scroll({ deltaX: event.deltaX, deltaY: event.deltaY, ...renderer.clientToRemote(event.clientX, event.clientY) });
+  }
+
+  function onKeyDown(event: KeyboardEvent): void {
+    if (!session || !canType()) return;
+    event.preventDefault();
+    void session.keyboard.keyDown(event.key);
+  }
+
+  function onKeyUp(event: KeyboardEvent): void {
+    if (!session || !canType()) return;
+    event.preventDefault();
+    void session.keyboard.keyUp(event.key);
   }
 
   function rejectPendingSecondFactor(message: string): void {
@@ -138,6 +190,7 @@ export function App() {
       setToken('');
       session = newSession;
       setDisplays(newSession.displays);
+      setPermissions(newSession.permissions.list());
 
       if (canvasRef) {
         renderer = new CanvasRenderer(canvasRef);
@@ -151,6 +204,7 @@ export function App() {
         // tilstander river ned.
         if (nextState === 'disconnected' || nextState === 'failed') teardownSession();
       });
+      newSession.on('permission-change', ({ permissions: granted }) => setPermissions(granted));
       newSession.on('latency', ({ latencyMs: ms }) => setLatencyMs(ms));
       newSession.on('display-change', ({ displays: next }) => setDisplays(next));
       newSession.on('error', (error) => setErrorMessage(error.message));
@@ -287,13 +341,25 @@ export function App() {
       </Show>
 
       <section class="remote-screen">
-        <canvas ref={canvasRef} width={1280} height={720} />
+        <canvas
+          ref={canvasRef}
+          width={1280}
+          height={720}
+          tabindex={0}
+          onPointerMove={onPointerMove}
+          onPointerDown={onPointerDown}
+          onPointerUp={onPointerUp}
+          onWheel={onWheel}
+          onKeyDown={onKeyDown}
+          onKeyUp={onKeyUp}
+        />
       </section>
 
       <section class="status-bar">
         <span>Tilstand: {STATE_LABELS[state()]}</span>
         <span>Forsinkelse: {latencyMs() !== undefined ? `${latencyMs()} ms` : '–'}</span>
         <span>Bilder per sekund: {fps() ?? '–'}</span>
+        <span>Tillatelser: {permissions().length > 0 ? permissions().join(', ') : '(ingen)'}</span>
       </section>
     </main>
   );

@@ -114,7 +114,14 @@ Per this project's explicit "do not fake functionality" rule, this section is th
 - **browser-verified** — actually executed in a real browser.
 - **live-verified** — actually exchanged bytes with a real `rustdesk/rustdesk-server` container.
 
-**The rendezvous half is now live-verified; everything past it is not.** A real hbbs accepts our `PunchHoleRequest` and we decode its replies correctly — that settles the "do our field numbers actually interoperate" question for those messages (details and byte dumps in `rustdesk-protocol.md`, "Verified against a live hbbs"). Relay pairing, the peer handshake, login and the session stream are still only fake-peer verified, because they need a live registered host on the other end and the Verevon Agent does not exist yet.
+**The full connection path is now live-verified end to end (2026-09-10/11), against a real, unmodified stock RustDesk 1.4.9 Windows client registered with a locally-run Support Plane** — the first time any of this has exchanged bytes with a real host rather than `FakeRustDeskPeer`. `remote-dev` connected, reached `connected` state, and streamed real decoded video (30 fps at first, settling to ~16 fps against a mostly-static screen; 4 ms latency, consistent with a loopback relay hop) for over an hour without disconnecting. Concretely, this settles:
+
+- **Rendezvous**: real registration/lookup against a real hbbs (already live-verified before this pass; see `rustdesk-protocol.md`, "Verified against a live hbbs").
+- **Relay pairing**: hbbr logged a real `New relay request … got paired` for this session — the negotiation genuinely completes against the real relay binary, not just the fake peer's approximation of it.
+- **Peer handshake / `SecureChannel` vouch chain**: since `verifyServerVouch` fails closed on any format mismatch (see below) and the session still reached `connected`, the real host's vouch actually matches what `SecureChannel` expects. This settles open question 3 from the old "Next verification step" list: **yes, the vouch format matches.**
+- **Login and the session pump**: reaching `connected` requires a successful `LoginRequest`/`LoginResponse` round trip; the subsequent live video stream requires the session pump to actually be decoding and dispatching real frames.
+
+**Still open even after this pass** — this run answered whether the plumbing works, not every remaining protocol unknown: which of the two relay-negotiation reply shapes was actually used (no debug-level log was captured to tell `PunchHoleResponse` from `RelayResponse`), the initial-permission-push-vs-delta question, which video codec was actually negotiated (so the H264/H265 Annex-B assumption is neither confirmed nor contradicted — VP9, the guaranteed/default codec, is the likely candidate but wasn't explicitly checked), scroll delta scaling, and real-host cursor decompression — none of pointer, keyboard, scroll, or cursor were exercised this pass (see "Next verification step" below for why, and for the harness change that makes the next attempt cheap).
 
 **Implemented and fake-peer verified — the whole Phase 2 connection path:**
 - `RustDeskProtocol` (`protocol/rustdesk/RustDeskProtocol.ts`) — the full sequence: rendezvous → relay pairing → X25519/Ed25519 handshake → `Hash`/`LoginRequest`/`LoginResponse` login → session pump. Implements `RemoteProtocol`, so nothing above it knows RustDesk exists.
@@ -154,18 +161,23 @@ Per this project's explicit "do not fake functionality" rule, this section is th
 
 ## Next verification step
 
-`apps/Support Plane` has now been started for real: both services come up, the `readiness` sidecar reports healthy on all four ports, and `remote-core`'s compiled `RendezvousClient` reached hbbs's WebSocket from inside the compose network — returning the correct human-readable error both without the access key ("license key mismatch") and with it ("does not know that device ID").
+The first live run against a real host is done (see Status above) — done with a stock RustDesk 1.4.9 client as the Verevon Agent stand-in, exactly as anticipated below. Two things worth not rediscovering:
 
-What remains needs **one live, registered RustDesk-protocol host** — a fake UDP registrant is provably not enough, since hbbs stays silent unless the peer actually answers its forwarded request. With such a host in place, the first run should settle, in priority order:
+- **`SUPPORT_PLANE_KEY=_` breaks a real connection the moment a relay is needed**, even though it looks fine through rendezvous alone. hbbs and hbbr each auto-generate their *own* identity keypair on `_` (they use separate data volumes/processes), so `hbbr` rejects the relay request with "invalid key" — a real host never gets past that point. Support Plane's own README previously called `_` "fine locally"; that was only true for a rendezvous-only smoke test. Use a real, explicit, shared `SUPPORT_PLANE_KEY` for both services — a base64 libsodium/sodiumoxide Ed25519 **secret** key (64 raw bytes) works cleanly, since `rustdesk-server`'s `get_server_sk()` derives the same public key from it deterministically on both sides; see Support Plane's README for the exact recipe.
+- The stock client's custom server settings live in `%APPDATA%\RustDesk\config\RustDesk2.toml`'s `[options]` table as `custom-rendezvous-server` / `relay-server` / `key` — **not** the file's top-level `rendezvous_server` field, which the app treats as its own resolved-value cache and freely overwrites. This isn't discoverable by editing that field and watching it "take" once, because the app echoes your value back into it before you notice it was actually `custom-rendezvous-server` doing the work; only a restart exposes the difference.
 
-1. Which relay-negotiation reply a `force_relay` request actually gets (`PunchHoleResponse` vs `RelayResponse` — both branches are implemented and tested).
-2. Whether the host pushes an initial permission set or only deltas — decides the default for `assumeInputPermittedOnLogin`.
-3. Whether the peer-handshake vouch format matches what `SecureChannel` expects.
-4. Whether the H264/H265 Annex-B assumption in `RemoteVideoDecoder` holds against a real stream.
+What the first run settled is in Status above. What it did **not** settle, in priority order, since none of pointer, keyboard, scroll, or cursor were exercised:
+
+1. Which relay-negotiation reply a `force_relay` request actually gets (`PunchHoleResponse` vs `RelayResponse` — both branches are implemented and tested; the live run didn't capture debug-level logs to tell which one fired).
+2. Whether the host pushes an initial permission set or only deltas — decides the default for `assumeInputPermittedOnLogin`. `remote-dev` now surfaces `session.permissions.list()` on connect (see below), so this is a read-only check with no side effects the next time a live session is up.
+3. ~~Whether the peer-handshake vouch format matches what `SecureChannel` expects.~~ **Settled: yes** (see Status above).
+4. Whether the H264/H265 Annex-B assumption in `RemoteVideoDecoder` holds against a real stream — not confirmed either way, since which codec the live run actually negotiated wasn't captured.
 5. Scroll delta scaling.
 6. Whether a real host's `CursorData.colors` decompresses cleanly through fzstd and lands on the RGBA/hotspot/coordinate semantics documented in `rustdesk-protocol.md` — the fake peer proves our own encode/decode round-trips, not that a real capture backend's zstd frames match.
 
-Until the Verevon Agent exists, the cheapest stand-in is a stock RustDesk client configured against Support Plane (its ID server address plus the `Key:` value hbbs logs at first start).
+`apps/remote-dev` only rendered video until now — it had no pointer/keyboard wiring at all, so items 2 and 5 were structurally untestable through it. It now mirrors `RemoteSupportPage.tsx`'s exact `canPoint`/`canType`-gated pointer/keyboard handlers and shows granted permissions in its status bar, so a future pass can exercise 2 and 5 directly. Testing 1, 4, and 6 needs either debug-level server logs or reading `remote-core`'s own decoded state, not just harness changes.
+
+A live test rig is inherently a loopback if the "remote" machine is the same one running the browser controller (there being no separate Verevon Agent machine yet) — mind that pointer/keyboard testing this way drives the *tester's own* live desktop, not an expendable target. That's why items 2 and 5 were deferred rather than exercised in the same pass that proved the connection itself: the operator was actively using the machine at the time.
 
 ## Extension points
 

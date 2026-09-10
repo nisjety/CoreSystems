@@ -1,7 +1,7 @@
 # Verevon Support Plane
 
-**Status:** Runs locally (verified 2026-09-07: both services start, readiness healthy, `remote-core` reaches hbbs over WebSocket) — not yet operated in production
-**Last updated:** 2026-09-01
+**Status:** Runs locally; a full remote-desktop session has been connected end to end through this stack (verified 2026-09-10/11: a real stock RustDesk client registered against local hbbs, and `remote-core` completed rendezvous → relay pairing → peer handshake → login and streamed real decoded video for over an hour) — not yet operated in production, and still no real Verevon Agent or automated integration test
+**Last updated:** 2026-09-11
 **Product owner:** Support / Remote Assistance
 **Runtime position:** Backend infrastructure for `@verevon/remote-core` (`apps/Frontend Plane/verevonv3/packages/remote-core`)
 
@@ -79,17 +79,33 @@ docker compose up -d hbbs hbbr readiness   # omit Caddy locally: it wants real D
 docker compose ps
 ```
 
-`SUPPORT_PLANE_KEY=_` is fine locally — hbbs then generates its own key pair on first start.
+`SUPPORT_PLANE_KEY=_` only works for a **rendezvous-only** smoke test (hbbs alone, no relay). It is **not** fine for anything that actually connects a peer: hbbs and hbbr each run `_` through their own independent keypair generation (`gen_sk`, on their own separate `hbbs-data`/`hbbr-data` volumes), so they end up with two *different* keys. hbbs will still answer rendezvous requests, but the moment a session needs the relay, hbbr rejects it with "invalid key" (`relay_server.rs`: `Relay authentication failed … - invalid key`) — confirmed live on 2026-09-10 while connecting a real RustDesk client through this exact stack.
+
+Use a real, explicit, **shared** `SUPPORT_PLANE_KEY` instead — the same value for both services, which the compose file already wires up identically. It must be a base64-encoded 64-byte Ed25519 **secret** key (libsodium/sodiumoxide's format: 32-byte seed + 32-byte public key), not an arbitrary string: `rustdesk-server`'s `get_server_sk()` only derives a *shared, deterministic* public key from a value shaped like that; an arbitrary string is used as a literal access-key string instead; and neither hbbs nor hbbr would use the real signing key their code path assumes elsewhere. Generate one with `remote-core`'s own crypto dependency (from `apps/Frontend Plane/verevonv3/packages/remote-core`, where `libsodium-wrappers` is already installed):
+
+```bash
+node -e "
+const sodium = require('libsodium-wrappers');
+(async () => {
+  await sodium.ready;
+  const kp = sodium.crypto_sign_keypair();
+  console.log('SUPPORT_PLANE_KEY=' + sodium.to_base64(kp.privateKey, sodium.base64_variants.ORIGINAL));
+})();
+"
+```
+
+Put that value in `.env` (never `_`, never a plain password string) and recreate hbbs/hbbr.
 
 ### Getting the server key clients need
 
-hbbs generates one Ed25519 pair at first start and logs its public half:
+With a real, explicit `SUPPORT_PLANE_KEY` set, both hbbs and hbbr log the **same** derived public key at startup:
 
 ```bash
 docker compose logs hbbs | grep 'Key:'
+docker compose logs hbbr | grep 'Key:'   # must match hbbs's line exactly
 ```
 
-That single base64 string is **both** the access key clients must present *and* the key used to verify peer identity — `remote-core` takes it as `serverPublicKey` and reuses it as `licenceKey` automatically. Verified empirically: send an empty key and hbbs answers `LICENSE_MISMATCH`.
+That single base64 string is **both** the access key clients must present *and* the key used to verify peer identity — `remote-core` takes it as `serverPublicKey` and reuses it as `licenceKey` automatically. Verified empirically: send an empty key and hbbs answers `LICENSE_MISMATCH`; send the wrong one and hbbr answers "invalid key" (see above).
 
 ### Reaching the WebSocket ports locally
 
@@ -108,5 +124,5 @@ The `rustdesk-server` image is built `FROM scratch` — it has no `/bin/sh` and 
 ## Known gaps
 
 - No production TLS certificate has been provisioned or verified in this pass — Caddy is configured to request one automatically on first real deployment, but that has not been exercised.
-- No integration test exists yet connecting a live `remote-core` session through this exact compose stack to a real Verevon Agent — see `remote-core`'s `docs/architecture.md`, "Status," for what has and hasn't been verified end-to-end.
+- This has been done manually once (a stock RustDesk client standing in for the Verevon Agent, see Status above), but no *automated* integration test exists yet, and no real Verevon Agent exists — see `remote-core`'s `docs/architecture.md`, "Status," for what has and hasn't been verified end-to-end, and "Next verification step" for what the manual pass did not settle (it did not exercise pointer, keyboard, scroll, or cursor).
 - Rate limiting / abuse protection beyond Caddy's defaults has not been configured.
