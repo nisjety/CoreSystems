@@ -157,6 +157,7 @@ func TestServiceScopeForRequest(t *testing.T) {
 		{name: "Space import execution reauthorization", method: http.MethodPost, path: "/api/v1/internal/spaces/import-execution-decision", want: "spaces:import:reauthorize"},
 		{name: "Space schedule fire reauthorization", method: http.MethodPost, path: "/api/v1/internal/spaces/schedule-fire-decision", want: "spaces:schedule:reauthorize"},
 		{name: "Space scheduled run preparation", method: http.MethodPost, path: "/api/v1/internal/spaces/scheduled-run-decision", want: "spaces:schedule:reauthorize"},
+		{name: "Space sandbox capability decision", method: http.MethodPost, path: "/api/v1/internal/spaces/sandbox-capability-decision", want: "spaces:sandbox:capability"},
 		{name: "Space scheduled run execution", method: http.MethodPost, path: "/api/v1/internal/spaces/scheduled-run-execution-decision", want: "spaces:schedule:execute"},
 		{name: "Space scheduled step execution", method: http.MethodPost, path: "/api/v1/internal/spaces/scheduled-step-decision", want: "spaces:schedule:step"},
 		{name: "Space agent action model view", method: http.MethodPost, path: "/api/v1/internal/spaces/model-action-view", want: "spaces:agent-action:view"},

@@ -116,6 +116,8 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "spaces:import:reauthorize"
 	case path == "/api/v1/internal/spaces/schedule-fire-decision" || path == "/api/v1/internal/spaces/scheduled-run-decision":
 		return "spaces:schedule:reauthorize"
+	case path == "/api/v1/internal/spaces/sandbox-capability-decision":
+		return "spaces:sandbox:capability"
 	case path == "/api/v1/internal/spaces/scheduled-run-execution-decision":
 		return "spaces:schedule:execute"
 	case path == "/api/v1/internal/spaces/scheduled-step-decision":
