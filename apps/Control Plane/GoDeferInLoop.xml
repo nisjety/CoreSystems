@@ -1,0 +1,14 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main.go</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main.go" />
+  <problem_class id="GoDeferInLoop" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">'defer' in the loop</problem_class>
+  <description>Possible resource leak, &lt;code&gt;defer&lt;/code&gt; is called in the &lt;code&gt;for&lt;/code&gt; loop</description>
+  <highlighted_element>defer</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>5</length>
+</problem>
+</problems>

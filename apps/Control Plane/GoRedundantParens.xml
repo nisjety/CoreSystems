@@ -1,0 +1,14 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/usage.go</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/usage.go" />
+  <problem_class id="GoRedundantParens" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant parentheses</problem_class>
+  <description>Redundant parentheses</description>
+  <highlighted_element>(*nodes)</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>8</length>
+</problem>
+</problems>

@@ -1,0 +1,62 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/scripts/add-password-to-user.js</file>
+  <line>24</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/scripts/add-password-to-user.js" />
+  <problem_class id="JSIgnoredPromiseFromCall" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Result of method call returning a promise is ignored</problem_class>
+  <description>Promise returned from createPasswordHash is ignored</description>
+  <highlighted_element>createPasswordHash</highlighted_element>
+  <language>JavaScript</language>
+  <offset>0</offset>
+  <length>18</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/scripts/create-service-account.ts</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/scripts/create-service-account.ts" />
+  <problem_class id="JSIgnoredPromiseFromCall" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Result of method call returning a promise is ignored</problem_class>
+  <description>Promise returned from createServiceAccount is ignored</description>
+  <highlighted_element>createServiceAccount</highlighted_element>
+  <language>JavaScript</language>
+  <offset>0</offset>
+  <length>20</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts</file>
+  <line>38</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts" />
+  <problem_class id="JSIgnoredPromiseFromCall" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Result of method call returning a promise is ignored</problem_class>
+  <description>Promise returned from handleResponse is ignored</description>
+  <highlighted_element>handleResponse</highlighted_element>
+  <language>JavaScript</language>
+  <offset>11</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts</file>
+  <line>47</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts" />
+  <problem_class id="JSIgnoredPromiseFromCall" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Result of method call returning a promise is ignored</problem_class>
+  <description>Promise returned from handleResponse is ignored</description>
+  <highlighted_element>handleResponse</highlighted_element>
+  <language>JavaScript</language>
+  <offset>15</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/middleware/organization-event.middleware.ts" />
+  <problem_class id="JSIgnoredPromiseFromCall" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Result of method call returning a promise is ignored</problem_class>
+  <description>Promise returned from handleResponse is ignored</description>
+  <highlighted_element>handleResponse</highlighted_element>
+  <language>JavaScript</language>
+  <offset>13</offset>
+  <length>14</length>
+</problem>
+</problems>

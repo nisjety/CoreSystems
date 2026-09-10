@@ -22,6 +22,19 @@ const spacesClient = vi.hoisted(() => ({
   // fails at module-resolution time, before it renders anything.
   getSpaceInstructions: vi.fn(),
   updateSpaceInstructions: vi.fn(),
+  // The room reads its own record through the Space route, not Chat's
+  // owner-bound one — that is what lets it show another member's turns.
+  getSpaceThreadTranscript: vi.fn(),
+  setSpaceAgentState: vi.fn(),
+  revokeSpaceAgent: vi.fn(),
+  // The Work tab stays mounted like every other panel, so it fetches on every
+  // render of this page whether or not a test is looking at it.
+  getSpaceWork: vi.fn(),
+  getSpaceKnowledge: vi.fn(),
+  getSpaceActivity: vi.fn(),
+  markSpaceRead: vi.fn(),
+  recordSpacePresence: vi.fn(),
+  updateSpaceThreadPresentation: vi.fn(),
 }))
 
 vi.mock('@/shared/api/spaces-client', () => ({
@@ -37,21 +50,50 @@ vi.mock('@/shared/api/spaces-client', () => ({
   requestPersonalSpaceDeletion: spacesClient.requestPersonalSpaceDeletion,
   getSpaceInstructions: spacesClient.getSpaceInstructions,
   updateSpaceInstructions: spacesClient.updateSpaceInstructions,
+  getSpaceThreadTranscript: spacesClient.getSpaceThreadTranscript,
+  setSpaceAgentState: spacesClient.setSpaceAgentState,
+  revokeSpaceAgent: spacesClient.revokeSpaceAgent,
+  getSpaceWork: spacesClient.getSpaceWork,
+  getSpaceKnowledge: spacesClient.getSpaceKnowledge,
+  getSpaceActivity: spacesClient.getSpaceActivity,
+  markSpaceRead: spacesClient.markSpaceRead,
+  recordSpacePresence: spacesClient.recordSpacePresence,
+  updateSpaceThreadPresentation: spacesClient.updateSpaceThreadPresentation,
 }))
 
 vi.mock('@/features/chat/lib/chat-thread-history', () => ({
   selectChatThread: vi.fn(),
 }))
 
+const orchestration = vi.hoisted(() => ({
+  listApprovals: vi.fn(),
+  decideApproval: vi.fn(),
+  resumeRun: vi.fn(),
+  cancelRun: vi.fn(),
+}))
+
+vi.mock('@/shared/api/orchestration-client', () => orchestration)
+
 const chatClient = vi.hoisted(() => ({
   streamChat: vi.fn(),
   getChatThreadTranscript: vi.fn(),
+  cancelInvocation: vi.fn(),
 }))
 
-vi.mock('@/shared/api/chat-client', () => ({
-  streamChat: chatClient.streamChat,
-  getChatThreadTranscript: chatClient.getChatThreadTranscript,
-}))
+// Partial mock: spread the real module so every other export (constants like
+// VEREVON_BALANCE_MODE_ID, helpers the composer imports) stays real. A
+// complete-replacement mock here has broken before as chat-client's surface
+// grew — see the getSpaceInstructions comment above for the same lesson on
+// spaces-client.
+vi.mock('@/shared/api/chat-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/shared/api/chat-client')>()
+  return {
+    ...actual,
+    streamChat: chatClient.streamChat,
+    getChatThreadTranscript: chatClient.getChatThreadTranscript,
+    cancelInvocation: chatClient.cancelInvocation,
+  }
+})
 
 const personalContext = {
   space: { space_ref: 'space_personal_1', name: 'Personal Space', kind: 'personal', lifecycle: 'active' },
@@ -118,6 +160,41 @@ describe('SpacePage', () => {
     chatClient.streamChat.mockResolvedValue(undefined)
     chatClient.getChatThreadTranscript.mockReset()
     chatClient.getChatThreadTranscript.mockResolvedValue(null)
+    spacesClient.getSpaceThreadTranscript.mockReset()
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({ threadId: '', turns: [] })
+    spacesClient.setSpaceAgentState.mockReset()
+    spacesClient.setSpaceAgentState.mockResolvedValue({ status: 'paused', changed: true })
+    spacesClient.revokeSpaceAgent.mockReset()
+    spacesClient.revokeSpaceAgent.mockResolvedValue({ status: 'revoked' })
+    spacesClient.getSpaceWork.mockReset()
+    spacesClient.getSpaceWork.mockResolvedValue({
+      space: personalContext.space, membership: personalContext.membership,
+      runs: [], schedules: [], unavailable: [],
+    })
+    spacesClient.getSpaceKnowledge.mockReset()
+    spacesClient.getSpaceKnowledge.mockResolvedValue({
+      space: personalContext.space, membership: personalContext.membership,
+      binding: null, documents: [], documents_truncated: false, wiki_pages: [], unavailable: [],
+    })
+    spacesClient.markSpaceRead.mockReset()
+    spacesClient.recordSpacePresence.mockReset()
+    spacesClient.recordSpacePresence.mockResolvedValue({ present: [], ttl_seconds: 30 })
+    spacesClient.markSpaceRead.mockResolvedValue({ last_read_at: 1 })
+    spacesClient.updateSpaceThreadPresentation.mockReset()
+    spacesClient.updateSpaceThreadPresentation.mockResolvedValue({ thread_id: 't' })
+    spacesClient.getSpaceActivity.mockReset()
+    spacesClient.getSpaceActivity.mockResolvedValue({
+      space: personalContext.space, membership: personalContext.membership,
+      runs: [], approvals: [], operations: [], authority: [], unavailable: [],
+    })
+    orchestration.listApprovals.mockReset()
+    orchestration.listApprovals.mockResolvedValue([])
+    orchestration.decideApproval.mockReset()
+    orchestration.decideApproval.mockResolvedValue({ id: 'ap-1', status: 'GRANTED' })
+    orchestration.resumeRun.mockReset()
+    orchestration.resumeRun.mockResolvedValue(undefined)
+    orchestration.cancelRun.mockReset()
+    orchestration.cancelRun.mockResolvedValue({ cancelled: true })
     spacesClient.createSpaceAgent.mockReset()
     spacesClient.createSpaceAgent.mockResolvedValue({ agent_ref: 'agent123', subject_id: 'agent-agent123', status: 'active' })
     spacesClient.bindSpaceAgent.mockReset()
@@ -220,7 +297,7 @@ describe('SpacePage', () => {
     // The room's own composer targets this exact, unencoded Space reference —
     // no href-encoding step to get right or wrong, since it is a component
     // prop reaching `streamChat` directly rather than text baked into a link.
-    fireEvent.input(screen.getByPlaceholderText('Skriv i rommet. Skriv @ for å nevne noen.'), {
+    fireEvent.input(screen.getByPlaceholderText('Skriv i rommet. @ nevner noen, / velger en ferdighet.'), {
       target: { value: 'Hei' },
     })
     flush()
@@ -249,7 +326,7 @@ describe('SpacePage', () => {
     expect(screen.queryByRole('link', { name: 'Chat' })).toBeNull()
     expect(screen.queryByRole('link', { name: 'Åpne Agent Studio' })).toBeNull()
 
-    const composer = screen.getByPlaceholderText('Skriv i rommet. Skriv @ for å nevne noen.')
+    const composer = screen.getByPlaceholderText('Skriv i rommet. @ nevner noen, / velger en ferdighet.')
     const [introStart] = screen.getAllByRole('button', { name: /Start en samtale/ }).reverse()
     fireEvent.click(introStart!)
     flush()
@@ -292,32 +369,375 @@ describe('SpacePage', () => {
         updated_at: '2026-08-16T10:00:00Z',
       }],
     })
-    chatClient.getChatThreadTranscript.mockResolvedValue({
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({
       threadId: 'thread_drift',
-      updatedAt: '2026-08-16T10:00:00Z',
       turns: [
-        { id: 'canonical-1', role: 'user', content: 'Hva er status?' },
-        { id: 'canonical-2', role: 'assistant', content: '**Alt** er grønt.', agentName: 'Driftsassistent' },
+        { role: 'user', content: 'Hva er status?', authorSubjectId: 'user_1' },
+        { role: 'assistant', content: '**Alt** er grønt.', agentName: 'Driftsassistent' },
       ],
     })
     renderSpacePage()
 
-    // The human turn carries the sole human member's name (transcript reads
-    // are owner-bound, so the readable user turn is provably theirs), and the
-    // agent turn carries the room's single active agent with an Agent chip —
-    // rendered as real markdown, not raw asterisks. Queries are scoped to the
-    // timeline because the cockpit keeps every tab panel mounted, so the same
-    // names also exist in the (hidden) member and agent panels. The await
-    // targets assistant-only content: the post's preview fallback shows the
-    // same text as the user turn, so waiting on that would pass before the
-    // transcript resource ever resolved.
+    // The human turn carries the name the SERVER recorded as its author,
+    // resolved through Control's roster, and the agent turn carries the turn's
+    // own recorded persona with an Agent chip — rendered as real markdown, not
+    // raw asterisks. Queries are scoped to the timeline because the cockpit
+    // keeps every tab panel mounted, so the same names also exist in the
+    // (hidden) member and agent panels. The await targets assistant-only
+    // content: the post's preview fallback shows the same text as the user
+    // turn, so waiting on that would pass before the transcript resolved.
     const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
     expect(await timeline.findByText('Driftsassistent')).toBeTruthy()
     expect(timeline.getByText('Hva er status?')).toBeTruthy()
-    expect(timeline.getByText('Kari Nordmann')).toBeTruthy()
+    expect(timeline.getByText('Kari Nordmann (deg)')).toBeTruthy()
     expect(timeline.getByText('Agent')).toBeTruthy()
     expect(timeline.getByText('Alt')).toBeTruthy()
     expect(timeline.queryByText('**Alt** er grønt.')).toBeNull()
+    // The room read its own record, not Chat's owner-bound one.
+    expect(spacesClient.getSpaceThreadTranscript).toHaveBeenCalledWith('space_personal_1', 'thread_drift')
+    expect(chatClient.getChatThreadTranscript).not.toHaveBeenCalled()
+  })
+
+  /** Open the Agent tab and return a scope for querying inside its panel.
+   *
+   * The cockpit keeps every tab mounted and hides the inactive ones, so a
+   * role-based query against the whole screen cannot see the agent controls
+   * while another tab is open — and a query that passes only because the
+   * element is hidden proves nothing. */
+  async function openAgentTab() {
+    const tab = await screen.findByRole('tab', { name: 'Agent' })
+    tab.click()
+    return within(await screen.findByRole('tabpanel', { name: 'Agent' }))
+  }
+
+  /** Open the Members tab and return a scope for querying inside its panel. */
+  async function openMembersTab() {
+    const tab = await screen.findByRole('tab', { name: 'Medlemmer' })
+    tab.click()
+    return within(await screen.findByRole('tabpanel', { name: 'Medlemmer' }))
+  }
+
+  const roomContext = {
+    space: { space_ref: 'space_room_1', name: 'Leveranse', kind: 'room', lifecycle: 'active', is_organization_room: false },
+    membership: {
+      space_ref: 'space_room_1', org_id: 'org_1', subject_id: 'user_1', kind: 'room', role: 'owner',
+      revisions: { authority: 1, membership: 1, privacy: 1, recipient_audience: 1, entitlement: 1 },
+    },
+  }
+
+  it('lets an owner manage the people in a room they made', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(roomContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({ ...roomContext, threads: [] })
+    renderSpacePage()
+
+    const members = await openMembersTab()
+    expect(await members.findByRole('button', { name: /Legg til personer/ })).toBeTruthy()
+  })
+
+  // The organization channel's roster is derived from the organization, so an
+  // editor here would be overwritten on the next sync while appearing to work.
+  it('offers no member editor for the organization channel, and says why', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue({
+      ...roomContext,
+      space: { ...roomContext.space, is_organization_room: true },
+    })
+    spacesClient.getSpaceThreads.mockResolvedValue({ ...roomContext, threads: [] })
+    renderSpacePage()
+
+    const members = await openMembersTab()
+    expect(members.queryByRole('button', { name: /Legg til personer/ })).toBeNull()
+    expect(await members.findByText(/følger organisasjonen/)).toBeTruthy()
+  })
+
+  // Absence is not a denial: an older gateway omits the flag entirely, and
+  // showing the editor on that silence offers a door the server then refuses.
+  it('withholds the member editor when the server did not say which room this is', async () => {
+    const { is_organization_room: _omitted, ...spaceWithoutFlag } = roomContext.space
+    spacesClient.getSpaceContext.mockResolvedValue({ ...roomContext, space: spaceWithoutFlag })
+    spacesClient.getSpaceThreads.mockResolvedValue({ ...roomContext, threads: [] })
+    renderSpacePage()
+
+    const members = await openMembersTab()
+    expect(members.queryByRole('button', { name: /Legg til personer/ })).toBeNull()
+    // Nor does it claim the roster is derived — it says nothing, which is what
+    // it knows.
+    expect(members.queryByText(/følger organisasjonen/)).toBeNull()
+  })
+
+  // "Pause / mute / remove HERE" is the room half of the product model's
+  // dividing rule. Until now the room could add an agent and never take one
+  // back, so a wrongly added agent stayed invokable.
+  it('lets an owner pause a bound agent, then re-reads the roster', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceAgents.mockResolvedValue([
+      {
+        subject_id: 'agent-drift', role: 'editor', revision: 1, identity_published: true,
+        binding_ref: 'sab_drift', name: 'Driftsassistent', status: 'active',
+        definition_status: 'active', delivery_targets: [],
+      },
+    ])
+    renderSpacePage()
+
+    const agentPanel = await openAgentTab()
+    const pause = await agentPanel.findByRole('button', { name: 'Sett på pause' })
+    pause.click()
+
+    await waitFor(() => expect(spacesClient.setSpaceAgentState).toHaveBeenCalled())
+    expect(spacesClient.setSpaceAgentState).toHaveBeenCalledWith('space_personal_1', 'sab_drift', 'paused')
+    // The card's standing comes from the server, so the panel re-reads rather
+    // than flipping the label locally.
+    await waitFor(() => expect(spacesClient.getSpaceAgents.mock.calls.length).toBeGreaterThan(1))
+  })
+
+  it('offers Resume for an agent that is already paused', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceAgents.mockResolvedValue([
+      {
+        subject_id: 'agent-drift', role: 'editor', revision: 1, identity_published: true,
+        binding_ref: 'sab_drift', name: 'Driftsassistent', status: 'paused',
+        definition_status: 'active', delivery_targets: [],
+      },
+    ])
+    spacesClient.setSpaceAgentState.mockResolvedValue({ status: 'active', changed: true })
+    renderSpacePage()
+
+    const agentPanel = await openAgentTab()
+    ;(await agentPanel.findByRole('button', { name: 'Gjenoppta' })).click()
+    await waitFor(() =>
+      expect(spacesClient.setSpaceAgentState).toHaveBeenCalledWith('space_personal_1', 'sab_drift', 'active'),
+    )
+    expect(agentPanel.queryByRole('button', { name: 'Sett på pause' })).toBeNull()
+  })
+
+  // Removal is the one control the other button cannot undo.
+  it('arms before removing an agent, and the first press changes nothing', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceAgents.mockResolvedValue([
+      {
+        subject_id: 'agent-drift', role: 'editor', revision: 1, identity_published: true,
+        binding_ref: 'sab_drift', name: 'Driftsassistent', status: 'active',
+        definition_status: 'active', delivery_targets: [],
+      },
+    ])
+    renderSpacePage()
+
+    const agentPanel = await openAgentTab()
+    ;(await agentPanel.findByRole('button', { name: 'Fjern fra rommet' })).click()
+    expect(spacesClient.revokeSpaceAgent).not.toHaveBeenCalled()
+    expect(await agentPanel.findByText(/legges til på nytt/)).toBeTruthy()
+
+    ;(await agentPanel.findByRole('button', { name: /Bekreft at Driftsassistent fjernes/ })).click()
+    await waitFor(() =>
+      expect(spacesClient.revokeSpaceAgent).toHaveBeenCalledWith('space_personal_1', 'sab_drift'),
+    )
+  })
+
+  // A pending binding is waiting on Control; a failed one records that
+  // provisioning did not work. Neither can be governed, so neither gets a
+  // control the server would refuse.
+  it('shows no lifecycle controls for a binding that is not settled', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceAgents.mockResolvedValue([
+      {
+        subject_id: 'agent-pending', role: 'editor', revision: 1, identity_published: true,
+        binding_ref: 'sab_pending', name: 'Ventende', status: 'pending',
+        definition_status: 'active', delivery_targets: [],
+      },
+      {
+        subject_id: 'agent-noref', role: 'editor', revision: 1, identity_published: true,
+        name: 'Uten binding', status: 'active',
+        definition_status: 'active', delivery_targets: [],
+      },
+    ])
+    renderSpacePage()
+
+    const agentPanel = await openAgentTab()
+    await agentPanel.findByText('Ventende')
+    expect(agentPanel.queryByRole('button', { name: 'Sett på pause' })).toBeNull()
+    expect(agentPanel.queryByRole('button', { name: 'Fjern fra rommet' })).toBeNull()
+  })
+
+  // Governing a binding is the same class of decision as granting one.
+  it('hides the lifecycle controls from a role that cannot grant', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue({
+      ...personalContext,
+      membership: { ...personalContext.membership, role: 'viewer' },
+    })
+    spacesClient.getSpaceAgents.mockResolvedValue([
+      {
+        subject_id: 'agent-drift', role: 'editor', revision: 1, identity_published: true,
+        binding_ref: 'sab_drift', name: 'Driftsassistent', status: 'active',
+        definition_status: 'active', delivery_targets: [],
+      },
+    ])
+    renderSpacePage()
+
+    const agentPanel = await openAgentTab()
+    await agentPanel.findByText('Driftsassistent')
+    expect(agentPanel.queryByRole('button', { name: 'Sett på pause' })).toBeNull()
+    expect(agentPanel.queryByRole('button', { name: 'Fjern fra rommet' })).toBeNull()
+  })
+
+  // A refused change must say the agent is unchanged, not leave the room
+  // implying something happened.
+  it('reports a failed pause without claiming the agent changed', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceAgents.mockResolvedValue([
+      {
+        subject_id: 'agent-drift', role: 'editor', revision: 1, identity_published: true,
+        binding_ref: 'sab_drift', name: 'Driftsassistent', status: 'active',
+        definition_status: 'active', delivery_targets: [],
+      },
+    ])
+    spacesClient.setSpaceAgentState.mockRejectedValue(new Error('nope'))
+    renderSpacePage()
+
+    const agentPanel = await openAgentTab()
+    ;(await agentPanel.findByRole('button', { name: 'Sett på pause' })).click()
+    expect(await agentPanel.findByRole('alert')).toBeTruthy()
+    expect(agentPanel.getByText(/Ingenting er endret/)).toBeTruthy()
+  })
+
+  // The room already COUNTED work that needed a person ("Oppmerksomhet" in the
+  // pulse rail) and then offered nowhere to act on it. Counting a duty and
+  // routing the person off the page to discharge it is the side-panel shape the
+  // product model argues against.
+  it('lets a paused run be decided in the room, and refreshes the room afterwards', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      threads: [{
+        thread_id: 'thread_gate',
+        space_id: 'space_personal_1',
+        title: 'Utsendelse',
+        preview: 'Send oppsummeringen',
+        latest_run_id: 'run_gate',
+        latest_run_status: 'awaiting_approval',
+        updated_at: '2026-09-06T10:00:00Z',
+      }],
+    })
+    orchestration.listApprovals.mockResolvedValue([
+      { id: 'ap-1', status: 'PENDING', detail: 'Send oppsummeringen til kunden' },
+    ])
+    renderSpacePage()
+
+    const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+    expect(await timeline.findByText('Send oppsummeringen til kunden')).toBeTruthy()
+
+    const approve = timeline.getByRole('button', { name: 'Godkjenn' })
+    approve.click()
+
+    await waitFor(() => expect(orchestration.decideApproval).toHaveBeenCalled())
+    expect(orchestration.decideApproval).toHaveBeenCalledWith('ap-1', 'approve', undefined, undefined)
+    // Approving continues the run; the room then re-reads so the post stops
+    // claiming it is waiting.
+    await waitFor(() => expect(orchestration.resumeRun).toHaveBeenCalledWith('run_gate', undefined))
+    await waitFor(() => expect(spacesClient.getSpaceThreads.mock.calls.length).toBeGreaterThan(1))
+  })
+
+  // A thread paused on a person does not take new input: a reply would queue
+  // behind a gate the same person is standing at.
+  it('refuses to send into a thread that is waiting on an approval', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      threads: [{
+        thread_id: 'thread_gate',
+        space_id: 'space_personal_1',
+        title: 'Utsendelse',
+        preview: 'Send oppsummeringen',
+        latest_run_id: 'run_gate',
+        latest_run_status: 'awaiting_approval',
+        updated_at: '2026-09-06T10:00:00Z',
+      }],
+    })
+    renderSpacePage()
+
+    const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+    timeline.getByRole('button', { name: 'Svar' }).click()
+
+    expect(await screen.findByText('Godkjenn eller avslå for å fortsette denne samtalen.')).toBeTruthy()
+    const composer = screen.getByPlaceholderText('Denne samtalen venter på en godkjenning.') as HTMLTextAreaElement
+    expect(composer.disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(chatClient.streamChat).not.toHaveBeenCalled()
+  })
+
+  // A run that is merely running has nothing to decide, and a thread with no
+  // run id gives the panel nothing to act on.
+  it('shows no approval surface when nothing is actually gated', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      threads: [
+        {
+          thread_id: 'thread_running',
+          space_id: 'space_personal_1',
+          title: 'Pågår',
+          preview: 'Jobber',
+          latest_run_id: 'run_running',
+          latest_run_status: 'running',
+          updated_at: '2026-09-06T10:00:00Z',
+        },
+        {
+          thread_id: 'thread_no_run',
+          space_id: 'space_personal_1',
+          title: 'Uten kjøring',
+          preview: 'Ingen kjøring',
+          latest_run_status: 'awaiting_approval',
+          updated_at: '2026-09-06T10:01:00Z',
+        },
+      ],
+    })
+    renderSpacePage()
+
+    await screen.findByRole('list', { name: 'Samtaler i rommet' })
+    expect(screen.queryByText('Venter på din godkjenning')).toBeNull()
+    expect(orchestration.listApprovals).not.toHaveBeenCalled()
+  })
+
+  // The regression this whole slice exists to prevent: before shared reads,
+  // every readable user turn was provably the reader's own, so the timeline
+  // labelled human turns with the one human in the roster. Applied to a room
+  // with several members that rule puts words in the wrong person's mouth.
+  it('attributes another member\'s turn to that member, never to the reader', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceRoster.mockResolvedValue([
+      { subject_type: 'user', subject_id: 'user_1', role: 'owner', revision: 1, display_name: 'Kari Nordmann' },
+      { subject_type: 'user', subject_id: 'user_2', role: 'editor', revision: 1, display_name: 'Ola Hansen' },
+    ])
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      threads: [{
+        thread_id: 'thread_shared',
+        space_id: 'space_personal_1',
+        owner_subject_id: 'user_2',
+        title: 'Leveranse',
+        preview: 'Når kommer leveransen?',
+        updated_at: '2026-09-06T10:00:00Z',
+      }],
+    })
+    spacesClient.getSpaceThreadTranscript.mockResolvedValue({
+      threadId: 'thread_shared',
+      turns: [
+        { role: 'user', content: 'Når kommer leveransen?', authorSubjectId: 'user_2' },
+        // No recorded author: it must stay unnamed rather than borrow one.
+        { role: 'user', content: 'Uten registrert avsender.' },
+      ],
+    })
+    renderSpacePage()
+
+    // Await transcript-only content: the post preview shows the first turn's
+    // text and the fallback header already names the thread starter, so
+    // waiting on either would pass before the transcript ever resolved.
+    const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+    expect(await timeline.findByText('Uten registrert avsender.')).toBeTruthy()
+    expect(timeline.getByText('Ola Hansen')).toBeTruthy()
+    expect(timeline.getByText('Ukjent avsender')).toBeTruthy()
+    // The reader is user_1. Their name must not appear on a turn they did not
+    // write, with or without the "(deg)" marker.
+    expect(timeline.queryByText('Kari Nordmann')).toBeNull()
+    expect(timeline.queryByText('Kari Nordmann (deg)')).toBeNull()
   })
 
   it('continues an existing room thread when a post is answered through the reply target', async () => {
@@ -344,7 +764,7 @@ describe('SpacePage', () => {
 
     // The banner names the target and the cursor lands in the composer.
     expect(screen.getByText(/Svarer i/)).toBeTruthy()
-    const composer = screen.getByPlaceholderText('Skriv i rommet. Skriv @ for å nevne noen.')
+    const composer = screen.getByPlaceholderText('Skriv i rommet. @ nevner noen, / velger en ferdighet.')
     expect(document.activeElement).toBe(composer)
 
     fireEvent.input(composer, { target: { value: 'Og lagerstatus?' } })
@@ -449,7 +869,7 @@ describe('SpacePage', () => {
     flush()
     expect(screen.queryByText(/Svarer i/)).toBeNull()
 
-    fireEvent.input(screen.getByPlaceholderText('Skriv i rommet. Skriv @ for å nevne noen.'), {
+    fireEvent.input(screen.getByPlaceholderText('Skriv i rommet. @ nevner noen, / velger en ferdighet.'), {
       target: { value: 'Ny sak' },
     })
     flush()
@@ -629,7 +1049,7 @@ describe('SpacePage', () => {
    * person mention never does — only an agent mention may invoke anything.
    */
   describe('the room composer', () => {
-    const composerPlaceholder = 'Skriv i rommet. Skriv @ for å nevne noen.'
+    const composerPlaceholder = 'Skriv i rommet. @ nevner noen, / velger en ferdighet.'
 
     beforeEach(() => {
       spacesClient.getSpaceContext.mockResolvedValue(personalContext)
@@ -760,7 +1180,7 @@ describe('SpacePage', () => {
   // These tests pin the count and the composer's survival rather than the
   // mechanism, so they keep holding if the shell's plumbing changes again.
   describe('panel identity across context rechecks', () => {
-    const composerPlaceholder = 'Skriv i rommet. Skriv @ for å nevne noen.'
+    const composerPlaceholder = 'Skriv i rommet. @ nevner noen, / velger en ferdighet.'
 
     // The real gateway returns a freshly parsed object on every call, so a
     // recheck always changes the context's identity even when nothing about
@@ -837,6 +1257,120 @@ describe('SpacePage', () => {
       const afterRecheck = screen.getByPlaceholderText(composerPlaceholder) as HTMLTextAreaElement
       expect(afterRecheck).toBe(composer)
       expect(afterRecheck.value).toBe('halvskrevet melding')
+    })
+  })
+
+  // Item 4b: "new since your last visit". The listing carries the reader's
+  // arrival marker; a post another member changed after it is badged, the
+  // reader's own is not, and having the room open advances the marker.
+  it('badges posts new since arrival and records that the room was read', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      read_marker: { last_read_at: Date.parse('2026-09-07T10:00:00Z') },
+      threads: [
+        { thread_id: 'theirs', space_id: 'space_personal_1', title: 'Ny sak fra kollega', owner_subject_id: 'user_2',
+          updated_at: '2026-09-07T11:00:00Z', latest_run_status: 'completed' },
+        { thread_id: 'mine', space_id: 'space_personal_1', title: 'Min egen sak', owner_subject_id: 'user_1',
+          updated_at: '2026-09-07T11:30:00Z', latest_run_status: 'completed' },
+        { thread_id: 'old', space_id: 'space_personal_1', title: 'Gammel sak', owner_subject_id: 'user_2',
+          updated_at: '2026-09-07T09:00:00Z', latest_run_status: 'completed' },
+      ],
+    })
+    renderSpacePage()
+
+    // Scoped to the timeline: the header's activity pulse names the same post.
+    const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+    await timeline.findByText('Ny sak fra kollega')
+    const badged = [...document.querySelectorAll('.verevon-room-post[data-unread]')].map((n) => n.textContent ?? '')
+    expect(badged.length).toBe(1)
+    expect(badged[0]).toContain('Ny sak fra kollega')
+    await waitFor(() => expect(spacesClient.markSpaceRead).toHaveBeenCalledWith('space_personal_1'))
+  })
+
+  // A first visit has no last visit to be new since — nothing is badged, and
+  // the marker is still recorded so the NEXT visit has one.
+  it('badges nothing on a first visit but still records it', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      read_marker: { last_read_at: null },
+      threads: [
+        { thread_id: 'theirs', space_id: 'space_personal_1', title: 'Første sak', owner_subject_id: 'user_2',
+          updated_at: '2026-09-07T11:00:00Z', latest_run_status: 'completed' },
+      ],
+    })
+    renderSpacePage()
+    const timeline = within(await screen.findByRole('list', { name: 'Samtaler i rommet' }))
+    await timeline.findByText('Første sak')
+    expect(document.querySelector('.verevon-room-post[data-unread]')).toBeNull()
+    await waitFor(() => expect(spacesClient.markSpaceRead).toHaveBeenCalled())
+  })
+
+
+  // Presence. The room already polls; the heartbeat rides that beat and its
+  // answer is who else is here, so there is no second timer and no second read.
+  describe('who else is in the room', () => {
+    const withRoster = () => {
+      spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+      spacesClient.getSpaceRoster.mockResolvedValue([
+        { subject_type: 'user', subject_id: 'user_1', role: 'owner', revision: 1, display_name: 'Kari Nordmann' },
+        { subject_type: 'user', subject_id: 'user_2', role: 'editor', revision: 1, display_name: 'Ola Nordmann' },
+      ])
+    }
+
+    it('beats presence on a visible listing and says who else is here', async () => {
+      withRoster()
+      spacesClient.recordSpacePresence.mockResolvedValue({
+        present: [{ subject_id: 'user_2', status: 'online', last_seen_at: 1 }],
+        ttl_seconds: 30,
+      })
+      renderSpacePage()
+
+      await waitFor(() =>
+        expect(spacesClient.recordSpacePresence).toHaveBeenCalledWith('space_personal_1', 'online'),
+      )
+      expect(await screen.findByText('Ola Nordmann er her nå')).toBeTruthy()
+    })
+
+    it('shows the room’s own typing line for a member who is writing', async () => {
+      withRoster()
+      spacesClient.recordSpacePresence.mockResolvedValue({
+        present: [{ subject_id: 'user_2', status: 'typing', last_seen_at: 1 }],
+        ttl_seconds: 30,
+      })
+      renderSpacePage()
+      expect(await screen.findByText('Ola Nordmann skriver …')).toBeTruthy()
+    })
+
+    // An unreadable answer and an empty room are different facts. Rendering the
+    // first as the second would tell a member they are alone.
+    it('says nothing at all when presence cannot be read', async () => {
+      withRoster()
+      spacesClient.recordSpacePresence.mockRejectedValue(new Error('application down'))
+      renderSpacePage()
+
+      await waitFor(() => expect(spacesClient.recordSpacePresence).toHaveBeenCalled())
+      // Level 1: the room has no threads, so the empty-state intro card also
+      // names the room, as an h3 — a second, legitimate "Personlig rom" that
+      // an unqualified query would trip over.
+      await screen.findByRole('heading', { name: 'Personlig rom', level: 1 })
+      expect(screen.queryByText(/er her nå/)).toBeNull()
+      expect(screen.queryByText(/skriver …/)).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+    })
+
+    // The roster names people; presence only carries identifiers. A subject the
+    // roster does not know is counted, never labelled with its raw id.
+    it('counts a present subject the roster cannot name, and never prints the id', async () => {
+      withRoster()
+      spacesClient.recordSpacePresence.mockResolvedValue({
+        present: [{ subject_id: 'user_ghost', status: 'online', last_seen_at: 1 }],
+        ttl_seconds: 30,
+      })
+      renderSpacePage()
+      expect(await screen.findByText('1 person er her nå')).toBeTruthy()
+      expect(screen.queryByText(/user_ghost/)).toBeNull()
     })
   })
 })

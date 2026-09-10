@@ -59,7 +59,8 @@ func NewDocumentRepo(pool *pgxpool.Pool) *DocumentRepo {
 // Per-User Data Ownership phase).
 const documentColumns = `document_id, org_id, source, type, title, content, status, metadata,
 	       error_message, zdr_classification, zdr_reason, extraction_trace,
-	       created_by, deleted_by, document_date, created_at, updated_at, deleted_at, owner_id, visibility`
+	       created_by, deleted_by, document_date, created_at, updated_at, deleted_at, owner_id, visibility,
+	       space_ref`
 
 // Get returns a single document, enforcing ownership when a viewer is supplied.
 // The viewer filter is a single static predicate so the tenant-isolation lint
@@ -339,13 +340,19 @@ func (r *DocumentRepo) CreateWithOutbox(
 					}
 				}
 
+				// space_ref is written on create only. A re-POST under Space
+				// authority refreshes content (the UPDATE branch above) but
+				// never re-homes an existing document into another room: that
+				// would move data across a membership boundary on the strength
+				// of an import, which is not what an import decision says.
 				row := tx.QueryRow(ctx, `
 					INSERT INTO documents (org_id,source,type,title,content,metadata,zdr_classification,
-						extraction_trace,created_by,owner_id,visibility,idempotency_key,status,document_date)
-					VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13)
+						extraction_trace,created_by,owner_id,visibility,idempotency_key,status,document_date,space_ref)
+					VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13,$14)
 					RETURNING `+documentColumns,
 					input.OrgID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace,
-					nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey), input.DocumentDate)
+					nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey), input.DocumentDate,
+					nilIfEmpty(strings.TrimSpace(input.SpaceRef)))
 				doc, insertErr := scanDocument(row)
 				if insertErr != nil {
 					if input.IdempotencyKey != "" && isUniqueViolation(insertErr) && attempt == 0 {
@@ -480,12 +487,16 @@ func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInp
 				}
 			}
 
+			// Same create-only Space stamp as CreateWithOutbox above: the two
+			// paths must not diverge, or which one a caller happens to use
+			// would decide whether the room edge is recorded at all.
 			row := tx.QueryRow(ctx, `
-				INSERT INTO documents (org_id, source, type, title, content, metadata, zdr_classification, extraction_trace, created_by, owner_id, visibility, idempotency_key, status, document_date)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', $13)
+				INSERT INTO documents (org_id, source, type, title, content, metadata, zdr_classification, extraction_trace, created_by, owner_id, visibility, idempotency_key, status, document_date, space_ref)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', $13, $14)
 				RETURNING `+documentColumns+`
 			`, input.OrgID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace,
-				nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey), input.DocumentDate)
+				nilIfEmpty(input.CreatedBy), ownerID, visibility, nilIfEmpty(input.IdempotencyKey), input.DocumentDate,
+				nilIfEmpty(strings.TrimSpace(input.SpaceRef)))
 
 			doc, err := scanDocument(row)
 			if err != nil {
@@ -829,7 +840,7 @@ func scanDocument(row pgx.Row) (*model.Document, error) {
 		&d.DocumentID, &d.OrgID, &d.Source, &d.Type, &d.Title, &d.Content,
 		&d.Status, &d.Metadata, &d.ErrorMessage, &d.ZDRClassification, &d.ZDRReason,
 		&d.ExtractionTrace, &d.CreatedBy, &d.DeletedBy, &d.DocumentDate, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
-		&d.OwnerID, &d.Visibility,
+		&d.OwnerID, &d.Visibility, &d.SpaceRef,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan document: %w", err)
@@ -843,7 +854,7 @@ func scanDocumentFromRows(rows pgx.Rows) (*model.Document, error) {
 		&d.DocumentID, &d.OrgID, &d.Source, &d.Type, &d.Title, &d.Content,
 		&d.Status, &d.Metadata, &d.ErrorMessage, &d.ZDRClassification, &d.ZDRReason,
 		&d.ExtractionTrace, &d.CreatedBy, &d.DeletedBy, &d.DocumentDate, &d.CreatedAt, &d.UpdatedAt, &d.DeletedAt,
-		&d.OwnerID, &d.Visibility,
+		&d.OwnerID, &d.Visibility, &d.SpaceRef,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan document row: %w", err)

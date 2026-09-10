@@ -38,6 +38,16 @@ const (
 	// name, og:image) for the page indicated by payload.url. Emitted by
 	// the runtime page pipeline after each successful HTML fetch.
 	EvtBrandingExtracted EventType = "branding_extracted"
+	// EvtPageExtracted mirrors quarry_core::event::EventType::PageExtracted
+	// (Rust). Emitted AFTER transform (page_fetched fires before it, with
+	// only url/status/duration/content_type) and carries the page-level
+	// extraction: title, title_source (html|model|host), a ~300-char plain
+	// excerpt, summary (optional), word_count, lang, driver, content_type,
+	// fingerprint. The orchestrator re-emits it from RunPageResult so
+	// consumers polling /v1/jobs/{id}/events (verevon onboarding) see real
+	// page names and text. Additive: consumers that only know page_fetched
+	// keep working.
+	EvtPageExtracted EventType = "page_extracted"
 )
 
 type Event struct {

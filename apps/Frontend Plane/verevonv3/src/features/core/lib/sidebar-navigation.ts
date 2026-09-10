@@ -1,4 +1,5 @@
 import {
+  MonitorPlay,
   BarChart3,
   BookOpen,
   Bot,
@@ -179,6 +180,7 @@ export const sidebarSections: SidebarSection[] = [
         items: [
           { id: 'inbox-home', label: 'Conversations', href: '/support', icon: Inbox, description: 'Samtaler som krever oppfølging.', exactPathMatch: true },
           { id: 'support-tickets', label: 'Tickets', href: '/support?surface=tickets', icon: TicketCheck, description: 'Saker, SLA og eierskap.' },
+          { id: 'support-remote', label: 'Remote support', href: '/support?surface=remote', icon: MonitorPlay, description: 'Se og styre kundens skjerm etter samtykke.' },
         ],
       },
     ],

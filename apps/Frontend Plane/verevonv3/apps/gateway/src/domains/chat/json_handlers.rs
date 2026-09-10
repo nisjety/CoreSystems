@@ -1,13 +1,24 @@
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use reqwest::Method;
 use serde_json::Value;
+use std::time::Duration;
 
 use crate::{config::AppState, domains::chat::shared, middleware::AuthenticatedUser};
+
+// Integration Core permits subscription-backed Codex requests to run for up
+// to 90 seconds. Leave a small proxy/response margin so a successful provider
+// result is not discarded by the gateway first.
+const SUBSCRIPTION_CHAT_INVOKE_TIMEOUT: Duration = Duration::from_secs(100);
+
+fn chat_invoke_timeout(body: &Value) -> Option<Duration> {
+    (body.get("provider").and_then(Value::as_str) == Some("openai-codex-subscription"))
+        .then_some(SUBSCRIPTION_CHAT_INVOKE_TIMEOUT)
+}
 
 pub(super) async fn invoke_chat(
     State(state): State<AppState>,
@@ -66,9 +77,10 @@ pub(super) async fn invoke_chat(
     let mut outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    let request_timeout = chat_invoke_timeout(&outbound_body);
     // Same rule as the streaming path: mark before dispatch, so a ZDR turn that
     // fails still leaves the thread non-persistable.
-    shared::proxy_model_json_with_data_plane(
+    shared::proxy_model_json_with_data_plane_request_timeout(
         &state,
         Method::POST,
         &url,
@@ -79,6 +91,7 @@ pub(super) async fn invoke_chat(
         Some(&execution_token),
         Some(&cost_token),
         Some(&session_token),
+        request_timeout,
         &user,
     )
     .await
@@ -137,17 +150,37 @@ pub(crate) async fn queue_invocation_input(
     // in model-gateway's http_routes.rs), the same as submit_feedback above —
     // without it the call 401s before the queue logic ever runs.
     let session_token = shared::session_token(&state, &user, &headers).await;
-    shared::proxy_model_json_with_session(
-        &state,
-        Method::POST,
-        &url,
-        Some(outbound_body),
-        token.as_deref(),
-        session_token.as_deref(),
-        &user,
+    normalize_queue_response(
+        shared::proxy_model_json_with_session(
+            &state,
+            Method::POST,
+            &url,
+            Some(outbound_body),
+            token.as_deref(),
+            session_token.as_deref(),
+            &user,
+        )
+        .await,
     )
-    .await
     .into_response()
+}
+
+/// A run ending between the browser's keystroke and the enqueue request is an
+/// expected lifecycle race, not a missing API resource. Model Gateway uses 404
+/// to keep inactive and foreign request ids indistinguishable; at the
+/// browser-facing boundary we retain that indistinguishable payload while
+/// returning 200 so DevTools does not report a handled retry as a failed HTTP
+/// request. The explicit flag prevents unrelated upstream 404s from being
+/// normalized.
+fn normalize_queue_response(response: (StatusCode, Json<Value>)) -> (StatusCode, Json<Value>) {
+    let (status, body) = response;
+    let run_ended = status == StatusCode::NOT_FOUND
+        && body.0.get("resend_as_new_turn").and_then(Value::as_bool) == Some(true);
+    if run_ended {
+        (StatusCode::OK, body)
+    } else {
+        (status, body)
+    }
 }
 
 pub(super) async fn get_thread_messages(
@@ -363,4 +396,47 @@ pub(crate) async fn submit_feedback(
         &user,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn subscription_chat_uses_the_extended_model_deadline() {
+        assert_eq!(
+            chat_invoke_timeout(&json!({"provider": "openai-codex-subscription"})),
+            Some(SUBSCRIPTION_CHAT_INVOKE_TIMEOUT),
+        );
+        assert_eq!(chat_invoke_timeout(&json!({"provider": "openai"})), None);
+        assert_eq!(chat_invoke_timeout(&json!({})), None);
+    }
+
+    #[test]
+    fn ended_queue_race_is_a_successful_browser_protocol_response() {
+        let (status, Json(body)) = normalize_queue_response((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "queued": false,
+                "error": "no active stream",
+                "resend_as_new_turn": true,
+            })),
+        ));
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["queued"], false);
+        assert_eq!(body["resend_as_new_turn"], true);
+    }
+
+    #[test]
+    fn unrelated_not_found_response_stays_not_found() {
+        let (status, Json(body)) = normalize_queue_response((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "route not found"})),
+        ));
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "route not found");
+    }
 }

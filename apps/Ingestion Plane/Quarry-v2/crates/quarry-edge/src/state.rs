@@ -73,6 +73,12 @@ pub struct AppState {
     pub model_plane_url: Option<String>,
     /// Bearer token for the Model Plane gateway.
     pub model_plane_token: Option<String>,
+    /// Best-effort Model Plane title enricher shared by every `PageRunner`
+    /// this edge builds (scrape, scrape/stream, internal run_page). `Some`
+    /// when `model_plane_url` is set and `page_title_enrich` is not `false`.
+    /// Holds the fingerprint-keyed title cache, so it must be process-wide,
+    /// not per-request.
+    pub page_title_enricher: Option<Arc<quarry_runtime::page_extract::PageTitleEnricher>>,
     /// Production Auth Core token minter. Routes use the verified JWT org to
     /// obtain bounded Model/Data Plane service tokens.
     pub service_token_provider: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,

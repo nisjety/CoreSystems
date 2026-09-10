@@ -336,6 +336,8 @@ describe('chat thread history', () => {
           role: 'user',
           content: 'next',
           createdAt: '2026-06-17T10:01:00.000Z',
+          provider: 'openai-codex-subscription',
+          subscriptionConnectionId: 'conn_123',
         },
       ],
     })
@@ -351,6 +353,8 @@ describe('chat thread history', () => {
           createdAt: '2026-06-17T10:01:00.000Z',
           model: undefined,
           modelUsed: undefined,
+          provider: 'openai-codex-subscription',
+          subscriptionConnectionId: 'conn_123',
           tools: undefined,
           attachments: undefined,
         },

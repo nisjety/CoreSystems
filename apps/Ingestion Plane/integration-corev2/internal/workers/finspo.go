@@ -180,7 +180,12 @@ func (w FinspoWorker) processAllRegisteredSources(ctx context.Context, job store
 		return w.failJob(ctx, job, fmt.Errorf("list registered Finspo sources: %w", err))
 	}
 	if len(sources) == 0 {
-		return w.failJob(ctx, job, errors.New("no SharePoint sources are registered for this organization yet — add one via Knowledge → Add source → SharePoint library"))
+		// integration-api normally refuses to queue this job (409
+		// no_sources_registered); a job that still reaches the worker — an
+		// API without a Finspo client, or a race with a source being removed
+		// — fails with the same code so the connection's documents lane
+		// tells the user to pick a library rather than "sync failed".
+		return w.failJobWithCode(ctx, job, "no_sources_registered", errors.New("no SharePoint or OneDrive library is registered for this organization yet — pick one via Knowledge → Add source → SharePoint library (or the onboarding connect step)"))
 	}
 
 	refs := make([]handoff.SyncSourceRef, 0, len(sources))
@@ -245,13 +250,25 @@ func (w FinspoWorker) logSkippedDataPlaneForward(sourceID string) {
 }
 
 func (w FinspoWorker) failJob(ctx context.Context, job store.SyncJob, failure error) error {
+	return w.failJobWithCode(ctx, job, "", failure)
+}
+
+// failJobWithCode marks the job failed and, when the failure has a stable
+// meaning (e.g. no_sources_registered), records that as metadata.failureCode
+// so integration-api's sync lanes and the SPA can act on it without parsing
+// the message.
+func (w FinspoWorker) failJobWithCode(ctx context.Context, job store.SyncJob, failureCode string, failure error) error {
+	metadata := map[string]any{
+		"failure": "finspo_worker",
+	}
+	if strings.TrimSpace(failureCode) != "" {
+		metadata["failureCode"] = strings.TrimSpace(failureCode)
+	}
 	_, progressErr := w.Integration.UpdateSyncProgress(ctx, job.ID, handoff.SyncProgressRequest{
 		Consumer: finspoConsumer,
 		Status:   "failed",
 		Message:  failure.Error(),
-		Metadata: map[string]any{
-			"failure": "finspo_worker",
-		},
+		Metadata: metadata,
 	})
 	if progressErr != nil {
 		return fmt.Errorf("%w; failed to mark sync job failed: %v", failure, progressErr)

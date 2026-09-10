@@ -22,7 +22,7 @@ import {
   selectChatThread,
   type ChatThreadHistoryItem,
 } from '@/features/chat/lib/chat-thread-history'
-import { getNavbarLabels, type VerevonRoute, type WorkspaceIdentity } from '@/features/core/lib/shell-data'
+import { formatPlanBadge, getNavbarLabels, type VerevonRoute, type WorkspaceIdentity } from '@/features/core/lib/shell-data'
 import { signOut } from '@/shared/api/auth-client'
 import {
   listOrganizations,
@@ -525,6 +525,10 @@ function Breadcrumb(props: {
   workspace: WorkspaceIdentity
   workspaceActive?: boolean
 }) {
+  const i18n = useI18n()
+  // billing-core elevates a trialing org to the paid tier name ("Expert"), so
+  // the raw label alone would paint a 14-day trial as a paid plan.
+  const isTrial = () => props.workspace.planTrial === true || props.workspace.plan.trim().toLowerCase() === 'trial'
   return (
     <div class="core-breadcrumb">
       <BreadcrumbSeparator />
@@ -537,16 +541,20 @@ function Breadcrumb(props: {
         <span>{props.workspace.name}</span>
         <strong
           class={{
-            'core-breadcrumb__plan--paid': props.workspace.plan.trim().toLowerCase() !== 'trial',
+            'core-breadcrumb__plan--paid': !isTrial(),
           }}
         >
-          {props.workspace.plan}
+          {formatPlanBadge(props.workspace.plan, props.workspace.planTrial, i18n.tr)}
         </strong>
       </button>
       <BreadcrumbSeparator />
       <a href={props.moduleHref} link>{props.moduleLabel}</a>
-      <BreadcrumbSeparator />
-      <a href={props.tabHref} link class="core-breadcrumb__muted">{props.tabLabel}</a>
+      {/* A route with no second level renders one destination, not the same
+          one twice: both links share `activeRoute` as their href. */}
+      <Show when={props.tabLabel}>
+        <BreadcrumbSeparator />
+        <a href={props.tabHref} link class="core-breadcrumb__muted">{props.tabLabel}</a>
+      </Show>
     </div>
   )
 }

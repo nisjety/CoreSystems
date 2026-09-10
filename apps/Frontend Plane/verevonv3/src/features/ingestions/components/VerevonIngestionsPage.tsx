@@ -656,7 +656,7 @@ function RunComposer(props: {
         <div style="display: flex; flex-direction: column; gap: 10px; padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;">
           <label class="ingestions-field" style="margin: 0;">
             {i18n.tr('Uttrekksmodus', 'Extraction mode')}
-            <VerevonSelect value={props.form.extractMode} onChange={(e) => props.onFormChange({ extractMode: e.currentTarget.value as any })}>
+            <VerevonSelect value={props.form.extractMode} onChange={(e) => props.onFormChange({ extractMode: e.currentTarget.value as typeof props.form.extractMode })}>
               <option value="general">{i18n.tr('Generell', 'General')}</option>
               <option value="product">{i18n.tr('Produkt (pris, lager, bilder)', 'Product (price, stock, images)')}</option>
               <option value="article">{i18n.tr('Artikkel (forfatter, dato, innhold)', 'Article (author, date, content)')}</option>

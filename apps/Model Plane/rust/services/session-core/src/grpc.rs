@@ -80,6 +80,8 @@ const CONTROL_SPACE_DECISION_AUDIENCE: &str = "model-plane";
 const CONTROL_THREAD_CREATE_ACTION: &str = "model.thread.create";
 const CONTROL_THREAD_APPEND_ACTION: &str = "model.thread.append";
 const CONTROL_THREAD_APPEND_SCHEMA: &str = "sha256:thread-append-v1";
+const CONTROL_THREAD_READ_ACTION: &str = "model.thread.read";
+const CONTROL_THREAD_READ_SCHEMA: &str = "sha256:thread-read-v1";
 const CONTROL_SCHEDULED_RUN_AUDIENCE: &str = "model-plane-capability-core";
 const CONTROL_SCHEDULED_RUN_ACTION: &str = "model.schedule.run";
 const CONTROL_SCHEDULED_RUN_SCHEMA: &str = "sha256:space-scheduled-run-v1";
@@ -1663,6 +1665,224 @@ fn verify_thread_space_decision(req: &pb::CreateThreadRequest) -> Result<(), Sta
     verify_thread_space_decision_with_keys(req, &keys, Utc::now())
 }
 
+/// What a verified Control `model.thread.read` decision admits.
+///
+/// Constructing one is the only way to skip [`authorize_thread_owner`] on a
+/// read path, so the type itself is the boundary: a caller cannot accidentally
+/// widen a query without holding proof that Control resolved this subject as a
+/// current member AND current recipient of this Space.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VerifiedSpaceRead {
+    /// The recipient-audience revision the decision was issued under. Rows
+    /// stamped with a NEWER revision are refused: they belong to an audience
+    /// this reader was not part of when the decision was minted.
+    pub(crate) recipient_audience_revision: i64,
+}
+
+/// Recompute Control's `model.thread.read` payload digest from the claims.
+///
+/// The signature already covers the whole payload, so this is not what stops a
+/// forged token -- it pins the digest CONTRACT. If Control ever changes how it
+/// encodes a read effect without this side changing with it, the mismatch
+/// surfaces here as a denial instead of as two planes silently disagreeing
+/// about what was authorized.
+fn thread_read_payload_digest(claims: &ControlSpaceDecisionClaims) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.thread.read\0v1\0");
+    for (name, value) in [
+        ("org_id", claims.org_id.as_str()),
+        ("user_id", claims.subject_id.as_str()),
+        ("space_id", claims.space_ref.as_str()),
+        ("space_decision_ref", claims.decision_ref.as_str()),
+        (
+            "recipient_audience_ref",
+            claims.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            claims.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", claims.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            claims.resource_authorization_ref.as_str(),
+        ),
+        ("action_schema_hash", CONTROL_THREAD_READ_SCHEMA),
+        ("idempotency_key", claims.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(claims.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(claims.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+#[allow(clippy::result_large_err)]
+#[allow(clippy::too_many_arguments)]
+fn verify_thread_read_space_decision_with_key(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<VerifiedSpaceRead, Status> {
+    if token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control Space read decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(
+            "invalid Control Space read decision envelope",
+        ));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    if token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "untrusted Control Space decision key",
+        ));
+    }
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space read decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space read decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space read decision signature"))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control Space read decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space read decision claims"))?;
+
+    let matches_request = claims.decision_ref == decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == CONTROL_THREAD_READ_ACTION
+        && claims.action_schema_hash == CONTROL_THREAD_READ_SCHEMA
+        && claims.payload_digest == thread_read_payload_digest(&claims)
+        && claims
+            .permissions
+            .iter()
+            .any(|permission| permission == "thread:read");
+    if !matches_request {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this conversation read",
+        ));
+    }
+    // A read decision must never double as authority to write. Control issues
+    // disjoint permission sets; this keeps that disjointness a property the
+    // reader enforces rather than a promise it takes on trust.
+    if claims
+        .permissions
+        .iter()
+        .any(|permission| permission == "thread:append" || permission == "thread:create")
+    {
+        return Err(Status::permission_denied(
+            "a Space read decision must not carry write permissions",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.recipient_audience_ref.trim().is_empty()
+        || claims.recipient_audience_revision == 0
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space read decision is expired or incomplete",
+        ));
+    }
+    let recipient_audience_revision =
+        i64::try_from(claims.recipient_audience_revision).map_err(|_| {
+            Status::permission_denied("Control Space read decision revision is invalid")
+        })?;
+    Ok(VerifiedSpaceRead {
+        recipient_audience_revision,
+    })
+}
+
+/// Resolve an optional shared-Space read authority for one request.
+///
+/// `Ok(None)` means no decision was offered and the caller stays on the
+/// owner-bound path -- the historical behaviour for personal threads and for
+/// every caller that has not opted in. A partially supplied decision is an
+/// error rather than a silent fallback: half a token is a bug or an attempt,
+/// and treating it as "no token" would hide both.
+#[allow(clippy::result_large_err)]
+pub(crate) fn verify_thread_read_space_decision(
+    token: &str,
+    decision_ref: &str,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+) -> Result<Option<VerifiedSpaceRead>, Status> {
+    if token.trim().is_empty() && decision_ref.trim().is_empty() {
+        return Ok(None);
+    }
+    if token.trim().is_empty() || decision_ref.trim().is_empty() || space_id.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "a Space read decision requires space_id, decision ref, and token together",
+        ));
+    }
+    if user_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "a Space read decision requires an authenticated user subject",
+        ));
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = keys
+        .get(&key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    verify_thread_read_space_decision_with_key(
+        token,
+        decision_ref,
+        org_id,
+        user_id,
+        space_id,
+        &key_id,
+        key,
+        Utc::now(),
+    )
+    .map(Some)
+}
+
 fn verify_append_space_decision_with_key(
     req: &pb::AppendMessageRequest,
     org_id: &str,
@@ -1986,12 +2206,23 @@ fn support_thread_id(session_key: &str) -> Option<&str> {
 
 /// Core of `SessionCore::append_message`, factored out to keep the trait method
 /// small. Inserts the message row and its `MESSAGE_APPENDED` event in one tx.
+/// `author_subject_id` is the VERIFIED caller, never a request field. It is
+/// recorded on user turns only: an assistant turn is attributed by its persona
+/// (`agent_name`), and a system/tool turn has no human author to name. Passing
+/// it in rather than reading it off the request is the point -- a client that
+/// could name the author of a message could put words in someone's mouth.
 async fn append_message_inner(
     pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
     retention: MemoryRetention,
     req: pb::AppendMessageRequest,
+    author_subject_id: &str,
 ) -> Result<Response<pb::AppendMessageResponse>, Status> {
+    let author_subject_id = if req.role.trim() == "user" {
+        author_subject_id.trim()
+    } else {
+        ""
+    };
     let msg_id = new_ulid();
     let now = Utc::now();
     let mut letta_sync: Option<(
@@ -2098,9 +2329,11 @@ async fn append_message_inner(
     let row: (i64, Option<String>, Option<String>, Option<i64>, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
         "INSERT INTO messages
          (id, thread_id, role, content, created_at, agent_name, metadata, space_id, recipient_audience_ref,
-          recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref)
+          recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref,
+          author_subject_id)
          SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), $7, t.space_id, t.recipient_audience_ref,
-                t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref
+                t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref,
+                NULLIF($8, '')
          FROM threads t WHERE t.id=$2
          RETURNING sequence, space_id, recipient_audience_ref, recipient_audience_revision,
                    recipient_audience_hash, authority_revision, resource_authorization_ref",
@@ -2112,6 +2345,7 @@ async fn append_message_inner(
     .bind(now)
     .bind(req.agent_name.trim())
     .bind(&metadata_json)
+    .bind(author_subject_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -2721,7 +2955,11 @@ async fn complete_step_inner(
                     step_id = %req.step_id,
                     "unrecognised CompleteStep status; classifying by error presence"
                 );
-                if req.error.trim().is_empty() { "done" } else { "failed" }
+                if req.error.trim().is_empty() {
+                    "done"
+                } else {
+                    "failed"
+                }
             }
         };
         match crate::orchestration_store::append_plan_step(
@@ -3558,11 +3796,13 @@ impl SessionCore for SessionService {
             let req = request.into_inner();
             authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
                 .await?;
+            let author_subject_id = caller.user_id().unwrap_or_default().to_owned();
             append_message_inner(
                 &self.pool,
                 self.letta_memory.as_ref(),
                 MemoryRetention::of(&caller),
                 req,
+                &author_subject_id,
             )
             .await
         }
@@ -4378,17 +4618,71 @@ impl SessionCore for SessionService {
                 ));
             }
             caller.authorize_org(&req.org_id)?;
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
-            let rows: Vec<(String, String, Option<String>, Option<serde_json::Value>)> =
-                sqlx::query_as(
-                    "SELECT m.role, m.content, m.agent_name, m.metadata
+            // Two ways to be allowed to read a conversation, and only two.
+            // Without a Control decision this stays exactly as it was: you must
+            // own the thread. With one, Control has already resolved you as a
+            // current member AND current recipient of this Space, so ownership
+            // stops being the question -- which is what lets a room have more
+            // than one reader.
+            let space_read = verify_thread_read_space_decision(
+                &req.space_read_decision_token,
+                &req.space_read_decision_ref,
+                &req.org_id,
+                caller.user_id().unwrap_or_default(),
+                &req.space_id,
+            )?;
+            match space_read {
+                None => {
+                    authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read)
+                        .await?
+                }
+                Some(_) => {
+                    // The decision authorizes one Space, not any thread the
+                    // caller can name. A thread outside it -- or an unscoped
+                    // one -- is not found rather than refused, matching what an
+                    // unauthorized reader already sees from the owner path.
+                    let scoped: Option<(String,)> = sqlx::query_as(
+                        "SELECT id FROM threads WHERE id = $1 AND org_id = $2 AND space_id = $3",
+                    )
+                    .bind(&req.thread_id)
+                    .bind(&req.org_id)
+                    .bind(&req.space_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                    if scoped.is_none() {
+                        return Err(Status::not_found("thread not found"));
+                    }
+                }
+            }
+            // Newer-audience rows are dropped for a Space reader: they were
+            // written for a recipient set this decision was not issued against.
+            // A NULL revision predates audience snapshots entirely and is
+            // covered by the thread-level Space check above.
+            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+            let rows: Vec<(
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<serde_json::Value>,
+                Option<String>,
+            )> = sqlx::query_as(
+                // `m.id` is selected so a caller can name one earlier turn
+                // durably (message pinning). It was always in the table; this
+                // read simply never returned it.
+                "SELECT m.id::text, m.role, m.content, m.agent_name, m.metadata, m.author_subject_id
                  FROM messages m
                  JOIN threads t ON t.id = m.thread_id
                  WHERE m.thread_id = $1 AND t.org_id = $2
+                   AND ($3::BIGINT IS NULL
+                        OR m.recipient_audience_revision IS NULL
+                        OR m.recipient_audience_revision <= $3)
                  ORDER BY m.sequence",
-                )
+            )
                 .bind(&req.thread_id)
                 .bind(&req.org_id)
+                .bind(audience_ceiling)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| {
@@ -4397,20 +4691,26 @@ impl SessionCore for SessionService {
                 })?;
             let messages = rows
                 .into_iter()
-                .map(|(role, content, agent_name, metadata)| pb::SessionMessage {
-                    role,
-                    content,
-                    agent_name: agent_name.unwrap_or_default(),
-                    // `{}` is the column default for every turn written before
-                    // metadata was persisted; send None rather than an empty
-                    // Struct so the caller can tell "no evidence recorded" from
-                    // "evidence recorded and empty".
-                    metadata: metadata
-                        .filter(|value| !matches!(value, serde_json::Value::Null))
-                        .filter(|value| value.as_object().is_none_or(|map| !map.is_empty()))
-                        .as_ref()
-                        .and_then(json_to_struct),
-                })
+                .map(
+                    |(message_id, role, content, agent_name, metadata, author_subject_id)| {
+                        pb::SessionMessage {
+                            message_id,
+                            role,
+                            content,
+                            agent_name: agent_name.unwrap_or_default(),
+                            author_subject_id: author_subject_id.unwrap_or_default(),
+                            // `{}` is the column default for every turn written before
+                            // metadata was persisted; send None rather than an empty
+                            // Struct so the caller can tell "no evidence recorded" from
+                            // "evidence recorded and empty".
+                            metadata: metadata
+                                .filter(|value| !matches!(value, serde_json::Value::Null))
+                                .filter(|value| value.as_object().is_none_or(|map| !map.is_empty()))
+                                .as_ref()
+                                .and_then(json_to_struct),
+                        }
+                    },
+                )
                 .collect();
             Ok(Response::new(pb::ListConversationResponse { messages }))
         }
@@ -4433,6 +4733,18 @@ impl SessionCore for SessionService {
             }
             caller.authorize_org(&req.org_id)?;
             caller.authorize_user(&req.user_id)?;
+            // A shared-Space listing is the same query with a different answer
+            // to "whose threads". Without a decision it stays owner-bound, which
+            // is why every member of one room used to see only their own posts
+            // in it.
+            let space_read = verify_thread_read_space_decision(
+                &req.space_read_decision_token,
+                &req.space_read_decision_ref,
+                &req.org_id,
+                &req.user_id,
+                &req.space_id,
+            )?;
+            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
             let limit = clamp_thread_limit(req.limit);
             let rows: Vec<(
                 String,
@@ -4447,6 +4759,7 @@ impl SessionCore for SessionService {
                 Option<String>,
                 Option<DateTime<Utc>>,
                 String,
+                String,
             )> = sqlx::query_as(
                 "SELECT
                     t.id,
@@ -4460,7 +4773,8 @@ impl SessionCore for SessionService {
                     latest_run.id AS latest_run_id,
                     latest_run.status AS latest_run_status,
                     latest_run.updated_at AS latest_run_updated_at,
-                    t.origin
+                    t.origin,
+                    t.user_id
                  FROM threads t
                  LEFT JOIN LATERAL (
                     SELECT content
@@ -4483,7 +4797,11 @@ impl SessionCore for SessionService {
                     ORDER BY updated_at DESC, created_at DESC, id DESC
                     LIMIT 1
                  ) latest_run ON TRUE
-                 WHERE t.org_id = $1 AND t.user_id = $2 AND t.archived_at IS NULL
+                 WHERE t.org_id = $1 AND t.archived_at IS NULL
+                   AND ($6::BIGINT IS NULL
+                        OR (t.recipient_audience_revision IS NULL
+                            OR t.recipient_audience_revision <= $6))
+                   AND ($6::BIGINT IS NOT NULL OR t.user_id = $2)
                    AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
                    AND (NULLIF($5, '') IS NULL OR t.origin = $5)
                  ORDER BY (t.pinned_at IS NOT NULL) DESC, COALESCE(last_message.created_at, t.created_at) DESC, t.created_at DESC, t.id DESC
@@ -4494,6 +4812,7 @@ impl SessionCore for SessionService {
             .bind(limit)
             .bind(&req.space_id)
             .bind(&req.origin)
+            .bind(audience_ceiling)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -4504,7 +4823,7 @@ impl SessionCore for SessionService {
             let threads = rows
                 .into_iter()
                 .map(
-                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin)| {
+                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin, owner_subject_id)| {
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
                         } else {
@@ -4527,6 +4846,7 @@ impl SessionCore for SessionService {
                             latest_run_status: latest_run_status.unwrap_or_default(),
                             latest_run_updated_at: latest_run_updated_at.map(to_proto_timestamp),
                             origin,
+                            owner_subject_id,
                         }
                     },
                 )
@@ -6202,7 +6522,10 @@ mod tests {
         semantic_context_search_status, support_thread_id, thread_append_payload_digest,
         thread_create_payload_digest, valid_scheduled_run_identifier,
         validate_append_space_context_shape, validate_scheduled_step_request,
-        validate_thread_space_context_shape, validate_user_checkpoint,
+        thread_read_payload_digest, validate_thread_space_context_shape, validate_user_checkpoint,
+        CONTROL_THREAD_READ_ACTION, CONTROL_THREAD_READ_SCHEMA,
+        verify_thread_read_space_decision, verify_thread_read_space_decision_with_key,
+        ControlSpaceDecisionClaims,
         verify_append_space_decision_with_key, verify_scheduled_run_decision_with_keys,
         verify_scheduled_run_execution_decision_with_keys, verify_thread_space_decision_with_key,
         verify_thread_space_decision_with_keys, AssemblyInputs, DelegatedDataPlaneBearer,
@@ -7314,6 +7637,189 @@ mod tests {
         );
     }
 
+    /// Mint a signed `model.thread.read` decision the way Control does, so the
+    /// verifier is exercised against the real envelope rather than a stub.
+    fn signed_thread_read_decision(
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+        permissions: &[&str],
+        audience_revision: u64,
+    ) -> (String, String, String) {
+        let key_id = "control-test-key".to_owned();
+        let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let decision_ref = "read-decision-1".to_owned();
+        let claims = serde_json::json!({
+            "decision_ref": decision_ref,
+            "org_id": "org-1",
+            "space_ref": "space-room",
+            "subject_id": "user-1",
+            "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": CONTROL_THREAD_READ_ACTION,
+            "action_schema_hash": CONTROL_THREAD_READ_SCHEMA,
+            "payload_digest": "",
+            "idempotency_key": "space-read-1",
+            "recipient_audience_ref": "audience:space-room:4",
+            "recipient_audience_hash": "sha256:test-audience",
+            "privacy_policy_ref": "privacy:org-1:5",
+            "resource_authorization_ref": "control:space-room:thread-read:7",
+            "purpose": "assistant_collaboration",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "nonce": "nonce-1",
+            "authority_revision": 7,
+            "membership_revision": 4,
+            "privacy_revision": 5,
+            "recipient_audience_revision": audience_revision,
+            "entitlement_revision": 3,
+            "permissions": permissions,
+            "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+        });
+        // Control computes the digest over its own claims; recompute it the
+        // same way so the fixture is self-consistent.
+        let mut parsed: ControlSpaceDecisionClaims =
+            serde_json::from_value(claims.clone()).expect("claims fixture");
+        parsed.payload_digest = thread_read_payload_digest(&parsed);
+        let mut claims = claims;
+        claims["payload_digest"] = serde_json::json!(parsed.payload_digest);
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims"));
+        let signed = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{encoded}");
+        let signature = signing_key.sign(signed.as_bytes());
+        let token = format!(
+            "{signed}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        );
+        (token, decision_ref, key_id)
+    }
+
+    /// The read path's whole purpose: admit a member who does NOT own the
+    /// thread, and only for the exact Space and subject Control resolved.
+    #[test]
+    fn signed_thread_read_decision_admits_only_its_own_space_and_subject() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[31_u8; 32]);
+        let (token, decision_ref, key_id) =
+            signed_thread_read_decision(&signing_key, now, &["thread:read"], 4);
+
+        let verified = verify_thread_read_space_decision_with_key(
+            &token,
+            &decision_ref,
+            "org-1",
+            "user-1",
+            "space-room",
+            &key_id,
+            &signing_key.verifying_key(),
+            now,
+        )
+        .expect("a current member's read decision must verify");
+        assert_eq!(
+            verified.recipient_audience_revision, 4,
+            "the audience ceiling must travel with the decision"
+        );
+
+        for (org, user, space, why) in [
+            ("org-2", "user-1", "space-room", "another tenant"),
+            ("org-1", "user-2", "space-room", "another subject"),
+            ("org-1", "user-1", "space-other", "another Space"),
+        ] {
+            assert_eq!(
+                verify_thread_read_space_decision_with_key(
+                    &token,
+                    &decision_ref,
+                    org,
+                    user,
+                    space,
+                    &key_id,
+                    &signing_key.verifying_key(),
+                    now,
+                )
+                .expect_err(why)
+                .code(),
+                tonic::Code::PermissionDenied,
+                "a read decision must not authorize {why}"
+            );
+        }
+    }
+
+    /// A reader's token must never be usable as a writer's. Control issues
+    /// disjoint permission sets; this proves the reader refuses rather than
+    /// trusting that it always will.
+    #[test]
+    fn thread_read_decision_refuses_write_permissions() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[32_u8; 32]);
+        let (token, decision_ref, key_id) =
+            signed_thread_read_decision(&signing_key, now, &["thread:read", "thread:append"], 4);
+        assert_eq!(
+            verify_thread_read_space_decision_with_key(
+                &token,
+                &decision_ref,
+                "org-1",
+                "user-1",
+                "space-room",
+                &key_id,
+                &signing_key.verifying_key(),
+                now,
+            )
+            .expect_err("a read decision carrying append must be refused")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    /// An expired decision is not a slow one. Revocation works by letting the
+    /// short lifetime run out, so accepting a stale token would quietly make
+    /// removal from a room take effect never.
+    #[test]
+    fn thread_read_decision_expires() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[33_u8; 32]);
+        let (token, decision_ref, key_id) =
+            signed_thread_read_decision(&signing_key, now, &["thread:read"], 4);
+        assert_eq!(
+            verify_thread_read_space_decision_with_key(
+                &token,
+                &decision_ref,
+                "org-1",
+                "user-1",
+                "space-room",
+                &key_id,
+                &signing_key.verifying_key(),
+                now + chrono::Duration::minutes(5),
+            )
+            .expect_err("an expired read decision must be refused")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    /// No decision at all is the historical, owner-bound path -- not an error.
+    /// Half a decision IS an error: treating it as "no token" would hide both
+    /// a client bug and an attempt.
+    #[test]
+    fn partial_thread_read_decision_is_rejected_but_absent_one_is_not() {
+        assert!(verify_thread_read_space_decision("", "", "org-1", "user-1", "")
+            .expect("an absent decision must keep the owner-bound path")
+            .is_none());
+        assert_eq!(
+            verify_thread_read_space_decision("token-without-ref", "", "org-1", "user-1", "space-room")
+                .expect_err("a half-supplied decision must not be ignored")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
     fn signed_personal_thread_request(
         signing_key: &SigningKey,
         now: DateTime<Utc>,
@@ -8110,6 +8616,9 @@ mod tests {
             .list_conversation(Request::new(pb::ListConversationRequest {
                 org_id: org.clone(),
                 thread_id: thread_id.clone(),
+                space_id: String::new(),
+                space_read_decision_ref: String::new(),
+                space_read_decision_token: String::new(),
             }))
             .await
             .expect("list_thread_messages")
@@ -8123,6 +8632,9 @@ mod tests {
             .list_conversation(Request::new(pb::ListConversationRequest {
                 org_id: format!("attacker-{sfx}"),
                 thread_id: thread_id.clone(),
+                space_id: String::new(),
+                space_read_decision_ref: String::new(),
+                space_read_decision_token: String::new(),
             }))
             .await
             .expect("list other-org convo")

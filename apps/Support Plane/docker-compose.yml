@@ -1,0 +1,117 @@
+name: support-plane
+
+x-runtime-defaults: &runtime-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "3"
+
+services:
+  # --- hbbs: rendezvous / ID server ---
+  # Official, unmodified image — see docs/licensing.md in remote-core for why
+  # this must stay unmodified (running-as-a-process, not copying source).
+  hbbs:
+    <<: *runtime-defaults
+    image: rustdesk/rustdesk-server:latest
+    command: ["hbbs"]
+    environment:
+      KEY: "${SUPPORT_PLANE_KEY:?SUPPORT_PLANE_KEY is required}"
+      RELAY: "${SUPPORT_PLANE_RELAY_ADDR:?SUPPORT_PLANE_RELAY_ADDR is required}"
+      ALWAYS_USE_RELAY: "Y" # belt-and-suspenders alongside remote-core always setting force_relay — see README
+      RUST_LOG: "${SUPPORT_PLANE_LOG_LEVEL:-info}"
+    volumes:
+      - hbbs-data:/root
+    ports:
+      # Native ports — reached directly by the Verevon Agent, no TLS hop.
+      - "21115:21115"
+      - "21116:21116"
+      - "21116:21116/udp"
+      # WS port — NOT published to the host; only Caddy (same docker network)
+      # may reach it. A browser must never hit this port directly (plaintext ws://).
+    expose:
+      - "21118"
+    networks:
+      - support-plane
+    # Ingen healthcheck her: dette bildet er bygget FROM scratch og har
+    # verken /bin/sh eller nc, så enhver in-container-sjekk feiler med
+    # "stat /bin/sh: no such file or directory" og markerer en fullt
+    # fungerende tjeneste som unhealthy. `readiness`-sidecaren under prober
+    # portene over nettverket i stedet.
+
+  # --- hbbr: relay server ---
+  hbbr:
+    <<: *runtime-defaults
+    image: rustdesk/rustdesk-server:latest
+    command: ["hbbr"]
+    environment:
+      KEY: "${SUPPORT_PLANE_KEY:?SUPPORT_PLANE_KEY is required}"
+      RUST_LOG: "${SUPPORT_PLANE_LOG_LEVEL:-info}"
+    volumes:
+      - hbbr-data:/root
+    ports:
+      - "21117:21117"
+      # WS port — not published; Caddy-only, same as hbbs above.
+    expose:
+      - "21119"
+    networks:
+      - support-plane
+    # Se kommentaren om healthcheck på hbbs.
+
+  # --- readiness: gir stacken et ekte helsesignal ---
+  # hbbs/hbbr kan ikke sjekke seg selv (scratch-bilde, ingen shell), så denne
+  # sidecaren prober alle fire portene over nettverket — inkludert
+  # WS-portene, som er de nettleseren faktisk trenger.
+  readiness:
+    <<: *runtime-defaults
+    image: busybox:1.37
+    depends_on:
+      - hbbs
+      - hbbr
+    command: ["sh", "-c", "while true; do sleep 3600; done"]
+    networks:
+      - support-plane
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - nc -z hbbs 21116 && nc -z hbbs 21118 && nc -z hbbr 21117 && nc -z hbbr 21119
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # --- Caddy: TLS termination for the two WS ports only ---
+  # hbbs/hbbr's WebSocket listeners are plaintext ws:// by design (they expect
+  # a reverse proxy in front — see docs/rustdesk-protocol.md). A browser
+  # served over https:// cannot open ws://, so this is not optional for any
+  # deployment a real browser will connect to.
+  proxy:
+    <<: *runtime-defaults
+    image: caddy:2-alpine
+    depends_on:
+      - hbbs
+      - hbbr
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      SUPPORT_PLANE_RENDEZVOUS_DOMAIN: "${SUPPORT_PLANE_RENDEZVOUS_DOMAIN:?SUPPORT_PLANE_RENDEZVOUS_DOMAIN is required}"
+      SUPPORT_PLANE_RELAY_DOMAIN: "${SUPPORT_PLANE_RELAY_DOMAIN:?SUPPORT_PLANE_RELAY_DOMAIN is required}"
+      SUPPORT_PLANE_ACME_EMAIL: "${SUPPORT_PLANE_ACME_EMAIL:?SUPPORT_PLANE_ACME_EMAIL is required}"
+    ports:
+      - "443:443"
+      - "80:80" # ACME HTTP-01 challenge only; Caddy redirects everything else to 443
+    networks:
+      - support-plane
+
+networks:
+  support-plane:
+    driver: bridge
+
+volumes:
+  hbbs-data:
+  hbbr-data:
+  caddy-data:
+  caddy-config:

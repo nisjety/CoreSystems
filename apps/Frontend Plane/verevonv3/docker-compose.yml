@@ -208,6 +208,19 @@ services:
       - .:/app
       # Exclude node_modules from bind mount to avoid permission issues
       - /app/node_modules
+      # The workspace packages have their OWN node_modules (pnpm's isolated
+      # linker), and the entry above does not cover them. Without these two,
+      # every `pnpm install` the container runs (its `pnpm dev` verifies and
+      # re-installs deps whenever package.json/lockfile change) writes LINUX
+      # symlinks into these directories on the Windows bind mount. Windows
+      # cannot read those reparse points: `Get-Item` shows no LinkType, Node
+      # gets EACCES on realpath, and the host-side root vitest then fails to
+      # resolve e.g. `libsodium-wrappers` from remote-core's dist — while Git
+      # Bash (MSYS) reads them fine, which is what makes the breakage look
+      # random. Measured 2026-09-08 (frontend log: `pnpm install` at 03:34Z,
+      # identical mtime on the unreadable links). Applies on `up -d` recreate.
+      - /app/packages/remote-core/node_modules
+      - /app/apps/remote-dev/node_modules
       # Exclude .next cache
       - /app/.next
       # Exclude dist build output

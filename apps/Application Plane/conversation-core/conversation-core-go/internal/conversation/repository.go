@@ -2566,6 +2566,95 @@ FROM conversation_ticket_operations
 	return &receipt, nil
 }
 
+// spaceActivityLimit bounds both Space Activity reads. Activity is a recent
+// record, not an archive: an unbounded read of a busy room would be a slow
+// query behind a tab that only ever renders the newest rows.
+const spaceActivityLimit = 200
+
+// ListSpaceOperationReceipts returns the owner effects authorized for one Space.
+//
+// The join is the authority: `grant_ref` is the exact grant row the operation
+// committed against, and that row carries the `space_ref`. An operation with
+// no grant (a human creating a ticket directly) has no Space and correctly does
+// not appear — it did not happen under a room's authority.
+//
+// Revoked grants are INCLUDED. The effect really happened while the authority
+// was live, and dropping it once the grant was withdrawn would quietly rewrite
+// the room's history — the opposite of what an activity record is for.
+func (r *PGRepository) ListSpaceOperationReceipts(ctx context.Context, orgID, spaceRef string) ([]SpaceOperationReceipt, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT o.operation_id, o.action_id, o.status, ag.subject_id, ag.created_by_user_id,
+       o.conversation_id, COALESCE(o.ticket_id, ''), COALESCE(o.audit_event_id, ''),
+       COALESCE(o.terminal_reason, ''), o.created_at, o.updated_at
+FROM conversation_ticket_operations o
+JOIN conversation_agent_action_grants ag ON ag.id = o.grant_ref
+WHERE o.org_id = $1 AND ag.org_id = $1 AND ag.space_ref = $2
+ORDER BY o.created_at DESC
+LIMIT $3`, orgID, spaceRef, spaceActivityLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	receipts := make([]SpaceOperationReceipt, 0)
+	for rows.Next() {
+		var receipt SpaceOperationReceipt
+		if err := rows.Scan(
+			&receipt.OperationID, &receipt.ActionID, &receipt.Status, &receipt.SubjectID,
+			&receipt.GrantedByUserID, &receipt.ConversationID, &receipt.TicketID,
+			&receipt.AuditEventID, &receipt.TerminalReason, &receipt.CreatedAt, &receipt.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		receipts = append(receipts, receipt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return receipts, nil
+}
+
+// ListSpaceAuthorityEvents returns the owner grants for one Space, newest
+// first, revoked ones included.
+//
+// A withdrawn grant is the more interesting row of the two: "this agent could
+// write tickets here until Tuesday" is what explains a refusal after the fact.
+func (r *PGRepository) ListSpaceAuthorityEvents(ctx context.Context, orgID, spaceRef string) ([]SpaceAuthorityEvent, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT id, action_id, subject_id, conversation_id, created_by_user_id,
+       created_at, revoked_at, revoked_by_user_id
+FROM conversation_agent_action_grants
+WHERE org_id = $1 AND space_ref = $2
+ORDER BY COALESCE(revoked_at, created_at) DESC
+LIMIT $3`, orgID, spaceRef, spaceActivityLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := make([]SpaceAuthorityEvent, 0)
+	for rows.Next() {
+		var event SpaceAuthorityEvent
+		var revokedAt *time.Time
+		if err := rows.Scan(
+			&event.GrantID, &event.ActionID, &event.SubjectID, &event.ConversationID,
+			&event.CreatedByUserID, &event.CreatedAt, &revokedAt, &event.RevokedByUserID,
+		); err != nil {
+			return nil, err
+		}
+		event.RevokedAt = revokedAt
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 func (r *PGRepository) ClaimTicketOperationOutbox(ctx context.Context, workerID string, now time.Time, lease time.Duration, limit int) ([]TicketOperationOutboxEvent, error) {
 	if err := r.ensureConfigured(); err != nil {
 		return nil, err

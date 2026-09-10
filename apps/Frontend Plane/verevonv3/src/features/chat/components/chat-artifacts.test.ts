@@ -4,6 +4,7 @@ import {
   artifactFileMeta,
   artifactLanguage,
   artifactRenderKind,
+  artifactRenderKindLabel,
   artifactVersionAt,
   artifactVersions,
   dataUriByteSize,
@@ -361,5 +362,51 @@ describe('highlightCode', () => {
 
   it('handles empty input without producing a phantom line', () => {
     expect(highlightCode('', 'python')).toEqual([{ number: 1, tokens: [] }])
+  })
+})
+
+describe('pdf artifacts (definition of finished, point 4)', () => {
+  /**
+   * A generated PDF used to fall into the binary set and render as a download
+   * card, while an ATTACHED pdf previewed in an iframe. Same file, two answers.
+   */
+  it('previews a pdf artifact whose content the browser can open', () => {
+    expect(artifactRenderKind(artifact({ kind: 'pdf', content: 'data:application/pdf;base64,JVBER' }))).toBe('pdf')
+    expect(artifactRenderKind(artifact({ kind: 'PDF', content: 'https://example.invalid/rapport.pdf' }))).toBe('pdf')
+    expect(artifactRenderKind(artifact({ kind: 'pdf', content: 'blob:http://localhost/9f2c' }))).toBe('pdf')
+  })
+
+  /**
+   * The conservative half, and the reason the check is not `looksLikeImageContent`'s
+   * shape: bare base64 or prose on a `pdf` artifact is not addressable, and
+   * guessing would replace a working download with an empty frame.
+   */
+  it('keeps the download card when a pdf artifact has no openable source', () => {
+    expect(artifactRenderKind(artifact({ kind: 'pdf', content: 'JVBERi0xLjQK' }))).toBe('binary')
+    expect(artifactRenderKind(artifact({ kind: 'pdf', content: 'Rapporten er vedlagt.' }))).toBe('binary')
+    expect(artifactRenderKind(artifact({ kind: 'pdf', content: '' }))).toBe('binary')
+    // Not an http(s) URL, and not a pdf data URI.
+    expect(artifactRenderKind(artifact({ kind: 'pdf', content: 'file:///C:/rapport.pdf' }))).toBe('binary')
+  })
+
+  /**
+   * A generic `file` kind carrying pdf bytes stays a download on purpose — that
+   * is pinned by the case above in `artifactRenderKind`, and only an explicit
+   * `pdf` kind claims the viewer.
+   */
+  it('does not promote a generic file artifact to the pdf viewer', () => {
+    expect(artifactRenderKind(artifact({ kind: 'file', content: 'data:application/pdf;base64,JVBER' }))).toBe('binary')
+  })
+
+  it('labels every render kind in both languages', () => {
+    // Stand-ins for `i18n.tr`, one per locale. Unused args carry the `_`
+    // prefix the lint rule requires.
+    const no = (noText: string, _enText: string) => noText
+    const en = (_noText: string, enText: string) => enText
+    expect(artifactRenderKindLabel('pdf', no)).toBe('PDF')
+    expect(artifactRenderKindLabel('binary', no)).toBe('Fil')
+    expect(artifactRenderKindLabel('binary', en)).toBe('File')
+    expect(artifactRenderKindLabel('html', no)).toBe('Nettside')
+    expect(artifactRenderKindLabel('html', en)).toBe('Web page')
   })
 })

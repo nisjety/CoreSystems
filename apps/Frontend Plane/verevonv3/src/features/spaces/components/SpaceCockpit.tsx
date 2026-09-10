@@ -23,9 +23,10 @@ import { useI18n } from '@/shared/i18n'
  *
  * # Honest about what does not exist yet
  *
- * Only Chat and Activity have a real space-scoped source today (threads), and
- * Agent has one as of the new actions catalog. Work, Knowledge and Members have
- * no space-scoped endpoint at all. Rather than render a convincing empty state
+ * Chat, Activity, Agent and Members all have real Space-scoped sources now.
+ * Work and Knowledge still have none: Model Plane's run and schedule listings
+ * carry no `space_id` filter, and Data Plane honours a Space decision on only
+ * its three retrieval endpoints. Rather than render a convincing empty state
  * that implies "nothing here", an unsupplied tab says which owner plane has not
  * published a Space projection yet — the same honesty `SpacePage` already
  * applies to run receipts. A tab that looks finished but shows nothing is how a
@@ -135,29 +136,10 @@ export interface SpaceCockpitProps {
 export function SpaceCockpit(props: SpaceCockpitProps) {
   const i18n = useI18n()
   const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_TAB)
+  // One evaluation of the caller's tabs object per change — see the note on
+  // `content` below for why reading `props.tabs` per tab is not free.
+  const tabs = createMemo(() => props.tabs ?? {})
   const tabButtons: Partial<Record<SpaceTabId, HTMLButtonElement>> = {}
-
-  /**
-   * Read `props.tabs` through this memo, never directly.
-   *
-   * Callers write the obvious thing — `tabs={{ chat: <Panel />, ... }}` — and
-   * Solid's JSX compiler wraps a dynamic prop expression in a getter, so that
-   * literal arrives here as `get tabs() { return { chat: createComponent(Panel) } }`.
-   * It is a factory, not a value: every *read* rebuilds every panel the caller
-   * supplied.
-   *
-   * Each panel below reads the prop twice — once for `<Show>`'s `when`, once
-   * for its `children` — so six tabs carrying four supplied panels read it ten
-   * times, and built all four panels ten times over. For the Space cockpit that
-   * meant ten mounts of the Agent tab's instructions section (ten identical
-   * `GET /spaces/{ref}/instructions` in one burst) and ten room composers, nine
-   * of them discarded along with anything typed into them.
-   *
-   * Memoizing collapses that to a single read, so a caller is not punished for
-   * passing an inline object. Panels stay reactive either way: their props are
-   * getters, so they keep re-reading the caller's live state.
-   */
-  const tabs = createMemo(() => props.tabs)
 
   createEffect(
     () => undefined,
@@ -225,7 +207,20 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
 
       <For each={SPACE_TABS}>
         {(tab) => {
-          const content = () => tabs()?.[tab.id]
+          // Memoized, and reading the memoized `tabs` object rather than
+          // `props.tabs` directly.
+          //
+          // `props.tabs` is a getter over the caller's object literal, so every
+          // read re-runs that literal — and Solid JSX constructs a component
+          // eagerly, so re-running it MOUNTS every panel again. This `For` has
+          // six tabs and each read `props.tabs` twice (once for `when`, once
+          // for the child), so a single context resolve produced twelve
+          // constructions of all six panels. Panels that fetch on mount
+          // (`SpaceWorkPanel`, `SpaceKnowledgePanel`,
+          // `SpaceInstructionsSection`) each fired a burst of identical
+          // requests — measured live as six `/work` and six `/knowledge` calls
+          // inside 3ms, repeated on every membership recheck.
+          const content = createMemo(() => tabs()[tab.id])
           return (
             <section
               role="tabpanel"

@@ -9,6 +9,7 @@ export function SupportTopTabs(props: { active: SupportSurface }) {
     { id: 'conversations' as const, label: i18n.tr('Samtaler', 'Conversations') },
     { id: 'tickets' as const, label: i18n.tr('Saksbehandling', 'Ticketing') },
     { id: 'outbound' as const, label: i18n.tr('Utgående', 'Outbound') },
+    { id: 'remote' as const, label: i18n.tr('Fjernhjelp', 'Remote support') },
   ]
 
   return (

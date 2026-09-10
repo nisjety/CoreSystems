@@ -6,6 +6,7 @@ import {
   writeClientValue,
 } from '@/shared/session/client-storage'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
+import type { ConversationNode } from '@/shared/chat-nodes'
 
 export const CHAT_ACTIVE_THREAD_KEY = 'verevon.chat.threadId'
 export const CHAT_THREAD_HISTORY_KEY = 'verevon.chat.threadHistory.v1'
@@ -69,6 +70,13 @@ export type ChatThreadTranscriptTurn = {
   /** Server-derived effect evidence from the durable run proof bundle. */
   effectClass?: ChatEffectClass
   confidence?: number
+  /**
+   * What the backend's verification pass found, persisted so the notice
+   * survives a reload — the same reason `memoryRecallCount` below is
+   * stored. Shaped from the confidence node rather than restated, so the
+   * snapshot cannot drift from what the renderer reads.
+   */
+  verification?: Extract<ConversationNode, { kind: 'confidence' }>['verification']
   files?: unknown[]
   grounding?: unknown
   id: string
@@ -89,6 +97,10 @@ export type ChatThreadTranscriptTurn = {
   recalledMemories?: unknown[]
   model?: string
   modelUsed?: string
+  /** Explicit model route used when this turn was submitted. */
+  provider?: string
+  /** Opaque user-owned model subscription connection id. */
+  subscriptionConnectionId?: string
   outputTokens?: number
   /** Durable orchestration run id for an agentic/Do turn. */
   runId?: string
@@ -447,6 +459,8 @@ function normalizeTranscriptTurn(turn: ChatThreadTranscriptTurn): ChatThreadTran
     latencyMs: normalizeOptionalNumber(turn.latencyMs),
     model: normalizeOptionalText(turn.model),
     modelUsed: normalizeOptionalText(turn.modelUsed),
+    provider: normalizeOptionalText(turn.provider),
+    subscriptionConnectionId: normalizeOptionalText(turn.subscriptionConnectionId),
     outputTokens: normalizeOptionalNumber(turn.outputTokens),
     planMode: typeof turn.planMode === 'boolean' ? turn.planMode : undefined,
     grantedRung: normalizeGrantedRung(turn.grantedRung),
@@ -621,6 +635,8 @@ function isChatThreadTranscriptTurn(value: unknown): value is ChatThreadTranscri
     !Number.isNaN(Date.parse(record.createdAt)) &&
     (record.model === undefined || typeof record.model === 'string') &&
     (record.modelUsed === undefined || typeof record.modelUsed === 'string') &&
+    (record.provider === undefined || typeof record.provider === 'string') &&
+    (record.subscriptionConnectionId === undefined || typeof record.subscriptionConnectionId === 'string') &&
     (record.requestId === undefined || typeof record.requestId === 'string') &&
     (record.runId === undefined || typeof record.runId === 'string') &&
     (record.planMode === undefined || typeof record.planMode === 'boolean') &&

@@ -1380,6 +1380,50 @@ func validTicketGrantSHA256(value string) bool {
 // effect again. The repository binds the lookup to the same authenticated
 // actor that created the operation, so an organization peer cannot probe
 // another user's idempotency keys or receipts.
+// SpaceActivityEvidence answers what this plane can prove about one Space.
+//
+// Both halves are read even if one is empty: a room with grants and no
+// operations means "an agent may act here and has not yet", and a room with
+// operations and no live grant means "it acted, and that authority is gone".
+// Those are different facts and the caller must be able to tell them apart,
+// so neither list is ever elided.
+func (s *Service) SpaceActivityEvidence(ctx context.Context, orgID, spaceRef string) (*SpaceActivityEvidence, error) {
+	orgID = strings.TrimSpace(orgID)
+	spaceRef = strings.TrimSpace(spaceRef)
+	if orgID == "" || spaceRef == "" || len(spaceRef) > 200 {
+		return nil, fmt.Errorf("%w: Space activity requires an org and a bounded space_ref", ErrInvalidInput)
+	}
+	operations, err := s.repository.ListSpaceOperationReceipts(ctx, orgID, spaceRef)
+	if err != nil {
+		return nil, err
+	}
+	authority, err := s.repository.ListSpaceAuthorityEvents(ctx, orgID, spaceRef)
+	if err != nil {
+		return nil, err
+	}
+	// The ledger's CHECK constraint already forbids a `completed` row without
+	// both identifiers. Re-assert it here rather than trusting the read: a
+	// receipt that claims an effect landed without naming it is the one thing
+	// this surface must never render.
+	for _, operation := range operations {
+		if operation.Status == "completed" && (operation.TicketID == "" || operation.AuditEventID == "") {
+			return nil, fmt.Errorf("completed Space operation is missing its owner receipt")
+		}
+	}
+	// Never hand back a nil slice. Go marshals one as `null`, which reaches the
+	// browser as a value a caller must special-case, and the difference between
+	// "no operations" and "we could not tell" is the whole point of this
+	// surface. The repository is careful about this too; the promise belongs
+	// here, where the contract is made.
+	if operations == nil {
+		operations = []SpaceOperationReceipt{}
+	}
+	if authority == nil {
+		authority = []SpaceAuthorityEvent{}
+	}
+	return &SpaceActivityEvidence{Operations: operations, Authority: authority}, nil
+}
+
 func (s *Service) GetTicketOperation(ctx context.Context, orgID, actorUserID, idempotencyKey string) (*TicketOperationReceipt, error) {
 	orgID = strings.TrimSpace(orgID)
 	actorUserID = strings.TrimSpace(actorUserID)

@@ -2,6 +2,7 @@
 
 import { createRouter, memoryHistory } from '@solidjs/router'
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatStreamHandlers } from '@/shared/api/chat-client'
 import type { RunEventHandlers } from '@/shared/api/run-console-client'
@@ -19,6 +20,7 @@ const {
   mockGetRun,
   mockListRuns,
   mockListSystemRuns,
+  mockGetRunWatchStatus,
 } = vi.hoisted(() => ({
   mockStreamChat: vi.fn(),
   mockStreamRunEvents: vi.fn(),
@@ -27,6 +29,7 @@ const {
   mockGetRun: vi.fn(),
   mockListRuns: vi.fn(),
   mockListSystemRuns: vi.fn(),
+  mockGetRunWatchStatus: vi.fn(),
 }))
 
 vi.mock('@/shared/api/chat-client', async (importOriginal) => {
@@ -48,6 +51,9 @@ vi.mock('@/shared/api/runs-client', async (importOriginal) => {
     getRun: mockGetRun,
     listRuns: mockListRuns,
     listSystemRuns: mockListSystemRuns,
+    getRunWatchStatus: mockGetRunWatchStatus,
+    watchRun: vi.fn(async () => undefined),
+    unwatchRun: vi.fn(async () => undefined),
   }
 })
 
@@ -89,6 +95,9 @@ async function runToCompletion(detail: RunDetail) {
   mockGetRun.mockResolvedValue(detail)
 
   fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Book a shipment' } })
+  // Solid 2 batches the goal-signal write; runTask() would otherwise see an
+  // empty goal and return before starting the run-event stream.
+  flush()
   fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
   await waitFor(() => expect(handlers).toBeDefined())
   handlers!.onDone?.()
@@ -103,6 +112,7 @@ beforeEach(() => {
   mockGetRun.mockReset().mockResolvedValue(null)
   mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
   mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+  mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
 })
 
 describe('run console privacy provenance line', () => {

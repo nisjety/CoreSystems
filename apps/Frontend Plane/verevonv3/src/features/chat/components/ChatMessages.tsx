@@ -4,9 +4,11 @@ import {
 } from '@/shared/api/orchestration-client'
 import {
   AlertCircle,
+  ArrowRight,
   Brain,
   Check,
   ChevronLeft,
+  Pin,
   ChevronRight,
   Copy,
   Download,
@@ -38,12 +40,14 @@ import {
   parseUnifiedDiff,
   toolPresentation,
   type AnswerState,
+  type ConversationNode,
   type ConversationNodeContext,
   type DiffResult,
   type PlanApprovalStatus,
   type ToolIntent,
 } from '@/shared/chat-nodes'
 import type { AutonomyRung, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import {
   For,
@@ -97,6 +101,15 @@ import { useI18n } from '@/shared/i18n'
 export function MessageBlock(props: {
   copied: boolean
   message: ChatTurn
+  /**
+   * Message pinning. Absent when the surface does not offer it (a foreign-origin
+   * or read-only thread), which is what hides the control entirely rather than
+   * showing a dead one.
+   */
+  pinned?: boolean
+  /** The thread already holds the maximum number of pins. */
+  pinDisabled?: boolean
+  onTogglePin?: () => void
   onBranch: () => void
   onCopy: () => void
   onEdit: (text: string) => void
@@ -151,9 +164,16 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
     kind: 'grounding',
     render: (node) => <GroundingInlineSummary grounding={node.grounding} />,
   },
-  'low-confidence': {
-    kind: 'low-confidence',
-    render: (node) => <LowConfidenceNotice confidence={node.confidence} />,
+  confidence: {
+    kind: 'confidence',
+    render: (node) => (
+      <ConfidenceNotice
+        confidence={node.confidence}
+        hasEvidence={node.hasEvidence}
+        low={node.low}
+        verification={node.verification}
+      />
+    ),
   },
   'memory-recall': {
     kind: 'memory-recall',
@@ -282,6 +302,15 @@ function AnswerRegion(props: {
 export function AssistantMessage(props: {
   copied: boolean
   message: ChatTurn
+  /**
+   * Message pinning. Absent when the surface does not offer it (a foreign-origin
+   * or read-only thread), which is what hides the control entirely rather than
+   * showing a dead one.
+   */
+  pinned?: boolean
+  /** The thread already holds the maximum number of pins. */
+  pinDisabled?: boolean
+  onTogglePin?: () => void
   onBranch: () => void
   onCopy: () => void
   onFeedback: (rating: 'positive' | 'negative', note?: string) => Promise<boolean>
@@ -362,7 +391,10 @@ export function AssistantMessage(props: {
   })
 
   return (
-    <article class="verevon-chat-message verevon-chat-message--assistant">
+    // `tabindex=-1`: focusable for the arrow-key walk in ChatPage, but never
+    // in the Tab sequence, which still runs answer -> actions -> next message
+    // through DOM order (audit item 26).
+    <article class="verevon-chat-message verevon-chat-message--assistant" tabindex={-1}>
       <div class="verevon-chat-message__avatar">
         <span class="verevon-chat-message__logo" aria-hidden="true" />
       </div>
@@ -383,6 +415,27 @@ export function AssistantMessage(props: {
         </For>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
+            <Show when={props.pinned}>
+              {/* Not only a changed action label: a pin steers every later
+                  turn, so it has to be visible while reading rather than
+                  discoverable by hovering. */}
+              <span class="verevon-chat-message-pinned">
+                <Pin size={11} />
+                {i18n.tr('Festet i konteksten', 'Pinned into the context')}
+              </span>
+            </Show>
+            <Show when={props.onTogglePin}>
+              <MessageAction
+                label={props.pinned
+                  ? i18n.tr('Løsne fra konteksten', 'Unpin from the context')
+                  : props.pinDisabled
+                    ? i18n.tr('Maks antall festede meldinger', 'Pin limit reached')
+                    : i18n.tr('Fest i konteksten', 'Pin into the context')}
+                onClick={() => props.onTogglePin?.()}
+              >
+                <Pin size={14} />
+              </MessageAction>
+            </Show>
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
@@ -408,12 +461,12 @@ export function AssistantMessage(props: {
             </MessageAction>
             <Show when={props.version}>
               {(version) => (
-                <div class="verevon-chat-version-switcher" role="group" aria-label="Answer version">
+                <div class="verevon-chat-version-switcher" role="group" aria-label={i18n.tr('Svarversjon', 'Answer version')}>
                   <button
                     type="button"
                     class="verevon-chat-version-switcher__arrow"
                     disabled={version().current <= 1}
-                    aria-label="Previous version"
+                    aria-label={i18n.tr('Forrige versjon', 'Previous version')}
                     onClick={() => props.onSelectVersion?.(version().current - 2)}
                   >
                     <ChevronLeft size={14} />
@@ -425,7 +478,7 @@ export function AssistantMessage(props: {
                     type="button"
                     class="verevon-chat-version-switcher__arrow"
                     disabled={version().current >= version().total}
-                    aria-label="Next version"
+                    aria-label={i18n.tr('Neste versjon', 'Next version')}
                     onClick={() => props.onSelectVersion?.(version().current)}
                   >
                     <ChevronRight size={14} />
@@ -441,7 +494,7 @@ export function AssistantMessage(props: {
                     Effekt registrert — kan ikke endres
                   </span>
                   <Show when={props.onRerunAsNewTurn}>
-                    <MessageAction label="Kjør som ny tur" onClick={() => props.onRerunAsNewTurn?.()}>
+                    <MessageAction label={i18n.tr('Kjør som ny tur', 'Run as a new turn')} onClick={() => props.onRerunAsNewTurn?.()}>
                       <RefreshCw size={14} />
                     </MessageAction>
                   </Show>
@@ -511,6 +564,7 @@ export function UserMessage(props: {
   onViewAttachments?: (attachmentId: string) => void
   editLocked?: boolean
 }) {
+  const i18n = useI18n()
   const [editing, setEditing] = createSignal(false)
   const [draft, setDraft] = createSignal('')
 
@@ -534,7 +588,7 @@ export function UserMessage(props: {
   }
 
   return (
-    <article class="verevon-chat-message verevon-chat-message--user">
+    <article class="verevon-chat-message verevon-chat-message--user" tabindex={-1}>
       <div class="verevon-chat-user-meta">
         <span>Meg</span>
         <time>{formatRelative(props.message.createdAt)}</time>
@@ -569,7 +623,7 @@ export function UserMessage(props: {
             />
             <div>
               <button type="button" onClick={() => setEditing(false)}>Avbryt</button>
-              <button type="button" disabled={!draft().trim()} onClick={submitEdit}>Send på nytt</button>
+              <button type="button" disabled={!draft().trim()} onClick={submitEdit}>{i18n.tr('Send på nytt', 'Send again')}</button>
             </div>
           </div>
         )}
@@ -735,7 +789,25 @@ export function MarkdownBlockView(props: { block: MarkdownBlock; citations?: rea
       <Match when={props.block.kind === 'paragraph'}>
         <p>{parseInline((props.block as Extract<MarkdownBlock, { kind: 'paragraph' }>).text, props.citations)}</p>
       </Match>
+      <Match when={props.block.kind === 'details'}>
+        <MarkdownDetails block={props.block as Extract<MarkdownBlock, { kind: 'details' }>} citations={props.citations} />
+      </Match>
     </Switch>
+  )
+}
+
+/** Model-authored `<details>`: a real collapsible whose body is parsed
+ * markdown (never injected HTML), instead of escaped tags around the text. */
+function MarkdownDetails(props: { block: Extract<MarkdownBlock, { kind: 'details' }>; citations?: readonly Citation[] }) {
+  return (
+    <details class="verevon-chat-details">
+      <summary>{parseInline(props.block.summary, props.citations)}</summary>
+      <div class="verevon-chat-details__body">
+        <For each={props.block.blocks}>
+          {(block) => <MarkdownBlockView block={block} citations={props.citations} />}
+        </For>
+      </div>
+    </details>
   )
 }
 
@@ -847,6 +919,7 @@ export function ReasoningTrace(props: { text: string; streaming: boolean }) {
 }
 
 export function ReasoningPopover(props: { message: ChatTurn }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const [tab, setTab] = createSignal('general')
   let ref!: HTMLDivElement
@@ -892,16 +965,19 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
   return (
     <Show when={hasMetrics()}>
       <div ref={ref} class="verevon-chat-reasoning-popover">
+        {/* The trigger used to read "Claude Sonnet · 5 tokens". UX spec finding
+            7: raw model labels and per-turn tokens belong in details or Trace,
+            not in the reading flow (audit item 20). The panel below already
+            lists Modell, Input, Output, tid, Sikkerhet and Kostnad. */}
         <button type="button" aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
           <Sparkles size={12} />
-          <Show when={model()}><span>{prettyModel(model() ?? '')}</span></Show>
-          <Show when={props.message.outputTokens}><em>{props.message.outputTokens} tokens</em></Show>
+          <span>{i18n.tr('Detaljer', 'Details')}</span>
         </button>
         <Show when={open()}>
           <div class="verevon-chat-reasoning-popover__panel">
             <div class="verevon-chat-reasoning-popover__head">
               <strong>Reasoning</strong>
-              <button type="button" aria-label="Lukk" onClick={() => setOpen(false)}>
+              <button type="button" aria-label={i18n.tr('Lukk', 'Close')} onClick={() => setOpen(false)}>
                 <X size={14} />
               </button>
             </div>
@@ -943,7 +1019,7 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
                   <Show when={props.message.inputTokens != null}><MetricRow label="Input" value={`${props.message.inputTokens} tokens`} /></Show>
                   <Show when={props.message.outputTokens != null}><MetricRow label="Output" value={`${props.message.outputTokens} tokens`} /></Show>
                   <Show when={props.message.latencyMs != null}><MetricRow label="Total tid" value={formatLatency(props.message.latencyMs ?? 0)} /></Show>
-                  <Show when={props.message.confidence != null}><MetricRow label="Sikkerhet" value={`${Math.round((props.message.confidence ?? 0) * 100)}%`} /></Show>
+                  <Show when={props.message.confidence != null}><MetricRow label={i18n.tr('Sikkerhet', 'Confidence')} value={`${Math.round((props.message.confidence ?? 0) * 100)}%`} /></Show>
                   <Show when={props.message.costUsd != null}><MetricRow label="Kostnad" value={`$${(props.message.costUsd ?? 0).toFixed(4)}`} /></Show>
                 </dl>
               </Match>
@@ -1036,13 +1112,16 @@ export function MessageMetricsBadge(props: { message: ChatTurn }) {
  * `mcp__…__execute_query` cards; the full detail still lives in the Steps tab.
  */
 export function StepsPill(props: { calls: ChatToolCall[]; onViewSteps: () => void }) {
+  const i18n = useI18n()
   const total = () => props.calls.length
   const failed = () => props.calls.filter((call) => Boolean(call.error) || call.status === 'error').length
   const running = () => props.calls.some((call) => !call.status || call.status === 'running')
   const label = () => {
-    if (running()) return `Bruker verktøy … (${total()})`
-    const plural = total() === 1 ? 'steg' : 'steg'
-    return `${total()} ${plural}`
+    if (running()) return i18n.tr(`Bruker verktøy … (${total()})`, `Using tools … (${total()})`)
+    // Norwegian has one form for both counts, which is why this used to read
+    // `'steg' : 'steg'`; English needs the plural.
+    const unit = i18n.tr('steg', total() === 1 ? 'step' : 'steps')
+    return `${total()} ${unit}`
   }
 
   return (
@@ -1050,7 +1129,7 @@ export function StepsPill(props: { calls: ChatToolCall[]; onViewSteps: () => voi
       <Wrench size={13} />
       <span>{label()}</span>
       <Show when={failed() > 0}>
-        <em class="verevon-chat-steps-pill__failed">{failed()} feilet</em>
+        <em class="verevon-chat-steps-pill__failed">{i18n.tr(`${failed()} feilet`, `${failed()} failed`)}</em>
       </Show>
       <ChevronRight size={13} />
     </button>
@@ -1065,8 +1144,9 @@ export function StepsPill(props: { calls: ChatToolCall[]; onViewSteps: () => voi
  * there, `onSelectFollowUp` here, both ultimately wired to `setInput`).
  */
 export function FollowUpChips(props: { suggestions: string[]; onSelect?: (text: string) => void }) {
+  const i18n = useI18n()
   return (
-    <div class="verevon-chat-followups" role="group" aria-label="Forslag til oppfølgingsspørsmål">
+    <div class="verevon-chat-followups" role="group" aria-label={i18n.tr('Forslag til oppfølgingsspørsmål', 'Suggested follow-up questions')}>
       <For each={props.suggestions}>
         {(suggestion) => (
           <button
@@ -1086,15 +1166,19 @@ export function ApprovalRequests(props: {
   approvals: Approval[]
   onDecide: (approvalId: string, decision: ApprovalDecision) => void
 }) {
+  const i18n = useI18n()
   return (
-    <div class="verevon-chat-approvals" role="group" aria-label="Godkjenninger">
+    <div class="verevon-chat-approvals" role="group" aria-label={i18n.tr('Godkjenninger', 'Approvals')}>
       <For each={props.approvals}>
         {(approval) => (
           <div class="verevon-chat-approval">
             <div class="verevon-chat-approval__head">
-              <span class="verevon-chat-approval__badge">Godkjenning</span>
+              <span class="verevon-chat-approval__badge">{i18n.tr('Godkjenning', 'Approval')}</span>
               <span class="verevon-chat-approval__kind">
-                {approval.kind ?? 'Agenten venter på godkjenning før neste steg'}
+                {approval.kind ?? i18n.tr(
+                  'Agenten venter på godkjenning før neste steg',
+                  'The agent is waiting for approval before the next step',
+                )}
               </span>
             </div>
             <Show when={approval.detail}>
@@ -1213,6 +1297,7 @@ function ToolIntentIcon(props: { intent: ToolIntent }) {
  * the payload is the evidence and reshaping it would hide what the model saw.
  */
 export function ToolCallCard(props: { call: ChatToolCall }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const failed = () =>
     Boolean(props.call.error) || props.call.status === 'error'
@@ -1249,7 +1334,7 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
               see it, which matters for any answer built on this. */}
           <em
             class="verevon-chat-tool-call__truncated"
-            title="Resultatet ble avkortet"
+            title={i18n.tr('Resultatet ble avkortet', 'The result was truncated')}
           >
             avkortet
           </em>
@@ -1294,6 +1379,7 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
  * discard mid-run input with no trace at all.
  */
 export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
+  const i18n = useI18n()
   const label = (entry: QueuedInput) => {
     if (entry.state === 'delivered') return 'levert til agenten'
     if (entry.state === 'refused') return 'ikke levert'
@@ -1301,7 +1387,7 @@ export function QueuedInputStrip(props: { entries: QueuedInput[] }) {
   }
   return (
     <Show when={props.entries.length > 0}>
-      <ul class="verevon-chat-queued" aria-label="Meldinger sendt underveis">
+      <ul class="verevon-chat-queued" aria-label={i18n.tr('Meldinger sendt underveis', 'Messages sent mid-run')}>
         <For each={props.entries}>
           {(entry) => (
             <li class="verevon-chat-queued-item" data-state={entry.state}>
@@ -1342,6 +1428,7 @@ export function PlanApprovalControl(props: {
   error?: string
   onApprove: (rung: AutonomyRung, justification: string) => void
 }) {
+  const i18n = useI18n()
   const [rung, setRung] = createSignal<AutonomyRung>('workspace_write')
   const [reason, setReason] = createSignal('')
   const tooShort = () => reason().trim().length < MIN_PLAN_JUSTIFICATION_CHARS
@@ -1355,12 +1442,12 @@ export function PlanApprovalControl(props: {
         </p>
       }
     >
-      <section class="verevon-chat-plan" aria-label="Godkjenn planen">
+      <section class="verevon-chat-plan" aria-label={i18n.tr('Godkjenn planen', 'Approve the plan')}>
         <p class="verevon-chat-plan__lead">
           Dette var en plan – ingenting er utført. Velg hvor mye agenten får gjøre, og skriv
           hvorfor.
         </p>
-        <div class="verevon-chat-plan__rungs" role="radiogroup" aria-label="Fullmakt">
+        <div class="verevon-chat-plan__rungs" role="radiogroup" aria-label={i18n.tr('Fullmakt', 'Authority')}>
           <For each={GRANTABLE_RUNGS}>
             {(option) => (
               <button
@@ -1379,7 +1466,10 @@ export function PlanApprovalControl(props: {
         <textarea
           class="verevon-chat-plan__reason"
           rows={2}
-          placeholder="Hvorfor trenger agenten denne fullmakten?"
+          placeholder={i18n.tr(
+            'Hvorfor trenger agenten denne fullmakten?',
+            'Why does the agent need this authority?',
+          )}
           value={reason()}
           onInput={(event) => setReason(event.currentTarget.value)}
         />
@@ -1478,6 +1568,7 @@ export function AttachmentItem(props: {
   tone: 'assistant' | 'user'
   onOpen?: (attachmentId: string) => void
 }) {
+  const i18n = useI18n()
   const [failed, setFailed] = createSignal(false)
   const previewUrl = () => props.attachment.previewUrl || props.attachment.url
   const isImage = () => Boolean(previewUrl()) && props.attachment.type.startsWith('image/') && !failed()
@@ -1500,7 +1591,7 @@ export function AttachmentItem(props: {
           tabindex={interaction() ? 0 : undefined}
           onClick={open}
           onKeyDown={handleKeyDown}
-          title={interaction() ? 'Åpne i arbeidsflate' : undefined}
+          title={interaction() ? i18n.tr('Åpne i arbeidsflate', 'Open in the workspace') : undefined}
         >
           {props.attachment.name}
         </span>
@@ -1513,7 +1604,7 @@ export function AttachmentItem(props: {
           tabindex={interaction() ? 0 : undefined}
           onClick={open}
           onKeyDown={handleKeyDown}
-          title={interaction() ? 'Åpne i arbeidsflate' : undefined}
+          title={interaction() ? i18n.tr('Åpne i arbeidsflate', 'Open in the workspace') : undefined}
         >
           <img src={url()} alt={props.attachment.name} onError={() => setFailed(true)} />
         </span>
@@ -1523,6 +1614,7 @@ export function AttachmentItem(props: {
 }
 
 export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[] }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-image-previews">
       <For each={props.previews}>
@@ -1541,16 +1633,16 @@ export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[
                   href={preview.src}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label={`Open ${preview.title}`}
-                  title="Open image"
+                  aria-label={i18n.tr(`Åpne ${preview.title}`, `Open ${preview.title}`)}
+                  title={i18n.tr('Åpne bildet', 'Open image')}
                 >
                   <ExternalLink size={14} />
                 </a>
                 <a
                   href={preview.src}
                   download={preview.downloadName}
-                  aria-label={`Download ${preview.title}`}
-                  title="Download image"
+                  aria-label={i18n.tr(`Last ned ${preview.title}`, `Download ${preview.title}`)}
+                  title={i18n.tr('Last ned bildet', 'Download image')}
                 >
                   <Download size={14} />
                 </a>
@@ -1561,7 +1653,7 @@ export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[
               href={preview.src}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label={`Open ${preview.title}`}
+              aria-label={i18n.tr(`Åpne ${preview.title}`, `Open ${preview.title}`)}
             >
               <img src={preview.src} alt={preview.title} loading="lazy" />
             </a>
@@ -1583,6 +1675,7 @@ export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[
  * open-in-tab affordance survives only for real http(s) URLs, where it works.
  */
 export function GeneratedFiles(props: { files: GeneratedFile[] }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-generated-files">
       <For each={props.files}>
@@ -1591,7 +1684,7 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
           const remote = () => /^https?:\/\//i.test(file.url)
           return (
             <span class="verevon-chat-generated-file">
-              <a href={file.url} download={file.name} aria-label={`Last ned ${file.name}`}>
+              <a href={file.url} download={file.name} aria-label={i18n.tr(`Last ned ${file.name}`, `Download ${file.name}`)}>
                 <Paperclip size={12} />
                 {file.name}
                 <em>{friendlyMimeLabel(file.mime)}</em>
@@ -1604,7 +1697,7 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
                   href={file.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label={`Åpne ${file.name}`}
+                  aria-label={i18n.tr(`Åpne ${file.name}`, `Open ${file.name}`)}
                 >
                   <ExternalLink size={12} />
                 </a>
@@ -1618,20 +1711,86 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
 }
 
 /**
- * Visible, inline caveat for an answer scored below
- * `LOW_CONFIDENCE_ANSWER_THRESHOLD` (see chat-types.ts for the threshold
- * rationale). Rendered directly on the message bubble — unlike the
+ * The answer's confidence, inline on the message bubble — unlike the
  * `ReasoningPopover`'s "Sikkerhet" metric, this does not require the user to
- * open anything to see it. Independent of `message.grounding`: an answer can
- * be low-confidence with no grounding object at all (an ungrounded guess),
- * which is exactly the case this notice exists to catch.
+ * open anything to see it.
+ *
+ * Below `LOW_CONFIDENCE_ANSWER_THRESHOLD` (see chat-types.ts for the threshold
+ * rationale) it is a caveat, worded to point only at a verification path that
+ * exists. At or above it, the same number is still shown, quietly: while only
+ * the caveat rendered, the score appeared on one answer and vanished on the
+ * next, which reads as a missing signal rather than a good one, and left the
+ * user unable to tell a confident answer from an unscored one without opening
+ * Detaljer.
+ *
+ * Independent of `message.grounding`: an answer can be low-confidence with no
+ * grounding object at all (an ungrounded guess), which is exactly the case the
+ * caveat exists to catch.
  */
-export function LowConfidenceNotice(props: { confidence: number }) {
+export function ConfidenceNotice(props: {
+  confidence: number
+  hasEvidence: boolean
+  low: boolean
+  verification?: Extract<ConversationNode, { kind: 'confidence' }>['verification']
+}) {
+  const i18n = useI18n()
+  const percent = () => Math.round(props.confidence * 100)
+  // What the backend actually did, when it did anything. Absent is NOT "found
+  // nothing": the pass only runs on low-scoring, unevidenced, short answers, so
+  // saying "we checked" for a turn that was never checked would be a claim the
+  // system cannot back.
+  const checked = () => {
+    const verification = props.verification
+    if (!verification) return undefined
+    const sources = verification.kbCitations + verification.webCitations
+    if (verification.verdict === 'supports') {
+      return i18n.tr(
+        `bekreftet mot ${sources} ${sources === 1 ? 'kilde' : 'kilder'}`,
+        `confirmed against ${sources} ${sources === 1 ? 'source' : 'sources'}`,
+      )
+    }
+    if (verification.verdict === 'contradicts') {
+      return i18n.tr('kildene sier noe annet', 'the sources say otherwise')
+    }
+    return verification.webAllowed
+      ? i18n.tr(
+          'sjekket dokumentene og nettet — fant ingen dekning',
+          'checked the documents and the web — found no backing',
+        )
+      : i18n.tr(
+          'sjekket dokumentene — fant ingen dekning',
+          'checked the documents — found no backing',
+        )
+  }
+  // Point only at a verification path that exists. "Check the sources" on a
+  // turn with no sources sends the reader after nothing, which is how a
+  // caveat trains people to ignore caveats (audit item 23). When the system
+  // has already checked, saying what it found beats telling the reader to go
+  // and repeat the work.
+  const advice = () => checked()
+    ?? (props.hasEvidence
+      ? i18n.tr('sjekk kildene før du stoler på dette', 'check the sources before relying on this')
+      : i18n.tr('ingen kilder ble brukt, så bekreft det selv', 'no sources were used, so verify it yourself'))
   return (
-    <p class="verevon-chat-low-confidence-notice" role="note">
-      <AlertCircle size={12} />
-      Usikkert svar ({Math.round(props.confidence * 100)}% sikkerhet) — sjekk kilder før du stoler på dette.
-    </p>
+    <Show
+      when={props.low}
+      fallback={
+        <p class="verevon-chat-confidence-note" role="note">
+          {i18n.tr(`${percent()}% sikkerhet`, `${percent()}% confidence`)}
+          <Show when={checked()}>
+            {(note) => <span> — {note()}</span>}
+          </Show>
+        </p>
+      }
+    >
+      <p class="verevon-chat-low-confidence-notice" role="note">
+        <AlertCircle size={12} />
+        {i18n.tr(
+          `Usikkert svar (${percent()}% sikkerhet) — ${advice()}.`,
+          `Uncertain answer (${percent()}% confidence) — ${advice()}.`,
+        )}
+      </p>
+    </Show>
   )
 }
 
@@ -1807,6 +1966,7 @@ export function MessageAction(props: { active?: boolean; children: JSX.Element; 
 }
 
 export function MessageMenu(props: { align?: 'start' | 'end'; items: Array<{ label: string; icon: JSX.Element; onClick: () => void }> }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   let ref!: HTMLDivElement
 
@@ -1831,7 +1991,7 @@ export function MessageMenu(props: { align?: 'start' | 'end'; items: Array<{ lab
 
   return (
     <div ref={ref} class="verevon-chat-menu">
-      <button type="button" aria-label="Flere handlinger" aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
+      <button type="button" aria-label={i18n.tr('Flere handlinger', 'More actions')} aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
         <MoreHorizontal size={14} />
       </button>
       <Show when={open()}>
@@ -1952,10 +2112,72 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
 export function EmptyChatState(props: {
   children: JSX.Element
   onSelectPrompt: (prompt: string) => void
+  /**
+   * Open an earlier thread. Distinct from `onSelectPrompt` on purpose:
+   * resuming a conversation is navigation, not a message. Typing a
+   * sentence ABOUT an earlier thread into a new one sends the model a
+   * reference it cannot resolve.
+   */
+  onResumeThread: (threadId: string) => void
   /** Names the actual grounding scope when the session knows it. */
   orgName?: string
+  /** Greets the person by name when the session knows it. First name only. */
+  userName?: string
 }) {
   const i18n = useI18n()
+  // Solid 2 evaluates component bodies untracked. Capture the prop through a
+  // memo before handing it to <Show>, instead of reading the reactive prop
+  // directly in the component body (STRICT_READ_UNTRACKED).
+  const orgName = createMemo(() => props.orgName?.trim() || null)
+  const scopeDescription = createMemo(() => {
+    const name = orgName()
+    return name
+      ? i18n.tr(
+          `Verevon søker i kunnskapsbasen og systemene til ${name}, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.`,
+          `Verevon searches ${name}'s knowledge base and systems, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.`,
+        )
+      : i18n.tr(
+          'Verevon søker i kildene og systemene dere allerede bruker, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.',
+          'Verevon searches the sources and systems you already use, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.',
+        )
+  })
+
+  /**
+   * A greeting instead of a question. "Hva vil du få gjort?" asked the user to
+   * supply everything, on a surface that already knows who they are and what
+   * it can reach — plan item 17, and the one part of designpixil's
+   * "two sentences and a suggestion" the empty state was missing.
+   *
+   * Time of day is read once per render of an empty thread, not tracked: the
+   * greeting must not change under someone mid-sentence at 11:59.
+   */
+  const greeting = () => {
+    const firstName = props.userName?.trim().split(/\s+/)[0] ?? ''
+    const hour = new Date().getHours()
+    const partOfDay = hour < 10
+      ? i18n.tr('God morgen', 'Good morning')
+      : hour < 17
+        ? i18n.tr('God dag', 'Good afternoon')
+        : i18n.tr('God kveld', 'Good evening')
+    return firstName ? `${partOfDay}, ${firstName}` : partOfDay
+  }
+
+  /**
+   * The most recent thread, when there is one worth resuming. Read once on
+   * mount rather than reactively: this is an empty-thread surface, so the
+   * history behind it cannot change while it is on screen, and a signal here
+   * would re-render the greeting for no reason.
+   */
+  const resumeTarget = () => {
+    const recent = readChatThreadHistory()
+      .filter((item) => item.title.trim() && item.threadId.trim())
+      .sort((a, b) => (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))[0]
+    if (!recent) return null
+    // A title long enough to wrap would break the one-line affordance, and a
+    // truncated one reads as broken. Skip it rather than mangle it.
+    return recent.title.length <= 60 ? recent : null
+  }
+
   const starterPrompts = () => [
     {
       description: i18n.tr('Trekk ut beslutninger, risiko og neste steg.', 'Extract decisions, risks, and next steps.'),
@@ -1985,18 +2207,38 @@ export function EmptyChatState(props: {
             <span class="verevon-chat-empty__mark"><span /></span>
             <span>Verevon</span>
           </div>
-          <h1>{i18n.tr('Hva vil du få gjort?', 'What would you like to get done?')}</h1>
-          <p>
-            <Show
-              when={props.orgName?.trim()}
-              fallback={i18n.tr('Verevon søker i kildene og systemene dere allerede bruker, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.', 'Verevon searches the sources and systems you already use, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.')}
-            >
-              {(orgName) => i18n.tr(
-                `Verevon søker i kunnskapsbasen og systemene til ${orgName()}, viser hvor svaret kommer fra, og lar deg godkjenne før noe sendes. Prøv et eksempel under, eller still et konkret spørsmål.`,
-                `Verevon searches ${orgName()}'s knowledge base and systems, shows where the answer comes from, and lets you approve before anything is sent. Try an example below, or ask something specific.`,
-              )}
-            </Show>
-          </p>
+          <h1>{greeting()}</h1>
+          <p>{scopeDescription()}</p>
+          {/* The suggested first move. Plan item 17 / designpixil's "two
+              sentences and a suggestion": the scope line above says what
+              Verevon can reach, this says what to do with it right now.
+              Sourced from real state — the most recent thread when there is
+              one — because a suggestion the product invented is just another
+              generic prompt, and there are three of those below already.
+
+              It OPENS that thread. It used to type a prompt naming the
+              thread's title into the new conversation instead, so the model
+              was asked to continue a conversation it had never been given —
+              and answered, correctly, that it did not have it. The
+              affordance promised continuity the wire never carried.
+              `selectChatThread` fires the same event the sidebar's thread
+              rows do, so this reuses the one working resume path rather than
+              adding a second. */}
+          <Show when={resumeTarget()}>
+            {(target) => (
+              <button
+                type="button"
+                class="verevon-chat-empty__resume"
+                onClick={() => props.onResumeThread(target().threadId)}
+              >
+                <ArrowRight size={14} aria-hidden="true" />
+                <span>
+                  {i18n.tr('Fortsett der du slapp', 'Pick up where you left off')}
+                  <small>{target().title}</small>
+                </span>
+              </button>
+            )}
+          </Show>
         </div>
         <div class="verevon-chat-empty__composer">{props.children}</div>
         <div class="verevon-chat-empty__prompts">

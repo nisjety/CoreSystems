@@ -1,0 +1,830 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>308</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Better Auth error: %s (code: %s)&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>34</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>318</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Better Auth error: %s (code: %s)&quot;</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>34</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>514</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Better Auth server unreachable: %w&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>36</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>519</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Better Auth health check failed: HTTP %d&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>42</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go</file>
+  <line>53</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Control Session Core bearer must not include an authorization scheme&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>70</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go</file>
+  <line>88</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Session Core run authority TLS CA is invalid&quot;</highlighted_element>
+  <language>go</language>
+  <offset>26</offset>
+  <length>46</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go</file>
+  <line>117</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Session Core run action authority client is not configured&quot;</highlighted_element>
+  <language>go</language>
+  <offset>49</offset>
+  <length>60</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go</file>
+  <line>139</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Session Core scheduled step authority client is not configured&quot;</highlighted_element>
+  <language>go</language>
+  <offset>53</offset>
+  <length>64</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go</file>
+  <line>161</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Session Core did not resolve the requested scheduled step authority&quot;</highlighted_element>
+  <language>go</language>
+  <offset>53</offset>
+  <length>69</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go</file>
+  <line>178</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Session Core did not resolve the requested run authority&quot;</highlighted_element>
+  <language>go</language>
+  <offset>49</offset>
+  <length>58</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go</file>
+  <line>181</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/session_run_action_authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Session Core run action authority revision is out of range&quot;</highlighted_element>
+  <language>go</language>
+  <offset>49</offset>
+  <length>60</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/transport_security.go</file>
+  <line>64</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/transport_security.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;User Core gRPC TLS certificate and private key are invalid or mismatched&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>74</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/authority.go</file>
+  <line>106</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space registration identity is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>41</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/authority.go</file>
+  <line>114</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space lifecycle revision must be positive&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>43</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/authority.go</file>
+  <line>177</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space effect policy %s is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>36</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/authority.go</file>
+  <line>268</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space reference is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>29</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/authority.go</file>
+  <line>271</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space membership exceeds %d subjects&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>38</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/authority.go</file>
+  <line>282</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space member subject id is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/authority.go</file>
+  <line>348</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/authority.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority revisions must be positive&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>44</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>34</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space decision environment reader is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>34</offset>
+  <length>47</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>39</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Control Space decision signing key is not configured&quot;</highlighted_element>
+  <language>go</language>
+  <offset>34</offset>
+  <length>54</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Control Space decision signing key has invalid length&quot;</highlighted_element>
+  <language>go</language>
+  <offset>34</offset>
+  <length>55</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>132</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space decision %s is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>136</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space decision permissions are required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>41</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>146</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space decision expiry must be after issuance&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>46</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>206</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space decision target does not match expected authority&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>57</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>213</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space decision expired&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>24</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/decision.go</file>
+  <line>216</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space decision issued in the future&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/deletion_authorization.go</file>
+  <line>35</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/deletion_authorization.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space deletion org_id is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/deletion_authorization.go</file>
+  <line>43</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/deletion_authorization.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space legal hold %s is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>33</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/deletion_authorization.go</file>
+  <line>55</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/deletion_authorization.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space deletion %s is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/deletion_authorization.go</file>
+  <line>76</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/deletion_authorization.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space deletion receipt does not match request&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>47</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>82</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space privacy policy %s is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>114</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role %q cannot access a personal Space&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>46</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>130</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role %q cannot create a thread&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>38</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>150</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role %q cannot create a shared thread&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>45</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>173</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role %q cannot retrieve in a shared Space&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>49</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>204</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role %q cannot import content&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>225</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role %q cannot request an agent action&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>46</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>17</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space owner is not an active organization member&quot;</highlighted_element>
+  <language>go</language>
+  <offset>44</offset>
+  <length>50</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>110</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space reference is already registered with a different organization, kind, or owner&quot;</highlighted_element>
+  <language>go</language>
+  <offset>26</offset>
+  <length>85</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>128</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space lifecycle revision conflicts with registered authorization state&quot;</highlighted_element>
+  <language>go</language>
+  <offset>26</offset>
+  <length>72</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>172</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>52</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>193</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space deletion request conflicts with immutable intent&quot;</highlighted_element>
+  <language>go</language>
+  <offset>53</offset>
+  <length>56</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>242</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>248</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space deletion policy actor is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>41</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>286</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>292</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space legal hold actor is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>36</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>332</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>335</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space legal hold reference and actor are required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>51</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>385</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>516</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>522</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space, organization and subject are required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>46</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>575</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>647</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>39</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>666</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space is not registered as active&quot;</highlighted_element>
+  <language>go</language>
+  <offset>39</offset>
+  <length>35</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>827</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>890</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>54</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>944</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>54</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>1052</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>54</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>1107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space authority repository unavailable&quot;</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_create_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role %q cannot create a schedule&quot;</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go</file>
+  <line>103</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/schedule_fire_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role %q cannot fire a schedule&quot;</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>38</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_run_decision.go</file>
+  <line>130</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_run_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role cannot run a schedule&quot;</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>34</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_step_decision.go</file>
+  <line>94</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_step_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Session Core scheduled step authority subject is required&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>59</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_step_decision.go</file>
+  <line>170</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/scheduled_step_decision.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Space role cannot run a scheduled step&quot;</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>40</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Auth erasure receipt reported failure&quot;</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>39</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go</file>
+  <line>103</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Auth erasure receipt success must be true&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>43</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go</file>
+  <line>106</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go" />
+  <problem_class id="GoErrorStringFormat" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Error string should not be capitalized or end with punctuation</problem_class>
+  <description>Error string should not be capitalized or end with punctuation mark</description>
+  <highlighted_element>&quot;Auth erasure receipt returned unexpected user&quot;</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>47</length>
+</problem>
+</problems>

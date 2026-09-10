@@ -186,3 +186,47 @@ describe('parseMarkdownBlocks — nested lists', () => {
     expect(blocks.map((block) => block.kind)).toEqual(['list', 'list'])
   })
 })
+
+describe('parseMarkdownBlocks — <details> blocks', () => {
+  // Regression: the shipping-quote answer wrapped its full offer table in
+  // `<details><summary>Se alle tilbud</summary>...</details>`, which rendered
+  // as literal tags around the table because the renderer has no HTML pass-
+  // through. Only the details/summary tags are interpreted; the body stays
+  // ordinary markdown.
+  it('parses a details block with a summary and a markdown body', () => {
+    const blocks = parseMarkdownBlocks([
+      'Billigste er DSV.',
+      '<details>',
+      '<summary>Se alle tilbud</summary>',
+      '',
+      '| Transportør | Pris |',
+      '|---|---|',
+      '| Bring 9300 | 257,83 kr |',
+      '</details>',
+      'Vil du bestille?',
+    ].join('\n'))
+    expect(blocks.map((block) => block.kind)).toEqual(['paragraph', 'details', 'paragraph'])
+    const details = blocks[1]
+    if (details?.kind !== 'details') throw new Error('expected details block')
+    expect(details.summary).toBe('Se alle tilbud')
+    expect(details.blocks.map((block) => block.kind)).toEqual(['table'])
+  })
+
+  it('accepts summary on the opening line and falls back to a default summary', () => {
+    const inline = parseMarkdownBlocks('<details><summary>Mer</summary>Skjult tekst</details>')
+    expect(inline).toHaveLength(1)
+    if (inline[0]?.kind !== 'details') throw new Error('expected details block')
+    expect(inline[0].summary).toBe('Mer')
+    expect(inline[0].blocks).toEqual([{ kind: 'paragraph', text: 'Skjult tekst' }])
+
+    const bare = parseMarkdownBlocks(['<details>', 'Bare innhold', '</details>'].join('\n'))
+    if (bare[0]?.kind !== 'details') throw new Error('expected details block')
+    expect(bare[0].summary).toBe('Detaljer')
+  })
+
+  it('never treats the body as HTML: tags inside stay text', () => {
+    const blocks = parseMarkdownBlocks(['<details>', '<summary>x</summary>', '<script>alert(1)</script>', '</details>'].join('\n'))
+    if (blocks[0]?.kind !== 'details') throw new Error('expected details block')
+    expect(blocks[0].blocks).toEqual([{ kind: 'paragraph', text: '<script>alert(1)</script>' }])
+  })
+})

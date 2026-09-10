@@ -4,6 +4,7 @@ import { createEffect, createSignal } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import type { ChatTab } from './chat-types'
 import { chatSurfaceSpec } from '../lib/chat-surfaces'
+import { useI18n } from '@/shared/i18n'
 
 const CHAT_WORKSPACE_CANVAS_WIDTH_KEY = 'verevon.chat.workspaceCanvasWidth.v1'
 const DEFAULT_CANVAS_WIDTH = 440
@@ -37,6 +38,7 @@ export function ChatWorkspaceCanvas(props: {
   navigation: JSX.Element
   onClose: () => void
 }) {
+  const i18n = useI18n()
   let bodyRef: HTMLDivElement | undefined
   let canvasRef: HTMLElement | undefined
   let stopResize: (() => void) | undefined
@@ -174,7 +176,7 @@ export function ChatWorkspaceCanvas(props: {
       <div
         class="verevon-chat-workspace-canvas__resize-handle"
         role="separator"
-        aria-label="Endre bredde på arbeidsflaten"
+        aria-label={i18n.tr('Endre bredde på arbeidsflaten', 'Resize the workspace')}
         aria-orientation="vertical"
         aria-valuemin={MIN_CANVAS_WIDTH}
         aria-valuemax={maxCanvasWidth()}
@@ -192,7 +194,7 @@ export function ChatWorkspaceCanvas(props: {
         <button
           type="button"
           class="verevon-chat-workspace-canvas__close"
-          aria-label="Lukk arbeidsflate"
+          aria-label={i18n.tr('Lukk arbeidsflate', 'Close the workspace')}
           onClick={closeCanvas}
         >
           <PanelRightClose size={16} />

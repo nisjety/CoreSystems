@@ -164,6 +164,13 @@ type EffectPolicy struct {
 	// recurring effect must be explicitly allowed at *each* fire; a schedule
 	// cannot inherit an old chat/creation entitlement.
 	ScheduleFireEntitled bool `json:"schedule_fire_entitled"`
+	// ThreadReadEntitled admits a current member/recipient of a SHARED Space to
+	// that Space's whole conversation record, not only the threads they
+	// themselves own. That is a disclosure of other people's turns, so it is
+	// its own deny-by-default class and never inherited from
+	// ThreadCreateEntitled: being allowed to speak in a room is not the same
+	// permission as reading what everyone else said in it.
+	ThreadReadEntitled bool `json:"thread_read_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {

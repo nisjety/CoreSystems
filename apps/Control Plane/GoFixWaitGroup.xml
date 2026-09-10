@@ -1,0 +1,15 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>1018</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoFixWaitGroup" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">WaitGroup goroutine pattern can use 'WaitGroup.Go'</problem_class>
+  <hints />
+  <description>Goroutine creation can be simplified using WaitGroup.Go</description>
+  <highlighted_element>go func()</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>9</length>
+</problem>
+</problems>

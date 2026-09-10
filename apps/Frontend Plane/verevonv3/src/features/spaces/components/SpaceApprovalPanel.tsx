@@ -1,0 +1,224 @@
+import { Loader2, ShieldCheck } from '@/shared/icons'
+import { createSignal, For, Show } from 'solid-js'
+
+import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
+import { useI18n } from '@/shared/i18n'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import {
+  describeApproval,
+  readPendingApprovals,
+  settleApproval,
+  type ApprovalOutcome,
+} from '../lib/space-approvals'
+
+/**
+ * The decision a paused run is waiting for, shown where the waiting happened.
+ *
+ * The room already knew a run was `awaiting_approval` — the pulse rail counted
+ * it — but the only place to act was the Agent Run Console, on another page.
+ * Counting something a person must do and then sending them elsewhere to do it
+ * is the "assistant in a side panel" shape `space-defenition.md` argues
+ * against, with the room on the losing side of it.
+ *
+ * # Two verbs, not four
+ *
+ * Every reference product offers some variant of *allow once / allow for this
+ * session / always allow / deny*. Model Plane records one decision for one
+ * approval and has no scope to remember a standing answer, so a persistent
+ * "always allow" here would be a button that quietly does the same thing as
+ * "allow once" while promising more. Approve and Deny are what the mechanism
+ * actually supports, so they are what the room offers.
+ *
+ * # It does not pretend
+ *
+ * A run belongs to the member who started it. Another member can see that a
+ * decision is outstanding and still not be the one who may make it, so a
+ * refusal renders as a sentence about who decides — not as an error, and not
+ * by hiding the card, which would make the room look idle while it waits.
+ */
+export interface SpaceApprovalPanelProps {
+  /** The paused run. */
+  readonly runId: string
+  /** Called once a decision settles, so the room can re-read its projection. */
+  readonly onSettled?: () => void
+}
+
+export function SpaceApprovalPanel(props: SpaceApprovalPanelProps) {
+  const i18n = useI18n()
+  const [reloadKey, setReloadKey] = createSignal(0)
+  const [pending, { refetch }] = createResource(
+    () => `${props.runId}\u0000${reloadKey()}`,
+    async (key) => {
+      const runId = key.split('\u0000')[0] ?? ''
+      return readPendingApprovals(runId)
+    },
+  )
+  const [decidingId, setDecidingId] = createSignal<string | undefined>(undefined)
+  const [outcome, setOutcome] = createSignal<ApprovalOutcome | undefined>(undefined)
+
+  const approvals = () => (pending.error ? [] : pending()?.approvals ?? [])
+  const refused = () => (pending.error ? false : pending()?.refused === true)
+
+  async function decide(approval: Approval, decision: ApprovalDecision) {
+    if (decidingId()) return
+    setDecidingId(approval.id)
+    setOutcome(undefined)
+    try {
+      const settled = await settleApproval({
+        approvalId: approval.id,
+        runId: props.runId,
+        decision,
+      })
+      setOutcome(settled)
+      // Re-read rather than assume: the card leaves only when the server says
+      // it is gone.
+      setReloadKey((value) => value + 1)
+      await refetch().catch(() => undefined)
+      props.onSettled?.()
+    } finally {
+      setDecidingId(undefined)
+    }
+  }
+
+  return (
+    <section class="verevon-room-approval" aria-labelledby={`space-approval-${props.runId}`}>
+      <div class="verevon-room-approval__heading">
+        <span class="verevon-room-approval__icon" aria-hidden="true">
+          <ShieldCheck size={15} />
+        </span>
+        <h4 id={`space-approval-${props.runId}`}>
+          {i18n.tr('Venter på din godkjenning', 'Waiting for your approval')}
+        </h4>
+      </div>
+
+      <Show when={pending.loading}>
+        <p class="verevon-space-inline-status" role="status">
+          {i18n.tr('Henter forespørselen …', 'Loading the request…')}
+        </p>
+      </Show>
+
+      {/* An unreachable Model Plane is not "nothing to approve". */}
+      <Show when={pending.error}>
+        <p class="verevon-space-projection-error" role="alert">
+          {i18n.tr(
+            'Vi fikk ikke hentet hva som venter på godkjenning. Kjøringen står fortsatt på pause.',
+            'We could not load what is waiting for approval. The run is still paused.',
+          )}
+        </p>
+      </Show>
+
+      <Show when={refused()}>
+        <p class="verevon-room-approval__note">
+          {i18n.tr(
+            'Denne kjøringen tilhører et annet medlem, så det er de som avgjør den. Du ser at den venter, men kan ikke svare for dem.',
+            'This run belongs to another member, so it is theirs to decide. You can see that it is waiting, but you cannot answer for them.',
+          )}
+        </p>
+      </Show>
+
+      <Show when={!pending.loading && !pending.error && !refused() && approvals().length === 0}>
+        <p class="verevon-room-approval__note">
+          {i18n.tr(
+            'Ingenting venter på godkjenning lenger.',
+            'Nothing is waiting for approval any more.',
+          )}
+        </p>
+      </Show>
+
+      <ul class="verevon-room-approval__list">
+        <For each={approvals()}>
+          {(approval) => (
+            <li class="verevon-room-approval__item">
+              <p class="verevon-room-approval__detail">{describeApproval(approval, i18n.tr)}</p>
+              <Show when={approval.requestedBy?.trim()}>
+                {(requestedBy) => (
+                  <p class="verevon-room-approval__requester">
+                    {i18n.tr('Bedt om av ', 'Requested by ')}
+                    {requestedBy()}
+                  </p>
+                )}
+              </Show>
+              <div class="verevon-room-approval__actions">
+                <button
+                  type="button"
+                  class="verevon-room-approval__approve"
+                  disabled={decidingId() !== undefined}
+                  onClick={() => void decide(approval, 'approve')}
+                >
+                  <Show
+                    when={decidingId() === approval.id}
+                    fallback={i18n.tr('Godkjenn', 'Approve')}
+                  >
+                    <Loader2 size={14} aria-hidden="true" />
+                    {i18n.tr('Registrerer …', 'Recording…')}
+                  </Show>
+                </button>
+                <button
+                  type="button"
+                  class="verevon-room-approval__deny"
+                  disabled={decidingId() !== undefined}
+                  onClick={() => void decide(approval, 'reject')}
+                >
+                  {i18n.tr('Avslå', 'Deny')}
+                </button>
+              </div>
+              {/* Said once, next to the buttons, because denying stops the run
+                  rather than nudging the agent to try something else. */}
+              <p class="verevon-room-approval__consequence">
+                {i18n.tr(
+                  'Godkjenning lar kjøringen fortsette. Avslag stopper den.',
+                  'Approving lets the run continue. Denying stops it.',
+                )}
+              </p>
+            </li>
+          )}
+        </For>
+      </ul>
+
+      <Show when={outcome()}>
+        {(settled) => (
+          <p
+            class={
+              settled() === 'unconfirmed'
+                ? 'verevon-space-projection-error'
+                : 'verevon-room-approval__note'
+            }
+            role={settled() === 'unconfirmed' ? 'alert' : 'status'}
+          >
+            {outcomeMessage(settled(), i18n.tr)}
+          </p>
+        )}
+      </Show>
+    </section>
+  )
+}
+
+function outcomeMessage(
+  outcome: ApprovalOutcome,
+  tr: (no: string, en: string) => string,
+): string {
+  switch (outcome) {
+    case 'granted':
+      return tr('Godkjent. Kjøringen fortsetter.', 'Approved. The run continues.')
+    case 'denied':
+      return tr('Avslått. Kjøringen er stoppet.', 'Denied. The run has been stopped.')
+    case 'already_decided':
+      return tr(
+        'Denne var allerede avgjort — sannsynligvis av noen andre.',
+        'This one was already decided — most likely by someone else.',
+      )
+    case 'refused':
+      return tr(
+        'Du kan ikke avgjøre denne. Den tilhører medlemmet som startet kjøringen.',
+        'You cannot decide this one. It belongs to the member who started the run.',
+      )
+    case 'unconfirmed':
+    default:
+      // Deliberately does not invite a retry: the decision may have landed, and
+      // deciding twice is worse than waiting to read the real state.
+      return tr(
+        'Vi fikk ikke bekreftet om avgjørelsen ble registrert. Sjekk statusen før du prøver igjen.',
+        'We could not confirm whether the decision was recorded. Check the status before trying again.',
+      )
+  }
+}

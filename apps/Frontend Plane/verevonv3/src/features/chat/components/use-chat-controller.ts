@@ -41,6 +41,7 @@ import {
 import {
   consumePendingChatLaunch,
 } from '@/features/chat/lib/pending-chat-launch'
+import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import {
   bindSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
@@ -155,6 +156,7 @@ import type {
 } from './chat-types'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
+import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
 
 function safeBranchBoundary(turns: readonly ChatTurn[], requestedIndex: number): number {
@@ -251,6 +253,29 @@ export function useChatController() {
    * tree (the first design's fatal flaw) is structurally impossible.
    */
   const [versionState, setVersionState] = createSignal<ExchangeVersionState | null>(null)
+  /**
+   * Messages the user pinned into context for the active thread.
+   *
+   * Read from storage rather than held only in memory so a pin survives a
+   * reload — the whole promise of a pin is that it keeps steering later
+   * turns. Ids only: the server resolves them against the durable thread, so
+   * this list cannot assert content (see `chat-pinned-messages.ts`).
+   */
+  const [pinRevision, setPinRevision] = createSignal(0)
+  const pinnedMessages = createMemo(() => {
+    // Re-read on a thread change and after any toggle. A memo rather than a
+    // signal-plus-effect: storage is the source of truth, so mirroring it
+    // into a second signal would just be state that can disagree.
+    pinRevision()
+    const threadId = state.threadId
+    return threadId ? readPinnedMessages(threadId) : []
+  })
+  const togglePin = (messageId: string) => {
+    const threadId = state.threadId
+    if (!threadId) return
+    togglePinnedMessage(threadId, messageId)
+    setPinRevision((revision) => revision + 1)
+  }
   /** Chat split view: whether the live agent panel is folded to its rail. */
   const [runPanelCollapsed, setRunPanelCollapsed] = createSignal(readChatRunPanelCollapsed())
   const toggleRunPanel = () => {
@@ -1338,9 +1363,15 @@ export function useChatController() {
             browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
             deepResearch: pending.tools?.includes('research'),
             displayAttachments: pending.attachments ?? [],
+            effort: pending.effort,
             generateImage: pending.tools?.includes('image'),
             tools: pending.tools ?? [],
             actions: (pending.actions ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
+            minPrivacyTier: pending.minPrivacyTier,
+            provider: pending.provider,
+            subscriptionConnectionId: pending.subscriptionConnectionId,
+            tone: pending.tone,
+            zdr: pending.zdr,
           })
           const currentThreadId = untrack(() => state.threadId)
           if (pending.supportHandoff && currentThreadId) {
@@ -1546,10 +1577,16 @@ export function useChatController() {
    *
    * Held rather than dropped: the 404 that produces this arrives BEFORE the SPA
    * has processed the stream's terminal event, so re-sending immediately would
-   * just hit the streaming guard again. Flushed by the effect below, as one turn
-   * so two missed messages cannot race two runs against each other.
+   * just hit the streaming guard again. Flushed by the effect below one turn at
+   * a time, so two missed messages cannot race two runs against each other and
+   * each keeps the model/provider route selected when it was submitted.
    */
-  const [deferredSends, setDeferredSends] = createSignal<string[]>([])
+  type DeferredSend = {
+    content: string
+    modelOverride?: string
+    options: SendOptions
+  }
+  const [deferredSends, setDeferredSends] = createSignal<DeferredSend[]>([])
 
   const noteQueuedInput = (id: string, next: QueuedInput['state'], note?: string) => {
     setState((s) => {
@@ -1559,7 +1596,11 @@ export function useChatController() {
     })
   }
 
-  const deliverMidRun = async (content: string) => {
+  const deliverMidRun = async (
+    content: string,
+    modelOverride: string | undefined,
+    options: SendOptions,
+  ) => {
     const requestId = state.requestId
     const id = createId('queued')
     setState((s) => { s.queuedInputs = [...s.queuedInputs, { id, content, state: 'pending' }] })
@@ -1567,7 +1608,7 @@ export function useChatController() {
       // Streaming but no request id yet — the stream is still opening, so there
       // is nothing to deliver to. Deferring is right: the run is about to exist
       // and will take it as an ordinary next turn.
-      setDeferredSends((pending) => [...pending, content])
+      setDeferredSends((pending) => [...pending, { content, modelOverride, options: { ...options } }])
       noteQueuedInput(id, 'pending', 'Venter på at kjøringen starter.')
       return
     }
@@ -1584,7 +1625,7 @@ export function useChatController() {
       return
     }
     if (result.outcome === 'run_ended') {
-      setDeferredSends((pending) => [...pending, content])
+      setDeferredSends((pending) => [...pending, { content, modelOverride, options: { ...options } }])
       noteQueuedInput(id, 'pending', 'Kjøringen ble ferdig – sendes som ny melding.')
       return
     }
@@ -1605,7 +1646,7 @@ export function useChatController() {
     // agent at its next tool-round boundary, where the agent decides whether it
     // redirects the work or follows it (see the Model Plane's `queued_input`).
     if (state.status === 'streaming') {
-      await deliverMidRun(content)
+      await deliverMidRun(content, modelOverride, options)
       return
     }
     // A new turn owns the mid-run strip: whatever the previous run showed there
@@ -1665,6 +1706,8 @@ export function useChatController() {
           createdAt: submittedAt,
           streaming: false,
           model,
+          provider: options.provider,
+          subscriptionConnectionId: options.subscriptionConnectionId,
           tools,
           attachments: displayAttachments,
         }
@@ -1680,6 +1723,8 @@ export function useChatController() {
       planMode: planMode(),
       status: 'waiting',
       model,
+      provider: options.provider,
+      subscriptionConnectionId: options.subscriptionConnectionId,
       tools,
       attachments: [],
     }
@@ -1762,6 +1807,8 @@ export function useChatController() {
         {
           content,
           model,
+          provider: options.provider,
+          subscriptionConnectionId: options.subscriptionConnectionId,
           // A scoped first turn lets Session Core mint the durable thread ID.
           // The local provisional ID remains only a UI correlation key until
           // `onConnected` replaces it; sending it as a thread ID would make
@@ -1782,6 +1829,10 @@ export function useChatController() {
           editResubmit: options.editResubmit,
           // Opt-in only: set just when the user picked a tiered catalog model.
           minPrivacyTier: options.minPrivacyTier,
+          // Read at send time rather than captured earlier: the user may pin
+          // or unpin while composing, and the turn should carry whatever is
+          // pinned when it is actually sent.
+          pinnedMessageIds: pinnedMessages(),
         },
         {
           onUiEvent: (event) => {
@@ -2013,7 +2064,11 @@ export function useChatController() {
             // provider. Only when a model was set (`model` non-empty) — the retry
             // runs with model "" so it can never re-trigger this branch — and
             // never on a user-aborted stream.
-            if (model && !controller.signal.aborted) {
+            if (
+              model &&
+              options.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER &&
+              !controller.signal.aborted
+            ) {
               settled = true
               // An SSE error frame can share a buffered response with trailing
               // frames. End this failed connection before opening the fallback
@@ -2109,6 +2164,8 @@ export function useChatController() {
       generateImage: payload.tools.includes('image'),
       tools: payload.tools,
       actions,
+      provider: payload.provider,
+      subscriptionConnectionId: payload.subscriptionConnectionId,
       zdr: payload.zdr,
       effort: payload.effort,
       tone: payload.tone,
@@ -2263,9 +2320,13 @@ export function useChatController() {
       // this effect, and a queue still holding the same text would send it
       // twice. The send itself is an event-style operation, so keep its
       // internal reactive reads untracked.
-      const content = deferred.join('\n\n')
-      setDeferredSends([])
-      untrack(() => { void sendContent(content) })
+      const next = deferred[0]
+      if (!next) return
+      const remaining = deferred.slice(1)
+      setDeferredSends(remaining)
+      untrack(() => {
+        void sendContent(next.content, next.modelOverride, next.options)
+      })
     },
   )
 
@@ -2417,6 +2478,14 @@ export function useChatController() {
           createdAt: new Date().toISOString(),
           turnId: assistantId,
           turnTitle,
+        })
+      },
+      onVerification: (
+        verification: Parameters<NonNullable<ChatStreamHandlers['onVerification']>>[0],
+      ) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.verification = verification
         })
       },
       onUsage: (usage: Parameters<NonNullable<ChatStreamHandlers['onUsage']>>[0]) => {
@@ -2579,6 +2648,8 @@ export function useChatController() {
       displayAttachments: lastUser.attachments,
       generateImage: lastUser.tools.includes('image'),
       tools: lastUser.tools,
+      provider: lastUser.provider,
+      subscriptionConnectionId: lastUser.subscriptionConnectionId,
       // Regenerating within an already-temporary thread must keep sending
       // ZDR — the thread-level lock, not the (possibly since-toggled)
       // composer state, decides.
@@ -2610,6 +2681,8 @@ export function useChatController() {
       displayAttachments: user.attachments,
       generateImage: user.tools.includes('image'),
       tools: user.tools,
+      provider: user.provider ?? assistant.provider,
+      subscriptionConnectionId: user.subscriptionConnectionId ?? assistant.subscriptionConnectionId,
       zdr: isTemporaryThread(state.threadId),
     })
   }
@@ -2661,6 +2734,8 @@ export function useChatController() {
       displayAttachments: original.attachments,
       generateImage: original.tools.includes('image'),
       tools: original.tools,
+      provider: original.provider,
+      subscriptionConnectionId: original.subscriptionConnectionId,
       // Same thread-level ZDR lock as `regenerateLatest`.
       zdr: isTemporaryThread(state.threadId),
       // The edit happened in the composer and never reached the server as a
@@ -2763,6 +2838,8 @@ export function useChatController() {
     liveRunId,
     runPanelCollapsed,
     toggleRunPanel,
+    pinnedMessages,
+    togglePin,
     title,
     handleScroll,
     scrollToBottom,

@@ -17,19 +17,6 @@ fn sync_job_events_url(integration_core_url: &str, id: &str) -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::sync_job_events_url;
-
-    #[test]
-    fn sync_job_events_url_encodes_the_untrusted_job_identifier() {
-        assert_eq!(
-            sync_job_events_url("http://integration-core:3026", "sync/id"),
-            "http://integration-core:3026/api/v1/sync-jobs/sync%2Fid/events"
-        );
-    }
-}
-
 pub(super) async fn list_sync_jobs(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -61,4 +48,17 @@ pub(super) async fn sync_job_events(
 ) -> Response {
     let url = sync_job_events_url(&state.integration_core_url, &id);
     proxy_sse_for_user(&state, &user, &headers, Method::GET, &url).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_job_events_url;
+
+    #[test]
+    fn sync_job_events_url_encodes_the_untrusted_job_identifier() {
+        assert_eq!(
+            sync_job_events_url("http://integration-core:3026", "sync/id"),
+            "http://integration-core:3026/api/v1/sync-jobs/sync%2Fid/events"
+        );
+    }
 }

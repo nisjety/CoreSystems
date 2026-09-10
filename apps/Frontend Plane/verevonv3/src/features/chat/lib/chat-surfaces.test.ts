@@ -63,11 +63,21 @@ describe('isWorkStep', () => {
 })
 
 describe('claimsFocus versus available', () => {
-  it('offers Work for a bookkeeping-only turn but does not open it', () => {
-    // A plain answer produces about six lifecycle steps and nothing else.
+  it('does not even offer Work for a bookkeeping-only turn', () => {
+    // A plain answer produces about six lifecycle steps and nothing else. The
+    // tab used to be offered on that count alone: measured 2026-09-04, a
+    // one-question thread advertised "Arbeid 4" over connect/compose/model/
+    // usage rows (audit item 27). UX spec section 4: only evidence-backed
+    // destinations appear.
     const state = { ...calm, stepCount: 6 }
-    expect(isChatSurfaceAvailable('steps', state)).toBe(true)
+    expect(isChatSurfaceAvailable('steps', state)).toBe(false)
     expect(chatSurfaceClaimsFocus('steps', state)).toBe(false)
+  })
+
+  it('offers Work once there is work, or a durable run to inspect', () => {
+    expect(isChatSurfaceAvailable('steps', { ...calm, stepCount: 7, toolCallCount: 1 })).toBe(true)
+    expect(isChatSurfaceAvailable('steps', { ...calm, stepCount: 7, workStepCount: 1 })).toBe(true)
+    expect(isChatSurfaceAvailable('steps', { ...calm, hasRun: true })).toBe(true)
   })
 
   it('opens Work on the first real tool call, work step, or durable run', () => {
@@ -106,6 +116,11 @@ describe('ChatPage wiring', () => {
     const page = readFileSync(resolve(process.cwd(), 'src/features/chat/components/ChatPage.tsx'), 'utf8')
     expect(page).toContain('!autoOpenedSurfaces.has(surface) && chatSurfaceClaimsFocus(surface, availability)')
     expect(page).not.toContain('!autoOpenedSurfaces.has(surface) && isChatSurfaceAvailable(surface, availability)')
-    expect(page).toContain('workStepCount: state.taskSteps.filter(isWorkStep).length')
+    // One derivation feeds the stale-tab guard, the auto-open rule, the header
+    // dropdown and the canvas tab strip (audit item 27): four inline copies of
+    // `filter(isWorkStep)` is how they drift apart.
+    expect(page).toContain('const workStepCount = createMemo(() => state.taskSteps.filter(isWorkStep).length)')
+    expect(page).toContain('workStepCount: workStepCount()')
+    expect(page).toContain('workStepCount={workStepCount()}')
   })
 })

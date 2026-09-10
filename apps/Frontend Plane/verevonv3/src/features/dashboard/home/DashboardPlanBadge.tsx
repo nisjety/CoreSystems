@@ -1,16 +1,22 @@
 import { Show } from 'solid-js'
 import { useI18n } from '@/shared/i18n'
 
-export function DashboardPlanBadge(props: { planLabel: string }) {
+export function DashboardPlanBadge(props: { planLabel: string; planTrial?: boolean }) {
   const i18n = useI18n()
   // Upgrade is only offered on Trial. On any paid plan we drop the CTA and tint
   // the plan text with the accent (the same color the Upgrade button used).
-  const isTrial = () => props.planLabel.trim().toLowerCase() === 'trial'
+  // billing-core elevates a trialing org to the `pro` tier ("Expert"), so
+  // the label alone reads as paid; `planTrial` is the billing truth.
+  const isTrial = () => props.planTrial === true || props.planLabel.trim().toLowerCase() === 'trial'
   return (
     <span
       class={['dashboard-home-plan-badge', { 'dashboard-home-plan-badge--paid': !isTrial() }]}
     >
       {localPlanLabel(props.planLabel, i18n)} {i18n.tr('plan', 'Plan')}
+      <Show when={props.planTrial}>
+        <span>·</span>
+        <span>{i18n.tr('prøveperiode', 'free trial')}</span>
+      </Show>
       <Show when={isTrial()}>
         <span>·</span>
         <button type="button">{i18n.tr('Oppgrader', 'Upgrade')}</button>

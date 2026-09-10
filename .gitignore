@@ -60,6 +60,12 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.example.json
+# JetBrains inspection exports — not source, and large (the Control Plane
+# copies were 2.8MB/41K lines). Committed by mistake more than once; glob
+# repo-wide so the same export run under a different plane directory is
+# caught too.
+**/.descriptions.xml
+**/Annotator.xml
 
 # ──────────────────────────────────────────────────────────────────────
 # Secrets and local env

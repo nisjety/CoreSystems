@@ -15,6 +15,12 @@ const MAX_CONTENT_BYTES: usize = 100 * 1024;
 pub struct NormalizedRequest {
     pub content: String,
     pub model: String,
+    /// A provider routing hint selected by the authenticated caller. No
+    /// credential is carried here.
+    pub provider_hint: String,
+    /// Opaque Integration Core subscription reference. This is validated again
+    /// by Integration Core with the caller's verified org/user scope.
+    pub subscription_connection_id: String,
     #[allow(dead_code)]
     pub session_key: Option<String>,
     #[allow(dead_code)]
@@ -111,6 +117,62 @@ pub fn normalize(
         .filter(|m| !m.is_empty())
         .map_or(default_model, str::to_owned);
 
+    let provider_hint = req
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
+    let subscription_connection_id = req
+        .subscription_connection_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
+    let is_codex_subscription = provider_hint.eq_ignore_ascii_case("openai-codex-subscription")
+        || provider_hint.eq_ignore_ascii_case("codex-subscription")
+        || provider_hint.eq_ignore_ascii_case("chatgpt-codex");
+    if is_codex_subscription && subscription_connection_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "subscription_connection_id is required for openai-codex-subscription",
+            })),
+        ));
+    }
+    if !is_codex_subscription && !subscription_connection_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "subscription_connection_id requires provider openai-codex-subscription",
+            })),
+        ));
+    }
+    if is_codex_subscription
+        && (req.zdr
+            || req
+                .structured_output_schema
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            || !req.attachments.is_empty()
+            || req.generate_image
+            || req.browse_web
+            || req.deep_research
+            || req.plan_mode
+            || !req.tools.is_empty()
+            || req
+                .features
+                .iter()
+                .any(|feature| matches!(feature.as_str(), "agentic" | "tools")))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "openai-codex-subscription supports text-only, non-ZDR chat without tools",
+            })),
+        ));
+    }
+
     // Validate model against allowlist — but skip when the model is unspecified
     // (empty): inference-core resolves it to a provider default downstream, so
     // there is nothing to validate against the allowlist yet.
@@ -169,6 +231,8 @@ pub fn normalize(
     Ok(NormalizedRequest {
         content,
         model,
+        provider_hint,
+        subscription_connection_id,
         session_key: req.session_key.clone(),
         thread_id: req.thread_id.clone(),
         space_context: req.space_context.clone(),
@@ -188,10 +252,13 @@ mod tests {
     fn make_request(content: &str, model: Option<&str>) -> InvokeRequest {
         InvokeRequest {
             effort: None,
+            pinned_message_ids: Vec::new(),
             regenerated: false,
             edited_resubmit: false,
             content: content.to_owned(),
             model: model.map(str::to_owned),
+            provider: None,
+            subscription_connection_id: None,
             session_key: None,
             thread_id: None,
             space_context: None,
@@ -200,6 +267,7 @@ mod tests {
             zdr: false,
             min_privacy_tier: None,
             browse_web: false,
+            skill_ids: Vec::new(),
             deep_research: false,
             max_cost_usd: None,
             max_tokens: None,
@@ -255,6 +323,30 @@ mod tests {
         let req = make_request("hello", Some("claude-sonnet-4-20250514"));
         let result = normalize(&req).expect("should succeed");
         assert_eq!(result.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn subscription_provider_requires_a_connection_and_refuses_tools() {
+        let mut req = make_request("hello", None);
+        req.provider = Some("openai-codex-subscription".to_owned());
+        assert!(normalize(&req).is_err(), "connection id is required");
+
+        req.subscription_connection_id = Some(" conn_example ".to_owned());
+        let normalized = normalize(&req).expect("text-only subscription request is valid");
+        assert_eq!(normalized.provider_hint, "openai-codex-subscription");
+        assert_eq!(normalized.subscription_connection_id, "conn_example");
+
+        // `tools` is `Vec<ToolSpec>` (http_routes.rs); this literal had drifted
+        // to `Vec<String>` and stopped the whole lib test target compiling.
+        req.tools = vec![crate::http_routes::ToolSpec {
+            name: "web_search".to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        }];
+        assert!(
+            normalize(&req).is_err(),
+            "subscription provider must not run tools"
+        );
     }
 
     #[test]

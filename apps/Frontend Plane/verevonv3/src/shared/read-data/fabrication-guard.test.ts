@@ -14,11 +14,12 @@ let eslint: ESLint
 
 beforeAll(async () => {
   eslint = new ESLint()
-  // Warm the ESLint flat-config + TS parser once. Cold-start is ~8s, which can
-  // exceed the default 5s test timeout when this file runs in isolation; warming
-  // here (with a generous hook timeout) keeps each assertion fast and stable.
+  // Warm the ESLint flat-config + TS parser once. Cold-start is ~8s alone but
+  // has been measured at ~69s when the whole suite runs in parallel and this
+  // worker competes for CPU — so the hook budget is sized for the full run,
+  // not the isolated one. Warming here keeps each assertion fast and stable.
   await eslint.lintText('export const warmup = 1\n', { filePath: 'src/__a8_warmup__.ts' })
-}, 60_000)
+}, 180_000)
 
 async function syntaxGuardMessages(code: string, relativeFilePath: string): Promise<string[]> {
   const [result] = await eslint.lintText(code, { filePath: relativeFilePath })

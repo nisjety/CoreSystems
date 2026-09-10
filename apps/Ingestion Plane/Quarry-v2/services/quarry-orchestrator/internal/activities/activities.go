@@ -195,6 +195,16 @@ type RunPageResult struct {
 	ContentType string         `json:"content_type,omitempty"`
 	Title       string         `json:"title,omitempty"`
 	Branding    map[string]any `json:"branding,omitempty"`
+	// Post-transform extraction (quarry-edge InternalRunPageResult, Rust).
+	// Empty TitleSource means the runtime predates the extraction or the
+	// response was not HTML; the workflow then emits no page_extracted.
+	DisplayTitle string `json:"display_title,omitempty"`
+	TitleSource  string `json:"title_source,omitempty"`
+	Excerpt      string `json:"excerpt,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+	WordCount    uint64 `json:"word_count,omitempty"`
+	Lang         string `json:"lang,omitempty"`
+	Driver       string `json:"driver,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.

@@ -1,5 +1,6 @@
 mod connect_sessions;
 pub(crate) mod connections;
+pub(crate) mod model_subscriptions;
 mod profile;
 pub(crate) mod providers;
 mod shared;
@@ -14,6 +15,20 @@ use crate::{config::AppState, middleware::require_session};
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
+        // Model subscriptions. These are separate from source integrations:
+        // they establish a credential-free browser device flow for Model Plane.
+        .route(
+            "/api/v1/model-subscriptions/openai-codex/connect",
+            post(model_subscriptions::start_openai_codex_subscription),
+        )
+        .route(
+            "/api/v1/model-subscriptions/openai-codex/connect/{connection_id}/{login_id}",
+            get(model_subscriptions::openai_codex_subscription_status),
+        )
+        .route(
+            "/api/v1/model-subscriptions/openai-codex/connections/{connection_id}",
+            delete(model_subscriptions::disconnect_openai_codex_subscription),
+        )
         // Providers
         .route(
             "/api/v1/integrations/providers",

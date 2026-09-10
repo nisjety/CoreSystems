@@ -1,0 +1,50 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_security_coverage_test.go</file>
+  <line>156</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_security_coverage_test.go" />
+  <problem_class id="GoMaybeNil" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Interprocedural potential nil dereference</problem_class>
+  <description>&lt;html&gt;Potential nil dereference when passing &lt;code&gt;msg&lt;/code&gt; to &lt;code&gt;retryOrDeadLetter&lt;/code&gt; &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber_security_coverage_test.go:5,570&quot;&gt;Line 138&lt;/a&gt;: &lt;code&gt;msg&lt;/code&gt; is default initialized to &lt;code&gt;nil&lt;/code&gt; &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber_security_coverage_test.go:6,100&quot;&gt;Line 156&lt;/a&gt;: &lt;code&gt;msg&lt;/code&gt; is passed to &lt;code&gt;sub.retryOrDeadLetter&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>msg</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_security_coverage_test.go</file>
+  <line>159</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_security_coverage_test.go" />
+  <problem_class id="GoMaybeNil" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Interprocedural potential nil dereference</problem_class>
+  <description>&lt;html&gt;Potential nil dereference when passing &lt;code&gt;msg&lt;/code&gt; to &lt;code&gt;retryOrDeadLetter&lt;/code&gt; &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber_security_coverage_test.go:5,570&quot;&gt;Line 138&lt;/a&gt;: &lt;code&gt;msg&lt;/code&gt; is default initialized to &lt;code&gt;nil&lt;/code&gt; &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber_security_coverage_test.go:6,280&quot;&gt;Line 159&lt;/a&gt;: &lt;code&gt;msg&lt;/code&gt; is passed to &lt;code&gt;sub.retryOrDeadLetter&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>msg</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_security_coverage_test.go</file>
+  <line>171</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_security_coverage_test.go" />
+  <problem_class id="GoMaybeNil" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Interprocedural potential nil dereference</problem_class>
+  <description>&lt;html&gt;Potential nil dereference when passing &lt;code&gt;msg&lt;/code&gt; to &lt;code&gt;retryOrDeadLetter&lt;/code&gt; &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber_security_coverage_test.go:5,570&quot;&gt;Line 138&lt;/a&gt;: &lt;code&gt;msg&lt;/code&gt; is default initialized to &lt;code&gt;nil&lt;/code&gt; &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/audit-core/internal/subscriber/subscriber_security_coverage_test.go:6,718&quot;&gt;Line 171&lt;/a&gt;: &lt;code&gt;msg&lt;/code&gt; is passed to &lt;code&gt;sub.retryOrDeadLetter&lt;/code&gt;&lt;/html&gt;</description>
+  <highlighted_element>msg</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>294</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GoMaybeNil" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Interprocedural potential nil dereference</problem_class>
+  <description>&lt;html&gt;Potential nil dereference &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/user-core/internal/users/service.go:7,886&quot;&gt;Line 283&lt;/a&gt;: &lt;code&gt;s.repo.ReassignID(…)&lt;/code&gt; is called &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/user-core/internal/users/service.go:7,859&quot;&gt;Line 283&lt;/a&gt;: &lt;code&gt;reassigned&lt;/code&gt; is set to &lt;code&gt;s.repo.ReassignID(…)&lt;/code&gt; &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/user-core/internal/users/service.go:7,966&quot;&gt;Line 285&lt;/a&gt;: &lt;code&gt;user&lt;/code&gt; is set to &lt;code&gt;reassigned&lt;/code&gt; &lt;br&gt;&lt;a href=&quot;#navigation/C:/Users/ImaFernandesDaCosta/OneDrive - Aquatiq/Dokumenter/CoresSystem/apps/Control Plane/user-core/internal/users/service.go:8,226&quot;&gt;Line 294&lt;/a&gt;: &lt;code&gt;user&lt;/code&gt; is dereferenced&lt;/html&gt;</description>
+  <highlighted_element>user</highlighted_element>
+  <language>go</language>
+  <offset>40</offset>
+  <length>4</length>
+</problem>
+</problems>

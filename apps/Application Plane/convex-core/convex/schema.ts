@@ -795,6 +795,49 @@ export default defineSchema({
   // independently verifies every member before any owner plane receives a
   // shared-effect decision. Superseded snapshots remain for visibility-safe
   // replay/fork decisions; their principal IDs never go to the browser.
+  // Who a NAMED room's people are, as decided by its owners and managers.
+  //
+  // Only for rooms somebody created and populated by hand. The organization
+  // room deliberately has no rows here: its roster is derived from org-core by
+  // `spaceMembershipSync`, on the rule that being in the organization is what
+  // grants a place in its room. Two sources for one room's people would fight,
+  // and the derived one would win every sync.
+  //
+  // This is an INTENT record, not an authority. Control owns membership; this
+  // table is what Application declares to it, and a row here means nothing
+  // until that declaration is accepted.
+  spaceMemberGrants: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    // The person's auth identity, the same subject Control stores in
+    // `space_memberships.subject_id` for a user.
+    externalAuthId: v.string(),
+    // Deliberately narrow: this flow grants participation, not the ability to
+    // hand out more of it. Promoting someone to manage a room is a separate
+    // decision that does not exist yet, and inventing it here would let anyone
+    // who can add a person also create another grantor.
+    role: v.literal("editor"),
+    grantedByExternalAuthId: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_space_ref", ["spaceRef"])
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+
+  // Where a member last caught up with a room (item 4b, "unread per thread").
+  // One row per member per Space: opening the room is reading it, and "new"
+  // means "since you last had it open" — Slack's channel model. Stores a
+  // timestamp against identifiers only, never a thread list and never content,
+  // so it records WHEN someone caught up and nothing about WHAT they read.
+  // Threads live in Model Plane and membership in Control; what a person has
+  // seen is a workspace projection, which is this plane's to own.
+  spaceReadMarkers: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    lastReadAt: v.number(),
+  })
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
+
   spaceRecipientAudiences: defineTable({
     audienceRef: v.string(),
     audienceHash: v.string(),
@@ -938,6 +981,22 @@ export default defineSchema({
   })
     .index("by_conversation", ["conversationId"])
     .index("by_user", ["externalUserId"]),
+
+  /**
+   * Who is in a room right now (see `convex/spacePresence.ts`). Separate from
+   * the dormant `conversationPresence` below, which is keyed per conversation:
+   * a room's presence is a fact about the room, not about one of its threads.
+   * Stores a status and a timestamp against identifiers — never content.
+   */
+  spacePresence: defineTable({
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    externalAuthId: v.string(),
+    status: v.union(v.literal("online"), v.literal("typing"), v.literal("offline")),
+    updatedAt: v.number(),
+  })
+    .index("by_space", ["spaceRef"])
+    .index("by_space_and_subject", ["spaceRef", "externalAuthId"]),
 
   conversationAiActions: defineTable({
     externalOrgId: v.string(),

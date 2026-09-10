@@ -662,10 +662,25 @@ impl RunService for RunServiceImpl {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:read")?;
             let req = request.into_inner();
-            if req.thread_id.is_empty() {
+            // Two ways to be allowed to list runs, and only two. Without a
+            // Control decision this is unchanged: name a thread you own. With
+            // one, the runs returned are those of the threads that decision
+            // already admits — so the room's Work tab reaches exactly as far as
+            // its Chat tab and no further.
+            let space_read = crate::grpc::verify_thread_read_space_decision(
+                &req.space_read_decision_token,
+                &req.space_read_decision_ref,
+                &caller.org_id(),
+                caller.user_id().unwrap_or_default(),
+                &req.space_id,
+            )?;
+            if space_read.is_none() && req.thread_id.is_empty() {
                 return Err(Status::invalid_argument("thread_id is required"));
             }
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
+            if space_read.is_none() {
+                authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read)
+                    .await?;
+            }
 
             let limit = clamp_limit(req.limit);
             // Fetch one extra row to compute `has_more` without a second query.
@@ -674,16 +689,40 @@ impl RunService for RunServiceImpl {
             // Runs are ordered newest-first by ULID id (lexicographic ULID order
             // == creation order). The cursor pages strictly older than the last
             // id the caller saw. Optional status filter; empty = all statuses.
-            let mut query = format!("{RUN_SELECT} WHERE r.thread_id = $1");
+            //
+            // The Space branch joins `threads` rather than filtering runs by a
+            // column of their own: a run has no audience snapshot, so the only
+            // honest way to decide whether this reader may see it is to ask
+            // whether they may see the thread it belongs to.
+            let audience_ceiling = space_read.map(|read| read.recipient_audience_revision);
+            let mut query = String::from(RUN_SELECT);
+            if audience_ceiling.is_some() {
+                query.push_str(
+                    " JOIN threads t ON t.id = r.thread_id
+                     WHERE t.org_id = $5 AND t.space_id = $6
+                       AND (t.recipient_audience_revision IS NULL
+                            OR t.recipient_audience_revision <= $7)
+                       AND ($1 = '' OR r.thread_id = $1)",
+                );
+            } else {
+                query.push_str(" WHERE r.thread_id = $1");
+            }
             query.push_str(" AND ($2 = '' OR r.status = $2)");
             query.push_str(" AND ($3 = '' OR r.id < $3)");
             query.push_str(" ORDER BY r.id DESC LIMIT $4");
 
-            let rows: Vec<RunRow> = sqlx::query_as(&query)
+            let mut sql = sqlx::query_as(&query)
                 .bind(&req.thread_id)
                 .bind(&req.status_filter)
                 .bind(&req.after_run_id)
-                .bind(fetch)
+                .bind(fetch);
+            if let Some(ceiling) = audience_ceiling {
+                sql = sql
+                    .bind(caller.org_id())
+                    .bind(&req.space_id)
+                    .bind(ceiling);
+            }
+            let rows: Vec<RunRow> = sql
                 .fetch_all(&self.pool)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;

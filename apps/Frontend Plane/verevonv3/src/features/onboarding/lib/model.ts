@@ -28,7 +28,7 @@ export type ConnectorOption = {
   category: ConnectorCategory
 }
 
-export type ConnectorCategory = 'work' | 'social' | 'other'
+export type ConnectorCategory = 'work' | 'social' | 'other' | 'ai'
 
 type ConnectedSource = {
   id: string

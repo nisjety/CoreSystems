@@ -33,10 +33,16 @@ CREATE TABLE IF NOT EXISTS documents (
     -- lastModifiedDateTime), distinct from updated_at (this row's own
     -- bookkeeping). NULL means unknown, not "old" — see the decay stage.
     document_date TIMESTAMPTZ,
+    -- The Space this document was imported into, when the create carried a
+    -- verified Control Space import decision. NULL means it did not; an
+    -- org-wide document is never retroactively assigned to a room. Written
+    -- only from the signed decision, never from a request body.
+    space_ref     TEXT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     deleted_at    TIMESTAMPTZ,
-    CONSTRAINT documents_visibility_chk CHECK (visibility IN ('private', 'org', 'shared'))
+    CONSTRAINT documents_visibility_chk CHECK (visibility IN ('private', 'org', 'shared')),
+    CONSTRAINT documents_space_ref_chk CHECK (space_ref IS NULL OR char_length(btrim(space_ref)) > 0)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_documents_idempotency
@@ -48,6 +54,9 @@ CREATE INDEX IF NOT EXISTS idx_documents_status     ON documents (status);
 CREATE INDEX IF NOT EXISTS idx_documents_org_status ON documents (org_id, status);
 CREATE INDEX IF NOT EXISTS idx_documents_owner      ON documents (org_id, owner_id);
 CREATE INDEX IF NOT EXISTS idx_documents_type       ON documents (org_id, type);
+CREATE INDEX IF NOT EXISTS idx_documents_space_ref
+    ON documents (org_id, space_ref, updated_at DESC)
+    WHERE space_ref IS NOT NULL AND deleted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_crawl_url_dedup
     ON documents (org_id, (metadata->>'url'))
     WHERE source = 'quarry';

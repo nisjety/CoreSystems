@@ -63,6 +63,7 @@ import {
   type ChatRunScreenshotState,
   type ChatRunWatchState,
 } from '@/features/chat/lib/chat-run-watch'
+import { useI18n } from '@/shared/i18n'
 
 const RUN_STREAM_ERROR = 'Kunne ikke lese hendelsesstrømmen for denne kjøringen.'
 
@@ -110,6 +111,7 @@ function ChatRunEvidenceFallback(props: {
   steps: ChatRunBrowserStep[]
   zdr: boolean
 }) {
+  const i18n = useI18n()
   const latest = () => (props.steps.length > 0 ? props.steps[props.steps.length - 1] ?? null : null)
   const note = () => {
     const step = latest()
@@ -138,14 +140,14 @@ function ChatRunEvidenceFallback(props: {
               fallback={(
                 <>
                   <CameraOff size={18} />
-                  <strong>Ingen nettleseraktivitet</strong>
-                  <p>Denne kjøringen brukte ikke nettleseren, så det finnes ingen skjermbilder.</p>
+                  <strong>{i18n.tr('Ingen nettleseraktivitet', 'No browser activity')}</strong>
+                  <p>{i18n.tr('Denne kjøringen brukte ikke nettleseren, så det finnes ingen skjermbilder.', 'This run did not use the browser, so there are no screenshots.')}</p>
                 </>
               )}
             >
               <Loader2 size={18} class="verevon-run-spin" />
-              <strong>Venter på agenten</strong>
-              <p>Agenten har ikke åpnet nettleseren ennå. Steg vises her så snart de skjer.</p>
+              <strong>{i18n.tr('Venter på agenten', 'Waiting for the agent')}</strong>
+              <p>{i18n.tr('Agenten har ikke åpnet nettleseren ennå. Steg vises her så snart de skjer.', 'The agent has not opened the browser yet. Steps appear here as they happen.')}</p>
             </Show>
           </div>
         )}
@@ -214,6 +216,14 @@ export function ChatLiveRunPanel(props: {
    */
   onRefreshApprovals?: (runId: string) => void
 }) {
+  const i18n = useI18n()
+  // One name for two attributes: the button carries the same text as its
+  // accessible name and its tooltip, and they must not drift apart.
+  const toggleLabel = () => props.workContent
+    ? i18n.tr('Lukk arbeidsflaten', 'Close the workspace')
+    : props.collapsed
+      ? i18n.tr('Vis live-panelet', 'Show the live panel')
+      : i18n.tr('Skjul live-panelet', 'Hide the live panel')
   const [watch, setWatch] = createSignal<ChatRunWatchState | null>(null)
   const [expandedStep, setExpandedStep] = createSignal<number | null>(null)
   const [reconnectVersion, setReconnectVersion] = createSignal(0)
@@ -475,7 +485,9 @@ export function ChatLiveRunPanel(props: {
               'verevon-chat-run-panel--workspace': Boolean(props.workContent),
             },
           ]}
-          aria-label={props.workContent ? 'Arbeidsflate' : 'Live agentkjøring'}
+          aria-label={props.workContent
+            ? i18n.tr('Arbeidsflate', 'Workspace')
+            : i18n.tr('Live agentkjøring', 'Live agent run')}
           style={{ display: props.hidden ? 'none' : undefined }}
         >
           <header class="verevon-chat-run-panel__head">
@@ -483,8 +495,8 @@ export function ChatLiveRunPanel(props: {
               type="button"
               class="verevon-chat-run-panel__toggle"
               aria-expanded={!props.collapsed ? 'true' : 'false'}
-              aria-label={props.workContent ? 'Lukk arbeidsflaten' : props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
-              title={props.workContent ? 'Lukk arbeidsflaten' : props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
+              aria-label={toggleLabel()}
+              title={toggleLabel()}
               onClick={() => props.workContent ? props.onCloseWork?.() : props.onToggleCollapsed()}
             >
               <Show when={props.collapsed} fallback={<PanelRightClose size={15} />}>
@@ -508,7 +520,7 @@ export function ChatLiveRunPanel(props: {
                 <span class="verevon-chat-run-panel__workspace-status">{statusLabel()}</span>
               </Show>
               <Show when={props.orgId && framed() && live()}>
-                <div class="verevon-chat-run-panel__controls" role="group" aria-label="Nettleserkjøring">
+                <div class="verevon-chat-run-panel__controls" role="group" aria-label={i18n.tr('Nettleserkjøring', 'Browser run')}>
                   <Show
                     when={watch()?.controlState === 'paused'}
                     fallback={(
@@ -516,8 +528,8 @@ export function ChatLiveRunPanel(props: {
                         type="button"
                         class="verevon-chat-run-panel__control"
                         disabled={controlPending() !== null}
-                        aria-label="Sett nettleserkjøring på pause"
-                        title="Pause etter gjeldende steg"
+                        aria-label={i18n.tr('Sett nettleserkjøring på pause', 'Pause the browser run')}
+                        title={i18n.tr('Pause etter gjeldende steg', 'Pause after the current step')}
                         onClick={() => void browserControl('pause')}
                       >
                         <Show when={controlPending() === 'pause'} fallback={<Pause size={12} />}>
@@ -530,8 +542,8 @@ export function ChatLiveRunPanel(props: {
                       type="button"
                       class="verevon-chat-run-panel__control"
                       disabled={controlPending() !== null}
-                      aria-label="Fortsett nettleserkjøring"
-                      title="Fortsett etter pause"
+                      aria-label={i18n.tr('Fortsett nettleserkjøring', 'Resume the browser run')}
+                      title={i18n.tr('Fortsett etter pause', 'Resume after the pause')}
                       onClick={() => void browserControl('resume')}
                     >
                       <Show when={controlPending() === 'resume'} fallback={<Play size={12} />}>
@@ -551,7 +563,7 @@ export function ChatLiveRunPanel(props: {
                   id="verevon-chat-tabpanel-steps"
                   class="verevon-chat-run-panel__work"
                   role="tabpanel"
-                  aria-label="Arbeidsdetaljer"
+                  aria-label={i18n.tr('Arbeidsdetaljer', 'Work details')}
                 >
                   {props.workContent}
                 </section>
@@ -575,7 +587,7 @@ export function ChatLiveRunPanel(props: {
               </Show>
 
               <Show when={steps().length > 0}>
-                <section class="verevon-chat-run-shots" aria-label="Skjermbilder per steg">
+                <section class="verevon-chat-run-shots" aria-label={i18n.tr('Skjermbilder per steg', 'Screenshots per step')}>
                   <div class="verevon-chat-run-shots__rail">
                     <For each={steps()}>
                       {(step) => (
@@ -583,7 +595,7 @@ export function ChatLiveRunPanel(props: {
                           type="button"
                           class={['verevon-chat-run-shot', { 'verevon-chat-run-shot--active': expandedStep() === step.step }]}
                           aria-pressed={expandedStep() === step.step ? 'true' : 'false'}
-                          title={`Steg ${step.step} · ${stepLabel(step)}`}
+                          title={i18n.tr(`Steg ${step.step} · ${stepLabel(step)}`, `Step ${step.step} - ${stepLabel(step)}`)}
                           onClick={() => setExpandedStep((current) => (current === step.step ? null : step.step))}
                         >
                           <span class="verevon-chat-run-shot__frame">
@@ -598,7 +610,7 @@ export function ChatLiveRunPanel(props: {
                               {(src) => (
                                 <img
                                   src={src()}
-                                  alt={`Skjermbilde fra steg ${step.step}`}
+                                  alt={i18n.tr(`Skjermbilde fra steg ${step.step}`, `Screenshot from step ${step.step}`)}
                                   loading="lazy"
                                   decoding="async"
                                   onError={() => update(runId(), (state) => markScreenshotFailed(state, step.actionId))}
@@ -630,7 +642,7 @@ export function ChatLiveRunPanel(props: {
                           {(src) => (
                             <img
                               src={src()}
-                              alt={`Skjermbilde fra steg ${step().step}`}
+                              alt={i18n.tr(`Skjermbilde fra steg ${step().step}`, `Screenshot from step ${step().step}`)}
                               decoding="async"
                               onError={() => update(runId(), (state) => markScreenshotFailed(state, step().actionId))}
                             />
@@ -658,7 +670,7 @@ export function ChatLiveRunPanel(props: {
                     <span>Teknisk aktivitet</span>
                     <em>{activity().length}</em>
                   </summary>
-                  <section class="verevon-chat-run-activity" aria-label="Kjøringshendelser">
+                  <section class="verevon-chat-run-activity" aria-label={i18n.tr('Kjøringshendelser', 'Run events')}>
                     <For each={activity().slice(-12)}>
                       {(entry) => (
                         <div class="verevon-chat-run-activity__row" data-status={entry.status ?? ''}>

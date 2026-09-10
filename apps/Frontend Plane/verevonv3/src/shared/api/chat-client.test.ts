@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildChatWireBody,
+  groupChatModels,
   listModels,
   shouldRequestSupportContext,
   describeFeedbackFailure,
@@ -10,6 +11,7 @@ import {
   queueInvocationInput,
   saveChatThreadSnapshot,
   streamChat,
+  subscriptionModelDisplayName,
   submitFeedback,
 } from './chat-client'
 import type { ChatStreamHandlers } from './chat-client'
@@ -109,6 +111,35 @@ describe('chat-client stream-event coverage', () => {
     // The recall event is opt-in server-side. Without this the injection still
     // happens but the UI can never show that it did.
     expect(buildChatWireBody({ content: 'hi' }).features).toContain('memory')
+  })
+
+  /**
+   * Pinned messages ride the wire as IDS. Sending the pinned text instead would
+   * let this browser assert that the user said something earlier in the thread;
+   * an id can only ever select a message the durable thread already holds, and
+   * model-gateway ignores one that resolves to nothing.
+   */
+  it('sends pinned message ids, and omits the field entirely when nothing is pinned', () => {
+    const plain = buildChatWireBody({ content: 'hi' })
+    // Absent, not an empty array: an ordinary turn's body stays byte-identical
+    // to what it was before pinning existed.
+    expect('pinned_message_ids' in plain).toBe(false)
+
+    const pinned = buildChatWireBody({ content: 'hi', pinnedMessageIds: ['m1', 'm2'] })
+    expect(pinned.pinned_message_ids).toEqual(['m1', 'm2'])
+
+    expect('pinned_message_ids' in buildChatWireBody({ content: 'hi', pinnedMessageIds: [] })).toBe(
+      false,
+    )
+  })
+
+  it('never puts pinned message CONTENT on the wire', () => {
+    const body = buildChatWireBody({ content: 'hi', pinnedMessageIds: ['m1'] })
+    const serialized = JSON.stringify(body)
+    expect(serialized).toContain('"m1"')
+    // Only the id travels; there is no field carrying a pinned message's text.
+    expect(serialized).not.toContain('pinned_messages')
+    expect(serialized).not.toContain('pinnedMessages')
   })
 
   it('separates a server-side stop from a normal completion', async () => {
@@ -265,6 +296,24 @@ describe('mid-run queued input', () => {
     })
   })
 
+  it('handles the browser-facing run-ended protocol without producing an HTTP 404', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          request_id: 'req-1',
+          queued: false,
+          error: 'no active stream',
+          resend_as_new_turn: true,
+        }),
+      ),
+    )
+
+    await expect(queueInvocationInput('req-1', 'bruk EUR')).resolves.toEqual({
+      outcome: 'run_ended',
+    })
+  })
+
   it('keeps the two refusal reasons apart, since one means wait and the other means shorten', async () => {
     vi.stubGlobal(
       'fetch',
@@ -368,6 +417,42 @@ describe('chat-client tool wiring', () => {
     expect(body.tools).toEqual([
       expect.objectContaining({ name: 'web_search' }),
     ])
+  })
+
+  it('routes a connected subscription without incompatible tool features', () => {
+    const body = buildChatWireBody({
+      content: 'hello from my plan',
+      model: 'gpt-5.6-luna',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn-subscription-1',
+      browseWeb: true,
+      generateImage: true,
+      planMode: true,
+      attachments: [{ kind: 'image', data_base64: 'abc' }],
+    })
+
+    expect(body).toMatchObject({
+      model: 'gpt-5.6-luna',
+      provider: 'openai-codex-subscription',
+      subscription_connection_id: 'conn-subscription-1',
+      browse_web: false,
+      generate_image: false,
+      plan_mode: false,
+      attachments: [],
+      tools: [],
+    })
+    expect(body.features).not.toContain('tools')
+    expect(body.features).not.toContain('agentic')
+  })
+
+  it('names and groups ChatGPT-plan models as subscriptions, not Codex products', () => {
+    expect(subscriptionModelDisplayName('gpt-5.6-luna')).toBe('GPT 5.6 Luna Subscription')
+    expect(subscriptionModelDisplayName('gpt-5.3-codex-spark')).toBe('GPT 5.3 Spark Subscription')
+    expect(groupChatModels([{
+      id: 'gpt-5.6-luna',
+      name: 'GPT 5.6 Luna Subscription',
+      provider: 'openai-codex-subscription',
+    }])[0]?.label).toBe('Subscription')
   })
 
   it('sends only a requested Space reference for a new thread, never authority metadata', () => {
@@ -495,7 +580,7 @@ describe('chat invoke privacy tier (Venice tiering)', () => {
 
   it('emits min_privacy_tier snake_case when a tier is selected', () => {
     const body = buildChatWireBody({ content: 'hi', minPrivacyTier: 'sovereign' })
-    expect(body.min_privacy_tier).toBe('sovereign')
+    expect(body.min_privacy_tier).toBe(4)
   })
 
   it('never emits min_privacy_tier for unspecified, even if passed', () => {
@@ -1005,5 +1090,35 @@ describe('recalled-memory provenance', () => {
       count: 1,
       memories: [],
     })
+  })
+})
+
+describe('buildChatWireBody — explicit skills (the composer `/` picker)', () => {
+  it('sends picked skills as skill_ids, and never as tool specs', () => {
+    const body = buildChatWireBody({
+      content: 'hi',
+      actions: [
+        { id: 'sk-1', name: 'Innkjøpsrutine', kind: 'skill' },
+        { id: 'cap-1', name: 'Some capability', kind: 'capability' },
+      ],
+    })
+    expect(body.skill_ids).toEqual(['sk-1'])
+    const tools = body.tools as Array<{ name: string }>
+    expect(tools.some((tool) => tool.name === 'sk-1')).toBe(false)
+  })
+
+  it('trims, de-duplicates and caps skill ids at four', () => {
+    const body = buildChatWireBody({
+      content: 'hi',
+      actions: ['a', ' a ', 'b', 'c', 'd', 'e'].map((id) => ({ id, name: id, kind: 'skill' as const })),
+    })
+    expect(body.skill_ids).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('omits the field entirely when no skill was picked', () => {
+    expect('skill_ids' in buildChatWireBody({ content: 'hi' })).toBe(false)
+    expect(
+      'skill_ids' in buildChatWireBody({ content: 'hi', actions: [{ id: 'cap-1', name: 'Cap', kind: 'capability' }] }),
+    ).toBe(false)
   })
 })

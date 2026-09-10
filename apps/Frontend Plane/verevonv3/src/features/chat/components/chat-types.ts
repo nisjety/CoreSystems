@@ -4,6 +4,7 @@ import {
 import {
   type AutonomyRung,
   type ChatAction,
+  type ChatVerificationEvent,
   type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
@@ -188,6 +189,10 @@ export type ChatTurn = {
   attachments: ChatTurnAttachment[]
   status?: 'waiting' | 'stopped' | 'error'
   model?: string
+  /** Explicit route retained so retry/edit/regenerate cannot leave a user-owned subscription. */
+  provider?: string
+  /** Opaque Integration Core connection id paired with a subscription route. */
+  subscriptionConnectionId?: string
   requestId?: string
   /**
    * Highest SSE frame `id:` seen for this turn, sent as `Last-Event-ID` on
@@ -206,6 +211,13 @@ export type ChatTurn = {
   latencyMs?: number
   costUsd?: number
   confidence?: number
+  /**
+   * What the backend's verification pass found after scoring this answer low.
+   * Absent when the pass did not run — which is itself the point: a reader can
+   * otherwise not tell "we checked and found nothing" from "we never looked",
+   * and those justify very different trust in the same number.
+   */
+  verification?: ChatVerificationEvent
   reasoning?: string
   citations?: Citation[]
   toolCalls?: ChatToolCall[]
@@ -339,6 +351,10 @@ export type StreamAttachment = {
 
 export type SendOptions = {
   actions?: ChatAction[]
+  /** Explicit provider route for a connected user-owned model subscription. */
+  provider?: string
+  /** Opaque Integration Core connection id; never a ChatGPT token. */
+  subscriptionConnectionId?: string
   /** Reasoning effort from the composer's response-mode selector. */
   effort?: 'quick' | 'deep'
   /**
@@ -398,6 +414,10 @@ export type MarkdownTableAlign = 'center' | 'left' | 'right' | null
 
 export type MarkdownBlock =
   | { kind: 'code'; lang: string; text: string }
+  // Raw `<details>`/`<summary>` HTML written by the model (e.g. "Se alle
+  // tilbud" behind a shipping-quote table). Rendered as a real collapsible
+  // instead of escaped tag soup; `blocks` is the parsed inner markdown.
+  | { kind: 'details'; summary: string; blocks: MarkdownBlock[] }
   | { kind: 'heading'; level: 1 | 2 | 3; text: string }
   | { kind: 'hr' }
   | { kind: 'list'; ordered: boolean; items: MarkdownListItem[] }

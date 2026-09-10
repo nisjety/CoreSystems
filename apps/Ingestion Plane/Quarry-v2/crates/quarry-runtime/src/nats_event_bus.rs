@@ -396,6 +396,7 @@ fn event_type_token(t: &EventType) -> &'static str {
         EventType::SearchIssued => "search_issued",
         EventType::HostDiscovered => "host_discovered",
         EventType::BrandingExtracted => "branding_extracted",
+        EventType::PageExtracted => "page_extracted",
     }
 }
 
@@ -423,6 +424,10 @@ mod tests {
         assert_eq!(
             event_type_token(&EventType::StoreRecordWritten),
             "store_record_written"
+        );
+        assert_eq!(
+            event_type_token(&EventType::PageExtracted),
+            "page_extracted"
         );
         assert_eq!(
             event_type_token(&EventType::StoreRecordFailed),

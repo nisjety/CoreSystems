@@ -1,0 +1,41 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api.go</file>
+  <line>44</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api.go" />
+  <problem_class id="GoFixOmitZero" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'omitempty' tag on a struct field can be changed</problem_class>
+  <hints />
+  <description>Omitempty has no effect on nested struct fields</description>
+  <highlighted_element>`json:&quot;last_ack_at,omitempty&quot;`</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go" />
+  <problem_class id="GoFixOmitZero" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'omitempty' tag on a struct field can be changed</problem_class>
+  <hints />
+  <description>Omitempty has no effect on nested struct fields</description>
+  <highlighted_element>`json:&quot;last_ack_at,omitempty&quot;`</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>30</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go</file>
+  <line>52</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber.go" />
+  <problem_class id="GoFixOmitZero" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'omitempty' tag on a struct field can be changed</problem_class>
+  <hints />
+  <description>Omitempty has no effect on nested struct fields</description>
+  <highlighted_element>`json:&quot;last_ack_at,omitempty&quot;`</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>30</length>
+</problem>
+</problems>

@@ -1,0 +1,119 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go</file>
+  <line>217</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/service_auth.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, scope := range credential.Scopes { if scope == required { return true } }</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>88</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>520</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, got := range info.Config.Subjects { if got == want { found = true break } }</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>98</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go</file>
+  <line>270</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, granted := range credential.Scopes { if granted == required { return required } }</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>100</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/config/config.go</file>
+  <line>161</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/config/config.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, name := range localServiceNames { if host == name { return true } }</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>82</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth.go</file>
+  <line>368</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, granted := range credential.Scopes { if granted == required { return required } }</highlighted_element>
+  <language>go</language>
+  <offset>2</offset>
+  <length>100</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/server.go</file>
+  <line>235</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/server.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, scope := range credential.Scopes { if scope == required { return true } }</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>88</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/grpc/service_auth.go</file>
+  <line>219</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/grpc/service_auth.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, allowed := range matched.Methods { if allowed == method { return nil } }</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>87</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/service_auth.go</file>
+  <line>228</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/service_auth.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, scope := range scopes { if scope == required { return true } }</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>77</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go</file>
+  <line>492</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision.go" />
+  <problem_class id="GoFixSlicesContains" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">Slice search loop can be replaced with 'slices.Contains'</problem_class>
+  <hints />
+  <description>Loop can be simplified using slices.Contains</description>
+  <highlighted_element>for _, candidate := range allowed { if value == candidate { return true } }</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>83</length>
+</problem>
+</problems>

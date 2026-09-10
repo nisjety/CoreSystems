@@ -106,6 +106,55 @@ pub(crate) async fn proxy_data_plane_json(
     .await
 }
 
+/// As `proxy_data_plane_json`, carrying a Control-signed Space decision.
+///
+/// The decision is authority the Data Plane verifies for itself: it names the
+/// Space, the recipient audience, the privacy policy and the resource
+/// authorization, and retrieval-engine resolves its own binding from that. The
+/// gateway therefore relays it verbatim and adds nothing — a gateway-shaped
+/// Space claim would be exactly the forged scoping header this boundary
+/// exists to refuse.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxy_data_plane_json_with_space_decision(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    org_id: Option<&str>,
+    space_decision: &str,
+) -> (StatusCode, Json<Value>) {
+    let cookie = cookie_header(headers);
+    let Some(token) = data_plane_token(state, user, &cookie).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "delegated_auth_unavailable",
+                    "message": "A scoped Data Plane authorization token could not be minted."
+                }
+            })),
+        );
+    };
+    let actor = actor_for(user);
+    crate::upstream::proxy_user_bearer_json_with_extra_headers(
+        state,
+        method,
+        url,
+        body,
+        org_id,
+        &actor,
+        &token,
+        None,
+        std::collections::BTreeMap::from([(
+            "x-space-decision".to_owned(),
+            space_decision.trim().to_owned(),
+        )]),
+    )
+    .await
+}
+
 /// Build an internal service-to-service request (internal API key + actor +
 /// optional org header), used by the knowledge aggregators to fan out across
 /// Data Plane v2 / integration-core / finspo with per-call timeouts.

@@ -456,6 +456,7 @@ fn build_infer_request(
         // Same floor the HTTP transports thread; enforced fail-closed by
         // inference-core's chain selection.
         min_privacy_tier: req.min_privacy_tier,
+        subscription_connection_id: req.subscription_connection_id.clone(),
         ..Default::default()
     })
 }
@@ -2899,6 +2900,7 @@ mod tests {
                 output_tokens: 1,
                 provider_used: String::new(),
                 residency: String::new(),
+                token_confidence: None,
                 tool_calls: Vec::new(),
             }))
         }
@@ -2919,6 +2921,7 @@ mod tests {
                     reasoning_delta: String::new(),
                     provider_used: String::new(),
                     residency: String::new(),
+                    token_confidence: None,
                 }),
                 Ok(InferChunk {
                     request_id: "req-stream".to_owned(),
@@ -2931,6 +2934,7 @@ mod tests {
                     reasoning_delta: String::new(),
                     provider_used: String::new(),
                     residency: String::new(),
+                    token_confidence: None,
                 }),
             ]))))
         }

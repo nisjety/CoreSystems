@@ -3,6 +3,7 @@ import { readSseStream, type SseEvent } from './sse'
 import {
   isSelectablePrivacyTier,
   normalizePrivacyTier,
+  privacyTierWireValue,
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
@@ -43,6 +44,10 @@ export type ChatAttachment = {
 export type ChatInvokeRequest = {
   content: string
   model?: string
+  /** Explicit provider route for a user-owned model subscription. */
+  provider?: string
+  /** Opaque Integration Core connection id; never a ChatGPT token. */
+  subscriptionConnectionId?: string
   threadId?: string
   /** The requested personal Space for a new durable chat thread. The BFF
    * exchanges this selection for a Control-signed, effect-bound decision. */
@@ -62,6 +67,17 @@ export type ChatInvokeRequest = {
   browseWeb?: boolean
   /** Deep research mode: gateway runs plan -> concurrent searches -> page reads -> a cited report. */
   deepResearch?: boolean
+  /**
+   * Durable ids of earlier messages the user pinned into context.
+   *
+   * Ids only — never the pinned text. model-gateway resolves each one
+   * against the durable thread and re-expresses the match as leading
+   * `system` context, where neither history shedder reaches it. Sending
+   * content instead would let this browser assert that the user said
+   * something earlier; sending an id can only ever SELECT a message that
+   * already exists.
+   */
+  pinnedMessageIds?: string[]
   /**
    * Extended-thinking effort: `quick` | `standard` | `deep`.
    *
@@ -179,6 +195,24 @@ export type ChatMemoryRecallEvent = {
   latencyMs?: number
   /** What was recalled. Empty when the backend reported only a count. */
   memories: RecalledMemory[]
+}
+
+/** What the sources said about a low-scoring answer. */
+export type VerificationVerdict = 'supports' | 'contradicts' | 'unrelated'
+
+/**
+ * The backend went looking for backing after scoring this answer low, and this
+ * is what it found. Emitted only for turns that actually ran the check, so its
+ * absence means "not checked" — which is why the verdict is worth showing at
+ * all: a score that moved silently cannot be told apart from one that never
+ * had anything behind it.
+ */
+export type ChatVerificationEvent = {
+  verdict: VerificationVerdict
+  kbCitations: number
+  webCitations: number
+  /** Whether the check was allowed to escalate past the knowledge base. */
+  webAllowed: boolean
 }
 
 /** Mid-run user messages the agent has just been handed. */
@@ -312,6 +346,7 @@ export type ChatStreamHandlers = {
   onFollowUps?: (event: ChatFollowUpsEvent) => void
   onStopped?: (event: ChatStoppedEvent) => void
   onMemoryRecall?: (event: ChatMemoryRecallEvent) => void
+  onVerification?: (event: ChatVerificationEvent) => void
   /**
    * A message the user sent mid-run has reached the agent. Emitted at delivery
    * rather than at enqueue: the POST already confirmed acceptance, and what the
@@ -345,6 +380,15 @@ export type ChatMessage = {
   content: string
   model?: string
   createdAt: string
+  /**
+   * The answer's persisted confidence score, flattened onto the message from
+   * session-core's turn metadata. Absent for a user message, and for assistant
+   * turns recorded before the score was persisted — which must stay
+   * distinguishable from a score of 0.
+   */
+  confidence?: number
+  /** What the backend's verification pass found, when it ran on this turn. */
+  verification?: ChatVerificationEvent
 }
 
 export type ChatThreadSession = {
@@ -542,13 +586,42 @@ type WireToolSpec = { name: string; description: string; parameters_json: string
 function buildToolSpecs(request: ChatInvokeRequest): WireToolSpec[] {
   return createSelectedAgentToolSpecs({
     browseWeb: request.browseWeb,
-    actions: request.actions,
+    // Skills are guidance, not tools. model-gateway injects a picked skill's
+    // body as system context from `skill_ids` (see buildChatWireBody). The old
+    // path synthesized a no-op tool spec named after the skill: the model was
+    // offered something to call, and nothing steered the answer.
+    actions: request.actions?.filter((action) => action.kind !== 'skill'),
     explicitTools: request.tools,
   }).map((tool) => ({
     name: tool.name,
     description: tool.description,
     parameters_json: tool.parametersJson,
   }))
+}
+
+/** Mirrors model-gateway `MAX_REQUESTED_SKILLS`; the server caps again. */
+const MAX_SKILL_IDS = 4
+
+/**
+ * The skills the member picked explicitly (`/` in a composer), as ids for the
+ * wire. Trimmed, de-duplicated, capped. The server resolves each against the
+ * org's catalogue and the ownership rule and drops what the caller may not use
+ * — this list is a request, never a grant.
+ */
+function skillIdsField(actions: readonly ChatAction[] | undefined): { skill_ids?: string[] } {
+  const ids = pickedSkillIds(actions)
+  return ids.length > 0 ? { skill_ids: ids } : {}
+}
+
+function pickedSkillIds(actions: readonly ChatAction[] | undefined): string[] {
+  const out: string[] = []
+  for (const action of actions ?? []) {
+    if (action.kind !== 'skill') continue
+    const id = action.id.trim()
+    if (id && !out.includes(id)) out.push(id)
+    if (out.length >= MAX_SKILL_IDS) break
+  }
+  return out
 }
 
 /**
@@ -575,7 +648,8 @@ export function shouldRequestSupportContext(content: string): boolean {
 export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
   const threadId = request.threadId?.trim() || undefined
   const supportReadOnly = isSupportChatThread(threadId)
-  const tools = supportReadOnly ? [] : buildToolSpecs(request)
+  const subscriptionBacked = request.provider === 'openai-codex-subscription'
+  const tools = supportReadOnly || subscriptionBacked ? [] : buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
   // Request the tools family by default, even with zero client-declared specs.
   // Support-derived threads are the exception because their durable history
@@ -588,12 +662,12 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   // to also toggle Browse or an action first. web_search stays gated behind
   // its own explicit-Search-toggle check server-side, so this does not grant
   // unrestricted web access — only the safe, always-useful builtins turn on.
-  if (supportReadOnly) features.delete('tools')
+  if (supportReadOnly || subscriptionBacked) features.delete('tools')
   else features.add('tools')
   // Plan mode → agentic run path (orchestration-backed, supports approval gates
   // + run pause/resume). Without it the gateway uses the direct tool loop, which
   // never pauses for human approval.
-  if (request.planMode && !supportReadOnly) features.add('agentic')
+  if (request.planMode && !supportReadOnly && !subscriptionBacked) features.add('agentic')
   else features.delete('agentic')
 
   const supportContextQuery = !supportReadOnly && shouldRequestSupportContext(request.content)
@@ -603,24 +677,30 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   return {
     content: request.content,
     model: request.model,
+    provider: request.provider,
+    subscription_connection_id: request.subscriptionConnectionId,
     profile: request.profile ?? 'chat',
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
     space_ref: request.spaceRef?.trim() || undefined,
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
-    browse_web: supportReadOnly ? false : request.browseWeb ?? false,
-    generate_image: supportReadOnly ? false : request.generateImage ?? false,
+    // Explicit skill picks. The KEY is absent when none — not `undefined`, not
+    // `[]` — so a turn that names no skill is byte-for-byte what it was before
+    // this field existed.
+    ...(supportReadOnly || subscriptionBacked ? {} : skillIdsField(request.actions)),
+    browse_web: supportReadOnly || subscriptionBacked ? false : request.browseWeb ?? false,
+    generate_image: supportReadOnly || subscriptionBacked ? false : request.generateImage ?? false,
     // Sent as a real field, not just as the `agentic` feature above: the
     // gateway needs it to mark the run itself (in-memory plan-mode store +
     // session-core's durable `run.mode`). Without this the toggle only widened
     // the feature set and nothing server-side could tell a planning run from an
     // executing one.
-    plan_mode: supportReadOnly ? false : request.planMode ?? false,
+    plan_mode: supportReadOnly || subscriptionBacked ? false : request.planMode ?? false,
     // Deep research is its OWN field, not just `browse_web`. "Dyp research"
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
     // multi-round research pipeline off this flag.
-    deep_research: supportReadOnly ? false : (request.deepResearch ?? false),
+    deep_research: supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
     // Omitted entirely when unset or `standard`: the gateway treats an absent
     // effort as "no thinking", and sending `standard` explicitly would be a
     // no-op field on every ordinary turn.
@@ -633,7 +713,15 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(request.verbosity && request.verbosity !== 'balanced'
       ? { verbosity: request.verbosity }
       : {}),
-    attachments: request.attachments ?? [],
+    attachments: subscriptionBacked ? [] : request.attachments ?? [],
+    // Opt-in only, like `min_privacy_tier` below: omitted entirely when
+    // nothing is pinned, so an ordinary turn's body is byte-identical to
+    // what it was before pinning existed. Support threads have this
+    // stripped at the gateway regardless (their history is customer text
+    // this surface may only read).
+    ...((request.pinnedMessageIds ?? []).length > 0
+      ? { pinned_message_ids: request.pinnedMessageIds }
+      : {}),
     ...(supportContextQuery ? { support_context_query: supportContextQuery } : {}),
     features: [...features],
     tools,
@@ -649,7 +737,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // `support_context_query` above. `isSelectablePrivacyTier` (not mere
     // truthiness) keeps a literal `'unspecified'` OFF the wire too.
     ...(isSelectablePrivacyTier(request.minPrivacyTier)
-      ? { min_privacy_tier: request.minPrivacyTier }
+      ? { min_privacy_tier: privacyTierWireValue(request.minPrivacyTier) }
       : {}),
   }
 }
@@ -1095,6 +1183,21 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       }
       break
     }
+    case 'verification': {
+      // Only the three verdicts the backend defines. An unrecognized one is a
+      // contract drift, and rendering "checked" from a value we cannot read
+      // would be worse than rendering nothing.
+      const verdict = payload.verdict
+      if (verdict === 'supports' || verdict === 'contradicts' || verdict === 'unrelated') {
+        handlers.onVerification?.({
+          verdict,
+          kbCitations: num(payload.kb_citations) ?? 0,
+          webCitations: num(payload.web_citations) ?? 0,
+          webAllowed: payload.web_allowed === true,
+        })
+      }
+      break
+    }
     case 'memory_recall': {
       const count = num(payload.count)
       // The backend only emits this when memory was genuinely injected, so a
@@ -1310,6 +1413,14 @@ export async function queueInvocationInput(
         }),
       },
     )
+    // The BFF translates Model Gateway's "stream just ended" 404 into a
+    // successful protocol response. It is an expected race and the caller
+    // replays the text as a new turn; treating it as a failed HTTP request only
+    // adds a misleading red entry to DevTools. Keep accepting a legacy 404 in
+    // the catch below while older gateways roll out.
+    if (raw.queued === false && raw.resend_as_new_turn === true) {
+      return { outcome: 'run_ended' }
+    }
     return {
       outcome: 'queued',
       pending: typeof raw.pending === 'number' ? raw.pending : 1,
@@ -1572,7 +1683,32 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       content: str(item.content) ?? '',
       model: str(item.model) ?? str(item.model_used),
       createdAt: str(item.created_at) ?? str(item.createdAt) ?? '',
+      // Turn metadata the backend flattens onto the message. Present only for
+      // assistant turns recorded since the score became durable, so a missing
+      // field means "not recorded" — never a score of zero.
+      confidence: num(item.confidence),
+      verification: normalizeVerification(item.verification),
     }))
+}
+
+/**
+ * Read a persisted verification record. Anything that is not one of the three
+ * verdicts the backend defines is dropped: rendering "checked" from a value we
+ * cannot interpret would be a claim the data does not support.
+ */
+function normalizeVerification(raw: unknown): ChatVerificationEvent | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const record = raw as Record<string, unknown>
+  const verdict = record.verdict
+  if (verdict !== 'supports' && verdict !== 'contradicts' && verdict !== 'unrelated') {
+    return undefined
+  }
+  return {
+    verdict,
+    kbCitations: num(record.kbCitations) ?? num(record.kb_citations) ?? 0,
+    webCitations: num(record.webCitations) ?? num(record.web_citations) ?? 0,
+    webAllowed: record.webAllowed === true || record.web_allowed === true,
+  }
 }
 
 function normalizeChatThreadSessions(raw: unknown): ChatThreadSession[] {
@@ -1762,7 +1898,9 @@ export async function listModels(): Promise<ModelInfo[]> {
       const privacyTier = normalizePrivacyTier(item.privacy_tier ?? item.privacyTier)
       return {
         id,
-        name,
+        name: provider === 'openai-codex-subscription'
+          ? subscriptionModelDisplayName(id)
+          : name,
         capabilities: Array.isArray(item.features)
           ? (item.features as unknown[]).filter((f): f is string => typeof f === 'string')
           : Array.isArray(item.capabilities)
@@ -1777,6 +1915,18 @@ export async function listModels(): Promise<ModelInfo[]> {
       }
     })
     .filter((model) => model.id.length > 0)
+}
+
+/** Product-facing label for a ChatGPT-plan model. `codex` is an implementation
+ * detail of the broker, not the entitlement the user selected. */
+export function subscriptionModelDisplayName(id: string): string {
+  const words = id
+    .split('-')
+    .filter((word) => word && word.toLocaleLowerCase() !== 'codex')
+    .map((word) => word.toLocaleLowerCase() === 'gpt'
+      ? 'GPT'
+      : word.charAt(0).toLocaleUpperCase() + word.slice(1))
+  return `${words.join(' ') || 'GPT'} Subscription`
 }
 
 /**
@@ -1845,6 +1995,7 @@ export function cheapDefaultModelId(models: readonly ModelInfo[]): string {
 }
 
 const PROVIDER_GROUP_ORDER: readonly { label: string; test: (m: ModelInfo) => boolean }[] = [
+  { label: 'Subscription', test: (m) => m.provider === 'openai-codex-subscription' },
   { label: 'Claude', test: (m) => m.provider === 'anthropic' || /claude/i.test(`${m.id} ${m.name}`) },
   { label: 'OpenAI GPT', test: (m) => m.provider === 'openai' || /gpt|^o[0-9]|model-router/i.test(`${m.id} ${m.name}`) },
   { label: 'DeepSeek', test: (m) => m.provider === 'deepseek' || /deepseek/i.test(`${m.id} ${m.name}`) },

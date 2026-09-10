@@ -1,3 +1,13 @@
+// This crate's pervasive error-propagation idiom is `Result<T, Response>` —
+// fail with the exact HTTP response to send, propagate with `?`, no
+// second translation step at the call site. `axum::http::Response<Body>` is
+// unavoidably large (status, headers, extensions, a body handle), so this
+// shape trips clippy::result_large_err at every one of its ~25+ call sites
+// across the crate's domains. Boxing the error type there would touch every
+// one of those sites for no behavioral gain, so the trade-off is accepted
+// crate-wide rather than suppressed function-by-function.
+#![allow(clippy::result_large_err)]
+
 use std::{env, net::SocketAddr};
 
 use anyhow::Result;
@@ -112,6 +122,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::orgs::router(state.clone()))
         .merge(domains::ownership::router(state.clone()))
         .merge(domains::privacy::router(state.clone()))
+        .merge(domains::remote_support::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
         .merge(domains::run_watchers::router(state.clone()))
         .merge(domains::search::router(state.clone()))
@@ -319,6 +330,8 @@ mod tests {
             leads_core_url: "http://127.0.0.1:1".into(),
             shipping_core_url: "http://127.0.0.1:1".into(),
             user_core_url: "http://127.0.0.1:1".into(),
+            application_convex_url: String::new(),
+            application_convex_service_key: String::new(),
             graph_index_url: "http://127.0.0.1:1".into(),
             quarry_edge_url: "http://127.0.0.1:1".into(),
             model_recommend_url: "http://127.0.0.1:1".into(),
@@ -343,6 +356,9 @@ mod tests {
             autocomplete_token: String::new(),
             zammad_api_url: "http://127.0.0.1:1".into(),
             zammad_api_token: String::new(),
+            remote_support_rendezvous_url: String::new(),
+            remote_support_relay_url: String::new(),
+            remote_support_server_public_key: String::new(),
             audience_token_cache: crate::audience_tokens::new_audience_token_cache(),
             browser_run_store: crate::domains::browser::new_browser_run_store(),
             cache: crate::cache::ResultCache::disabled(),
@@ -1137,6 +1153,11 @@ mod tests {
     /// derived from the validated session + the header is stripped at ingress.
     #[tokio::test]
     async fn forged_org_header_never_reaches_upstream() {
+        // This test asserts over EVERY request its mock recorded, and the
+        // upstream URLs come from process-global env — so without the lock a
+        // concurrent test's traffic lands on this mock and the loop asserts
+        // on a foreign request (observed: `Some("inbox-org")`).
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         use axum::body::Body;
         use axum::http::Request;
         use http_body_util::BodyExt;
@@ -2457,6 +2478,9 @@ mod tests {
 
     #[tokio::test]
     async fn knowledge_routes_fail_closed_when_data_plane_token_cannot_be_minted() {
+        // Same reason as `forged_org_header_never_reaches_upstream`: the
+        // routes under test resolve their upstream from global env.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         use axum::body::Body;
         use axum::http::Request;
         use http_body_util::BodyExt;

@@ -15,6 +15,7 @@ import {
 } from 'solid-js'
 import type { ChatTurnAttachment } from './chat-types'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
+import { useI18n } from '@/shared/i18n'
 
 /**
  * Viewer for files the user attached to the current conversation. Object URLs
@@ -26,6 +27,7 @@ export function ChatAttachmentCanvas(props: {
   attachments: ChatTurnAttachment[]
   selectedId?: string | null
 }) {
+  const i18n = useI18n()
   const [selectedId, setSelectedId] = createSignal<string | null>(props.selectedId ?? null)
   createEffect(
     () => props.selectedId,
@@ -47,14 +49,17 @@ export function ChatAttachmentCanvas(props: {
         <div class="verevon-chat-empty-panel">
           <div>
             <FileText size={20} />
-            <h2>Ingen vedlegg</h2>
-            <p>Filer du legger til i samtalen blir tilgjengelige her mens du arbeider.</p>
+            <h2>{i18n.tr('Ingen vedlegg', 'No attachments')}</h2>
+            <p>{i18n.tr(
+              'Filer du legger til i samtalen blir tilgjengelige her mens du arbeider.',
+              'Files you add to the conversation become available here while you work.',
+            )}</p>
           </div>
         </div>
       )}
     >
       <div class="verevon-chat-attachment-workspace">
-        <div class="verevon-chat-attachment-workspace__list" role="tablist" aria-label="Vedlegg i samtalen">
+        <div class="verevon-chat-attachment-workspace__list" role="tablist" aria-label={i18n.tr('Vedlegg i samtalen', 'Attachments in this conversation')}>
           <For each={props.attachments}>
             {(attachment) => {
               const tabId = attachmentTabId(attachment.id)
@@ -105,6 +110,7 @@ export function ChatAttachmentCanvas(props: {
 }
 
 function AttachmentViewer(props: { attachment: ChatTurnAttachment; panelId: string; tabId: string }) {
+  const i18n = useI18n()
   const previewUrl = () => props.attachment.previewUrl
   const isImage = () => props.attachment.type.startsWith('image/')
   const isPdf = () => props.attachment.type === 'application/pdf' || props.attachment.name.toLowerCase().endsWith('.pdf')
@@ -145,10 +151,10 @@ function AttachmentViewer(props: { attachment: ChatTurnAttachment; panelId: stri
           <Show when={previewUrl()}>
             {(url) => (
               <>
-                <a href={url()} download={props.attachment.name} aria-label={`Last ned ${props.attachment.name}`} title="Last ned">
+                <a href={url()} download={props.attachment.name} aria-label={i18n.tr(`Last ned ${props.attachment.name}`, `Download ${props.attachment.name}`)} title={i18n.tr('Last ned', 'Download')}>
                   <Download size={14} />
                 </a>
-                <a href={url()} target="_blank" rel="noopener noreferrer" aria-label={`Åpne ${props.attachment.name}`} title="Åpne i ny fane">
+                <a href={url()} target="_blank" rel="noopener noreferrer" aria-label={i18n.tr(`Åpne ${props.attachment.name}`, `Open ${props.attachment.name}`)} title={i18n.tr('Åpne i ny fane', 'Open in a new tab')}>
                   <ExternalLink size={14} />
                 </a>
               </>
@@ -160,7 +166,7 @@ function AttachmentViewer(props: { attachment: ChatTurnAttachment; panelId: stri
         <Match when={!previewUrl()}>
           <div class="verevon-chat-attachment-workspace__unavailable">
             <FileText size={18} />
-            <p>Forhåndsvisning finnes bare i denne nettleserøkten.</p>
+            <p>{i18n.tr('Forhåndsvisning finnes bare i denne nettleserøkten.', 'This preview exists only in the current browser session.')}</p>
           </div>
         </Match>
         <Match when={isImage()}>
@@ -212,11 +218,11 @@ function CsvTablePreview(props: { rows: CsvRow[] }) {
       <table class="verevon-chat-table">
         <caption>{props.rows.length} rader · {columns} kolonner</caption>
         <thead>
-          <tr>{cells(header ?? []).map((cell) => <th scope="col">{cell || '—'}</th>)}</tr>
+          <tr><For each={cells(header ?? [])}>{(cell) => <th scope="col">{cell || '—'}</th>}</For></tr>
         </thead>
         <tbody>
           <For each={body}>
-            {(row) => <tr>{cells(row).map((cell) => <td>{cell}</td>)}</tr>}
+            {(row) => <tr><For each={cells(row)}>{(cell) => <td>{cell}</td>}</For></tr>}
           </For>
         </tbody>
       </table>

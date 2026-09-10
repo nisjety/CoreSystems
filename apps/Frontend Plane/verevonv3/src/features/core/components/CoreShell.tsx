@@ -172,6 +172,7 @@ function resolveWorkspaceIdentity(
     initial: firstInitial(organization?.name, orgStyleName, personalName, userEmail),
     name: cleanOrganizationName(name),
     plan,
+    planTrial: navbarData?.planTrial === true,
     role: organization?.role ?? null,
     userAvatar: profile?.avatar ?? session.user?.image ?? null,
     userEmail,

@@ -383,5 +383,8 @@ section that lists only what works is marketing.
 - Which Space roles may add, pause or revoke an agent?
 - Does a Space agent get one shared thread per Space, one per member, or both,
   per `default_thread_policy`?
-- Can a personal Space hold an agent? Membership replacement currently refuses
-  personal Spaces, so a personal assistant has no write path today.
+- Can a personal Space hold an agent? Membership replacement still refuses
+  personal Spaces, so a personal assistant has no write path today. **Still
+  open as of 2026-09-07**, and now also the reason a personal Space has no
+  member editor: Control declines to replace its membership at all, so both
+  the agent-binding path and the people path stop at the same wall.

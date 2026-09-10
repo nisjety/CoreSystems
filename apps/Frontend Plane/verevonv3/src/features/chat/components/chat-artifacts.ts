@@ -22,7 +22,7 @@ import {
 } from './chat-types'
 
 /** Which viewer renders an artifact. Derived from `kind`, then from `content`. */
-export type ArtifactRenderKind = 'binary' | 'code' | 'document' | 'html' | 'image' | 'text'
+export type ArtifactRenderKind = 'binary' | 'code' | 'document' | 'html' | 'image' | 'pdf' | 'text'
 
 export type ParsedDataUri = {
   /** Payload byte length: decoded for base64, UTF-8 encoded for percent-escaped. */
@@ -125,17 +125,26 @@ const MIME_EXTENSIONS: Record<string, string> = {
   'text/plain': 'txt',
 }
 
-const RENDER_KIND_LABELS: Record<ArtifactRenderKind, string> = {
-  binary: 'Fil',
-  code: 'Kode',
-  document: 'Dokument',
-  html: 'Nettside',
-  image: 'Bilde',
-  text: 'Tekst',
+/**
+ * Viewer descriptors, in both languages. These were Norwegian-only and
+ * rendered straight into the panel header, which is acceptance criterion 9's
+ * defect in visible text rather than in an attribute — the static guard in
+ * chat-localization.test.ts only reads naming attributes, so nothing would
+ * have caught it.
+ */
+const RENDER_KIND_LABELS: Record<ArtifactRenderKind, { no: string; en: string }> = {
+  binary: { no: 'Fil', en: 'File' },
+  code: { no: 'Kode', en: 'Code' },
+  document: { no: 'Dokument', en: 'Document' },
+  html: { no: 'Nettside', en: 'Web page' },
+  image: { no: 'Bilde', en: 'Image' },
+  pdf: { no: 'PDF', en: 'PDF' },
+  text: { no: 'Tekst', en: 'Text' },
 }
 
 const RENDER_KIND_MIMES: Record<ArtifactRenderKind, string> = {
   binary: 'application/octet-stream',
+  pdf: 'application/pdf',
   code: 'text/plain',
   document: 'text/markdown',
   html: 'text/html',
@@ -159,6 +168,22 @@ export function looksLikeImageContent(content: string): boolean {
   return IMAGE_CONTENT_PATTERN.test(content.trim())
 }
 
+/**
+ * True when `content` is a PDF the browser can actually open: an explicit
+ * `application/pdf` data URI, a blob URL, or an http(s) URL ending in `.pdf`.
+ *
+ * Deliberately narrower than `looksLikeImageContent`, which wraps bare base64
+ * in a data URI. Bare base64 on a `pdf` artifact could equally be prose, and
+ * guessing wrong would put an empty viewer where a working download used to
+ * be — so an unrecognised body keeps its file card.
+ */
+export function looksLikePdfContent(content: string): boolean {
+  const value = content.trim()
+  if (/^data:application\/pdf\b/i.test(value)) return true
+  if (/^blob:/i.test(value)) return true
+  return /^https?:\/\/\S+\.pdf(?:[?#]\S*)?$/i.test(value)
+}
+
 function normalizeKind(kind: string): string {
   return kind.trim().toLowerCase()
 }
@@ -174,15 +199,27 @@ export function artifactRenderKind(artifact: ChatArtifact): ArtifactRenderKind {
   if (HTML_ARTIFACT_KINDS.has(kind)) return 'html'
   if (kind === 'document' || kind === 'markdown' || PROSE_ARTIFACT_KINDS.has(kind)) return 'document'
   if (CODE_ARTIFACT_KINDS.has(kind)) return 'code'
+  // A pdf artifact the browser can open is a viewer, not a download. Checked
+  // before the binary set, which still owns every unopenable body.
+  if (kind === 'pdf' && looksLikePdfContent(artifact.content)) return 'pdf'
   if (BINARY_ARTIFACT_KINDS.has(kind)) return 'binary'
   if (looksLikeImageContent(artifact.content)) return 'image'
   if (parseDataUri(artifact.content)) return 'binary'
   return 'text'
 }
 
-/** Norwegian descriptor for the viewer header. */
-export function artifactRenderKindLabel(kind: ArtifactRenderKind): string {
-  return RENDER_KIND_LABELS[kind]
+/**
+ * Descriptor for the viewer header. `tr` is passed in rather than the hook
+ * being called here: this module is pure and has several non-component
+ * callers, and a `useI18n()` inside it would be a hook call outside a
+ * component root.
+ */
+export function artifactRenderKindLabel(
+  kind: ArtifactRenderKind,
+  tr: (noText: string, enText: string) => string,
+): string {
+  const label = RENDER_KIND_LABELS[kind]
+  return tr(label.no, label.en)
 }
 
 /** Text-based kinds can be copied to the clipboard verbatim. */

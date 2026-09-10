@@ -1083,6 +1083,7 @@ async fn append_assistant_message_with_bearer(
 pub(crate) fn turn_evidence_metadata(
     grounding: Option<&crate::retrieval::Grounding>,
     citations: &[crate::sse_events::RecordedCitation],
+    quality: TurnQuality,
 ) -> Option<prost_types::Struct> {
     let mut fields = std::collections::BTreeMap::new();
 
@@ -1098,10 +1099,50 @@ pub(crate) fn turn_evidence_metadata(
         }
     }
 
+    // Persisted so the score survives the turn that produced it. It arrives on
+    // the `usage` SSE event, which only the browser watching the stream ever
+    // sees; a thread reopened on another device replayed the answer with no
+    // score at all, and the UI cannot tell "unscored" from "never checked".
+    if let Some(confidence) = quality.confidence.filter(|value| value.is_finite()) {
+        fields.insert(
+            "confidence".to_owned(),
+            json_to_prost_value(&serde_json::json!(confidence)),
+        );
+    }
+    if let Some(verification) = quality.verification {
+        fields.insert(
+            "verification".to_owned(),
+            json_to_prost_value(&serde_json::json!({
+                "verdict": verification.verdict,
+                "kbCitations": verification.kb_citations,
+                "webCitations": verification.web_citations,
+                "webAllowed": verification.web_allowed,
+            })),
+        );
+    }
+
     if fields.is_empty() {
         return None;
     }
     Some(prost_types::Struct { fields })
+}
+
+/// The turn's answer-quality assessment, for persistence alongside its
+/// evidence. Both halves are optional: a turn may be unscored, and only a
+/// low-scoring one is ever verified.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TurnQuality {
+    pub(crate) confidence: Option<f64>,
+    pub(crate) verification: Option<TurnVerification>,
+}
+
+/// What the verification pass found, in the shape the SPA reads back.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TurnVerification {
+    pub(crate) verdict: &'static str,
+    pub(crate) kb_citations: u32,
+    pub(crate) web_citations: u32,
+    pub(crate) web_allowed: bool,
 }
 
 fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {

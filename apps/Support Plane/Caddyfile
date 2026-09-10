@@ -1,0 +1,19 @@
+{
+	email {$SUPPORT_PLANE_ACME_EMAIL}
+}
+
+# Rendezvous (hbbs) — matches remote-core's `rendezvousUrl`, e.g. wss://remote.verevon.com
+{$SUPPORT_PLANE_RENDEZVOUS_DOMAIN} {
+	reverse_proxy hbbs:21118 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+# Relay (hbbr) — matches remote-core's `relayUrl`, e.g. wss://relay.verevon.com
+{$SUPPORT_PLANE_RELAY_DOMAIN} {
+	reverse_proxy hbbr:21119 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+}

@@ -75,9 +75,20 @@ it down.
 
 ### 2. The unavailable state is load-bearing — please don't replace it with a generic empty state
 
-Only Chat and Activity have a real space-scoped source today; Agent gained one
-with the actions catalog. **Work, Knowledge and Members have no space-scoped
-endpoint at all.**
+**Updated 2026-09-07.** All six tabs now have a real Space-scoped source:
+Chat (threads plus the room's own transcript route), Work (`/spaces/:ref/work`
+— runs under the room's read decision, schedules filtered by `space_ref`),
+Knowledge (`/spaces/:ref/knowledge` — documents through `documents.space_ref`,
+wiki pages through the retrieval binding), Activity (`/spaces/:ref/activity` —
+runs with cost, approvals, owner receipts correlated through the grant that
+authorized them, and authority grants), Agent (Control roster joined with the
+Application binding, plus authored instructions) and Members (Control's roster,
+with grant and revoke for a named room).
+
+The unavailable state is still load-bearing, just at a finer grain: every one of
+those endpoints answers with a per-section `unavailable` list carrying a stable
+code, so a section that could not be read is named beside the ones that could.
+Durable delivery (S4.4) and watches (S4.3) have no source at all and say so.
 
 So an unsupplied tab names the plane that hasn't published a Space projection
 yet, and says the gap is *a missing connection, not an empty room*. That

@@ -1,0 +1,1046 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>275</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (44 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>org-core)</highlighted_element>
+  <language>Markdown</language>
+  <offset>59</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_ROADMAP.md</file>
+  <line>80</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_ROADMAP.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Would you like to insert '→'?</description>
+  <highlighted_element>-&gt;</highlighted_element>
+  <language>Markdown</language>
+  <offset>79</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (42 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>mutation.</highlighted_element>
+  <language>Markdown</language>
+  <offset>1119</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md</file>
+  <line>13</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Would you like to insert '→'?</description>
+  <highlighted_element>-&gt;</highlighted_element>
+  <language>Markdown</language>
+  <offset>407</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md</file>
+  <line>13</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Would you like to insert '→'?</description>
+  <highlighted_element>-&gt;</highlighted_element>
+  <language>Markdown</language>
+  <offset>420</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONVEX_INTEGRATION_SUMMARY.md</file>
+  <line>258</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONVEX_INTEGRATION_SUMMARY.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Some style guides suggest that commas should set off the year in a month-day-year date.</description>
+  <highlighted_element>2026</highlighted_element>
+  <language>Markdown</language>
+  <offset>31</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main.go</file>
+  <line>95</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>go</language>
+  <offset>47</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main.go</file>
+  <line>156</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/api/api_test.go</file>
+  <line>29</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/api/api_test.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (62 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>insertFunc.</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (57 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>source.</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>120</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (48 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>volume.</highlighted_element>
+  <language>go</language>
+  <offset>54</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go</file>
+  <line>607</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>go</language>
+  <offset>28</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/docs/DNS_MIGRATION_PLAN.md</file>
+  <line>186</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/docs/DNS_MIGRATION_PLAN.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Some style guides suggest that commas should set off the year in a month-day-year date.</description>
+  <highlighted_element>2025</highlighted_element>
+  <language>Markdown</language>
+  <offset>27</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/migrations/028_org_group_grants.sql</file>
+  <line>25</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/migrations/028_org_group_grants.sql" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (51 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>true.&quot;</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>46</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts</file>
+  <line>384</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/convex-token.service.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (44 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>start.</highlighted_element>
+  <language>TypeScript</language>
+  <offset>59</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.spec.ts</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.spec.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (47 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>mock.</highlighted_element>
+  <language>TypeScript</language>
+  <offset>18</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.spec.ts</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.spec.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (47 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>mock.</highlighted_element>
+  <language>TypeScript</language>
+  <offset>18</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.ts</file>
+  <line>249</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/data-plane-authorization.controller.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (45 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>first.</highlighted_element>
+  <language>TypeScript</language>
+  <offset>71</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts</file>
+  <line>87</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/model-plane-token.controller.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>honoured</highlighted_element>
+  <language>TypeScript</language>
+  <offset>11</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/user-service-integration.plugin.ts</file>
+  <line>150</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/user-service-integration.plugin.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (40 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>switch.</highlighted_element>
+  <language>TypeScript</language>
+  <offset>70</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/redis.ts</file>
+  <line>296</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/redis.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>TypeScript</language>
+  <offset>33</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/internal/internal-agent-signup.controller.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>organisation</highlighted_element>
+  <language>TypeScript</language>
+  <offset>26</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/main.ts</file>
+  <line>252</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/main.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>TypeScript</language>
+  <offset>40</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts</file>
+  <line>131</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>organisation</highlighted_element>
+  <language>TypeScript</language>
+  <offset>57</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts</file>
+  <line>132</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>organisation</highlighted_element>
+  <language>TypeScript</language>
+  <offset>27</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts</file>
+  <line>165</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/organizations.controller.ts" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>normalise</highlighted_element>
+  <language>JavaScript</language>
+  <offset>69</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/billing_group.go</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/billing_group.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>go</language>
+  <offset>30</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/billing_group.go</file>
+  <line>59</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/billing_group.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (54 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>tier.</highlighted_element>
+  <language>go</language>
+  <offset>63</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>263</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (42 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>works).</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/database/migrate.go</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/database/migrate.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>go</language>
+  <offset>12</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/correlation.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/correlation.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>honours</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>recognises</highlighted_element>
+  <language>go</language>
+  <offset>51</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go</file>
+  <line>30</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/config/README.md</file>
+  <line>20</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/config/README.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (45 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>cause.</highlighted_element>
+  <language>Markdown</language>
+  <offset>14</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/audit-core.md</file>
+  <line>129</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/audit-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (55 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>symptoms.</highlighted_element>
+  <language>Markdown</language>
+  <offset>754</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/audit-core.md</file>
+  <line>143</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/audit-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (45 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>since.</highlighted_element>
+  <language>Markdown</language>
+  <offset>817</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/audit-core.md</file>
+  <line>145</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/audit-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (41 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>now.</highlighted_element>
+  <language>Markdown</language>
+  <offset>488</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/audit-core.md</file>
+  <line>173</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/audit-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (45 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>it.</highlighted_element>
+  <language>Markdown</language>
+  <offset>543</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/auth-core.md</file>
+  <line>159</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/auth-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Would you like to insert '→'?</description>
+  <highlighted_element>-&gt;</highlighted_element>
+  <language>Markdown</language>
+  <offset>402</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/auth-core.md</file>
+  <line>351</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/auth-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (40 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>diff.</highlighted_element>
+  <language>Markdown</language>
+  <offset>42</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/billing-core.md</file>
+  <line>83</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/billing-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (43 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>implementation.</highlighted_element>
+  <language>Markdown</language>
+  <offset>629</offset>
+  <length>15</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/billing-core.md</file>
+  <line>94</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/billing-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (57 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>sweep.</highlighted_element>
+  <language>Markdown</language>
+  <offset>472</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/org-core.md</file>
+  <line>54</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/org-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (55 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>owner.</highlighted_element>
+  <language>Markdown</language>
+  <offset>571</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/org-core.md</file>
+  <line>205</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/org-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (41 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>yet.</highlighted_element>
+  <language>Markdown</language>
+  <offset>402</offset>
+  <length>4</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/org-core.md</file>
+  <line>254</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/org-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (56 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>work-in-progress.</highlighted_element>
+  <language>Markdown</language>
+  <offset>404</offset>
+  <length>17</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>12</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>The double modal &quot;requires scoped&quot; is nonstandard (only accepted in certain dialects). Consider 'to be scoped'.</description>
+  <highlighted_element>scoped</highlighted_element>
+  <language>Markdown</language>
+  <offset>820</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>17</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Would you like to insert '→'?</description>
+  <highlighted_element>-&gt;</highlighted_element>
+  <language>Markdown</language>
+  <offset>217</offset>
+  <length>2</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>44</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (44 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>debt.</highlighted_element>
+  <language>Markdown</language>
+  <offset>346</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/user-core.md</file>
+  <line>159</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/user-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>Markdown</language>
+  <offset>104</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/user-core.md</file>
+  <line>233</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/user-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>Markdown</language>
+  <offset>123</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/user-core.md</file>
+  <line>233</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/user-core.md" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (45 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>index)</highlighted_element>
+  <language>Markdown</language>
+  <offset>391</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/cmd/server/main.go</file>
+  <line>157</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/cmd/server/main.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>go</language>
+  <offset>38</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/cmd/server/main.go</file>
+  <line>163</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/cmd/server/main.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>go</language>
+  <offset>55</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/cmd/server/main.go</file>
+  <line>308</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/cmd/server/main.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>go</language>
+  <offset>61</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/cmd/server/main.go</file>
+  <line>351</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/cmd/server/main.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (45 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>ticker.</highlighted_element>
+  <language>go</language>
+  <offset>44</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/cmd/server/main.go</file>
+  <line>352</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/cmd/server/main.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>cancelled</highlighted_element>
+  <language>go</language>
+  <offset>64</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/brreg/client.go</file>
+  <line>43</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/brreg/client.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>organisation</highlighted_element>
+  <language>go</language>
+  <offset>16</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/database/migrate.go</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/database/migrate.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>go</language>
+  <offset>12</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/correlation.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/correlation.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>honours</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>133</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>Honour</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>recognises</highlighted_element>
+  <language>go</language>
+  <offset>51</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go</file>
+  <line>30</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/repository.go</file>
+  <line>886</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/repository.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (40 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>intends.</highlighted_element>
+  <language>go</language>
+  <offset>49</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/rbac/effective_capabilities.go</file>
+  <line>16</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/rbac/effective_capabilities.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (40 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>value.</highlighted_element>
+  <language>go</language>
+  <offset>29</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/rbac/repository_postgres_test.go</file>
+  <line>23</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/rbac/repository_postgres_test.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (48 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>call.</highlighted_element>
+  <language>go</language>
+  <offset>41</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/migrations/008_rls_tenant_isolation.down.sql</file>
+  <line>3</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/migrations/008_rls_tenant_isolation.down.sql" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Consider shortening this phrase to just 'whether', unless you mean 'regardless of whether'.</description>
+  <highlighted_element>whether or not</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>30</offset>
+  <length>14</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/migrations/009_rls_enforce_tenant_isolation.up.sql</file>
+  <line>33</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/migrations/009_rls_enforce_tenant_isolation.up.sql" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (42 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>layer.</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>54</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/migrations/020_interactive_retention_outbox_org_id_check.down.sql</file>
+  <line>2</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/migrations/020_interactive_retention_outbox_org_id_check.down.sql" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>organisation</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>34</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/correlation.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/correlation.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>honours</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>recognises</highlighted_element>
+  <language>go</language>
+  <offset>51</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go</file>
+  <line>30</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers_test.go</file>
+  <line>136</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/gdpr_handlers_test.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English does not double '-l-' in suffixes</description>
+  <highlighted_element>labelling</highlighted_element>
+  <language>go</language>
+  <offset>45</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>428</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>honours</highlighted_element>
+  <language>go</language>
+  <offset>25</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/spaces.go</file>
+  <line>321</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/spaces.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (42 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>either.</highlighted_element>
+  <language>go</language>
+  <offset>11</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>American English uses '-iz-' in suffixes</description>
+  <highlighted_element>recognises</highlighted_element>
+  <language>go</language>
+  <offset>51</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go</file>
+  <line>30</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/internalkey/assert.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>British roots ending with '-our' usually have '-or' in American English</description>
+  <highlighted_element>behaviour</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>9</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go</file>
+  <line>204</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (49 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>in.</highlighted_element>
+  <language>go</language>
+  <offset>66</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/membership_owner_live_test.go</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/membership_owner_live_test.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (40 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>roster.</highlighted_element>
+  <language>go</language>
+  <offset>32</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>567</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (43 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>from.</highlighted_element>
+  <language>go</language>
+  <offset>37</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>627</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (40 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>it.</highlighted_element>
+  <language>go</language>
+  <offset>48</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>641</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (49 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>roster.</highlighted_element>
+  <language>go</language>
+  <offset>33</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>694</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (43 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>clear.</highlighted_element>
+  <language>go</language>
+  <offset>42</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>705</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (44 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>role.</highlighted_element>
+  <language>go</language>
+  <offset>38</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>762</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (41 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>existed.</highlighted_element>
+  <language>go</language>
+  <offset>62</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_succession.go</file>
+  <line>90</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_succession.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (40 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>them.</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/service.go</file>
+  <line>746</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/service.go" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (44 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>onboarding.</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/migrations/012_resource_grants.up.sql</file>
+  <line>48</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/migrations/012_resource_grants.up.sql" />
+  <problem_class id="GrazieStyle" severity="STYLE_SUGGESTION" attribute_key="TEXT_STYLE_SUGGESTION">Style</problem_class>
+  <description>Long sentences (42 words here) are harder to read, according to the research; consider splitting</description>
+  <highlighted_element>downgrade.</highlighted_element>
+  <language>GenericSQL</language>
+  <offset>60</offset>
+  <length>10</length>
+</problem>
+</problems>

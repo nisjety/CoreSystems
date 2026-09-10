@@ -1,0 +1,38 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision_test.go</file>
+  <line>154</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/personal_thread_decision_test.go" />
+  <problem_class id="GoDfaErrorMayBeNotNil" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Error may be not nil</problem_class>
+  <description>&lt;code&gt;second&lt;/code&gt; might have &lt;code&gt;nil&lt;/code&gt; or other unexpected value as its corresponding error variable might be not &lt;code&gt;nil&lt;/code&gt;</description>
+  <highlighted_element>second</highlighted_element>
+  <language>go</language>
+  <offset>102</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/spaces/repository.go</file>
+  <line>109</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/spaces/repository.go" />
+  <problem_class id="GoDfaErrorMayBeNotNil" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Error may be not nil</problem_class>
+  <description>&lt;code&gt;current&lt;/code&gt; might have &lt;code&gt;nil&lt;/code&gt; or other unexpected value as its corresponding error variable might be not &lt;code&gt;nil&lt;/code&gt;</description>
+  <highlighted_element>current</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go</file>
+  <line>219</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/gdpr_erasure_saga.go" />
+  <problem_class id="GoDfaErrorMayBeNotNil" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Error may be not nil</problem_class>
+  <description>&lt;code&gt;operation&lt;/code&gt; might have &lt;code&gt;nil&lt;/code&gt; or other unexpected value as its corresponding error variable might be not &lt;code&gt;nil&lt;/code&gt;</description>
+  <highlighted_element>operation</highlighted_element>
+  <language>go</language>
+  <offset>56</offset>
+  <length>9</length>
+</problem>
+</problems>

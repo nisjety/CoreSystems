@@ -25,10 +25,12 @@ import (
 	"github.com/triodelab/integration-corev2/internal/actions"
 	"github.com/triodelab/integration-corev2/internal/attestation"
 	"github.com/triodelab/integration-corev2/internal/auth"
+	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
 	"github.com/triodelab/integration-corev2/internal/discovery"
 	"github.com/triodelab/integration-corev2/internal/events"
+	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/hotpath"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/providers"
@@ -50,10 +52,24 @@ type ServerConfig struct {
 	Actions           *actions.Service
 	WriteAttestations *attestation.Verifier
 	HotPath           hotpath.WebhookNormalizer
+	// CodexSubscriptions owns ChatGPT subscription device-code flows and
+	// execution. It is nil unless explicitly enabled in deployment config.
+	CodexSubscriptions *codexsubscription.Manager
 	// WebhookOrg resolves the owning tenant for account-wide provider
 	// webhooks (Meta/Slack callbacks carry no Verevon org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
-	Logger     *zerolog.Logger
+	// Finspo lets the generic per-connection sync route refuse to queue a
+	// Microsoft job the finspo worker is guaranteed to fail (no SharePoint
+	// library registered yet) and answer 409 no_sources_registered instead.
+	// Nil-safe: without it the route queues as before.
+	Finspo FinspoSourceLister
+	Logger *zerolog.Logger
+}
+
+// FinspoSourceLister is the finspo-core surface the API needs: the org's
+// registered SharePoint/OneDrive sources. *handoff.FinspoClient satisfies it.
+type FinspoSourceLister interface {
+	ListSources(ctx context.Context, orgID, userID string) ([]handoff.FinspoSource, error)
 }
 
 const requestIDHeader = "X-Request-ID"
@@ -106,11 +122,12 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			"natsEnabled": cfg.Config.NATSEnabled,
 			"providers":   len(providers.Catalog()),
 			"capabilities": fiber.Map{
-				"oauth":          true,
-				"tokenBroker":    true,
-				"discovery":      cfg.Discovery != nil,
-				"actions":        cfg.Actions != nil,
-				"webhookHotPath": cfg.HotPath != nil,
+				"oauth":             true,
+				"tokenBroker":       true,
+				"codexSubscription": cfg.CodexSubscriptions != nil,
+				"discovery":         cfg.Discovery != nil,
+				"actions":           cfg.Actions != nil,
+				"webhookHotPath":    cfg.HotPath != nil,
 			},
 		}
 		if auditMonitor != nil {
@@ -138,6 +155,10 @@ func NewServer(cfg ServerConfig) *fiber.App {
 
 	internalAuth := auth.InternalOnly(auth.Config{
 		APIKey:       cfg.Config.InternalAPIKey,
+		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
+	})
+	codexSubscriptionModelPlaneAuth := auth.InternalOnly(auth.Config{
+		APIKey:       cfg.Config.CodexSubscriptionModelPlaneAPIKey,
 		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
 	})
 	app.Get("/metrics", internalAuth, func(c *fiber.Ctx) error {
@@ -293,7 +314,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			return apiError(c, fiber.StatusInternalServerError, "connections_list_failed", err.Error())
 		}
 		connections = filterConnectionsByCategory(connections, firstNonEmpty(c.Query("category"), c.Query("providerCategory")))
-		return success(c, fiber.Map{"connections": connections})
+		return success(c, fiber.Map{"connections": connectionViews(c.UserContext(), cfg.Repo, organizationID, connections)})
 	})
 
 	app.Get("/api/v1/connections/:id", internalOrBearerAuth, func(c *fiber.Ctx) error {
@@ -304,7 +325,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 			return authAwareError(c, err)
 		}
-		return success(c, fiber.Map{"connection": connection})
+		return success(c, fiber.Map{"connection": connectionView1(c.UserContext(), cfg.Repo, connection)})
 	})
 
 	app.Get("/api/v1/connections/:id/status", internalOrBearerAuth, func(c *fiber.Ctx) error {
@@ -540,6 +561,14 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 			return authAwareError(c, err)
 		}
+		// A metadata-less Microsoft sync is handed to finspo-core, which fans
+		// out over the org's registered SharePoint/OneDrive libraries. With
+		// nothing registered the worker can only fail the job, so refuse up
+		// front with a code the SPA turns into "pick a library" instead of
+		// leaving a guaranteed-failed job in Settings → Integrations.
+		if refusal, refused := microsoftSyncNeedsSources(c.UserContext(), cfg, connection); refused {
+			return refusal(c)
+		}
 		job, err := createSyncJob(c.UserContext(), cfg, connection, syncJobBody{Reason: "manual", Mode: "incremental"})
 		if err != nil {
 			return apiError(c, fiber.StatusInternalServerError, "sync_queue_failed", err.Error())
@@ -737,6 +766,62 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 		return nil
 	})
+
+	// Control Plane hands a user's fresh Microsoft (or other OAuth) sign-in
+	// token to this service after every login. The org's connection is created
+	// or widened from it — never narrowed — and remembers the Better Auth
+	// account row so the token can be re-minted through auth-core later. See
+	// oauth/delegated.go. Internal-only: the caller is auth-core, and the body
+	// carries a live access token that must never come from a browser.
+	app.Post("/internal/providers/:provider/sign-in-handoff", chainHandlers(rateLimited, internalAuth, func(c *fiber.Ctx) error {
+		var body signInHandoffBody
+		if err := c.BodyParser(&body); err != nil {
+			return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
+		}
+		providerKey := providers.NormalizeKey(c.Params("provider"))
+		if _, ok := providers.FindOAuth(providerKey); !ok {
+			return apiError(c, fiber.StatusNotFound, "provider_not_found", "Provider is not an OAuth provider.")
+		}
+		if strings.TrimSpace(body.OrganizationID) == "" || strings.TrimSpace(body.AccessToken) == "" {
+			return apiError(c, fiber.StatusBadRequest, "handoff_incomplete", "organizationId and accessToken are required.")
+		}
+		var expiresAt time.Time
+		if raw := strings.TrimSpace(body.ExpiresAt); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return apiError(c, fiber.StatusBadRequest, "invalid_expires_at", "expiresAt must be RFC 3339.")
+			}
+			expiresAt = parsed
+		}
+		connection, created, err := cfg.OAuth.AdoptDelegatedToken(c.UserContext(), oauth.DelegatedTokenInput{
+			ProviderKey:       providerKey,
+			OrganizationID:    body.OrganizationID,
+			WorkspaceID:       body.WorkspaceID,
+			UserID:            body.UserID,
+			UserEmail:         body.UserEmail,
+			ProviderAccountID: body.ProviderAccountID,
+			AccessToken:       body.AccessToken,
+			ExpiresAt:         expiresAt,
+			Scopes:            body.Scopes,
+			TokenRef:          body.TokenRef,
+		})
+		if err != nil {
+			return apiError(c, fiber.StatusBadGateway, "handoff_failed", err.Error())
+		}
+		recordUsage(cfg, connection.OrganizationID, "connection_signin_adopted", 1, map[string]any{
+			"providerKey":  connection.ProviderKey,
+			"connectionId": connection.ID,
+			"created":      created,
+		})
+		status := fiber.StatusOK
+		if created {
+			status = fiber.StatusCreated
+		}
+		return c.Status(status).JSON(fiber.Map{"success": true, "data": fiber.Map{
+			"connection": connectionView1(c.UserContext(), cfg.Repo, connection),
+			"created":    created,
+		}})
+	})...)
 
 	app.Post("/internal/sync-jobs/claim", chainHandlers(rateLimited, internalAuth, func(c *fiber.Ctx) error {
 		var body syncClaimBody
@@ -1184,6 +1269,8 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return success(c, token)
 	})...)
 
+	registerCodexSubscriptionRoutes(app, cfg, codexSubscriptionModelPlaneAuth, internalOrBearerAuth, rateLimited)
+
 	app.Get("/internal/gdpr/export", internalAuth, func(c *fiber.Ctx) error {
 		organizationID := strings.TrimSpace(c.Query("organizationId"))
 		userID := strings.TrimSpace(c.Query("userId"))
@@ -1306,6 +1393,21 @@ type syncJobBody struct {
 
 type inboxSyncBody struct {
 	Channel string `json:"channel"`
+}
+
+// signInHandoffBody is the Control Plane → integration-core sign-in hand-off
+// (auth-core `microsoft-signin-handoff.ts`). `scopes` are the granted scopes
+// as auth-core stored them; `tokenRef` is the Better Auth account row id.
+type signInHandoffBody struct {
+	OrganizationID    string   `json:"organizationId"`
+	WorkspaceID       string   `json:"workspaceId"`
+	UserID            string   `json:"userId"`
+	UserEmail         string   `json:"userEmail"`
+	ProviderAccountID string   `json:"providerAccountId"`
+	AccessToken       string   `json:"accessToken"`
+	ExpiresAt         string   `json:"expiresAt"`
+	Scopes            []string `json:"scopes"`
+	TokenRef          string   `json:"tokenRef"`
 }
 
 type syncCancelBody struct {
@@ -1885,6 +1987,12 @@ func advanceWorkerSyncJob(ctx context.Context, cfg ServerConfig, id string, body
 	})
 	if status == "completed" || status == "failed" || status == "cancelled" {
 		job.CompletedAt = &now
+	}
+	if status == "failed" && strings.TrimSpace(body.Message) != "" {
+		// Keep the worker's failure text on the job itself (not only in the
+		// event stream) so connection sync lanes can show the concrete next
+		// step without a second events query.
+		job.Metadata = mergeMetadata(job.Metadata, map[string]any{"failureMessage": strings.TrimSpace(body.Message)})
 	}
 	var updated store.SyncJob
 	err = withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
@@ -3901,14 +4009,27 @@ func prometheusLabel(input string) string {
 func requestLogger(logger zerolog.Logger) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		err := c.Next()
-		logger.Info().
+		status := c.Response().StatusCode()
+		logger.WithLevel(requestLogLevel(c.Method(), c.Path(), status)).
 			Str("request_id", requestIDFromFiber(c)).
 			Str("method", c.Method()).
 			Str("path", c.Path()).
-			Int("status", c.Response().StatusCode()).
+			Int("status", status).
 			Msg("request")
 		return err
 	}
+}
+
+// requestLogLevel keeps the request log at INFO except for the workers' idle
+// poll: every worker asks POST /internal/sync-jobs/claim about every two
+// seconds and a 404 sync_job_not_available simply means "nothing to do". At
+// INFO that is the bulk of integration-api's log volume; it stays visible at
+// DEBUG for anyone tracing the claim loop.
+func requestLogLevel(method, path string, status int) zerolog.Level {
+	if method == fiber.MethodPost && path == "/internal/sync-jobs/claim" && status == fiber.StatusNotFound {
+		return zerolog.DebugLevel
+	}
+	return zerolog.InfoLevel
 }
 
 func Shutdown(ctx context.Context, app *fiber.App) error {

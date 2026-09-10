@@ -64,17 +64,48 @@ type RunActionDecisionVerifier struct {
 	now       func() time.Time
 }
 
+// DecodeControlPublicKey decodes a Control-minted Ed25519 public key, accepting
+// base64url as well as standard base64.
+//
+// Control emits these keys URL-safe. This file's own envelope parsing already
+// decodes the token's key id, payload, and signature with `RawURLEncoding`, and
+// every sibling consumer of the SAME key does the same — Data Plane's
+// `space_scope.rs` uses `URL_SAFE_NO_PAD`, and `documents-api`'s
+// `configuredSpaceDecisionKeys` uses `base64.RawURLEncoding`. Only the key
+// itself was decoded standard-only here, in both the verifier and the config
+// validator, so a real Control key containing `-` or `_` was rejected: the
+// config check refused to start the service at all, and had it started, the
+// verifier could never have admitted a decision.
+//
+// URL-safe is tried FIRST because it is what Control actually produces; the
+// standard alphabets remain accepted so an operator-supplied key in either
+// convention keeps working.
+func DecodeControlPublicKey(encoded string) (ed25519.PublicKey, bool) {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		return nil, false
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.RawURLEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.StdEncoding,
+	} {
+		if decoded, err := encoding.DecodeString(encoded); err == nil &&
+			len(decoded) == ed25519.PublicKeySize {
+			return ed25519.PublicKey(decoded), true
+		}
+	}
+	return nil, false
+}
+
 func NewRunActionDecisionVerifier(keyID, publicKeyEncoded string) (*RunActionDecisionVerifier, error) {
 	keyID = strings.TrimSpace(keyID)
 	if keyID == "" {
 		return nil, fmt.Errorf("Control run action decision key id is required")
 	}
-	encoded := strings.TrimSpace(publicKeyEncoded)
-	publicKeyBytes, err := base64.RawStdEncoding.DecodeString(encoded)
-	if err != nil {
-		publicKeyBytes, err = base64.StdEncoding.DecodeString(encoded)
-	}
-	if err != nil || len(publicKeyBytes) != ed25519.PublicKeySize {
+	publicKeyBytes, ok := DecodeControlPublicKey(publicKeyEncoded)
+	if !ok {
 		return nil, fmt.Errorf("Control run action decision public key is invalid")
 	}
 	return &RunActionDecisionVerifier{

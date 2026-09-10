@@ -51,8 +51,10 @@ pub(super) async fn upload_chat_document(
 
     // Title and content are the document; without them there is nothing to
     // ground on, and documents-api would reject the row anyway.
-    let (Some(title), Some(content)) = (text_field(&payload, "title"), text_field(&payload, "content"))
-    else {
+    let (Some(title), Some(content)) = (
+        text_field(&payload, "title"),
+        text_field(&payload, "content"),
+    ) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({

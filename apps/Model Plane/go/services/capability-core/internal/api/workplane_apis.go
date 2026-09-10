@@ -891,11 +891,23 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		orgID := verifiedOrganizationID(r)
+		// Optional `space_ref` narrows the org's schedules to one room's.
+		//
+		// A filter, never a grant: this listing has always returned every
+		// schedule in the verified organization to any caller in it, and the
+		// rows already carry `space_ref` — so selecting a subset can only show
+		// less. A room's Work view needs it because a schedule created in one
+		// room is not the other rooms' business, and an org-wide list is
+		// unreadable as soon as a second room exists.
+		spaceRef := strings.TrimSpace(r.URL.Query().Get("space_ref"))
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, schedule_expr, timezone, task_template,
 			       enabled, last_fire_at, next_fire_at, created_at, updated_at, space_ref, creator_subject_id
-			FROM cron_schedules WHERE org_id=$1 AND deleted_at IS NULL ORDER BY name
-		`, orgID)
+			FROM cron_schedules
+			WHERE org_id=$1 AND deleted_at IS NULL
+			  AND ($2 = '' OR space_ref = $2)
+			ORDER BY name
+		`, orgID, spaceRef)
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return

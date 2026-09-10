@@ -8,6 +8,7 @@ import {
 } from '@/shared/api/spaces-client'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { Loader2 } from '@/shared/icons'
+import { useI18n } from '@/shared/i18n'
 import { Redirect } from '@/shared/ui/Redirect'
 
 /**
@@ -54,6 +55,7 @@ const REGISTRATION_POLL_ATTEMPTS = 8
 const REGISTRATION_POLL_INTERVAL_MS = 2_500
 
 export default function SpacesIndexPage() {
+  const i18n = useI18n()
   const [spaces, { refetch }] = createResource(listSpaces)
   const [creating, setCreating] = createSignal(false)
   const [createError, setCreateError] = createSignal('')
@@ -126,9 +128,10 @@ export default function SpacesIndexPage() {
       // you land whether the room was just made or already existed.
       await refetch()
     } catch {
-      setCreateError(
+      setCreateError(i18n.tr(
         'Rommet kunne ikke opprettes. Ingenting ble klargjort — prøv igjen, eller last siden på nytt.',
-      )
+        'The room could not be created. Nothing was provisioned — try again, or reload the page.',
+      ))
     } finally {
       setCreating(false)
     }
@@ -140,17 +143,19 @@ export default function SpacesIndexPage() {
   return (
     <section class="space-page" aria-labelledby="spaces-index-title">
       <Show when={spaces.loading}>
-        <p role="status" aria-live="polite">Åpner rommet ditt …</p>
+        <p role="status" aria-live="polite">{i18n.tr('Åpner rommet ditt …', 'Opening your room…')}</p>
       </Show>
 
       {/* A failed list is NOT "no rooms": membership could not be read, which is
           a different fact and must not be reported as an empty workspace. */}
       <Show when={spaces.error}>
         <div role="alert">
-          <h1 id="spaces-index-title">Rom er utilgjengelig</h1>
+          <h1 id="spaces-index-title">{i18n.tr('Rom er utilgjengelig', 'Spaces unavailable')}</h1>
           <p>
-            Medlemskapet ditt kunne ikke bekreftes, så vi kan ikke vise hvilke rom du har
-            tilgang til. Ingen romhandlinger er tilgjengelige akkurat nå.
+            {i18n.tr(
+              'Medlemskapet ditt kunne ikke bekreftes, så vi kan ikke vise hvilke rom du har tilgang til. Ingen romhandlinger er tilgjengelige akkurat nå.',
+              'Your membership could not be confirmed, so we cannot show which Spaces you have access to. No Space actions are available right now.',
+            )}
           </p>
         </div>
       </Show>
@@ -165,28 +170,35 @@ export default function SpacesIndexPage() {
                   when={provisioningBusy()}
                   fallback={
                     <div>
-                      <h1 id="spaces-index-title">Ingen rom ennå</h1>
+                      <h1 id="spaces-index-title">{i18n.tr('Ingen rom ennå', 'No Spaces yet')}</h1>
                       <Show
                         when={provisioning() === 'timed_out'}
                         fallback={
                           <p>
-                            Organisasjonens rom kunne ikke opprettes akkurat nå. Ingenting ble
-                            klargjort — prøv igjen, eller opprett ditt personlige rom først.
+                            {i18n.tr(
+                              'Organisasjonens rom kunne ikke opprettes akkurat nå. Ingenting ble klargjort — prøv igjen, eller opprett ditt personlige rom først.',
+                              "The organization's room could not be created right now. Nothing was provisioned — try again, or create your personal room first.",
+                            )}
                           </p>
                         }
                       >
                         <p>
-                          Organisasjonens rom er opprettet og registreres fortsatt hos Control
-                          Plane. Det dukker opp i listen så snart registreringen er fullført —
-                          du kan vente her, eller opprette ditt personlige rom i mellomtiden.
+                          {i18n.tr(
+                            'Organisasjonens rom er opprettet og registreres fortsatt hos Control Plane. Det dukker opp i listen så snart registreringen er fullført — du kan vente her, eller opprette ditt personlige rom i mellomtiden.',
+                            "The organization's room has been created and is still being registered with Control Plane. It appears in the list as soon as registration completes — you can wait here, or create your personal room in the meantime.",
+                          )}
                         </p>
                       </Show>
                       <div class="spaces-index-actions">
                         <button type="button" onClick={retryOrganizationRoom}>
-                          {provisioning() === 'timed_out' ? 'Sjekk igjen' : 'Prøv igjen'}
+                          {provisioning() === 'timed_out'
+                            ? i18n.tr('Sjekk igjen', 'Check again')
+                            : i18n.tr('Prøv igjen', 'Try again')}
                         </button>
                         <button type="button" onClick={() => void createRoom()} disabled={creating()}>
-                          {creating() ? 'Oppretter rommet …' : 'Opprett mitt personlige rom'}
+                          {creating()
+                            ? i18n.tr('Oppretter rommet …', 'Creating the room…')
+                            : i18n.tr('Opprett mitt personlige rom', 'Create my personal room')}
                         </button>
                       </div>
                       {/* Honest about the two-step lifecycle: a room exists as soon
@@ -194,8 +206,10 @@ export default function SpacesIndexPage() {
                           Space action is allowed. Saying "ready" here would promise
                           something the next screen would then refuse. */}
                       <p>
-                        Rom opprettes med én gang, men må registreres av Control Plane før
-                        handlinger i dem er tillatt. Du ser statusen i rommet.
+                        {i18n.tr(
+                          'Rom opprettes med én gang, men må registreres av Control Plane før handlinger i dem er tillatt. Du ser statusen i rommet.',
+                          'A Space is created immediately, but Control Plane must register it before any action in it is allowed. You can see that status inside the room.',
+                        )}
                       </p>
                       <Show when={createError()}>
                         <p role="alert">{createError()}</p>
@@ -204,12 +218,15 @@ export default function SpacesIndexPage() {
                   }
                 >
                   <div role="status" aria-live="polite">
-                    <h1 id="spaces-index-title">Gjør klar organisasjonens rom</h1>
+                    <h1 id="spaces-index-title">{i18n.tr("Gjør klar organisasjonens rom", "Preparing the organization's room")}</h1>
                     <p class="spaces-index-provisioning__status">
                       <Loader2 size={15} class="onboarding-phase-spinner" />
                       {provisioning() === 'ensuring'
-                        ? 'Oppretter organisasjonens rom …'
-                        : 'Rommet er opprettet — venter på registrering hos Control Plane …'}
+                        ? i18n.tr("Oppretter organisasjonens rom …", "Creating the organization's room…")
+                        : i18n.tr(
+                            'Rommet er opprettet — venter på registrering hos Control Plane …',
+                            'The room has been created — waiting for registration with Control Plane…',
+                          )}
                     </p>
                   </div>
                 </Show>

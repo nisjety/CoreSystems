@@ -11,7 +11,7 @@ use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use reqwest::Method;
@@ -24,7 +24,7 @@ use crate::{
     contracts::ActionActor,
     envelope::error,
     middleware::{require_session, AuthenticatedUser},
-    upstream::proxy_json,
+    upstream::{proxy_json, send_with_retry},
 };
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -137,7 +137,7 @@ pub(crate) async fn inject_personal_thread_context(
             "{}/api/v1/internal/spaces/thread-append-decision",
             state.user_core_url
         );
-        let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let content_digest = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
         let (status, Json(response)) = proxy_json(
             state,
             Method::POST,
@@ -517,7 +517,7 @@ pub(crate) async fn inject_personal_schedule_create_context(
             )),
         )
     })?;
-    let template_digest = format!("sha256:{:x}", Sha256::digest(template_bytes));
+    let template_digest = format!("sha256:{}", hex::encode(Sha256::digest(template_bytes)));
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -663,6 +663,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 		)
         .route("/api/v1/spaces/{space_ref}/roster", get(space_roster))
         .route(
+            "/api/v1/spaces/{space_ref}/members",
+            post(add_space_member),
+        )
+        .route(
+            "/api/v1/spaces/{space_ref}/members/{member_id}",
+            delete(remove_space_member),
+        )
+        .route(
             "/api/v1/spaces/{space_ref}/instructions",
             get(get_space_instructions).patch(update_space_instructions),
         )
@@ -682,7 +690,29 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/spaces/{space_ref}/agents/bind",
             post(bind_existing_space_agent),
         )
+        // Registered AFTER `/agents/bind` so the literal segment still wins;
+        // `{binding_ref}` would otherwise swallow it.
+        .route(
+            "/api/v1/spaces/{space_ref}/agents/{binding_ref}",
+            patch(set_space_agent_state).delete(revoke_space_agent),
+        )
         .route("/api/v1/spaces/{space_ref}/threads", get(list_space_threads))
+        .route("/api/v1/spaces/{space_ref}/work", get(space_work))
+        .route("/api/v1/spaces/{space_ref}/knowledge", get(space_knowledge))
+        .route("/api/v1/spaces/{space_ref}/activity", get(space_activity))
+        .route(
+            "/api/v1/spaces/{space_ref}/threads/{thread_id}/transcript",
+            get(space_thread_transcript),
+        )
+        .route(
+            "/api/v1/spaces/{space_ref}/threads/{thread_id}/presentation",
+            axum::routing::patch(space_thread_presentation),
+        )
+        .route("/api/v1/spaces/{space_ref}/read", post(mark_space_read))
+        .route(
+            "/api/v1/spaces/{space_ref}/presence",
+            post(record_space_presence),
+        )
         .route(
             "/api/v1/spaces/{space_ref}/deletion-requests",
             post(request_personal_space_deletion),
@@ -1114,8 +1144,25 @@ async fn list_space_threads(
             Err(reason) => return crate::domains::chat::shared::delegated_auth_unavailable(reason),
         };
     let limit = query.limit.unwrap_or(80).clamp(1, 200);
+    // Without this the listing is owner-bound, so every member of one room sees
+    // a different room. Control decides whether this caller may see the shared
+    // record; a decline leaves the request exactly as it was.
+    let read = match shared_thread_read_decision(&state, &user, &org_id, space_ref).await {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let read_query = read
+        .as_ref()
+        .map(|(decision_ref, token)| {
+            format!(
+                "&space_read_decision_ref={}&space_read_decision_token={}",
+                urlencoding::encode(decision_ref),
+                urlencoding::encode(token),
+            )
+        })
+        .unwrap_or_default();
     let url = format!(
-        "{}/v1/threads?limit={limit}&space_id={}",
+        "{}/v1/threads?limit={limit}&space_id={}{read_query}",
         state.model_gateway_url,
         urlencoding::encode(space_ref),
     );
@@ -1155,6 +1202,22 @@ async fn list_space_threads(
             )),
         );
     }
+    // Where this member last caught up (item 4b). Read alongside the listing so
+    // "new since your last visit" is one round trip. Application answering
+    // slowly or not at all must never cost the room its threads, so a failed
+    // marker read is a named gap beside the list, not a failed list.
+    let mut unavailable: Vec<Value> = Vec::new();
+    let read_marker = match space_read_marker(&state, &user, &org_id, space_ref).await {
+        Some(marker) => marker,
+        None => {
+            unavailable.push(json!({
+                "section": "read_marker",
+                "code": "read_marker_unavailable",
+                "reason": "Application Plane could not return where you last caught up.",
+            }));
+            Value::Null
+        }
+    };
     (
         StatusCode::OK,
         Json(json!({
@@ -1162,6 +1225,1399 @@ async fn list_space_threads(
                 "space": public_space(&space),
                 "membership": crate::envelope::unwrap_data(&membership),
                 "threads": thread_items,
+                "read_marker": read_marker,
+                "unavailable": unavailable,
+            }
+        })),
+    )
+}
+
+/// Ask Control whether this caller may read this shared Space's record, and
+/// return the signed decision for Model Plane to verify.
+///
+/// `Ok(None)` means "no shared read available", which is a real answer rather
+/// than a failure, and it has exactly two causes:
+///
+/// * **403** — Control considered the request and declined: the org has not
+///   enabled `thread_read_entitled` (deny-by-default, migration 026), the
+///   Space is personal, or the caller is not a current recipient.
+/// * **404** — this Control does not have the endpoint at all, i.e. a gateway
+///   newer than the Control it talks to. An absent capability is not an
+///   outage, and failing here would mean a room that goes dark for the whole
+///   window between deploying the two planes.
+///
+/// Everything else propagates. An unreachable or erroring Control must never
+/// be read as "not entitled" — the same rule the retrieval decision follows
+/// above, and the reason this returns a Result rather than an Option.
+async fn shared_thread_read_decision(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<Option<(String, String)>, (StatusCode, Json<Value>)> {
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let url = format!(
+        "{}/api/v1/internal/spaces/thread-read-decision",
+        state.user_core_url
+    );
+    let (status, Json(response)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "space_ref": space_ref,
+            // Same shape as the retrieval decision's key above: a read is not
+            // an idempotent effect to dedupe, it just needs a unique operation
+            // name, and the clock gives one without a new dependency.
+            "idempotency_key": format!("space-read-{}", unix_nanos()),
+        })),
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err((status, Json(response)));
+    }
+    let data = crate::envelope::unwrap_data(&response);
+    let decision_ref = data
+        .get("decision")
+        .and_then(Value::as_object)
+        .and_then(|decision| decision.get("decision_ref"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let token = data
+        .get("token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if decision_ref.trim().is_empty() || token.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "invalid_space_decision",
+                "Control returned an invalid Space read decision.",
+            )),
+        ));
+    }
+    Ok(Some((decision_ref, token)))
+}
+
+/// `GET /api/v1/spaces/{space_ref}/activity` — what has happened here.
+///
+/// Activity and Work ask different questions of overlapping evidence. Work asks
+/// "what is in flight"; Activity asks "what happened, on whose authority, and
+/// with what outcome". So this reads the same run listing with a wider limit
+/// and keeps terminal runs, and it adds the two things Work has no use for:
+/// the owner effects performed under this Space's authority, and the grants
+/// that authorized them.
+///
+/// # The owner receipts are correlated through the grant, not a Space column
+///
+/// `conversation_ticket_operations` has no `space_ref`, and deliberately does
+/// not gain one. An operation is bound to the exact owner grant it committed
+/// against, and that grant carries the `space_ref` Control decided — so
+/// Conversation Core's new `/spaces/:ref/activity` joins the two. This closes
+/// S2.3's slice 5 ("correlate the owner event into Application Space
+/// Activity") without inventing an edge: an effect appears here only if it was
+/// genuinely authorized for this room.
+///
+/// # Every section fails alone and says so
+///
+/// Runs need Control's `model.thread.read` decision; receipts need Conversation
+/// Core; approvals need Model Plane per run. A reader must be able to tell "no
+/// approvals were needed" from "we could not ask", so each gap is named with a
+/// stable code beside whatever did resolve — the same contract Work and
+/// Knowledge use.
+async fn space_activity(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to read Space activity.",
+            )),
+        );
+    }
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    let space = match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(space)) => space,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    };
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+
+    let mut runs = Value::Array(vec![]);
+    let mut operations = Value::Array(vec![]);
+    let mut authority = Value::Array(vec![]);
+    let mut approvals: Vec<Value> = Vec::new();
+    let mut unavailable: Vec<Value> = Vec::new();
+
+    // ---- runs, through the room's read authority -------------------------
+    let read = match shared_thread_read_decision(&state, &user, &org_id, space_ref).await {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    match read.as_ref() {
+        Some((decision_ref, token)) => {
+            let model_token =
+                crate::domains::chat::shared::model_token(&state, &user, &headers).await;
+            let session_token =
+                crate::domains::chat::shared::required_session_token(&state, &user, &headers)
+                    .await
+                    .ok();
+            match session_token {
+                None => unavailable.push(json!({
+                    "section": "runs",
+                    "code": "runs_session_unavailable",
+                    "reason": "This session cannot read this room's runs right now.",
+                })),
+                Some(session_token) => {
+                    let url = format!(
+                        "{}/v1/runs?limit=100&space_id={}&space_read_decision_ref={}&space_read_decision_token={}",
+                        state.model_gateway_url,
+                        urlencoding::encode(space_ref),
+                        urlencoding::encode(decision_ref),
+                        urlencoding::encode(token),
+                    );
+                    let (status, Json(payload)) =
+                        crate::domains::chat::shared::proxy_model_json_with_session(
+                            &state,
+                            Method::GET,
+                            &url,
+                            None,
+                            model_token.as_deref(),
+                            Some(&session_token),
+                            &user,
+                        )
+                        .await;
+                    if status.is_success() {
+                        runs = payload
+                            .get("runs")
+                            .filter(|value| value.is_array())
+                            .cloned()
+                            .unwrap_or(Value::Array(vec![]));
+                        // Approvals are per-run upstream, so a room-wide fetch
+                        // would be an unbounded fan-out. Ask only for the runs
+                        // that are actually gated on a person — those are the
+                        // rows whose decision the reader can still change, and
+                        // the only ones an approval detail adds anything to.
+                        let gated: Vec<String> = runs
+                            .as_array()
+                            .map(|rows| {
+                                rows.iter()
+                                    .filter(|row| {
+                                        row.get("status").and_then(Value::as_str)
+                                            == Some("awaiting_approval")
+                                    })
+                                    .filter_map(|row| {
+                                        row.get("run_id").and_then(Value::as_str).map(str::to_owned)
+                                    })
+                                    .take(SPACE_ACTIVITY_APPROVAL_RUNS)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let mut approval_read_failed = false;
+                        for run_id in gated {
+                            let url = format!(
+                                "{}/v1/runs/{}/approvals",
+                                state.model_gateway_url,
+                                urlencoding::encode(&run_id),
+                            );
+                            let (status, Json(payload)) =
+                                crate::domains::chat::shared::proxy_model_json_with_session(
+                                    &state,
+                                    Method::GET,
+                                    &url,
+                                    None,
+                                    model_token.as_deref(),
+                                    Some(&session_token),
+                                    &user,
+                                )
+                                .await;
+                            if !status.is_success() {
+                                approval_read_failed = true;
+                                continue;
+                            }
+                            if let Some(rows) = payload.get("approvals").and_then(Value::as_array) {
+                                for row in rows {
+                                    let mut row = row.clone();
+                                    // Carry the run so the timeline can put an
+                                    // approval next to the work it gates.
+                                    if let Some(object) = row.as_object_mut() {
+                                        object
+                                            .entry("run_id".to_owned())
+                                            .or_insert_with(|| json!(run_id));
+                                    }
+                                    approvals.push(row);
+                                }
+                            }
+                        }
+                        if approval_read_failed {
+                            unavailable.push(json!({
+                                "section": "approvals",
+                                "code": "approvals_upstream_unavailable",
+                                "reason": "Model Plane could not return this room's approvals.",
+                            }));
+                        }
+                    } else {
+                        unavailable.push(json!({
+                            "section": "runs",
+                            "code": "runs_upstream_unavailable",
+                            "reason": "Model Plane could not return this room's runs.",
+                        }));
+                    }
+                }
+            }
+        }
+        None => unavailable.push(json!({
+            "section": "runs",
+            "code": "runs_read_not_authorized",
+            "reason": "Reading this Space's shared work is not authorized.",
+        })),
+    }
+
+    // ---- owner receipts and the authority behind them --------------------
+    let receipts_url = format!(
+        "{}/api/v1/spaces/{}/activity",
+        state.conversation_core_url,
+        urlencoding::encode(space_ref),
+    );
+    let (receipts_status, Json(receipts)) = crate::upstream::proxy_conversation_json(
+        &state,
+        Method::GET,
+        &receipts_url,
+        None,
+        &user,
+        None,
+    )
+    .await;
+    if receipts_status.is_success() {
+        let data = crate::envelope::unwrap_data(&receipts);
+        operations = data
+            .get("operations")
+            .filter(|value| value.is_array())
+            .cloned()
+            .unwrap_or(Value::Array(vec![]));
+        authority = data
+            .get("authority")
+            .filter(|value| value.is_array())
+            .cloned()
+            .unwrap_or(Value::Array(vec![]));
+    } else if receipts_status == StatusCode::NOT_FOUND {
+        // A Conversation Core that predates the route. The room is still
+        // readable; its owner effects simply are not, and saying which beats
+        // an empty list that reads as "nothing has happened here".
+        unavailable.push(json!({
+            "section": "operations",
+            "code": "operations_endpoint_unavailable",
+            "reason": "This deployment cannot yet list this room's owner effects.",
+        }));
+    } else {
+        unavailable.push(json!({
+            "section": "operations",
+            "code": "operations_upstream_unavailable",
+            "reason": "Application Plane could not return this room's owner effects.",
+        }));
+    }
+
+    // Evidence classes this room has no source for yet. Named rather than
+    // omitted: the Activity tab's footnote has promised "other owner-plane
+    // evidence joins when a correlated Space projection is published" since the
+    // cockpit shipped, and a reader deserves to know which ones are still out.
+    unavailable.push(json!({
+        "section": "delivery",
+        "code": "delivery_ledger_not_built",
+        "reason": "Durable delivery state is not published yet (S4.4).",
+    }));
+    unavailable.push(json!({
+        "section": "watches",
+        "code": "watches_not_built",
+        "reason": "Watches are not published yet (S4.3).",
+    }));
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "space": public_space(&space),
+                "membership": crate::envelope::unwrap_data(&membership),
+                "runs": runs,
+                "approvals": approvals,
+                "operations": operations,
+                "authority": authority,
+                "unavailable": unavailable,
+            }
+        })),
+    )
+}
+
+/// How many gated runs Activity will fetch approval detail for.
+///
+/// Approvals are a per-run read upstream, so this is a fan-out bound, not a
+/// display limit. Only runs that are waiting on a person are asked about at
+/// all; a room with more than this many simultaneous approvals has a bigger
+/// problem than a truncated Activity list, and the Work tab is where that queue
+/// belongs.
+const SPACE_ACTIVITY_APPROVAL_RUNS: usize = 10;
+
+/// Ask Control for this Space's `retrieval.read` authority.
+///
+/// Same decline semantics as `shared_thread_read_decision`: FORBIDDEN means
+/// Control considered the request and said no (retrieval is a separately
+/// entitled effect — `retrieval_read_entitled` is its own policy bit, and most
+/// orgs have never turned it on), and NOT_FOUND means this Control predates the
+/// endpoint. Both are answers, so both degrade the Knowledge tab to a named gap
+/// rather than darkening it. Anything else is an outage and fails the call.
+async fn space_retrieval_decision(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let url = format!(
+        "{}/api/v1/internal/spaces/retrieval-decision",
+        state.user_core_url
+    );
+    let (status, Json(response)) = proxy_json(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "space_ref": space_ref,
+            "idempotency_key": format!("space-knowledge-{}", unix_nanos()),
+        })),
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err((status, Json(response)));
+    }
+    let token = crate::envelope::unwrap_data(&response)
+        .get("token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if token.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "invalid_space_decision",
+                "Control returned an invalid Space retrieval decision.",
+            )),
+        ));
+    }
+    Ok(Some(token))
+}
+
+/// `GET /api/v1/spaces/{space_ref}/knowledge` — what this room knows about.
+///
+/// The Knowledge tab has read "Data Plane has not published a Space projection
+/// for this yet" since the cockpit shipped, and the reason was further upstream
+/// than a missing endpoint: `documents-api` verified a Space import decision on
+/// every create and then discarded the Space, so no document row could say
+/// which room it belonged to. `documents.space_ref` is that edge, and
+/// retrieval-engine's `/v1/knowledge/space-sources` reads it under the same
+/// Control `retrieval.read` authority a grounded room turn already uses.
+///
+/// # One authority, two sections, separate gaps
+///
+/// Documents resolve through `documents.space_ref`; wiki pages resolve through
+/// the workspace this Space's `space_retrieval_bindings` row names. Those are
+/// different mechanisms with different ways to be absent, so Data reports a
+/// per-section gap and this endpoint relays it beside whatever did resolve.
+///
+/// # Why a decline is not an error
+///
+/// Retrieval is entitled separately from chat. A room whose org never opted
+/// into `retrieval_read_entitled` is a working room that cannot list its
+/// archive — saying that is the honest answer, and failing the request would
+/// make an unconfigured entitlement look like a broken feature.
+async fn space_knowledge(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to read Space knowledge.",
+            )),
+        );
+    }
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    let space = match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(space)) => space,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    };
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+
+    let mut documents = Value::Array(vec![]);
+    let mut wiki_pages = Value::Array(vec![]);
+    let mut binding = Value::Null;
+    let mut documents_truncated = false;
+    let mut unavailable: Vec<Value> = Vec::new();
+
+    match space_retrieval_decision(&state, &user, &org_id, space_ref).await {
+        Err(response) => return response,
+        Ok(None) => unavailable.push(json!({
+            "section": "knowledge",
+            "code": "knowledge_read_not_authorized",
+            "reason": "Reading this Space's knowledge is not authorized.",
+        })),
+        Ok(Some(decision)) => {
+            let url = format!("{}/v1/knowledge/space-sources", state.retrieval_engine_url);
+            let (status, Json(payload)) =
+                crate::domains::knowledge::shared::proxy_data_plane_json_with_space_decision(
+                    &state,
+                    &user,
+                    &headers,
+                    Method::POST,
+                    &url,
+                    Some(json!({ "limit": 50 })),
+                    Some(&org_id),
+                    &decision,
+                )
+                .await;
+            if status.is_success() {
+                // Same `null`-versus-`[]` care as the Work tab: keep only a
+                // real array, so a room with nothing in it reaches the browser
+                // as an empty list rather than a null the client must guess at.
+                documents = payload
+                    .get("documents")
+                    .filter(|value| value.is_array())
+                    .cloned()
+                    .unwrap_or(Value::Array(vec![]));
+                wiki_pages = payload
+                    .get("wiki_pages")
+                    .filter(|value| value.is_array())
+                    .cloned()
+                    .unwrap_or(Value::Array(vec![]));
+                binding = payload.get("binding").cloned().unwrap_or(Value::Null);
+                documents_truncated = payload
+                    .get("documents_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                // Data's own per-section gaps, relayed rather than restated:
+                // it knows which half of its answer is missing and why.
+                if let Some(gaps) = payload.get("unavailable").and_then(Value::as_array) {
+                    unavailable.extend(gaps.iter().cloned());
+                }
+            } else if status == StatusCode::FORBIDDEN {
+                // Authority verified at Control and refused at Data means the
+                // Space has no active binding to a Data target — a real,
+                // nameable state, not an outage.
+                unavailable.push(json!({
+                    "section": "knowledge",
+                    "code": "knowledge_binding_unavailable",
+                    "reason": "This Space is not bound to a Data Plane knowledge target.",
+                }));
+            } else {
+                unavailable.push(json!({
+                    "section": "knowledge",
+                    "code": "knowledge_upstream_unavailable",
+                    "reason": "Data Plane could not return this room's knowledge.",
+                }));
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "space": public_space(&space),
+                "membership": crate::envelope::unwrap_data(&membership),
+                "binding": binding,
+                "documents": documents,
+                "documents_truncated": documents_truncated,
+                "wiki_pages": wiki_pages,
+                "unavailable": unavailable,
+            }
+        })),
+    )
+}
+
+/// The caller's read marker for a room, as `{"last_read_at": <epoch ms>|null}`.
+/// `None` when Application could not be asked at all — distinct from a member
+/// who has never caught up, which is `Some(null)`.
+async fn space_read_marker(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Option<Value> {
+    let result = convex_gateway_call(
+        state,
+        "query",
+        "spaceReadMarkers:spaceReadMarkerForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+        }),
+    )
+    .await
+    .ok()?;
+    let value = result.get("value").unwrap_or(&result);
+    Some(json!({
+        "last_read_at": value.get("lastReadAt").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+/// `POST /api/v1/spaces/{space_ref}/presence` — "I am here", and in the same
+/// answer, "who else is?".
+///
+/// One request per beat rather than a write plus a read: the room already runs
+/// a six-second poll, and a heartbeat that only wrote would need a second
+/// request on the same timer to be worth anything. The answer is necessarily
+/// as fresh as the write that produced it.
+///
+/// Body: `{ "status": "online" | "typing" | "offline" }`, defaulting to
+/// `online`. `offline` is the polite goodbye a closing tab can send; it is
+/// never required, because Application expires a heartbeat that stops coming.
+///
+/// The same lifecycle and membership checks as every other Space call run
+/// first, so someone removed from a room stops appearing in it. Application is
+/// only ever told the caller's own identity — presence cannot be written for
+/// anyone else.
+async fn record_space_presence(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to read a Space.",
+            )),
+        );
+    }
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    // Only the three statuses this route offers. An unknown one is refused
+    // rather than coerced to `online`: a client sending something else has a
+    // bug, and quietly reporting them as present would hide it.
+    let status = match body.get("status").and_then(Value::as_str) {
+        None => "online",
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "online" => "online",
+            "typing" => "typing",
+            "offline" => "offline",
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(error(
+                        "invalid_presence",
+                        "Presence is one of online, typing or offline.",
+                    )),
+                )
+            }
+        },
+    };
+    match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+    let Ok(result) = convex_gateway_call(
+        &state,
+        "mutation",
+        "spacePresence:recordSpacePresenceForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "status": status,
+        }),
+    )
+    .await
+    else {
+        // Presence is the least important thing in the room. It fails as its
+        // own named gap so the caller can say "who is here is unknown" rather
+        // than draw an empty room, which would read as "you are alone".
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "presence_unavailable",
+                "Who else is in this room could not be read. Nothing else was altered.",
+            )),
+        );
+    };
+    let value = result.get("value").unwrap_or(&result);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "space_ref": space_ref,
+                "status": status,
+                "present": value.get("present").cloned().unwrap_or(Value::Array(vec![])),
+                "ttl_seconds": value.get("ttlSeconds").cloned().unwrap_or(Value::Null),
+            }
+        })),
+    )
+}
+
+/// `POST /api/v1/spaces/{space_ref}/read` — the caller has this room open now.
+///
+/// Records a timestamp against identifiers in Application Plane and nothing
+/// else: not which threads exist, not what they say. The same lifecycle and
+/// membership checks as every other Space read run first, so a former member
+/// cannot keep advancing a marker in a room they were removed from.
+async fn mark_space_read(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to read a Space.",
+            )),
+        );
+    }
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+    let Ok(result) = convex_gateway_call(
+        &state,
+        "mutation",
+        "spaceReadMarkers:markSpaceReadForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+        }),
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "read_marker_unavailable",
+                "Where you last caught up could not be recorded. Nothing else was altered.",
+            )),
+        );
+    };
+    let value = result.get("value").unwrap_or(&result);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "space_ref": space_ref,
+                "last_read_at": value.get("lastReadAt").cloned().unwrap_or(Value::Null),
+            }
+        })),
+    )
+}
+
+/// `PATCH /api/v1/spaces/{space_ref}/threads/{thread_id}/presentation` — retitle
+/// or pin a post in the room.
+///
+/// # Why the room needs its own route for this
+///
+/// Chat's `PUT /api/v1/chat/threads/{id}` performs the same Model Gateway
+/// write and then re-reads the caller's thread list with `origin=chat` to
+/// return the updated session. Room threads carry `origin="space"` (Session
+/// Core enforces the pairing with a CHECK), so that re-read can never find
+/// one: the title would be written and the request would still answer 404.
+/// This route runs the room's own lifecycle and membership checks, performs
+/// the identical write, and returns a receipt rather than a re-read.
+///
+/// # Owner-bound, and said so
+///
+/// Session Core's `UpdateThreadPresentation` authorizes the thread's OWNER. So
+/// today the member who started a post can retitle or pin it, and everyone in
+/// the room sees the result on the next poll — the listing already orders
+/// pinned posts first and relays `pinned`. A member pinning someone else's
+/// post is refused by Session Core, and this route relays that as a 403 with a
+/// sentence about who may, not as a generic error. Letting any editor pin any
+/// post is the next slice: it needs a Space-authorized presentation write in
+/// Session Core, mirroring how a room reply is admitted through a Control
+/// `model.thread.append` decision, and is deliberately not faked here.
+async fn space_thread_presentation(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
+    Path((space_ref, thread_id)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    let thread_id = thread_id.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to change a Space thread.",
+            )),
+        );
+    }
+    if space_ref.is_empty() || thread_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_space",
+                "A Space and thread reference are required.",
+            )),
+        );
+    }
+    let title = body
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let pinned = body.get("pinned").and_then(Value::as_bool);
+    if title.is_none() && pinned.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_presentation",
+                "A title or a pin state is required.",
+            )),
+        );
+    }
+    if title.is_some_and(|value| value.chars().count() > 200) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_presentation",
+                "A title is at most 200 characters.",
+            )),
+        );
+    }
+    match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+    match crate::domains::chat::history::update_durable_presentation(
+        &state, &user, &headers, thread_id, title, None, pinned,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "data": {
+                    "space_ref": space_ref,
+                    "thread_id": thread_id,
+                    "title": title,
+                    "pinned": pinned,
+                }
+            })),
+        ),
+        Err(response) => {
+            let status = response.status();
+            if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
+                // Session Core refused because the caller does not own the post,
+                // or answered as if it does not exist for them — the same thing
+                // from the room's side. Say who may, rather than "forbidden".
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(error(
+                        "thread_presentation_owner_only",
+                        "Only the member who started this post can retitle or pin it.",
+                    )),
+                );
+            }
+            (
+                status,
+                Json(error(
+                    "thread_presentation_unavailable",
+                    "The post could not be changed. Nothing was altered.",
+                )),
+            )
+        }
+    }
+}
+
+/// `GET /api/v1/spaces/{space_ref}/work` — what this room has running and
+/// scheduled.
+///
+/// The Work tab has been rendering an honest "no plane has published a Space
+/// projection for this" since the cockpit shipped, and it was right: Model
+/// Plane's run listing was per-thread and owner-bound, and its schedule listing
+/// was org-wide with no way to ask about one room. Both now take a Space, so
+/// this composes them.
+///
+/// # Two upstreams, two different authorities, deliberately
+///
+/// Runs come back through the same `model.thread.read` decision the room's
+/// transcript uses, and Session Core lists them THROUGH the threads that
+/// decision admits — so Work reaches exactly as far as Chat and no further.
+/// Schedules are filtered, not authorized, by `space_ref`: that listing has
+/// always returned the verified organization's schedules to any member of it,
+/// so narrowing to one room can only show less.
+///
+/// # Partial is reported, not hidden
+///
+/// Either upstream can fail on its own. Returning what did resolve with a named
+/// gap is the honest answer for a tab whose whole point is "what needs me" —
+/// silently dropping the schedules would make a room with pending work look
+/// idle, and failing the whole call would hide the runs that did load.
+async fn space_work(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to read Space work.",
+            )),
+        );
+    }
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    // Lifecycle and membership first, exactly as the thread listing does: a
+    // suspended room must not answer with its work.
+    let space = match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(space)) => space,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    };
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership)) = proxy_json(
+        &state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return (membership_status, Json(membership));
+    }
+
+    let session_token =
+        match crate::domains::chat::shared::required_session_token(&state, &user, &headers).await {
+            Ok(token) => token,
+            Err(reason) => return crate::domains::chat::shared::delegated_auth_unavailable(reason),
+        };
+    let model_token = crate::domains::chat::shared::model_token(&state, &user, &headers).await;
+
+    // ---- runs, through the room's read authority -------------------------
+    let read = match shared_thread_read_decision(&state, &user, &org_id, space_ref).await {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let mut runs = Value::Array(vec![]);
+    let mut unavailable: Vec<Value> = Vec::new();
+    match read.as_ref() {
+        Some((decision_ref, token)) => {
+            let url = format!(
+                "{}/v1/runs?limit=50&space_id={}&space_read_decision_ref={}&space_read_decision_token={}",
+                state.model_gateway_url,
+                urlencoding::encode(space_ref),
+                urlencoding::encode(decision_ref),
+                urlencoding::encode(token),
+            );
+            let (status, Json(payload)) =
+                crate::domains::chat::shared::proxy_model_json_with_session(
+                    &state,
+                    Method::GET,
+                    &url,
+                    None,
+                    model_token.as_deref(),
+                    Some(&session_token),
+                    &user,
+                )
+                .await;
+            if status.is_success() {
+                runs = payload
+                    .get("runs")
+                    .filter(|value| value.is_array())
+                    .cloned()
+                    .unwrap_or(Value::Array(vec![]));
+            } else {
+                unavailable.push(json!({
+                    "section": "runs",
+                    "code": "runs_upstream_unavailable",
+                    "reason": "Model Plane could not return this room's runs.",
+                }));
+            }
+        }
+        None => {
+            // Control declined the shared read, or does not have the endpoint.
+            // The room may still be usable; its OTHER members' work simply is
+            // not visible, and saying which is better than an empty list.
+            unavailable.push(json!({
+                "section": "runs",
+                "code": "runs_read_not_authorized",
+                "reason": "Reading this Space's shared work is not authorized.",
+            }));
+        }
+    }
+
+    // ---- schedules, filtered by the room ---------------------------------
+    let mut schedules = Value::Array(vec![]);
+    match crate::domains::chat::shared::required_capability_token(&state, &user, &headers).await {
+        Ok(capability) => {
+            let url = format!(
+                "{}/v1/cron?space_ref={}",
+                state.model_gateway_url,
+                urlencoding::encode(space_ref),
+            );
+            let (status, Json(payload)) =
+                crate::domains::chat::shared::proxy_model_json_with_capability(
+                    &state,
+                    Method::GET,
+                    &url,
+                    None,
+                    model_token.as_deref(),
+                    Some(&capability),
+                    &user,
+                )
+                .await;
+            if status.is_success() {
+                // Go marshals an empty slice as `null`, so `get("schedules")`
+                // returns Some(Null) for a room with no schedules — which is
+                // not the same as an array and would reach the browser as
+                // `null`. Keep only a real array; anything else becomes the
+                // empty list this endpoint promises.
+                schedules = payload
+                    .get("schedules")
+                    .or_else(|| payload.get("data"))
+                    .filter(|value| value.is_array())
+                    .cloned()
+                    .unwrap_or(Value::Array(vec![]));
+            } else {
+                unavailable.push(json!({
+                    "section": "schedules",
+                    "code": "schedules_upstream_unavailable",
+                    "reason": "Model Plane could not return this room's schedules.",
+                }));
+            }
+        }
+        Err(_) => unavailable.push(json!({
+            "section": "schedules",
+            "code": "schedules_session_unavailable",
+            "reason": "This session cannot read schedules right now.",
+        })),
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "space": public_space(&space),
+                "membership": crate::envelope::unwrap_data(&membership),
+                "runs": runs,
+                "schedules": schedules,
+                // Always present, empty when nothing is missing: a reader must
+                // be able to tell "this room has no work" from "we could not
+                // find out", and an absent key makes those look the same.
+                "unavailable": unavailable,
+            }
+        })),
+    )
+}
+
+/// One Space thread's transcript, read as the room rather than as its owner.
+///
+/// Deliberately a separate route from Chat's `/chat/threads/{id}/transcript`
+/// instead of a flag on it. That one authorizes by finding the thread in the
+/// caller's OWN durable list, which is the correct rule for a personal chat
+/// history and exactly the wrong one for a shared room — a colleague's post is
+/// not in your list, so the room could only ever render its preview. Splitting
+/// the routes keeps each one's authority legible: Chat asks "is this yours",
+/// the room asks Control "are you a current recipient here".
+async fn space_thread_transcript(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
+    Path((space_ref, thread_id)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    let thread_id = thread_id.trim();
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to read a Space thread.",
+            )),
+        );
+    }
+    if space_ref.is_empty() || thread_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_space",
+                "A Space reference and thread id are required.",
+            )),
+        );
+    }
+    // Lifecycle first: a suspended or deleting room must not serve content on
+    // the strength of a membership row alone. Same read, and the same three
+    // outcomes, as the sibling thread listing.
+    match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(error("space_not_found", "Space is not available.")),
+            )
+        }
+        Err(()) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_lifecycle_unavailable",
+                    "Space lifecycle is unavailable.",
+                )),
+            )
+        }
+    }
+    let read = match shared_thread_read_decision(&state, &user, &org_id, space_ref).await {
+        Ok(read) => read,
+        Err(response) => return response,
+    };
+    let Some((decision_ref, token)) = read else {
+        // Control declined to authorize a shared read. Say so plainly rather
+        // than falling back to the owner-bound route: silently returning only
+        // the caller's own turns is how a room starts lying about who said
+        // what.
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "space_read_not_authorized",
+                "Reading this Space's shared conversation is not authorized.",
+            )),
+        );
+    };
+    let session_token =
+        match crate::domains::chat::shared::required_session_token(&state, &user, &headers).await {
+            Ok(token) => token,
+            Err(reason) => return crate::domains::chat::shared::delegated_auth_unavailable(reason),
+        };
+    let url = format!(
+        "{}/v1/threads/{}/messages?space_id={}&space_read_decision_ref={}&space_read_decision_token={}",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+        urlencoding::encode(space_ref),
+        urlencoding::encode(&decision_ref),
+        urlencoding::encode(&token),
+    );
+    let model_token = crate::domains::chat::shared::model_token(&state, &user, &headers).await;
+    let (status, Json(payload)) = crate::domains::chat::shared::proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        model_token.as_deref(),
+        Some(&session_token),
+        &user,
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(payload));
+    }
+    let turns = payload
+        .get("messages")
+        .cloned()
+        .unwrap_or(Value::Array(vec![]));
+    if !turns.is_array() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "invalid_model_gateway_response",
+                "Model Gateway returned an invalid conversation.",
+            )),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({
+            "data": {
+                "transcript": {
+                    "threadId": thread_id,
+                    "turns": turns,
+                }
             }
         })),
     )
@@ -1292,6 +2748,61 @@ pub(crate) async fn create_personal_space(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(str::to_owned);
+
+    // A named room is the general case of "create a Space"; a personal one is
+    // the default because that is what this route has always made and what an
+    // omitted `kind` used to mean. Anything else is refused rather than guessed
+    // at — `project` and `case` are real Space kinds with owners and lifecycles
+    // that nothing in the product creates yet.
+    let kind = body
+        .as_ref()
+        .and_then(|Json(value)| value.get("kind"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or("personal")
+        .to_owned();
+    if kind != "personal" && kind != "room" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "unsupported_space_kind",
+                "Only a personal Space or a room can be created here.",
+            )),
+        );
+    }
+    if kind == "room" {
+        let Some(name) = name.clone() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error("room_name_required", "A room needs a name.")),
+            );
+        };
+        let Ok(created) = convex_gateway_call(
+            &state,
+            "mutation",
+            "spaces:createRoomForGateway",
+            json!({
+                "externalAuthId": user.user_id,
+                "externalOrgId": org_id,
+                "name": name,
+            }),
+        )
+        .await
+        else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_provisioning_unavailable",
+                    "The room could not be created. Nothing was provisioned.",
+                )),
+            );
+        };
+        return (
+            StatusCode::ACCEPTED,
+            Json(json!({"data": {"space": public_space(&created)}})),
+        );
+    }
 
     // `convex_gateway_call` injects only the service key; identity is the
     // caller's responsibility, and it comes from the verified session and the
@@ -1779,6 +3290,274 @@ pub(crate) async fn create_space_agent(
 /// delegation — never an org-wide role, and never something the request body
 /// could assert. Shared by §UI-3b (create new) and §UI-3 (bind existing) so
 /// the two routes can never quietly diverge on who is allowed to grant.
+/// Declare a managed room's people to Control after a grant or revocation.
+///
+/// Separate from `confirm_space_agent_membership` because the two converge
+/// different subject types: this one says `["user"]`, that one says
+/// `["service"]`. Merging them would let a human roster change revoke the
+/// room's agents.
+async fn sync_room_members(state: &AppState, org_id: &str, space_ref: &str) -> bool {
+    convex_gateway_call(
+        state,
+        "action",
+        "spaceMembers:syncRoomMembersForGateway",
+        json!({
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+        }),
+    )
+    .await
+    .map(|value| {
+        value
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "applied")
+    })
+    .unwrap_or(false)
+}
+
+/// Shared body of "change who is in this room".
+///
+/// Adding and removing differ only in the mutation called, so they share the
+/// role gate, the Control convergence, and the refusal shapes. Both use the
+/// same owner/manager floor as granting an agent: deciding who may read a
+/// room's shared record is at least as consequential.
+async fn apply_room_membership(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    member_id: &str,
+    add: bool,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    let space_ref = space_ref.trim();
+    let member_id = member_id.trim();
+    if org_id.is_empty() || space_ref.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership and Space are required.",
+            )),
+        );
+    }
+    if member_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("member_required", "A member is required.")),
+        );
+    }
+    if let Err(response) = require_space_agent_grant_role(state, user, &org_id, space_ref).await {
+        return response;
+    }
+
+    let mutation = if add {
+        "spaceMembers:addSpaceMemberForGateway"
+    } else {
+        "spaceMembers:removeSpaceMemberForGateway"
+    };
+    let Ok(result) = convex_gateway_call(
+        state,
+        "mutation",
+        mutation,
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "memberExternalAuthId": member_id,
+        }),
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "room_membership_unavailable",
+                "The room's members could not be changed. Nothing was altered.",
+            )),
+        );
+    };
+
+    // Application's list is only an intent until Control accepts it. Say so
+    // rather than reporting success on a list nobody is enforcing yet.
+    if !sync_room_members(state, &org_id, space_ref).await {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "room_membership_unconfirmed",
+                "The change was recorded, but Control has not confirmed the room's members yet.",
+            )),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({"data": {
+            "member_count": result.get("memberCount").and_then(Value::as_u64).unwrap_or(0),
+            "changed": result
+                .get(if add { "added" } else { "removed" })
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }})),
+    )
+}
+
+/// `POST /api/v1/spaces/{space_ref}/members` — add one person to a named room.
+async fn add_space_member(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let member_id = body
+        .get("member_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    apply_room_membership(&state, &user, &space_ref, &member_id, true).await
+}
+
+/// `DELETE /api/v1/spaces/{space_ref}/members/{member_id}` — remove one person.
+async fn remove_space_member(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((space_ref, member_id)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    apply_room_membership(&state, &user, &space_ref, &member_id, false).await
+}
+
+/// Shared body of "change one binding's standing in this room".
+///
+/// Pause, resume and revoke differ only in the status asked for and in whether
+/// Control has to be told afterwards, so they share one path: the same role
+/// gate as adding an agent (governing an agent here is the same class of
+/// decision as granting one), the same Convex mutation, and the same refusal
+/// shapes.
+async fn apply_space_agent_state(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    binding_ref: &str,
+    status: &str,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    let space_ref = space_ref.trim();
+    let binding_ref = binding_ref.trim();
+    if org_id.is_empty() || space_ref.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership and Space are required.",
+            )),
+        );
+    }
+    if binding_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "binding_ref_required",
+                "A binding reference is required.",
+            )),
+        );
+    }
+
+    // Role first, and against THIS room: the Convex mutation re-checks that the
+    // binding belongs to the Space named here, so a manager of one room cannot
+    // reach into another.
+    if let Err(response) = require_space_agent_grant_role(state, user, &org_id, space_ref).await {
+        return response;
+    }
+
+    let Ok(updated) = convex_gateway_call(
+        state,
+        "mutation",
+        "spaceAgents:setSpaceAgentBindingStateForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "bindingRef": binding_ref,
+            "status": status,
+        }),
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "agent_binding_state_unavailable",
+                "The agent's standing in this room could not be changed. Nothing was altered.",
+            )),
+        );
+    };
+
+    // Only revocation changes who is in the room, so only revocation needs
+    // Control to converge. Pausing keeps the agent a member that may not be
+    // invoked, which the gateway's own invocation path already enforces.
+    if status == "revoked" && !confirm_space_agent_membership(state, &org_id, space_ref).await {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "agent_revocation_unconfirmed",
+                "The agent was revoked here, but Control has not confirmed the room's roster yet. It may still appear as a member until it does.",
+            )),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({"data": {
+            "binding_ref": updated.get("bindingRef").and_then(Value::as_str).unwrap_or(binding_ref),
+            "status": updated.get("status").and_then(Value::as_str).unwrap_or(status),
+            "changed": updated.get("changed").and_then(Value::as_bool).unwrap_or(false),
+        }})),
+    )
+}
+
+/// `PATCH /api/v1/spaces/{space_ref}/agents/{binding_ref}` — pause or resume.
+///
+/// Accepts only `active` and `paused`. Revocation is the DELETE below rather
+/// than a third status here: it is the one irreversible option, it is the one
+/// that changes Control's roster, and putting it behind its own verb keeps a
+/// mistyped status from removing an agent.
+async fn set_space_agent_state(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((space_ref, binding_ref)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let status = body
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if status != "active" && status != "paused" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_agent_binding_status",
+                "An agent can only be paused or resumed here. Use DELETE to revoke it.",
+            )),
+        );
+    }
+    apply_space_agent_state(&state, &user, &space_ref, &binding_ref, status).await
+}
+
+/// `DELETE /api/v1/spaces/{space_ref}/agents/{binding_ref}` — revoke.
+///
+/// The binding row survives; `space-defenition.md` keeps a revoked binding for
+/// audit history and never renders it as a participant. What is removed is the
+/// agent's membership in Control's roster, which is what actually stops it
+/// acting here.
+async fn revoke_space_agent(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((space_ref, binding_ref)): Path<(String, String)>,
+) -> (StatusCode, Json<Value>) {
+    apply_space_agent_state(&state, &user, &space_ref, &binding_ref, "revoked").await
+}
+
 async fn require_space_agent_grant_role(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -2686,25 +4465,21 @@ async fn personal_space_record(
     user: &AuthenticatedUser,
     org_id: &str,
 ) -> Result<Option<Value>, ()> {
-    let convex_url = std::env::var("APPLICATION_CONVEX_URL").unwrap_or_default();
-    let service_key = std::env::var("APPLICATION_CONVEX_SERVICE_KEY").unwrap_or_default();
+    let convex_url = state.application_convex_url.clone();
+    let service_key = state.application_convex_service_key.clone();
     if org_id.trim().is_empty() || convex_url.trim().is_empty() || service_key.trim().is_empty() {
         return Err(());
     }
     let url = format!("{}/api/query", convex_url.trim_end_matches('/'));
-    let response = state
-        .client
-        .post(url)
-        .json(&json!({
-            "path": "spaces:getPersonalSpaceForGateway",
-            "args": {
-                "externalAuthId": user.user_id,
-                "externalOrgId": org_id,
-                "serviceKey": service_key,
-            }
-        }))
-        .send()
-        .await;
+    let request = state.client.post(url).json(&json!({
+        "path": "spaces:getPersonalSpaceForGateway",
+        "args": {
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "serviceKey": service_key,
+        }
+    }));
+    let response = send_with_retry(request).await;
     let Ok(response) = response else {
         return Err(());
     };
@@ -2767,23 +4542,24 @@ pub(crate) async fn convex_gateway_call(
     path: &str,
     mut args: Value,
 ) -> Result<Value, ()> {
-    let convex_url = std::env::var("APPLICATION_CONVEX_URL").unwrap_or_default();
-    let service_key = std::env::var("APPLICATION_CONVEX_SERVICE_KEY").unwrap_or_default();
+    let convex_url = state.application_convex_url.clone();
+    let service_key = state.application_convex_service_key.clone();
     if convex_url.trim().is_empty() || service_key.trim().is_empty() {
         return Err(());
     }
     let object = args.as_object_mut().ok_or(())?;
     object.insert("serviceKey".to_owned(), Value::String(service_key));
-    let response = state
-        .client
-        .post(format!(
-            "{}/api/{operation}",
-            convex_url.trim_end_matches('/')
-        ))
-        .json(&json!({"path": path, "args": args}))
-        .send()
-        .await
-        .map_err(|_| ())?;
+    let response = send_with_retry(
+        state
+            .client
+            .post(format!(
+                "{}/api/{operation}",
+                convex_url.trim_end_matches('/')
+            ))
+            .json(&json!({"path": path, "args": args})),
+    )
+    .await
+    .map_err(|_| ())?;
     if !response.status().is_success() {
         return Err(());
     }
@@ -2797,12 +4573,22 @@ pub(crate) async fn convex_gateway_call(
 }
 
 fn public_space(space: &Value) -> Value {
-    json!({
+    let mut projected = json!({
         "space_ref": space.get("spaceRef").and_then(Value::as_str).unwrap_or_default(),
         "name": space.get("name").and_then(Value::as_str).unwrap_or("Personal Space"),
         "kind": space.get("kind").and_then(Value::as_str).unwrap_or("personal"),
         "lifecycle": space.get("lifecycle").and_then(Value::as_str).unwrap_or_default(),
-    })
+    });
+    // Emitted for every Space this projects, true or false. The argument is a
+    // real Convex record, and Convex stores the flag as `optional(literal(true))`
+    // — so an absent field there IS a definite "not the organization room",
+    // and saying so lets a caller distinguish that from a response which never
+    // carried the field at all (the Control-outage fallback listing, which does
+    // not come through here). A caller gating an action must still test
+    // `=== false` rather than falsiness, so that silence stays unknown.
+    projected["is_organization_room"] =
+        json!(space.get("isOrganizationRoom").and_then(Value::as_bool) == Some(true));
+    projected
 }
 
 async fn space_context(
@@ -3688,9 +5474,9 @@ mod tests {
                 "spaceRef":"space-personal", "name":"Personal Space", "kind":"personal", "lifecycle":"active"
             }})))
             .mount(&application).await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -3703,8 +5489,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -3766,9 +5550,9 @@ mod tests {
             ]})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -3781,8 +5565,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert_eq!(
             response.status(),
@@ -3795,6 +5577,1799 @@ mod tests {
         assert_eq!(body["data"]["space"]["space_ref"], "space-room");
         assert_eq!(body["data"]["space"]["name"], "AQUATIQ AS");
         assert_eq!(body["data"]["space"]["kind"], "room");
+    }
+
+    /// Drive `GET /spaces/space-room/activity` with a given Control answer to
+    /// the shared-read decision, a run listing, an approvals answer, and a
+    /// Conversation Core receipts answer.
+    async fn space_activity_response(
+        read_decision: ResponseTemplate,
+        runs: ResponseTemplate,
+        approvals: ResponseTemplate,
+        receipts: ResponseTemplate,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor"}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(read_decision)
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/runs"))
+            .respond_with(runs)
+            .mount(&model_gateway)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/runs/run-gated/approvals"))
+            .respond_with(approvals)
+            .mount(&model_gateway)
+            .await;
+        let conversation = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/spaces/space-room/activity"))
+            .respond_with(receipts)
+            .mount(&conversation)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        state.conversation_core_url = conversation.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-room/activity")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body, model_gateway)
+    }
+
+    fn activity_read_decision() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"decision": {"decision_ref": "read-1"}, "token": "v2.a.b.c"}
+        }))
+    }
+
+    fn activity_receipts() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "operations": [{
+                    "operation_id": "op-1", "action_id": "tickets.create", "status": "completed",
+                    "subject_id": "agent-7", "granted_by_user_id": "user-1",
+                    "ticket_id": "ticket-9", "audit_event_id": "audit-3",
+                }],
+                "authority": [{
+                    "grant_id": "grant-1", "action_id": "tickets.create",
+                    "subject_id": "agent-7", "created_by_user_id": "user-1",
+                }],
+            }
+        }))
+    }
+
+    /// S2.3's slice 5 and S2.5's core: the owner effect performed under this
+    /// room's authority appears in the room's own record.
+    #[tokio::test]
+    async fn space_activity_correlates_owner_receipts_with_the_rooms_runs() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _mg) = space_activity_response(
+            activity_read_decision(),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "runs": [{
+                    "run_id": "run-1", "goal": "Opprette sak", "status": "completed",
+                    "input_tokens": 900, "output_tokens": 120, "steps_completed": 4,
+                }]
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({"approvals": []})),
+            activity_receipts(),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["runs"][0]["goal"], "Opprette sak");
+        // The cost evidence a run already carried and Work never used.
+        assert_eq!(body["data"]["runs"][0]["input_tokens"], 900);
+        assert_eq!(body["data"]["operations"][0]["ticket_id"], "ticket-9");
+        assert_eq!(body["data"]["authority"][0]["grant_id"], "grant-1");
+    }
+
+    /// Approvals are a per-run read upstream. Only runs actually waiting on a
+    /// person are asked about, or opening a busy room would fan out across
+    /// every run it has ever had.
+    #[tokio::test]
+    async fn space_activity_asks_for_approvals_only_on_gated_runs() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model_gateway) = space_activity_response(
+            activity_read_decision(),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "runs": [
+                    {"run_id": "run-done", "goal": "Ferdig", "status": "completed"},
+                    {"run_id": "run-gated", "goal": "Sende varsel", "status": "awaiting_approval"},
+                ]
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "approvals": [{"id": "ap-1", "status": "APPROVAL_STATE_REQUESTED", "kind": "tool"}]
+            })),
+            activity_receipts(),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["approvals"][0]["id"], "ap-1");
+        // Carried so the timeline can put the approval beside the work it gates.
+        assert_eq!(body["data"]["approvals"][0]["run_id"], "run-gated");
+
+        let requests = model_gateway.received_requests().await.expect("requests");
+        let approval_paths: Vec<_> = requests
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .filter(|path| path.ends_with("/approvals"))
+            .collect();
+        assert_eq!(approval_paths, ["/v1/runs/run-gated/approvals"]);
+    }
+
+    /// Each section fails alone. A reader must be able to tell "no owner
+    /// effects" from "we could not ask", and the runs that did load are still
+    /// worth showing.
+    #[tokio::test]
+    async fn space_activity_names_a_missing_section_and_keeps_the_rest() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _mg) = space_activity_response(
+            activity_read_decision(),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "runs": [{"run_id": "run-1", "goal": "Kjører", "status": "running"}]
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({"approvals": []})),
+            ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["runs"][0]["goal"], "Kjører");
+        let codes: Vec<&str> = body["data"]["unavailable"]
+            .as_array()
+            .expect("gap list")
+            .iter()
+            .filter_map(|gap| gap["code"].as_str())
+            .collect();
+        assert!(
+            codes.contains(&"operations_upstream_unavailable"),
+            "codes = {codes:?}"
+        );
+        assert_eq!(body["data"]["operations"], json!([]));
+    }
+
+    /// A Conversation Core that predates the route is a different fact from an
+    /// outage, and neither is "nothing has happened in this room".
+    #[tokio::test]
+    async fn space_activity_separates_a_missing_endpoint_from_an_outage() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _mg) = space_activity_response(
+            activity_read_decision(),
+            ResponseTemplate::new(200).set_body_json(json!({"runs": []})),
+            ResponseTemplate::new(200).set_body_json(json!({"approvals": []})),
+            ResponseTemplate::new(404).set_body_json(json!({"error": "not found"})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let codes: Vec<&str> = body["data"]["unavailable"]
+            .as_array()
+            .expect("gap list")
+            .iter()
+            .filter_map(|gap| gap["code"].as_str())
+            .collect();
+        assert!(
+            codes.contains(&"operations_endpoint_unavailable"),
+            "codes = {codes:?}"
+        );
+    }
+
+    /// The tab's footnote has promised since the cockpit shipped that other
+    /// owner-plane evidence joins when its projection lands. Name the classes
+    /// that are still out rather than leaving the reader to wonder.
+    #[tokio::test]
+    async fn space_activity_always_names_the_evidence_classes_that_do_not_exist_yet() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _mg) = space_activity_response(
+            activity_read_decision(),
+            ResponseTemplate::new(200).set_body_json(json!({"runs": []})),
+            ResponseTemplate::new(200).set_body_json(json!({"approvals": []})),
+            activity_receipts(),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let codes: Vec<&str> = body["data"]["unavailable"]
+            .as_array()
+            .expect("gap list")
+            .iter()
+            .filter_map(|gap| gap["code"].as_str())
+            .collect();
+        assert!(
+            codes.contains(&"delivery_ledger_not_built"),
+            "codes = {codes:?}"
+        );
+        assert!(codes.contains(&"watches_not_built"), "codes = {codes:?}");
+    }
+
+    /// Control declining the shared read is a real answer: the caller can take
+    /// part in the room without seeing what other members ran.
+    #[tokio::test]
+    async fn space_activity_reports_an_unauthorized_run_read_as_its_own_gap() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model_gateway) = space_activity_response(
+            ResponseTemplate::new(403).set_body_json(json!({
+                "error": {"code": "forbidden", "message": "not entitled"}
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({"runs": []})),
+            ResponseTemplate::new(200).set_body_json(json!({"approvals": []})),
+            activity_receipts(),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let codes: Vec<&str> = body["data"]["unavailable"]
+            .as_array()
+            .expect("gap list")
+            .iter()
+            .filter_map(|gap| gap["code"].as_str())
+            .collect();
+        assert!(
+            codes.contains(&"runs_read_not_authorized"),
+            "codes = {codes:?}"
+        );
+        // The owner receipts do NOT depend on that decision, so they still load.
+        assert_eq!(body["data"]["operations"][0]["operation_id"], "op-1");
+        assert!(
+            model_gateway
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
+            "Model Plane must not be asked without a decision to present"
+        );
+    }
+
+    /// Shared scaffolding for the item-4b routes: a signed-in editor of
+    /// `space-room`, a Control membership, an Application (Convex) server whose
+    /// `/api/query` answers the Space lookup and whose read-marker answers are
+    /// given, and a Model Gateway whose presentation endpoint answers as given.
+    async fn room_4b_fixture(
+        convex_marker_query: ResponseTemplate,
+        convex_marker_mutation: ResponseTemplate,
+        presentation: ResponseTemplate,
+    ) -> (
+        crate::config::AppState,
+        MockServer,
+        MockServer,
+        MockServer,
+        MockServer,
+    ) {
+        // Every server this starts is returned, including the two the caller
+        // never looks at. A `MockServer` shuts down when it drops, so keeping
+        // `auth` and `user_core` here while `state.auth_core_url` and
+        // `state.user_core_url` still pointed at them left the gateway talking
+        // to dead ports: session validation failed (403) or the space could not
+        // be resolved and the route failed closed (503). It looked like a race
+        // because wiremock tears down asynchronously — under light load the
+        // request sometimes beat the shutdown, so the suite passed
+        // single-threaded and failed under parallel load.
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor", "subject_id": "user-1"}
+            })))
+            .mount(&user_core)
+            .await;
+        // Control declines the shared read: the thread listing then takes the
+        // owner-bound path, which is enough for these tests.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(json!({"error": {"code": "forbidden"}})),
+            )
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        // The Space lookup and the read-marker query share `/api/query`; route
+        // on the function path in the body.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"path": "spaceReadMarkers:spaceReadMarkerForGateway"}),
+            ))
+            .respond_with(convex_marker_query)
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(convex_marker_mutation)
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/threads/thread-1/presentation"))
+            .respond_with(presentation)
+            .mount(&model_gateway)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/threads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"threads": [
+                {"thread_id": "thread-1", "space_id": "space-room", "title": "Innkjøp", "pinned": true,
+                 "updated_at": "2026-09-07T11:00:00Z", "owner_subject_id": "user-1"}
+            ]})))
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        (state, application, model_gateway, auth, user_core)
+    }
+
+    async fn room_4b_request(
+        state: crate::config::AppState,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        let request = builder
+            .body(Body::from(
+                body.map(|value| value.to_string()).unwrap_or_default(),
+            ))
+            .unwrap();
+        let response = crate::build_router(state).oneshot(request).await.unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    /// Item 4b: the room's thread listing carries where the reader last caught
+    /// up, alongside the threads, so "new since your last visit" is one round
+    /// trip — and `pinned` flows through from Session Core's ordering.
+    #[tokio::test]
+    async fn space_threads_carry_the_readers_marker_and_pin_state() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"lastReadAt": 1_757_240_000_000_i64}})),
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": 1}})),
+            ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-1"})),
+        )
+        .await;
+        let (status, body) =
+            room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["data"]["read_marker"]["last_read_at"],
+            1_757_240_000_000_i64
+        );
+        assert_eq!(body["data"]["threads"][0]["pinned"], true);
+        assert_eq!(body["data"]["unavailable"], json!([]));
+    }
+
+    /// A member who has never opened the room has a marker of `null` — a real
+    /// answer ("nothing is new yet"), distinct from the marker being unreadable.
+    #[tokio::test]
+    async fn space_threads_separate_never_caught_up_from_marker_unavailable() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) =
+            room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        assert_eq!(status, 200);
+        assert!(body["data"]["read_marker"]["last_read_at"].is_null());
+        assert_eq!(body["data"]["unavailable"], json!([]));
+
+        let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) =
+            room_4b_request(state, "GET", "/api/v1/spaces/space-room/threads", None).await;
+        // Application being down must never cost the room its threads.
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["threads"][0]["thread_id"], "thread-1");
+        assert!(body["data"]["read_marker"].is_null());
+        assert_eq!(
+            body["data"]["unavailable"][0]["code"],
+            "read_marker_unavailable"
+        );
+    }
+
+    async fn presence_fixture(
+        convex_presence: ResponseTemplate,
+    ) -> (crate::config::AppState, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor", "subject_id": "user-1"}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"path": "spacePresence:recordSpacePresenceForGateway"}),
+            ))
+            .respond_with(convex_presence)
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        (state, application)
+    }
+
+    #[tokio::test]
+    async fn presence_answers_who_else_is_here_from_the_same_beat() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = presence_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {
+                "present": [
+                    {"subject_id": "user-2", "status": "typing", "last_seen_at": 1_788_000_000_000i64}
+                ],
+                "ttlSeconds": 30
+            }})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/presence",
+            Some(json!({"status": "typing"})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["status"], "typing");
+        assert_eq!(body["data"]["present"][0]["subject_id"], "user-2");
+        assert_eq!(body["data"]["present"][0]["status"], "typing");
+        assert_eq!(body["data"]["ttl_seconds"], 30);
+    }
+
+    #[tokio::test]
+    async fn presence_defaults_to_online_when_the_body_says_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = presence_fixture(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"present": [], "ttlSeconds": 30}})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/presence",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["status"], "online");
+        assert_eq!(body["data"]["present"], json!([]));
+    }
+
+    // Coercing an unknown status to `online` would report someone as present
+    // while hiding the client bug that sent it.
+    #[tokio::test]
+    async fn presence_refuses_a_status_it_does_not_offer() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = presence_fixture(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"present": [], "ttlSeconds": 30}})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/presence",
+            Some(json!({"status": "away"})),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_presence");
+    }
+
+    // An empty room and an unreadable one are different facts. Reporting the
+    // second as the first would tell a member they are alone.
+    #[tokio::test]
+    async fn presence_fails_as_its_own_gap_rather_than_drawing_an_empty_room() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = presence_fixture(ResponseTemplate::new(500)).await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/presence",
+            Some(json!({"status": "online"})),
+        )
+        .await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "presence_unavailable");
+    }
+
+    #[tokio::test]
+    async fn mark_space_read_records_the_moment_and_nothing_else() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, application, _mg, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"value": {"lastReadAt": 1_757_240_100_000_i64}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/read",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["last_read_at"], 1_757_240_100_000_i64);
+        // The mutation carries identifiers only — never a thread list or content.
+        let mutation = application
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .find(|request| request.url.path() == "/api/mutation")
+            .expect("mutation request");
+        let sent: Value = serde_json::from_slice(&mutation.body).unwrap();
+        assert_eq!(sent["path"], "spaceReadMarkers:markSpaceReadForGateway");
+        assert_eq!(sent["args"]["spaceRef"], "space-room");
+        assert!(sent["args"].get("threads").is_none() && sent["args"].get("threadIds").is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_space_read_fails_honestly_when_application_is_down() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "POST",
+            "/api/v1/spaces/space-room/read",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, 503);
+        assert_eq!(body["error"]["code"], "read_marker_unavailable");
+    }
+
+    /// The room's own presentation route: same Model Gateway write Chat uses,
+    /// without Chat's `origin=chat` re-read that can never find a room thread.
+    #[tokio::test]
+    async fn space_thread_presentation_writes_a_title_and_a_pin_through_model_gateway() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, model_gateway, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({"thread_id": "thread-1"})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "PATCH",
+            "/api/v1/spaces/space-room/threads/thread-1/presentation",
+            Some(json!({"title": "Innkjøp av pumper", "pinned": true})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["thread_id"], "thread-1");
+        assert_eq!(body["data"]["title"], "Innkjøp av pumper");
+        assert_eq!(body["data"]["pinned"], true);
+        let write = model_gateway
+            .received_requests()
+            .await
+            .expect("requests")
+            .into_iter()
+            .find(|request| request.url.path() == "/v1/threads/thread-1/presentation")
+            .expect("presentation write");
+        let sent: Value = serde_json::from_slice(&write.body).unwrap();
+        assert_eq!(sent["title"], "Innkjøp av pumper");
+        assert_eq!(sent["pinned"], true);
+        // Preview is Chat's concern and is never sent from the room.
+        assert!(sent["preview"].is_null());
+    }
+
+    /// Session Core is owner-bound. A refusal is relayed as a sentence about
+    /// who may, not as a generic forbidden — and a 404 from upstream means the
+    /// same thing from the room's side.
+    #[tokio::test]
+    async fn space_thread_presentation_says_who_may_when_the_caller_is_not_the_author() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for upstream in [403_u16, 404_u16] {
+            let (state, _app, _mg, _auth, _user_core) = room_4b_fixture(
+                ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+                ResponseTemplate::new(200).set_body_json(json!({})),
+                ResponseTemplate::new(upstream).set_body_json(json!({"error": "not the owner"})),
+            )
+            .await;
+            let (status, body) = room_4b_request(
+                state,
+                "PATCH",
+                "/api/v1/spaces/space-room/threads/thread-1/presentation",
+                Some(json!({"pinned": true})),
+            )
+            .await;
+            assert_eq!(status, 403, "upstream {upstream}");
+            assert_eq!(body["error"]["code"], "thread_presentation_owner_only");
+        }
+    }
+
+    #[tokio::test]
+    async fn space_thread_presentation_refuses_an_empty_change() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _app, model_gateway, _auth, _user_core) = room_4b_fixture(
+            ResponseTemplate::new(200).set_body_json(json!({"value": {"lastReadAt": null}})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+            ResponseTemplate::new(200).set_body_json(json!({})),
+        )
+        .await;
+        let (status, body) = room_4b_request(
+            state,
+            "PATCH",
+            "/api/v1/spaces/space-room/threads/thread-1/presentation",
+            Some(json!({"title": "   "})),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "invalid_presentation");
+        assert!(
+            model_gateway
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
+            "nothing to change means nothing is sent upstream"
+        );
+    }
+
+    /// Drive `GET /spaces/space-room/knowledge` with a given Control answer to
+    /// the retrieval decision and a given Data Plane listing outcome.
+    async fn space_knowledge_response(
+        retrieval_decision: ResponseTemplate,
+        listing: ResponseTemplate,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        // The Data Plane leg travels under a session-minted `aud=data-plane`
+        // bearer, so the token mint must be mocked or the call fails closed.
+        for slug in ["data-plane", "session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor"}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(retrieval_decision)
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let retrieval = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/knowledge/space-sources"))
+            .respond_with(listing)
+            .mount(&retrieval)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.retrieval_engine_url = retrieval.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-room/knowledge")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body, retrieval)
+    }
+
+    /// The Knowledge tab rendered "Data Plane has not published a Space
+    /// projection for this yet" from the day the cockpit shipped. This is it.
+    #[tokio::test]
+    async fn space_knowledge_lists_the_rooms_documents_and_wiki_pages() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, retrieval) = space_knowledge_response(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "space_ref": "space-room",
+                "binding": {"workspace_id": "ws-1", "collection_id": null},
+                "documents": [{"document_id": "doc-1", "title": "Rutine for mottak"}],
+                "documents_truncated": false,
+                "wiki_pages": [{"page_id": "page-1", "title": "Onboarding", "path": "/onboarding"}],
+                "unavailable": [],
+            })),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["documents"][0]["title"], "Rutine for mottak");
+        assert_eq!(body["data"]["wiki_pages"][0]["title"], "Onboarding");
+        assert_eq!(body["data"]["binding"]["workspace_id"], "ws-1");
+        assert!(
+            body["data"]["unavailable"]
+                .as_array()
+                .is_some_and(|gaps| gaps.is_empty()),
+            "nothing was missing, so the gap list must be present and empty"
+        );
+
+        // The Space decision must reach Data as its own header. Without it the
+        // listing has no authority to resolve a binding from, and Data refuses.
+        let requests = retrieval.received_requests().await.expect("requests");
+        let listing = requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/knowledge/space-sources")
+            .expect("listing request");
+        assert_eq!(
+            listing
+                .headers
+                .get("x-space-decision")
+                .and_then(|value| value.to_str().ok()),
+            Some("v2.a.b.c"),
+        );
+    }
+
+    /// Retrieval is entitled separately from chat, so most orgs will answer
+    /// exactly this way. A working room that cannot list its archive must say
+    /// so — a failed request would make an unset entitlement look broken.
+    #[tokio::test]
+    async fn space_knowledge_names_an_unauthorized_read_instead_of_failing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, retrieval) = space_knowledge_response(
+            ResponseTemplate::new(403).set_body_json(json!({
+                "error": {"code": "forbidden", "message": "retrieval is not entitled"}
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({"documents": []})),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["data"]["unavailable"][0]["code"],
+            "knowledge_read_not_authorized"
+        );
+        assert!(
+            body["data"]["documents"]
+                .as_array()
+                .is_some_and(|d| d.is_empty()),
+            "an unauthorized read must still answer with an empty list, not null"
+        );
+        assert!(
+            retrieval
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
+            "Data must not be asked without a decision to present"
+        );
+    }
+
+    /// Control issued the authority and Data refused it: the Space has no
+    /// active binding to a Data target. That is a nameable state, not an
+    /// outage, and it is the state the dev organization is actually in.
+    #[tokio::test]
+    async fn space_knowledge_separates_no_binding_from_an_outage() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _retrieval) = space_knowledge_response(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
+            ResponseTemplate::new(403).set_body_json(json!({
+                "error": "Space retrieval binding is unavailable"
+            })),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["data"]["unavailable"][0]["code"],
+            "knowledge_binding_unavailable"
+        );
+
+        let (status, body, _retrieval) = space_knowledge_response(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
+            ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["data"]["unavailable"][0]["code"],
+            "knowledge_upstream_unavailable"
+        );
+    }
+
+    /// Data knows which half of its own answer is missing. Relay that rather
+    /// than restating it: a collection-only binding has no wiki workspace, and
+    /// an empty page list would read as "this room has no pages".
+    #[tokio::test]
+    async fn space_knowledge_relays_the_per_section_gap_data_reported() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _retrieval) = space_knowledge_response(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"token": "v2.a.b.c"}})),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "documents": [{"document_id": "doc-1", "title": "Rutine"}],
+                // Go/Rust both marshal an absent list this way somewhere in
+                // this chain; the browser must still receive an array.
+                "wiki_pages": null,
+                "unavailable": [{
+                    "section": "wiki_pages",
+                    "code": "space_binding_has_no_wiki_workspace",
+                    "reason": "This Space's Data binding names no wiki workspace.",
+                }],
+            })),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["documents"][0]["title"], "Rutine");
+        assert_eq!(
+            body["data"]["wiki_pages"],
+            json!([]),
+            "a null list must reach the browser as an empty array"
+        );
+        assert_eq!(
+            body["data"]["unavailable"][0]["code"],
+            "space_binding_has_no_wiki_workspace"
+        );
+    }
+
+    /// A Control outage is not an answer. Degrading it to "not authorized"
+    /// would tell the reader their room has no archive when the truth is that
+    /// we could not ask.
+    #[tokio::test]
+    async fn space_knowledge_fails_the_call_on_a_control_outage() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, _body, retrieval) = space_knowledge_response(
+            ResponseTemplate::new(503).set_body_json(json!({"error": "control down"})),
+            ResponseTemplate::new(200).set_body_json(json!({"documents": []})),
+        )
+        .await;
+        assert_eq!(status, 503);
+        assert!(
+            retrieval
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
+            "Data must not be asked when Control could not be reached"
+        );
+    }
+
+    /// Drive `GET /spaces/space-room/work` with a given Control answer to the
+    /// shared-read decision and given upstream outcomes for runs and schedules.
+    async fn space_work_response(
+        read_decision: ResponseTemplate,
+        runs: ResponseTemplate,
+        schedules: ResponseTemplate,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        for slug in ["session-core", "capability-core"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/{slug}/token")))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"token": "plane-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": "editor"}
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(read_decision)
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/runs"))
+            .respond_with(runs)
+            .mount(&model_gateway)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/cron"))
+            .respond_with(schedules)
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-room/work")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body, model_gateway)
+    }
+
+    /// The Work tab rendered an honest "not published yet" from the day the
+    /// cockpit shipped. This is the projection it was waiting for.
+    #[tokio::test]
+    async fn space_work_composes_runs_and_schedules_for_the_room() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model_gateway) = space_work_response(
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"decision": {"decision_ref": "read-1"}, "token": "v2.a.b.c"}
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "runs": [{"id": "r1", "goal": "Send varsel", "status": "awaiting_approval"}]
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "schedules": [{"id": "c1", "name": "Daglig rapport", "enabled": true}]
+            })),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["runs"][0]["goal"], "Send varsel");
+        assert_eq!(body["data"]["schedules"][0]["name"], "Daglig rapport");
+        assert!(
+            body["data"]["unavailable"]
+                .as_array()
+                .is_some_and(|gaps| gaps.is_empty()),
+            "nothing was missing, so the gap list must be present and empty"
+        );
+
+        // Runs must travel under the room's read decision, and schedules must
+        // be narrowed to the room — otherwise Work shows the whole org.
+        let requests = model_gateway.received_requests().await.expect("requests");
+        let runs = requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/runs")
+            .expect("runs request");
+        assert!(runs
+            .url
+            .query()
+            .unwrap_or_default()
+            .contains("space_read_decision_token=v2.a.b.c"));
+        let cron = requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/cron")
+            .expect("cron request");
+        assert!(cron
+            .url
+            .query()
+            .unwrap_or_default()
+            .contains("space_ref=space-room"));
+    }
+
+    /// Either upstream can fail alone. Showing what resolved with a named gap
+    /// beats hiding the runs that loaded or claiming the room is idle.
+    #[tokio::test]
+    async fn space_work_reports_a_partial_answer_rather_than_hiding_it() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _mg) = space_work_response(
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"decision": {"decision_ref": "read-1"}, "token": "v2.a.b.c"}
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "runs": [{"id": "r1", "goal": "Kjører", "status": "running"}]
+            })),
+            ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+        )
+        .await;
+
+        assert_eq!(status, 200, "a partial answer is still an answer");
+        assert_eq!(body["data"]["runs"][0]["goal"], "Kjører");
+        let gaps = body["data"]["unavailable"].as_array().expect("gaps");
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0]["section"], "schedules");
+    }
+
+    /// Control declining the shared read is a real answer: the caller can take
+    /// part in the room without seeing other members' runs. It must be named,
+    /// not rendered as an empty list.
+    #[tokio::test]
+    async fn space_work_names_an_unauthorized_shared_read_instead_of_showing_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model_gateway) = space_work_response(
+            ResponseTemplate::new(403).set_body_json(json!({"error": "not entitled"})),
+            ResponseTemplate::new(200).set_body_json(json!({"runs": []})),
+            ResponseTemplate::new(200).set_body_json(json!({"schedules": []})),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let gaps = body["data"]["unavailable"].as_array().expect("gaps");
+        assert!(gaps.iter().any(|gap| gap["section"] == "runs"));
+        // And no run request was made at all — there was no authority to make it
+        // under.
+        let requests = model_gateway.received_requests().await.expect("requests");
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.path() != "/v1/runs"),
+            "an unauthorized read must not reach Model Plane"
+        );
+    }
+
+    /// Drive a room-membership request with a given Control-resolved room
+    /// role and a given Convex outcome for the sync action.
+    async fn room_membership_response(
+        role: &str,
+        method: &str,
+        body: Option<Value>,
+        sync: Value,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": role}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"added": true, "removed": true, "memberCount": 2}
+            })))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/action"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": sync})))
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let uri = if method == "DELETE" {
+            "/api/v1/spaces/space-room/members/user-2"
+        } else {
+            "/api/v1/spaces/space-room/members"
+        };
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        let response = crate::build_router(state)
+            .oneshot(
+                request
+                    .body(match &body {
+                        Some(value) => Body::from(value.to_string()),
+                        None => Body::empty(),
+                    })
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, payload, application)
+    }
+
+    /// Adding a person is only real once Control has the roster, so the route
+    /// declares it and reports the result rather than trusting the write.
+    #[tokio::test]
+    async fn an_owner_adds_a_person_and_control_gets_the_roster() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) = room_membership_response(
+            "owner",
+            "POST",
+            Some(json!({"member_id": "user-2"})),
+            json!({"status": "applied"}),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["changed"], true);
+        let requests = application.received_requests().await.expect("requests");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.url.path() == "/api/action"),
+            "a membership change must be declared to Control"
+        );
+    }
+
+    /// Application's list ahead of Control's roster is the safe direction, but
+    /// the caller must be told: the person is not a member yet.
+    #[tokio::test]
+    async fn an_unconfirmed_roster_is_reported_rather_than_claimed_as_success() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _application) = room_membership_response(
+            "owner",
+            "POST",
+            Some(json!({"member_id": "user-2"})),
+            json!({"status": "control_unavailable"}),
+        )
+        .await;
+
+        assert_eq!(status, 502);
+        assert_eq!(body["error"]["code"], "room_membership_unconfirmed");
+    }
+
+    /// Deciding who may read a room's shared record takes the same roles as
+    /// granting an agent access to it.
+    #[tokio::test]
+    async fn a_viewer_cannot_add_or_remove_room_members() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (method, body) in [
+            ("POST", Some(json!({"member_id": "user-2"}))),
+            ("DELETE", None),
+        ] {
+            let (status, payload, application) =
+                room_membership_response("viewer", method, body, json!({"status": "applied"}))
+                    .await;
+            assert_eq!(status, 403, "{method} must be refused for a viewer");
+            assert_eq!(payload["error"]["code"], "space_role_cannot_create_agent");
+            assert!(
+                application
+                    .received_requests()
+                    .await
+                    .expect("requests")
+                    .is_empty(),
+                "a refused {method} must never reach Application"
+            );
+        }
+    }
+
+    /// Drive `POST /api/v1/spaces` with a given body and return what came back
+    /// plus the Application mock, so the chosen Convex mutation can be checked.
+    async fn create_space_response(body: Value) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"spaceRef": "space-new", "name": "Leveranse", "kind": "room", "lifecycle": "pending_registration"}
+            })))
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/spaces")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, payload, application)
+    }
+
+    /// A named room is the general case; a personal Space stays the default so
+    /// the route's existing callers are unaffected.
+    #[tokio::test]
+    async fn creating_a_room_uses_the_room_mutation_and_a_personal_space_stays_the_default() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) =
+            create_space_response(json!({"kind": "room", "name": "Leveranse"})).await;
+        assert_eq!(status, 202, "a room is created but not yet registered");
+        assert_eq!(body["data"]["space"]["kind"], "room");
+        let requests = application.received_requests().await.expect("requests");
+        let sent = String::from_utf8_lossy(&requests[0].body).to_string();
+        assert!(
+            sent.contains("spaces:createRoomForGateway"),
+            "a room must not be created through the personal-Space mutation: {sent}"
+        );
+
+        let (status, _body, application) = create_space_response(json!({})).await;
+        assert_eq!(status, 202);
+        let requests = application.received_requests().await.expect("requests");
+        let sent = String::from_utf8_lossy(&requests[0].body).to_string();
+        assert!(
+            sent.contains("spaces:ensurePersonalSpaceForGateway"),
+            "an omitted kind must still mean a personal Space: {sent}"
+        );
+    }
+
+    /// A room with no name would appear in the sidebar as a blank row, and the
+    /// other Space kinds have owners and lifecycles nothing here creates.
+    #[tokio::test]
+    async fn an_unnamed_room_or_unsupported_kind_is_refused_before_any_write() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (body, code) in [
+            (json!({"kind": "room"}), "room_name_required"),
+            (json!({"kind": "room", "name": "   "}), "room_name_required"),
+            (
+                json!({"kind": "project", "name": "P"}),
+                "unsupported_space_kind",
+            ),
+            (
+                json!({"kind": "case", "name": "C"}),
+                "unsupported_space_kind",
+            ),
+        ] {
+            let (status, payload, application) = create_space_response(body.clone()).await;
+            assert_eq!(status, 400, "{body} must be refused");
+            assert_eq!(payload["error"]["code"], code);
+            assert!(
+                application
+                    .received_requests()
+                    .await
+                    .expect("requests")
+                    .is_empty(),
+                "a refused create must never reach Application"
+            );
+        }
+    }
+
+    /// Drive a binding-lifecycle request (PATCH or DELETE) with a given
+    /// Control-resolved room role. Returns (status, body) plus the Application
+    /// mock so the forwarded Convex call can be asserted.
+    async fn space_agent_lifecycle_response(
+        role: &str,
+        method: &str,
+        body: Option<Value>,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": role}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:setSpaceAgentBindingStateForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"bindingRef": "sab_1", "subjectId": "agent-a1", "status": "paused", "changed": true}
+            })))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/action"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"status": "applied"}
+            })))
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let mut request = Request::builder()
+            .method(method)
+            .uri("/api/v1/spaces/space-room/agents/sab_1")
+            .header("cookie", "better-auth.session_token=session-1");
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        let response = crate::build_router(state)
+            .oneshot(
+                request
+                    .body(match &body {
+                        Some(value) => Body::from(value.to_string()),
+                        None => Body::empty(),
+                    })
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let payload: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, payload, application)
+    }
+
+    /// The room could add an agent and never take one back. Pausing is the
+    /// reversible half of closing that gap.
+    #[tokio::test]
+    async fn an_owner_can_pause_a_bound_agent_in_the_room() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) =
+            space_agent_lifecycle_response("owner", "PATCH", Some(json!({"status": "paused"})))
+                .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["status"], "paused");
+        let requests = application.received_requests().await.expect("requests");
+        // Pausing keeps the agent a member that may not be invoked, so Control
+        // has nothing to converge — the roster is unchanged.
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.path() != "/api/action"),
+            "pausing must not re-declare the room's roster to Control"
+        );
+    }
+
+    /// Governing a binding is the same class of decision as granting one, so
+    /// it takes the same roles — and the refusal must happen before any write.
+    #[tokio::test]
+    async fn a_member_cannot_pause_or_revoke_an_agent() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for (method, body) in [
+            ("PATCH", Some(json!({"status": "paused"}))),
+            ("DELETE", None),
+        ] {
+            let (status, payload, application) =
+                space_agent_lifecycle_response("viewer", method, body).await;
+            assert_eq!(status, 403, "{method} must be refused for a viewer");
+            assert_eq!(payload["error"]["code"], "space_role_cannot_create_agent");
+            assert!(
+                application
+                    .received_requests()
+                    .await
+                    .expect("requests")
+                    .is_empty(),
+                "a refused {method} must never reach Application"
+            );
+        }
+    }
+
+    /// Revocation is the one irreversible option, so it has its own verb. A
+    /// status of "revoked" sent to PATCH is refused rather than honoured, and
+    /// so is any status the binding contract does not define.
+    #[tokio::test]
+    async fn patch_refuses_revocation_and_unknown_states() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        for status_value in ["revoked", "deleted", ""] {
+            let (status, payload, application) = space_agent_lifecycle_response(
+                "owner",
+                "PATCH",
+                Some(json!({"status": status_value})),
+            )
+            .await;
+            assert_eq!(status, 400, "PATCH must refuse status {status_value:?}");
+            assert_eq!(payload["error"]["code"], "invalid_agent_binding_status");
+            assert!(
+                application
+                    .received_requests()
+                    .await
+                    .expect("requests")
+                    .is_empty(),
+                "a refused status must never reach Application"
+            );
+        }
+    }
+
+    /// Revoking changes who is in the room, so Control must be told. Without
+    /// the roster convergence the binding would say "revoked" while Control
+    /// still listed the agent as a member.
+    #[tokio::test]
+    async fn revoking_an_agent_reconverges_the_control_roster() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, _body, application) =
+            space_agent_lifecycle_response("manager", "DELETE", None).await;
+
+        assert_eq!(status, 200);
+        let requests = application.received_requests().await.expect("requests");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.url.path() == "/api/action"),
+            "revocation must re-declare the room's roster to Control"
+        );
+    }
+
+    /// Drive `GET /spaces/space-room/threads/{id}/transcript` with a given
+    /// Control answer to the shared-read decision. Returns the response plus
+    /// the Model Gateway mock so the forwarded query can be asserted.
+    async fn space_thread_transcript_response(
+        read_decision: ResponseTemplate,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        // The room proxies to Model Plane under the caller delegation, so the
+        // session-core audience token has to mint or the route 503s before it
+        // ever asks Control anything.
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/session-core/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"token": "session-core-token"})),
+            )
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(read_decision)
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active","isOrganizationRoom":true}
+            ]})))
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/threads/thread-1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "thread_id": "thread-1",
+                "messages": [
+                    {"role":"user","content":"Når kommer leveransen?","author_subject_id":"user-2"},
+                    {"role":"assistant","content":"I morgen.","agent_name":"Driftsassistent"}
+                ]
+            })))
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-room/threads/thread-1/transcript")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body, model_gateway)
+    }
+
+    /// The room reads another member's turns, and the author travels with them.
+    ///
+    /// Before this route existed the room could only read threads in the
+    /// caller's OWN durable list, so a colleague's post rendered as its preview
+    /// and nothing else.
+    #[tokio::test]
+    async fn a_space_transcript_returns_another_members_turns_with_their_author() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model_gateway) =
+            space_thread_transcript_response(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "decision": {"decision_ref": "read-decision-1"},
+                    "token": "v2.a.b.c"
+                }
+            })))
+            .await;
+
+        assert_eq!(
+            status, 200,
+            "a current member must be able to read the room"
+        );
+        let turns = body["data"]["transcript"]["turns"]
+            .as_array()
+            .expect("turns");
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            turns[0]["author_subject_id"], "user-2",
+            "another member's turn must carry that member's subject, not the reader's"
+        );
+
+        // The signed decision must actually reach Model Plane; without it
+        // session-core stays owner-bound and the read silently narrows.
+        let request = &model_gateway.received_requests().await.expect("requests")[0];
+        let query = request.url.query().unwrap_or_default();
+        assert!(
+            query.contains("space_read_decision_token=v2.a.b.c"),
+            "the Control read decision must be forwarded, got {query}"
+        );
+        assert!(query.contains("space_id=space-room"));
+    }
+
+    /// Control declining is a real answer, and the room must say so rather than
+    /// quietly falling back to the owner-bound read — which would show the
+    /// caller only their own turns while looking like the whole conversation.
+    #[tokio::test]
+    async fn a_declined_space_read_refuses_instead_of_narrowing_to_the_caller() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model_gateway) = space_thread_transcript_response(
+            ResponseTemplate::new(403).set_body_json(json!({"error": "not entitled"})),
+        )
+        .await;
+
+        assert_eq!(status, 403, "an unauthorized shared read must refuse");
+        assert_eq!(body["error"]["code"], "space_read_not_authorized");
+        assert!(
+            model_gateway
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
+            "a declined read must never reach Model Plane"
+        );
     }
 
     /// Drive `POST /spaces/space-room/agents` with a given Control-resolved
@@ -3846,9 +7421,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": confirmation})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -3863,8 +7438,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -3983,9 +7556,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": definitions})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -3998,8 +7571,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -4096,9 +7667,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": confirmation})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -4113,8 +7684,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -4240,9 +7809,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -4255,8 +7824,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -4296,9 +7863,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": registry_rows})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -4311,8 +7878,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -4428,8 +7993,6 @@ mod tests {
         // No APPLICATION_CONVEX_URL / APPLICATION_CONVEX_SERVICE_KEY set, so
         // `convex_gateway_call` fails closed with `Err(())` before ever
         // issuing an HTTP request.
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let mut state = crate::tests::test_state(false);
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
@@ -4640,9 +8203,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.user_core_url = user_core.uri();
         (state, application, user_core)
     }
@@ -4699,8 +8262,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok(), "an active bound agent must be authorized");
         assert_eq!(body["agent_name"], "Kundestøtte");
@@ -4746,8 +8307,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         let (status, payload) = result.expect_err("a blocked binding must refuse");
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
@@ -4789,8 +8348,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         let (status, payload) = result.expect_err("a non-mention binding must refuse");
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
@@ -4844,8 +8401,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(
             result.is_ok(),
@@ -4912,8 +8467,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(
             result.is_ok(),
@@ -4979,8 +8532,6 @@ mod tests {
             &mut body,
         )
         .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(
             result.is_ok(),
@@ -5011,8 +8562,6 @@ mod tests {
         let result =
             inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
                 .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         let (status, response) = result.expect_err("an unbound mention must be rejected");
         assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
@@ -5051,8 +8600,6 @@ mod tests {
         let result =
             inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
                 .await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         let (status, _) = result.expect_err("a paused binding must not answer");
         assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
@@ -5137,9 +8684,9 @@ mod tests {
             }})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -5156,8 +8703,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -5218,9 +8763,9 @@ mod tests {
             ]})))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         let response = crate::build_router(state)
@@ -5233,8 +8778,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -5302,9 +8845,9 @@ mod tests {
             }]})))
             .mount(&model)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
         state.model_gateway_url = model.uri();
@@ -5318,8 +8861,6 @@ mod tests {
             )
             .await
             .unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         let body: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
@@ -5446,8 +8987,6 @@ mod tests {
             )
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         // Any turn carrying a `space_ref` now has its Space layer gated on a
         // live Control membership check (`resolve_space_role`) before Convex
         // is even asked — this default "viewer" response lets a scoped test
@@ -5462,6 +9001,8 @@ mod tests {
             .mount(&user_core)
             .await;
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.user_core_url = user_core.uri();
         (state, application, user_core)
     }
@@ -5477,8 +9018,6 @@ mod tests {
         let mut body = json!({"content": "hello"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok());
         assert_eq!(body["org_instructions"], "Always answer in Norwegian.");
@@ -5499,8 +9038,6 @@ mod tests {
         let mut body = json!({"content": "hello", "space_ref": "space-1"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok());
         assert_eq!(body["org_instructions"], "Org rule.");
@@ -5523,8 +9060,6 @@ mod tests {
         let mut body = json!({"content": "hello", "space_ref": "someone-elses-space"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(
             result.is_err(),
@@ -5548,8 +9083,6 @@ mod tests {
         });
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok());
         assert!(
@@ -5568,8 +9101,6 @@ mod tests {
         let mut body = json!({"content": "hello"});
         let result =
             inject_authored_instructions(&state, &authenticated_user(), "", &mut body).await;
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
         assert!(result.is_ok());
         assert!(body.get("org_instructions").is_none());
@@ -5626,9 +9157,9 @@ mod tests {
             })))
             .mount(&application)
             .await;
-        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
-        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
         state.auth_core_url = auth.uri();
         state.user_core_url = user_core.uri();
 
@@ -5645,8 +9176,6 @@ mod tests {
             request.body(Body::empty()).unwrap()
         };
         let response = crate::build_router(state).oneshot(request).await.unwrap();
-        std::env::remove_var("APPLICATION_CONVEX_URL");
-        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
         let status = response.status().as_u16();
         let parsed: Value =
             serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())

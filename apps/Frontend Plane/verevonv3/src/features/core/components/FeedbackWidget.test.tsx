@@ -33,6 +33,17 @@ describe('FeedbackWidget', () => {
     expect(screen.queryByRole('button', { name: 'Tilbakemelding' })).toBeNull()
   })
 
+  it('does not cover the persistent Verevon composer on the Support route', () => {
+    setSessionUser({ id: 'user-1', email: 'ada@example.com', name: 'Ada', emailVerified: true })
+    flush()
+    markSessionOnboardingComplete({ id: 'org-1', name: 'Verevon', role: 'member' })
+    flush()
+
+    renderWidget('/support?view=all')
+
+    expect(screen.queryByRole('button', { name: 'Tilbakemelding' })).toBeNull()
+  })
+
   it('submits a one-line note to the feedback endpoint and shows a confirmation', async () => {
     setSessionUser({ id: 'user-1', email: 'ada@example.com', name: 'Ada', emailVerified: true })
     flush()

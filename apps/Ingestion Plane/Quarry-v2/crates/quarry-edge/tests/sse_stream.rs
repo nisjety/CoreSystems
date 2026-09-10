@@ -84,4 +84,21 @@ async fn sse_streams_page_fetched_and_artifact_written() {
 
     assert!(body.contains("event: page_fetched"), "body: {body}");
     assert!(body.contains("event: artifact_written"), "body: {body}");
+    // Post-transform extraction rides the same stream as a full quarry-core
+    // Event envelope; the gateway maps it into onboarding snippet cards.
+    assert!(body.contains("event: page_extracted"), "body: {body}");
+    let extracted = body
+        .split("\n\n")
+        .find(|frame| frame.contains("event: page_extracted"))
+        .expect("page_extracted frame");
+    let data = extracted
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .expect("data line");
+    let env: serde_json::Value = serde_json::from_str(data).unwrap();
+    assert_eq!(env["type"], "page_extracted");
+    assert_eq!(env["payload"]["url"], "https://stub.example/");
+    assert_eq!(env["payload"]["title_source"], "host");
+    assert_eq!(env["payload"]["title"], "stub.example");
+    assert_eq!(env["payload"]["driver"], "static");
 }

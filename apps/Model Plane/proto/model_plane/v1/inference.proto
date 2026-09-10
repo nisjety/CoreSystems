@@ -156,6 +156,12 @@ message InferRequest {
   // does not is a hard provider error, not a silent no-op. A budget set for a
   // model that cannot think is dropped and the request proceeds normally.
   int32 thinking_budget_tokens = 13;
+
+  // Opaque, user-owned subscription connection selected in Integration Core.
+  // It is meaningful only with provider_hint "openai-codex-subscription";
+  // Model Plane forwards it to the broker but never receives a ChatGPT OAuth
+  // access or refresh token.
+  string subscription_connection_id = 15;
 }
 
 // ToolDefinition — a function the model may call (chat-parity §2).
@@ -191,6 +197,48 @@ message ChatMessage {
 }
 
 // InferResponse — complete inference result.
+// TokenConfidence — the provider's own per-token probabilities for a
+// completion, summarized.
+//
+// OpenAI-family chat completions return a `logprob` for every token the model
+// actually emitted (request-side `logprobs: true`). That is the only signal in
+// the stack that reports how sure the MODEL was, as opposed to how well-backed
+// the answer was by our own evidence: "Oslo." as the capital of Norway is
+// near-certain token by token, while a guessed figure is not, and both look
+// identical to a heuristic reading the finished text.
+//
+// Summarized rather than forwarded verbatim: the per-token array is the
+// answer's shape in probability space and is both large and re-identifying,
+// and no consumer needs more than the aggregate. Absent (unset) whenever the
+// serving provider does not report logprobs — Anthropic never does, and
+// reasoning models reject the request parameter — so consumers must treat a
+// missing message as "unknown", never as "low".
+message TokenConfidence {
+  // Number of answer tokens the summary covers. 0 means no usable logprobs
+  // arrived; treat the whole message as absent.
+  uint32 token_count = 1;
+
+  // Mean natural-log probability across those tokens. `exp(mean_logprob)` is
+  // the geometric-mean per-token probability: ~1.0 when every token was the
+  // obvious one, falling as the model chose between real alternatives. Always
+  // <= 0.
+  double mean_logprob = 2;
+
+  // The same statistic over the answer's CLAIM tokens only: those that carry
+  // content and do not echo the question. "Hovedstaden i Portugal er" is
+  // near-certain whatever the answer, because it restates the prompt; the one
+  // token that asserts anything is "Lisboa". Averaging the two together lets
+  // confident framing hide an invented claim, which is measurably what
+  // happened — over the same answers, the whole-answer mean put fabrications
+  // (0.63-0.78) inside the range of correct prose (0.69), while this statistic
+  // put them at 0.00-0.22 against 0.60-1.00 for correct content.
+  //
+  // 0 / unset when the answer was entirely framing (or the provider reported
+  // no usable tokens); consumers fall back to `mean_logprob`.
+  uint32 claim_token_count = 3;
+  double claim_mean_logprob = 4;
+}
+
 message InferResponse {
   // Echoed request identifier.
   string request_id = 1;
@@ -221,6 +269,10 @@ message InferResponse {
   // Empty means undeclared. Disclosure only — the tier that was REQUIRED is
   // carried by the request; this reports what was actually met.
   string residency = 9;
+
+  // The serving model's own token-level certainty, when it reports logprobs.
+  // Unset means unknown — see TokenConfidence.
+  TokenConfidence token_confidence = 10;
 }
 
 // InferChunk — a single chunk in a streaming inference response.
@@ -262,6 +314,11 @@ message InferChunk {
   // reasoning independently of its answer -- and so reasoning can never be
   // concatenated into the answer by a client that does not know about it.
   string reasoning_delta = 8;
+
+  // Token-level certainty for the whole streamed answer, accumulated across
+  // the stream and populated ONLY on the final chunk (same rule as the token
+  // counts and provenance above). Unset means unknown — see TokenConfidence.
+  TokenConfidence token_confidence = 11;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.

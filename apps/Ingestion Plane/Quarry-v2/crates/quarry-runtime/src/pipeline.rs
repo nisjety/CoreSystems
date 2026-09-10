@@ -96,6 +96,12 @@ pub struct PageRunner {
     /// manual registration flow ever wrote that row). `None` disables
     /// registration (ad-hoc single-page scrapes, test harnesses).
     pub source_registrar: Option<Arc<dyn SourceRegistrar>>,
+    /// Best-effort Model Plane title enricher for the `page_extracted`
+    /// event. `None` disables the model hop (the extraction then carries
+    /// `title_source: html | host` only). Edge wires it from
+    /// `QUARRY_EDGE__MODEL_PLANE_URL` + `QUARRY_EDGE__PAGE_TITLE_MODEL`;
+    /// test harnesses and ad-hoc runners leave it `None`.
+    pub title_enricher: Option<Arc<crate::page_extract::PageTitleEnricher>>,
 }
 
 #[cfg(test)]
@@ -353,7 +359,7 @@ impl PageRunner {
 
         let md = html_to_readable_markdown(&body_text);
         let link_list = links::extract(&body_text, &resp.final_url);
-        let mut meta = metadata::extract(&body_text, ct);
+        let mut meta = metadata::extract(&body_text, ct.clone());
 
         // Body-content language detection when the HTML lang
         // attribute is missing or generic. Helps downstream LLM
@@ -609,6 +615,82 @@ impl PageRunner {
                 }
             }),
             privacy: Some(self.privacy.clone().with_zdr(self.zdr)),
+            extraction: None,
+        };
+
+        // Page-level extraction → `page_extracted` event. Runs AFTER
+        // transform (unlike `page_fetched`, which fires pre-transform with
+        // only url/status/duration/content_type) so it can carry the title,
+        // a plain-text excerpt of the markdown, the word count, the driver
+        // that served the fetch, and — when the HTML title is missing or
+        // generic — a clean short title proposed by Model Plane. Best-effort
+        // end to end: the model hop is time-boxed, ZDR-gated, cached by
+        // content fingerprint, and never fails the page. The event is routed
+        // through `emit_for_zdr`, so under ZDR it reaches only live SSE
+        // subscribers and never the durable publisher or NATS.
+        let output = {
+            let mut output = output;
+            let is_html = ct
+                .as_deref()
+                .map(|c| c.contains("html") || c.contains("xml"))
+                // Browser snapshots and header-less responses are HTML
+                // in practice; only an explicit non-HTML MIME opts out.
+                .unwrap_or(true);
+            if is_html {
+                let mut extraction =
+                    crate::page_extract::build_extraction(crate::page_extract::ExtractionInput {
+                        url: &resp.final_url,
+                        html_title: output.metadata.title.as_deref(),
+                        markdown: &md,
+                        lang: output.metadata.lang.as_deref(),
+                        driver: resp.served_by,
+                    });
+                if extraction.title_source == quarry_core::output::TitleSource::Host {
+                    if let Some(enricher) = self.title_enricher.as_ref() {
+                        if crate::page_extract::model_hop_allowed(self.zdr, &self.privacy) {
+                            if let Some(model_title) = enricher
+                                .enrich(
+                                    self.org_id.as_deref().filter(|o| !o.is_empty()),
+                                    &resp.final_url,
+                                    extraction.lang.as_deref(),
+                                    &extraction.excerpt,
+                                    &fp.0,
+                                    !self.zdr.is_active(),
+                                )
+                                .await
+                            {
+                                crate::page_extract::apply_model_title(
+                                    &mut extraction,
+                                    model_title,
+                                );
+                            }
+                        } else {
+                            tracing::debug!(
+                                url = %resp.final_url,
+                                "page-title model hop skipped by ZDR/privacy posture"
+                            );
+                        }
+                    }
+                }
+                tracing::info!(
+                    url = %resp.final_url,
+                    driver = ?resp.served_by,
+                    title = %extraction.title,
+                    title_source = extraction.title_source.as_str(),
+                    excerpt_chars = extraction.excerpt.chars().count(),
+                    word_count = extraction.word_count,
+                    "page extracted"
+                );
+                self.emit_page_event(
+                    run_id.clone(),
+                    EventType::PageExtracted,
+                    crate::page_extract::event_payload(&extraction, ct.as_deref(), &fp.0),
+                    format!("{}:{}:extracted", run_id, resp.final_url),
+                )
+                .await;
+                output.extraction = Some(extraction);
+            }
+            output
         };
 
         // Cycle 19 / cluster #16: index successful scrape into the local
@@ -895,5 +977,141 @@ mod zdr_event_tests {
     fn zdr_page_events_are_ephemeral_only() {
         assert!(!page_event_persistence_allowed(ZdrMode::On));
         assert!(page_event_persistence_allowed(ZdrMode::Off));
+    }
+}
+
+#[cfg(test)]
+mod page_extracted_tests {
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use async_trait::async_trait;
+    use quarry_core::output::{DriverKind, TitleSource};
+    use tokio::sync::mpsc;
+
+    /// Canned HTML page whose `<title>` is just the host name — the exact
+    /// aquatiq.com symptom — with real body text.
+    struct ShellTitleDriver;
+
+    const PAGE: &str = "<html lang=\"no\"><head><title>aquatiq.com</title></head><body><main><h1>Hygiene for matindustrien</h1><p>Vi leverer rengjøringsløsninger, kjemikalier og kompetanse til næringsmiddelindustrien i hele Norden. Trygg mat starter med rent utstyr.</p></main></body></html>";
+
+    #[async_trait]
+    impl Driver for ShellTitleDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Browser
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: PAGE.as_bytes().to_vec(),
+                duration_ms: 3,
+                served_by: DriverKind::Browser,
+            })
+        }
+    }
+
+    fn runner(tx: mpsc::Sender<quarry_core::event::Event>) -> PageRunner {
+        PageRunner {
+            driver: Arc::new(ShellTitleDriver),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr: ZdrMode::Off,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn emits_page_extracted_with_excerpt_and_host_title_when_no_enricher() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let runner = runner(tx);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://www.aquatiq.com/".parse().unwrap();
+        let out = runner.run(&run_id, &url, None).await.expect("run ok");
+
+        let extraction = out.extraction.expect("extraction present for html");
+        assert_eq!(extraction.title, "aquatiq.com");
+        assert_eq!(extraction.title_source, TitleSource::Host);
+        assert_eq!(extraction.driver, DriverKind::Browser);
+        assert!(
+            extraction.excerpt.starts_with("Hygiene for matindustrien"),
+            "{}",
+            extraction.excerpt
+        );
+        assert!(extraction.word_count >= 15);
+        assert_eq!(extraction.lang.as_deref(), Some("no"));
+
+        let mut saw_extracted = None;
+        let mut order = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            order.push(evt.event_type);
+            if evt.event_type == EventType::PageExtracted {
+                saw_extracted = Some(evt.payload);
+            }
+        }
+        let payload = saw_extracted.expect("page_extracted emitted");
+        assert_eq!(payload["title_source"], "host");
+        assert_eq!(payload["driver"], "browser");
+        assert_eq!(payload["url"], "https://www.aquatiq.com/");
+        assert!(payload["excerpt"].as_str().unwrap().contains("Vi leverer"));
+        // Emitted after the pre-transform page_fetched, as documented.
+        let fetched = order
+            .iter()
+            .position(|t| *t == EventType::PageFetched)
+            .unwrap();
+        let extracted = order
+            .iter()
+            .position(|t| *t == EventType::PageExtracted)
+            .unwrap();
+        assert!(extracted > fetched);
+    }
+
+    #[tokio::test]
+    async fn zdr_run_keeps_page_extracted_off_the_durable_channel() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut runner = runner(tx);
+        runner.zdr = ZdrMode::On;
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let mut live = runner.event_sink.subscribe(&run_id);
+        let url: Url = "https://www.aquatiq.com/".parse().unwrap();
+        let out = runner.run(&run_id, &url, None).await.expect("run ok");
+        assert!(
+            out.extraction.is_some(),
+            "ZDR still yields an in-memory extraction"
+        );
+
+        let mut durable_types = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            durable_types.push(evt.event_type);
+        }
+        assert!(
+            !durable_types.contains(&EventType::PageExtracted),
+            "ZDR page_extracted must not reach the durable publisher: {durable_types:?}"
+        );
+        let mut live_types = Vec::new();
+        while let Ok(evt) = live.try_recv() {
+            live_types.push(evt.event_type);
+        }
+        assert!(
+            live_types.contains(&EventType::PageExtracted),
+            "{live_types:?}"
+        );
     }
 }

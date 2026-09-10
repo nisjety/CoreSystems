@@ -567,6 +567,99 @@ export const bindExistingSpaceAgentForGateway = mutation({
   },
 });
 
+/**
+ * Pause, resume, or revoke one binding from inside the room it belongs to.
+ *
+ * The room could add an agent and never take one back, so a binding added by
+ * mistake stayed invokable until somebody edited the database. `paused` and
+ * `revoked` were already in the schema, already enforced at the gateway's
+ * invocation path, and already excluded from the roster convergence query —
+ * everything existed except a way for a person to ask for them.
+ *
+ * Deliberately narrow about which transitions it will make:
+ *
+ * * **`pending` is never touched.** A pending binding is waiting on Control to
+ *   accept the roster; letting the room flip it to `active` here would mean the
+ *   room asserting a membership Control has not granted.
+ * * **`revoked` is terminal.** Reinstating an agent is a fresh grant, and it
+ *   should go through the same bind flow (and the same role gate) as the first
+ *   one rather than being quietly resurrected from an old record.
+ * * **`failed` is not repaired.** It records that provisioning did not work;
+ *   flipping it to active would hide that rather than fix it.
+ *
+ * Revocation does NOT remove the row. The binding is retained so the room's
+ * history keeps naming who was here, exactly as `space-defenition.md` says a
+ * revoked binding should behave; the roster convergence in
+ * `confirmSpaceAgentMembershipForGateway` is what actually removes the subject
+ * from Control.
+ */
+export const setSpaceAgentBindingStateForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    bindingRef: v.string(),
+    status: v.union(v.literal("active"), v.literal("paused"), v.literal("revoked")),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{ bindingRef: string; subjectId: string; status: string; changed: boolean }> => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const spaceRef = args.spaceRef.trim();
+    const bindingRef = args.bindingRef.trim();
+    if (!spaceRef || !bindingRef) {
+      throw new Error("A Space reference and binding reference are required");
+    }
+
+    const binding = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_binding_ref", (q: any) => q.eq("bindingRef", bindingRef))
+      .unique();
+    // The binding must belong to the Space the caller was authorized for. The
+    // gateway checked the caller's role in THAT room, so accepting a binding
+    // from another one would let a manager of one room govern another.
+    if (
+      !binding ||
+      (binding as any).spaceRef !== spaceRef ||
+      (binding as any).externalOrgId !== args.externalOrgId
+    ) {
+      throw new Error("Agent binding not found in this Space");
+    }
+
+    const current = (binding as any).status as string;
+    if (current === args.status) {
+      return {
+        bindingRef,
+        subjectId: (binding as any).subjectId as string,
+        status: current,
+        changed: false,
+      };
+    }
+    if (current === "revoked") {
+      throw new Error("A revoked binding cannot be changed; add the agent again instead");
+    }
+    if (current === "pending" || current === "failed") {
+      throw new Error(`A ${current} binding cannot be paused, resumed, or revoked`);
+    }
+
+    await ctx.db.patch(binding._id, {
+      status: args.status,
+      projectionVersion: ((binding as any).projectionVersion as number) + 1,
+      updatedAt: Date.now(),
+    });
+    return {
+      bindingRef,
+      subjectId: (binding as any).subjectId as string,
+      status: args.status,
+      changed: true,
+    };
+  },
+});
+
 /** Every subject the room's service roster must contain — the full declarative
  * set for Control convergence, not a delta. Revoked bindings are the one state
  * excluded on purpose: revocation is exactly the decision to leave the roster. */

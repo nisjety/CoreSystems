@@ -68,6 +68,12 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     createdAt: msg.createdAt || '',
     streaming: false,
     model: msg.model,
+    // Persisted answer quality, so a thread opened on a device that never saw
+    // the stream shows the same score the stream reported. Absent for turns
+    // recorded before the score was persisted — which stays distinguishable
+    // from "scored zero", because the field is simply missing.
+    confidence: msg.confidence,
+    verification: msg.verification,
     tools: [],
     attachments: [],
   }
@@ -83,6 +89,8 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       createdAt: turn.createdAt,
       model: turn.model,
       modelUsed: turn.modelUsed,
+      provider: turn.provider,
+      subscriptionConnectionId: turn.subscriptionConnectionId,
       requestId: turn.requestId,
       runId: turn.runId,
       planMode: turn.planMode,
@@ -94,6 +102,7 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       costUsd: turn.costUsd,
       effectClass: turn.effectClass,
       confidence: turn.confidence,
+      verification: turn.verification,
       reasoning: turn.reasoning,
       citations: turn.citations,
       toolCalls: turn.toolCalls,
@@ -135,6 +144,8 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     streaming: false,
     model: turn.model,
     modelUsed: turn.modelUsed,
+    provider: turn.provider,
+    subscriptionConnectionId: turn.subscriptionConnectionId,
     requestId: turn.requestId,
     runId: turn.runId,
     planMode: turn.planMode,
@@ -146,6 +157,7 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     costUsd: turn.costUsd,
     effectClass: turn.effectClass,
     confidence: turn.confidence,
+      verification: turn.verification,
     reasoning: turn.reasoning,
     citations: (turn.citations ?? []).filter(isCitation),
     toolCalls: (turn.toolCalls ?? []).filter(isChatToolCall),
@@ -223,6 +235,8 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
       createdAt: serverTurn.createdAt || cachedTurn.createdAt,
       model: serverTurn.model ?? cachedTurn.model,
       modelUsed: serverTurn.modelUsed ?? cachedTurn.modelUsed,
+      provider: serverTurn.provider ?? cachedTurn.provider,
+      subscriptionConnectionId: serverTurn.subscriptionConnectionId ?? cachedTurn.subscriptionConnectionId,
       requestId: serverTurn.requestId ?? cachedTurn.requestId,
       runId: serverTurn.runId ?? cachedTurn.runId,
       planMode: serverTurn.planMode ?? cachedTurn.planMode,

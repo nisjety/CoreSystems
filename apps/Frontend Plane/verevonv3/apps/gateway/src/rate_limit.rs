@@ -472,6 +472,11 @@ mod tests {
 
     #[test]
     fn from_env_rejects_non_positive_and_keeps_default() {
+        // GATEWAY_RATE_LIMIT_RPM is process-global: without this lock a
+        // concurrent test's request is limited against the bogus value set
+        // below and fails with 503. `blocking_lock` because this is a plain
+        // `#[test]` with no runtime to await on.
+        let _env = crate::config::TEST_ENV_LOCK.blocking_lock();
         // Set a bogus value; RPM parsing must fall back to DEFAULT_RPM. Built via
         // from_cache against a disabled cache (no connection ⇒ in-process path).
         std::env::set_var("GATEWAY_RATE_LIMIT_RPM", "not-a-number");

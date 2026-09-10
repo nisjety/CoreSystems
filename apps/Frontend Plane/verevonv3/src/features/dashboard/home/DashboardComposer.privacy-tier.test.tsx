@@ -2,7 +2,7 @@
 
 import { createRouter, memoryHistory } from '@solidjs/router'
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelInfo } from '@/shared/api/chat-client'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
@@ -186,6 +186,9 @@ describe('tier threading into the submit payload', () => {
     ])
 
     fireEvent.input(screen.getByRole('textbox'), { target: { value: 'Hei' } })
+    // Solid v2 schedules signal writes; flush so the composer's `message` prop
+    // (and its hasContent guard) sees the typed text before the submit.
+    flush()
     submitComposerForm()
     await waitFor(() => expect(submittedPayloads.length).toBe(1))
 
@@ -195,6 +198,7 @@ describe('tier threading into the submit payload', () => {
     await reopenModelMenu()
     fireEvent.click(await screen.findByText('Sovereign Model B'))
     fireEvent.input(screen.getByRole('textbox'), { target: { value: 'Hei igjen' } })
+    flush()
     submitComposerForm()
 
     await waitFor(() => expect(submittedPayloads.length).toBe(2))

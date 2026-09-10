@@ -161,6 +161,9 @@ export function OutboundVerevonRail(props: { intent: OutboundIntent | null; orgI
           <>
             <header class="verevon-outbound-verevon__header">
               <div><Sparkles class="size-4" /><strong>Verevon</strong></div>
+              {/* Bevisst INGEN «Åpne i chat»-lenke: Chat eier sin egen rute, og en
+                  /chat?thread_id=-lenke ville adoptert en tråd Chat ikke eier og
+                  vist den skrivebeskyttet — se chat-route-ownership.test.ts. */}
               <Show when={Boolean(threadId())}><a href={`/support?view=all&conversation_id=${encodeURIComponent(intent().conversation_id)}`} link>{i18n.tr('Åpne kildesamtale', 'Open source conversation')}<ArrowUpRight class="size-3.5" /></a></Show>
             </header>
 

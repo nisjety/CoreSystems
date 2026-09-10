@@ -190,6 +190,7 @@ pub fn record_chat_turn(
     user_id: &str,
     run_id: &str,
     turn_query: &str,
+    requested_skill_ids: &[String],
     injected_limit: i32,
 ) {
     global().record(
@@ -197,7 +198,14 @@ pub fn record_chat_turn(
         org_id,
         user_id,
         run_id,
-        injected_skill_ids(state, org_id, user_id, turn_query, injected_limit),
+        injected_skill_ids(
+            state,
+            org_id,
+            user_id,
+            turn_query,
+            requested_skill_ids,
+            injected_limit,
+        ),
     );
 }
 
@@ -342,17 +350,28 @@ fn truncate_bytes(value: &str, max: usize) -> String {
 
 /// Ids of the skills `fetch_skill_context` would inject for this turn. Mirrors
 /// its filter (non-empty body) so the recorded set is exactly the injected set.
+/// `requested_skill_ids` are the skills the member picked explicitly, AFTER
+/// `sse::fetch_skill_context` resolved them against the catalogue and the
+/// ownership rule — so they are the server's list of what was injected, not
+/// the client's claim. They lead, in the order picked; keyword matches follow.
 fn injected_skill_ids(
     state: &crate::state::AppState,
     org_id: &str,
     user_id: &str,
     turn_query: &str,
+    requested_skill_ids: &[String],
     limit: i32,
 ) -> Vec<String> {
     use mp_contracts::model_plane::v1::MatchSkillsRequest;
 
+    let mut out: Vec<String> = requested_skill_ids
+        .iter()
+        .map(|id| id.trim().to_owned())
+        .filter(|id| !id.is_empty())
+        .collect();
+    out.dedup();
     if org_id.trim().is_empty() {
-        return Vec::new();
+        return out;
     }
     let Ok(matched) = crate::skills::handle_match_skills(
         &state.skills,
@@ -366,15 +385,20 @@ fn injected_skill_ids(
         &state.ownership,
         user_id,
     ) else {
-        return Vec::new();
+        return out;
     };
-    matched
+    for id in matched
         .matches
         .into_iter()
         .filter_map(|m| m.skill)
         .filter(|s| !s.body.trim().is_empty() && !s.id.trim().is_empty())
         .map(|s| s.id)
-        .collect()
+    {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

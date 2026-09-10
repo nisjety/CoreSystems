@@ -34,15 +34,36 @@ CONFIG_NAME=".gitleaks.toml"
 TOPLEVEL="$(git rev-parse --show-toplevel)"
 ARGS=(detect --pipe --redact --no-banner)
 
-# Nothing staged (a mode-only change, an empty --amend) is not a failure.
-if git diff --cached --quiet; then
+# Lockfiles carry high-entropy content-hash lines (go.sum's `h1:<base64>`,
+# Cargo.lock/pnpm-lock/package-lock/yarn.lock checksums) that gitleaks'
+# generic-api-key rule can mistake for secrets. .gitleaks.toml already lists
+# these paths in its allowlist for the CI scan (which reads real files), but
+# that path allowlist does not reliably apply here: --pipe only ever sees
+# diff text, not a resolvable filesystem path, so the allowlist's path
+# regexes silently fail to match and a plain module checksum gets treated
+# like a leak. Confirmed 2026-09-08 (a go.sum `h1:` hash flagged as
+# "generic-api-key", un-suppressable by any regex.gitleaks.toml offers in
+# --pipe mode). Excluding the same already-declared-exempt paths from the
+# diff before it reaches gitleaks makes this hook actually enforce the
+# policy .gitleaks.toml states, instead of silently failing to.
+LOCKFILE_EXCLUDES=(
+  ':(exclude,glob)**/Cargo.lock'
+  ':(exclude,glob)**/go.sum'
+  ':(exclude,glob)**/pnpm-lock.yaml'
+  ':(exclude,glob)**/package-lock.json'
+  ':(exclude,glob)**/yarn.lock'
+)
+
+# Nothing staged outside the lockfile excludes (a mode-only change, an empty
+# --amend, or a commit touching only lockfiles) is not a failure.
+if git diff --cached --quiet -- . "${LOCKFILE_EXCLUDES[@]}"; then
   exit 0
 fi
 
 if command -v gitleaks >/dev/null 2>&1; then
   [ -f "$TOPLEVEL/$CONFIG_NAME" ] && ARGS+=(--config "$TOPLEVEL/$CONFIG_NAME")
   rc=0
-  git diff --cached | gitleaks "${ARGS[@]}" || rc=$?
+  git diff --cached -- . "${LOCKFILE_EXCLUDES[@]}" | gitleaks "${ARGS[@]}" || rc=$?
 elif command -v docker >/dev/null 2>&1; then
   MOUNT=()
   if [ -f "$TOPLEVEL/$CONFIG_NAME" ]; then
@@ -56,7 +77,7 @@ elif command -v docker >/dev/null 2>&1; then
   # on Windows. The host side is unaffected because TOPLEVEL is already a
   # Windows path. The variable is inert on Linux and macOS.
   rc=0
-  git diff --cached | MSYS_NO_PATHCONV=1 docker run --rm -i \
+  git diff --cached -- . "${LOCKFILE_EXCLUDES[@]}" | MSYS_NO_PATHCONV=1 docker run --rm -i \
     ${MOUNT[@]+"${MOUNT[@]}"} \
     ghcr.io/gitleaks/gitleaks:latest "${ARGS[@]}" || rc=$?
 else

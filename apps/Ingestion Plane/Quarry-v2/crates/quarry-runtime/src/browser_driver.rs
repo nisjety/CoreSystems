@@ -30,6 +30,41 @@ const LEASE_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 /// choice, not a default.
 const DEFAULT_WAIT_FOR_TIMEOUT_MS: u32 = 5_000;
 
+/// Hydration settle budget when the caller gave no `wait_for_selector`.
+/// `goto` resolves on the document load event, which for a JS shell
+/// (Next.js/Nuxt/SPA) fires BEFORE the framework has rendered any text —
+/// snapshotting right there returns the same empty shell the static driver
+/// already had, silently defeating the fallback. When the first snapshot
+/// still looks like a shell we re-snapshot until the visible text stops
+/// growing or this budget elapses. Override with `QUARRY_BROWSER_SETTLE_MS`.
+const DEFAULT_SETTLE_MS: u64 = 3_500;
+const SETTLE_POLL: Duration = Duration::from_millis(300);
+/// Below this many visible text chars a snapshot is treated as "not hydrated
+/// yet" (a real page has far more; a shell has a title and little else).
+const SETTLE_MIN_TEXT_CHARS: usize = 600;
+
+fn settle_budget() -> Duration {
+    std::env::var("QUARRY_BROWSER_SETTLE_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_millis(DEFAULT_SETTLE_MS))
+}
+
+/// A snapshot that still needs hydration time: carries scripts (so it *can*
+/// hydrate) but exposes little or no readable text yet. Script-less bodies
+/// (plain HTML, test stubs) never wait.
+fn looks_unhydrated(body: &[u8]) -> bool {
+    let has_script = body
+        .windows(b"<script".len())
+        .any(|w| w.eq_ignore_ascii_case(b"<script"));
+    if !has_script {
+        return false;
+    }
+    crate::fallback_driver::is_js_shell_needing_browser(body, 200)
+        || crate::fallback_driver::visible_text_len(body) < SETTLE_MIN_TEXT_CHARS
+}
+
 /// Adapts a [`quarry_browser::BrowserDriver`] into the [`Driver`] trait.
 ///
 /// The adapter acquires a browser session, executes the fetch, then
@@ -188,7 +223,7 @@ impl BrowserDriverAdapter {
             }
         }
 
-        let body_bytes = match self.inner.content(&session).await {
+        let mut body_bytes = match self.inner.content(&session).await {
             Ok(b) => b,
             Err(e) => {
                 guard.poison();
@@ -196,6 +231,43 @@ impl BrowserDriverAdapter {
                 return Err(e);
             }
         };
+
+        // Hydration settle (only without an explicit wait_for, which already
+        // defines "ready"). Re-snapshot while the DOM still looks like an
+        // unhydrated shell; stop once the visible text stabilises or the
+        // budget is spent. Snapshot errors here are non-fatal — we keep the
+        // last good body.
+        if hints.render.wait_for_selector.is_none() && looks_unhydrated(&body_bytes) {
+            let budget = settle_budget();
+            let deadline = Instant::now() + budget;
+            let mut last_text = crate::fallback_driver::visible_text_len(&body_bytes);
+            let mut polls = 0u32;
+            while Instant::now() < deadline {
+                tokio::time::sleep(SETTLE_POLL).await;
+                polls += 1;
+                let Ok(next) = self.inner.content(&session).await else {
+                    break;
+                };
+                let text = crate::fallback_driver::visible_text_len(&next);
+                let grew = text > last_text;
+                if text >= last_text {
+                    body_bytes = next;
+                }
+                if !grew && text >= SETTLE_MIN_TEXT_CHARS {
+                    break;
+                }
+                last_text = last_text.max(text);
+            }
+            tracing::info!(
+                url = %url,
+                polls,
+                budget_ms = budget.as_millis() as u64,
+                text_chars = last_text,
+                body_bytes = body_bytes.len(),
+                hydrated = last_text >= SETTLE_MIN_TEXT_CHARS,
+                "browser hydration settle"
+            );
+        }
 
         let response = FetchResponse {
             status: 200,
@@ -355,6 +427,22 @@ mod tests {
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.as_str());
         assert_eq!(ct, Some("text/html; charset=utf-8"));
+    }
+
+    #[test]
+    fn script_less_bodies_never_wait_for_hydration() {
+        assert!(!looks_unhydrated(b"x"));
+        assert!(!looks_unhydrated(b"<html><body><p>hei</p></body></html>"));
+    }
+
+    #[test]
+    fn sparse_script_bearing_bodies_wait_for_hydration() {
+        let shell = b"<html><head><script src=\"/_next/static/a.js\"></script></head><body><div id=\"__next\"></div></body></html>";
+        assert!(looks_unhydrated(shell));
+        let mut hydrated = b"<html><head><script>1</script></head><body>".to_vec();
+        hydrated.extend_from_slice("<p>ord </p>".repeat(200).as_bytes());
+        hydrated.extend_from_slice(b"</body></html>");
+        assert!(!looks_unhydrated(&hydrated));
     }
 
     #[tokio::test]

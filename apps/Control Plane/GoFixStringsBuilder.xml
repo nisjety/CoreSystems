@@ -1,0 +1,28 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go</file>
+  <line>19</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/http/service_auth_test.go" />
+  <problem_class id="GoFixStringsBuilder" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">String concatenation can use 'strings.Builder'</problem_class>
+  <hints />
+  <description>using string += string in a loop is inefficient</description>
+  <highlighted_element>raw += &quot;,&quot;</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go</file>
+  <line>19</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/service_auth_test.go" />
+  <problem_class id="GoFixStringsBuilder" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">String concatenation can use 'strings.Builder'</problem_class>
+  <hints />
+  <description>using string += string in a loop is inefficient</description>
+  <highlighted_element>raw += &quot;,&quot;</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>10</length>
+</problem>
+</problems>

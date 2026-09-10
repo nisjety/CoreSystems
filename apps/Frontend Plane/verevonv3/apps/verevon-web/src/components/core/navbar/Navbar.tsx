@@ -1,10 +1,12 @@
 import Link from "next/link";
+import type { RefObject } from "react";
 
 type NavbarProps = {
 	isHidden?: boolean;
 	isMenuOpen: boolean;
 	isOnDark: boolean;
 	isScrolled: boolean;
+	menuButtonRef: RefObject<HTMLButtonElement | null>;
 	onOpen: () => void;
 };
 
@@ -12,7 +14,7 @@ const navItems = [
 	{ href: "/produkt/arbeidsflyten", label: "Produkt" },
 	{ href: "/plattform/felles-kontekst", label: "Plattform" },
 	{ href: "/trust", label: "Tillit" },
-	{ href: "#kontakt", label: "Kontakt" },
+	{ href: "/#kontakt", label: "Kontakt" },
 ];
 
 export function Navbar({
@@ -20,6 +22,7 @@ export function Navbar({
 	isMenuOpen,
 	isOnDark,
 	isScrolled,
+	menuButtonRef,
 	onOpen,
 }: NavbarProps) {
 	const tone =
@@ -41,13 +44,13 @@ export function Navbar({
 			].join(" ")}
 			data-site-nav=""
 		>
-			<a
+			<Link
 				aria-label="Verevon hjem"
 				className="pointer-events-auto justify-self-start font-arbeit text-[0.98rem] font-normal uppercase leading-none tracking-[0.18em] max-[760px]:text-[0.86rem] max-[760px]:tracking-[0.16em]"
-				href="#top"
+				href="/"
 			>
 				VEREVON
-			</a>
+			</Link>
 
 			<nav
 				aria-label="Hovednavigasjon"
@@ -71,17 +74,17 @@ export function Navbar({
 
 			<div className="pointer-events-auto flex items-center gap-[30px] justify-self-end max-[760px]:gap-[22px]">
 				<a
-					aria-label="Søk"
+					aria-label="Kontakt oss på e-post"
 					className="grid size-[34px] place-items-center text-[color-mix(in_srgb,currentColor_58%,transparent)] transition-colors hover:text-current max-[760px]:size-8"
-					href="#kontakt"
+					href="mailto:hei@verevon.ai"
 				>
 					<svg
 						aria-hidden="true"
 						className="size-[18px] overflow-visible fill-none stroke-current stroke-[1px] max-[760px]:size-[17px]"
 						viewBox="0 0 20 20"
 					>
-						<circle cx="8.5" cy="8.5" r="5.75" />
-						<path d="m13 13 4 4" strokeLinecap="round" />
+						<rect height="12" rx="1.5" width="16" x="2" y="4" />
+						<path d="m2.8 5 7.2 5.6L17.2 5" strokeLinecap="round" />
 					</svg>
 				</a>
 
@@ -90,6 +93,7 @@ export function Navbar({
 					aria-label="Åpne meny"
 					className="group grid w-[50px] cursor-pointer gap-1.5 border-0 bg-transparent py-2.5 text-[color-mix(in_srgb,currentColor_68%,transparent)] transition-colors hover:text-current max-[760px]:w-11"
 					onClick={onOpen}
+					ref={menuButtonRef}
 					type="button"
 				>
 					<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-[0.76]" />

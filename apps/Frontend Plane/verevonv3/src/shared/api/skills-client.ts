@@ -16,8 +16,31 @@ export interface Skill {
   trigger_file_patterns: string[]
   tool_restrictions: string[]
   enabled: boolean
+  /**
+   * Ownership (SKILL-1): `org` is visible to the whole organization, `user` is
+   * private to `owner_user_id` until shared. These are the only two scopes the
+   * registry can store — there is no `space` scope (a CHECK constraint, not a
+   * convention), which is why the room composer badges "Organisasjon" and
+   * "Personlig" and nothing else.
+   */
+  scope?: 'org' | 'user'
+  owner_user_id?: string
+  shared_with?: string[]
   created_at?: string
   updated_at?: string
+}
+
+/** Mirrors model-gateway `MAX_REQUESTED_SKILLS`; the server caps again. */
+export const MAX_PICKED_SKILLS = 4
+
+/**
+ * The enabled skills this member may use in a composer. Org and visibility are
+ * resolved server-side from the session (capability-core filters `user`-scoped
+ * skills to the owner and explicit shares), so no hint header is needed.
+ */
+export async function listAvailableSkills(signal?: AbortSignal): Promise<Skill[]> {
+  const payload = await requestJson<{ skills?: Skill[] } | null>('/api/v1/skills', { signal })
+  return (payload?.skills ?? []).filter((skill) => skill && skill.enabled !== false && skill.id?.trim())
 }
 
 export function listSkills(orgId: string): Promise<{ skills: Skill[] }> {

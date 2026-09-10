@@ -662,6 +662,10 @@ fn router_inner(
         .route("/v1/knowledge/wiki", post(retrieve_wiki))
         .route("/v1/knowledge/sources", post(retrieve_sources))
         .route("/v1/knowledge/freshness", post(retrieve_freshness))
+        // What a Space's knowledge actually IS, rather than what a query
+        // matched. Requires the Space decision — there is no org-wide form of
+        // this listing, so nothing here can be asked without Space authority.
+        .route("/v1/knowledge/space-sources", post(space_knowledge))
         // Semantic response cache — Model Plane gateway SemanticCache seam.
         .route("/v1/cache/semantic/search", post(semantic_cache_search))
         .route("/v1/cache/semantic/store", post(semantic_cache_store))
@@ -721,10 +725,36 @@ fn router_inner(
     .with_state(state)
 }
 
+/// Endpoints that enforce a Space decision rather than ignoring one.
+///
+/// Membership here is a claim about the handler, not a convenience: presenting
+/// a decision to an endpoint that would drop it is how a Space silently
+/// becomes a hint. Each path below resolves the binding and constrains its own
+/// read to it:
+///
+/// - the three retrieval arms pin the dense vertical to the Space's documents
+///   (`ResolvedSpaceRetrievalScope::apply_document_scope_to_filters`);
+/// - `sources` and `freshness` narrow the requested ids to that same set;
+/// - `wiki` pins the search to the workspace the binding names, and refuses a
+///   binding that names none rather than falling back to the caller's ACL;
+/// - `space-sources` exists only under Space authority.
+///
+/// `graph`, `pack`, `timeline`, `contradictions`, `chunks` and `compare` are
+/// deliberately absent: they have no Space predicate yet, so a decision
+/// presented to them is still refused at the boundary.
 fn space_decision_is_enforced_for_path(path: &str) -> bool {
     matches!(
         path,
-        "/v1/retrieve" | "/v1/retrieve/hybrid" | "/v1/knowledge/search"
+        "/v1/retrieve"
+            | "/v1/retrieve/hybrid"
+            | "/v1/retrieve/sources"
+            | "/v1/retrieve/freshness"
+            | "/v1/retrieve/wiki"
+            | "/v1/knowledge/search"
+            | "/v1/knowledge/sources"
+            | "/v1/knowledge/freshness"
+            | "/v1/knowledge/wiki"
+            | "/v1/knowledge/space-sources"
     )
 }
 
@@ -739,6 +769,46 @@ async fn reject_unenforced_space_decision(
             .into_response();
     }
     next.run(request).await
+}
+
+/// Verify and resolve an `x-space-decision` bearer, if one was supplied.
+///
+/// `Ok(None)` means the caller presented no Space decision — the legacy
+/// org-scoped read. Everything else is a refusal: a supplied decision is never
+/// downgraded to "carry on without it", because the whole point of routing a
+/// read through a Space is that the Space, not the caller, chose the target.
+async fn resolved_space_scope(
+    pipeline: &AppState,
+    auth: Option<&axum::extract::Extension<crate::authz::AuthContext>>,
+    headers: &HeaderMap,
+) -> Result<Option<crate::space_scope::ResolvedSpaceRetrievalScope>, AppError> {
+    let Some(token) = headers
+        .get("x-space-decision")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Ok(None);
+    };
+    let ctx = auth.ok_or_else(|| {
+        AppError::forbidden("authenticated subject required for Space retrieval")
+    })?;
+    let subject = ctx
+        .user_id
+        .as_deref()
+        .ok_or_else(|| AppError::forbidden("user subject required for Space retrieval"))?;
+    let keys = crate::space_scope::configured_retrieval_decision_keys()
+        .map_err(|_| AppError::forbidden("Space decision verification is unavailable"))?;
+    let authority = crate::space_scope::verify_retrieval_space_decision(
+        token,
+        &keys,
+        &ctx.org_id,
+        subject,
+        chrono::Utc::now(),
+    )
+    .map_err(|_| AppError::forbidden("invalid Space retrieval decision"))?;
+    let scope = crate::space_scope::resolve_space_retrieval_scope(&pipeline.pool, authority)
+        .await
+        .map_err(|_| AppError::forbidden("Space retrieval binding is unavailable"))?;
+    Ok(Some(scope))
 }
 
 async fn retrieve(
@@ -757,33 +827,7 @@ async fn retrieve(
     // A Space bearer is optional for legacy org-scoped retrieval, but whenever
     // it is supplied it is verified and resolved before the pipeline can see
     // any caller-controlled workspace/collection filter.
-    if let Some(token) = headers
-        .get("x-space-decision")
-        .and_then(|value| value.to_str().ok())
-    {
-        let ctx = auth.as_ref().ok_or_else(|| {
-            AppError::forbidden("authenticated subject required for Space retrieval")
-        })?;
-        let subject = ctx
-            .user_id
-            .as_deref()
-            .ok_or_else(|| AppError::forbidden("user subject required for Space retrieval"))?;
-        let keys = crate::space_scope::configured_retrieval_decision_keys()
-            .map_err(|_| AppError::forbidden("Space decision verification is unavailable"))?;
-        let authority = crate::space_scope::verify_retrieval_space_decision(
-            token,
-            &keys,
-            &ctx.org_id,
-            subject,
-            chrono::Utc::now(),
-        )
-        .map_err(|_| AppError::forbidden("invalid Space retrieval decision"))?;
-        req.space_scope = Some(
-            crate::space_scope::resolve_space_retrieval_scope(&pipeline.pool, authority)
-                .await
-                .map_err(|_| AppError::forbidden("Space retrieval binding is unavailable"))?,
-        );
-    }
+    req.space_scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers).await?;
     let resp = pipeline.retrieve(req).await?;
     Ok(Json(resp))
 }
@@ -1429,21 +1473,38 @@ fn default_wiki_limit() -> i32 {
 async fn retrieve_wiki(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
     Json(mut req): Json<WikiRetrieveRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    let space_scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers).await?;
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
-    let allowed_workspaces = auth
-        .as_ref()
-        .map(|extension| {
-            if viewer.is_none() {
-                Vec::new()
-            } else {
-                extension.acl.workspaces.clone()
-            }
-        })
-        .unwrap_or_default();
+    let allowed_workspaces = match space_scope.as_ref() {
+        // `wiki_search` treats an empty workspace list as UNCONSTRAINED, so a
+        // binding that names no workspace must refuse rather than pass one
+        // through: a collection-only binding would otherwise widen a
+        // Space-scoped wiki read to the whole org.
+        Some(scope) => vec![scope
+            .workspace_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::forbidden("Space retrieval binding names no wiki workspace")
+            })?
+            .to_owned()],
+        None => auth
+            .as_ref()
+            .map(|extension| {
+                if viewer.is_none() {
+                    Vec::new()
+                } else {
+                    extension.acl.workspaces.clone()
+                }
+            })
+            .unwrap_or_default(),
+    };
     let pages = wiki::wiki_search(
         &pipeline.pool,
         &req.query,
@@ -1621,15 +1682,25 @@ async fn retrieve_pack(
 }
 
 // D7: Source lookup
+//
+// `$5` is the Space predicate: NULL for a legacy org-scoped lookup, and the
+// verified decision's own `space_ref` when one was presented. Expressing it in
+// SQL rather than narrowing the requested ids against a resolved set keeps it
+// EXACT — an id list has to be bounded, and a bounded list would silently drop
+// documents that really are in the room. It is a separate clause from the
+// viewer predicate on purpose: that one stays about the reader, and a Space
+// never widens it.
 const SOURCES_SQL: &str = "SELECT document_id, title, source, type, status, zdr_classification
      FROM documents
      WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
-       AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))";
+       AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
+       AND ($5::text IS NULL OR space_ref = $5)";
 
 const FRESHNESS_SQL: &str = "SELECT document_id, title, updated_at::TEXT, status
      FROM documents
      WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
-       AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))";
+       AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
+       AND ($5::text IS NULL OR space_ref = $5)";
 
 #[derive(serde::Deserialize)]
 struct SourcesRequest {
@@ -1640,9 +1711,16 @@ struct SourcesRequest {
 async fn retrieve_sources(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
     Json(mut req): Json<SourcesRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    // Under Space authority this is a lookup inside one room, so an id outside
+    // the room is absent exactly like one the viewer cannot see. The predicate
+    // goes into the query rather than pre-filtering the ids, so it is exact.
+    let space_ref = resolved_space_scope(&pipeline, auth.as_ref(), &headers)
+        .await?
+        .map(|scope| scope.authority.space_ref);
     if req.document_ids.is_empty() {
         return Ok(Json(serde_json::json!({"sources": []})));
     }
@@ -1659,6 +1737,7 @@ async fn retrieve_sources(
         .bind(&req.org_id)
         .bind(&viewer)
         .bind(&granted)
+        .bind(&space_ref)
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1680,6 +1759,159 @@ async fn retrieve_sources(
     Ok(Json(serde_json::json!({"sources": sources})))
 }
 
+const SPACE_DOCUMENTS_SQL: &str =
+    "SELECT document_id, title, source, type, status, zdr_classification, updated_at::TEXT
+     FROM documents
+     WHERE org_id = $1 AND space_ref = $2 AND deleted_at IS NULL
+       AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
+     ORDER BY updated_at DESC
+     LIMIT $5";
+
+const SPACE_WIKI_PAGES_SQL: &str =
+    "SELECT page_id, title, path, updated_at::TEXT
+     FROM wiki_pages
+     WHERE org_id = $1 AND workspace_id = $2 AND deleted_at IS NULL
+       AND page_status = 'published'
+     ORDER BY updated_at DESC
+     LIMIT $3";
+
+const SPACE_KNOWLEDGE_DEFAULT_LIMIT: i64 = 50;
+const SPACE_KNOWLEDGE_MAX_LIMIT: i64 = 200;
+
+#[derive(serde::Deserialize)]
+struct SpaceKnowledgeRequest {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// Everything this Space's knowledge scope actually contains.
+///
+/// # Why this is a listing and not a search
+///
+/// `retrieve` answers "what matches this query". The Space cockpit's Knowledge
+/// tab asks a different question — "what does this room know about at all" —
+/// and until now Data could not answer it: `documents-api` verified a Space
+/// import decision and then discarded the Space, so no row said which room it
+/// belonged to. `documents.space_ref` is that edge; this endpoint reads it.
+///
+/// # Two independent sections, two independent gaps
+///
+/// Documents come from `documents.space_ref`. Wiki pages come from the
+/// workspace the binding names — a different mechanism, with a different way to
+/// be missing. A collection-only binding has no wiki workspace to read, and
+/// saying so beats rendering an empty list that reads as "this room has no
+/// pages". Each section reports its own gap with a stable code, alongside
+/// whatever the other section did resolve.
+///
+/// # The Space never widens an ACL
+///
+/// The per-viewer ownership predicate runs here exactly as it does in
+/// `retrieve_sources`. Being in a room is permission to ask; it is not
+/// permission to read a private document owned by another member.
+async fn space_knowledge(
+    State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
+    Json(req): Json<SpaceKnowledgeRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers)
+        .await?
+        .ok_or_else(|| {
+            AppError::forbidden("a Space decision is required to list a Space's knowledge")
+        })?;
+    let org_id = scope.authority.org_id.clone();
+    let limit = req
+        .limit
+        .unwrap_or(SPACE_KNOWLEDGE_DEFAULT_LIMIT)
+        .clamp(1, SPACE_KNOWLEDGE_MAX_LIMIT);
+    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &org_id).await;
+    let mut unavailable: Vec<serde_json::Value> = Vec::new();
+
+    // Phase 1 RLS: both reads serve exactly one org, taken from the verified
+    // decision rather than any request field, so they run inside an org-scoped
+    // transaction. The SQL still binds org_id itself as the backstop.
+    let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &org_id).await?;
+    let document_rows = sqlx::query_as::<
+        _,
+        (String, String, String, String, String, String, String),
+    >(SPACE_DOCUMENTS_SQL)
+    .bind(&org_id)
+    .bind(&scope.authority.space_ref)
+    .bind(&viewer)
+    .bind(&granted)
+    .bind(limit)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let wiki_workspace = scope
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let wiki_rows = match wiki_workspace {
+        Some(workspace) => {
+            sqlx::query_as::<_, (String, String, String, String)>(SPACE_WIKI_PAGES_SQL)
+                .bind(&org_id)
+                .bind(workspace)
+                .bind(limit)
+                .fetch_all(&mut *tx)
+                .await?
+        }
+        None => {
+            unavailable.push(serde_json::json!({
+                "section": "wiki_pages",
+                "code": "space_binding_has_no_wiki_workspace",
+                "reason": "This Space's Data binding names no wiki workspace.",
+            }));
+            Vec::new()
+        }
+    };
+    tx.commit().await?;
+
+    let documents: Vec<serde_json::Value> = document_rows
+        .into_iter()
+        .map(|(did, title, source, dtype, status, zdr, updated)| {
+            serde_json::json!({
+                "document_id": did,
+                "title": title,
+                "source": source,
+                "type": dtype,
+                "status": status,
+                "zdr_classification": zdr,
+                "updated_at": updated,
+            })
+        })
+        .collect();
+    let wiki_pages: Vec<serde_json::Value> = wiki_rows
+        .into_iter()
+        .map(|(page_id, title, path, updated)| {
+            serde_json::json!({
+                "page_id": page_id,
+                "title": title,
+                "path": path,
+                "updated_at": updated,
+            })
+        })
+        .collect();
+
+    // The document list is capped, and a caller cannot tell a full page from a
+    // complete room. Say which it is rather than letting the reader assume.
+    let documents_truncated = documents.len() as i64 >= limit;
+    Ok(Json(serde_json::json!({
+        "space_ref": scope.authority.space_ref,
+        "decision_ref": scope.authority.decision_ref,
+        "binding": {
+            "workspace_id": scope.workspace_id,
+            "collection_id": scope.collection_id,
+            "owner_resource_ref": scope.owner_resource_ref,
+        },
+        "documents": documents,
+        "documents_truncated": documents_truncated,
+        "wiki_pages": wiki_pages,
+        "unavailable": unavailable,
+    })))
+}
+
 // D7: Freshness scoring
 #[derive(serde::Deserialize)]
 struct FreshnessRequest {
@@ -1690,9 +1922,15 @@ struct FreshnessRequest {
 async fn retrieve_freshness(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
     Json(mut req): Json<FreshnessRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    // Same predicate as `retrieve_sources`: freshness is the other half of the
+    // same by-id lookup, and the two must not disagree about what is in a room.
+    let space_ref = resolved_space_scope(&pipeline, auth.as_ref(), &headers)
+        .await?
+        .map(|scope| scope.authority.space_ref);
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
     // Phase 1 RLS: single-org read, same rationale as `retrieve_sources` above.
     let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &req.org_id).await?;
@@ -1701,6 +1939,7 @@ async fn retrieve_freshness(
         .bind(&req.org_id)
         .bind(&viewer)
         .bind(&granted)
+        .bind(&space_ref)
         .fetch_all(&mut *tx)
         .await?;
     tx.commit().await?;

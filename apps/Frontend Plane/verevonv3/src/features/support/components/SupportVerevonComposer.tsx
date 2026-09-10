@@ -10,6 +10,7 @@ import { createDraftReplyProposal, createInternalNoteProposal, createTicketUpdat
 import { useI18n } from '@/shared/i18n'
 import { SupportAssistDisclosure, type SupportAssistRunMetadata } from './SupportAssistDisclosure'
 import { parseInboxTriageProposal } from '@/features/inbox/lib/inbox-ai-triage'
+import { AiModelPicker } from '@/shared/components/AiModelPicker'
 
 type ReadableTranscriptTurn = Pick<ChatThreadTranscriptTurn, 'content' | 'role' | 'status'>
 type NextActionKind = 'reply' | 'note' | 'ticketUpdate'
@@ -287,6 +288,12 @@ export function SupportVerevonComposer(props: {
           </>
         </Show>
       </div>
+
+      <AiModelPicker
+        orgId={props.orgId}
+        respectOrgZdr
+        class="verevon-support-verevon-composer__model-picker"
+      />
 
       <section
         class="verevon-support-verevon-composer__conversation"

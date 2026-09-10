@@ -1,0 +1,80 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>1601</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="GoFixStringsSeq" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'strings.Split' or 'strings.Fields' loop can use a 'Seq' variant</problem_class>
+  <hints />
+  <description>Ranging over SplitSeq is more efficient</description>
+  <highlighted_element>strings.Split</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go</file>
+  <line>1630</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/server/main_test.go" />
+  <problem_class id="GoFixStringsSeq" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'strings.Split' or 'strings.Fields' loop can use a 'Seq' variant</problem_class>
+  <hints />
+  <description>Ranging over SplitSeq is more efficient</description>
+  <highlighted_element>strings.Split</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/gdpr_handlers.go</file>
+  <line>63</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/gdpr_handlers.go" />
+  <problem_class id="GoFixStringsSeq" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'strings.Split' or 'strings.Fields' loop can use a 'Seq' variant</problem_class>
+  <hints />
+  <description>Ranging over SplitSeq is more efficient</description>
+  <highlighted_element>strings.Split</highlighted_element>
+  <language>go</language>
+  <offset>19</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/server.go</file>
+  <line>154</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/server.go" />
+  <problem_class id="GoFixStringsSeq" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'strings.Split' or 'strings.Fields' loop can use a 'Seq' variant</problem_class>
+  <hints />
+  <description>Ranging over SplitSeq is more efficient</description>
+  <highlighted_element>strings.Split</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1126</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoFixStringsSeq" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'strings.Split' or 'strings.Fields' loop can use a 'Seq' variant</problem_class>
+  <hints />
+  <description>Ranging over SplitSeq is more efficient</description>
+  <highlighted_element>strings.Split</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>504</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GoFixStringsSeq" severity="SYNTAX_UPDATE" attribute_key="GO_SYNTAX_UPDATE">'strings.Split' or 'strings.Fields' loop can use a 'Seq' variant</problem_class>
+  <hints />
+  <description>Ranging over SplitSeq is more efficient</description>
+  <highlighted_element>strings.Split</highlighted_element>
+  <language>go</language>
+  <offset>23</offset>
+  <length>13</length>
+</problem>
+</problems>

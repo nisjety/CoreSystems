@@ -33,6 +33,12 @@ type Document struct {
 	// 'private' | 'org' | 'shared'.
 	OwnerID    string `json:"owner_id"`
 	Visibility string `json:"visibility"`
+	// SpaceRef is the Space this document was imported into, when it was
+	// imported under a verified Control Space import decision. Nil means it was
+	// not — org-wide documents are never retroactively assigned to a room.
+	// Data stores the reference opaquely; membership and lifecycle stay with
+	// Application and Control.
+	SpaceRef *string `json:"space_ref,omitempty"`
 }
 
 type CreateDocumentInput struct {
@@ -71,6 +77,12 @@ type CreateDocumentInput struct {
 	// visibility they first landed with — including keeping a document
 	// org-visible here after it was restricted upstream.
 	VisibilityFromSource bool `json:"-"`
+	// SpaceRef is set ONLY by the handler, from the verified Space import
+	// decision's own `space_ref` — hence `json:"-"`. A body-supplied Space is a
+	// claim, not authority, the same way `space_retrieval_bindings` refuses a
+	// client-supplied workspace filter as a mapping. Empty means the create
+	// carried no Space authority and the column stays NULL.
+	SpaceRef string `json:"-"`
 }
 
 // IngestPolicy mirrors `dataplane.documents.v2.IngestPolicy`. When

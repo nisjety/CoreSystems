@@ -1,14 +1,17 @@
-import { Bot, MessageCircle, Sparkles } from '@/shared/icons'
-import { createMemo, For, Show } from 'solid-js'
+import { Bot, MessageCircle, Pin, PinOff, Sparkles } from '@/shared/icons'
+import { createMemo, createSignal, For, Show } from 'solid-js'
 
 import { ChatMarkdown } from '@/features/chat/components/ChatMessages'
 import {
+  AWAITING_APPROVAL_RUN_STATUS,
   FAILED_RUN_STATUSES,
+  LIVE_RUN_STATUSES,
   formatWhen,
   stripMarkdownPreview,
   threadStatus,
 } from '@/features/spaces/lib/space-thread-presentation'
-import { getChatThreadTranscript } from '@/shared/api/chat-client'
+import { SpaceApprovalPanel } from './SpaceApprovalPanel'
+import { getSpaceThreadTranscript, updateSpaceThreadPresentation } from '@/shared/api/spaces-client'
 import type { SpaceAgent, SpaceRosterMember, SpaceThread } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -20,13 +23,15 @@ import { createResource } from '@/shared/lib/create-resource-compat'
  * Nothing here links a room conversation out to `/chat`; the room is the
  * workspace.
  *
- * Turn attribution is deliberately conservative. Transcript reads are
- * owner-bound at the gateway (`get_thread_transcript` only resolves threads in
- * the caller's own durable list), so every `user` turn a member can see is
- * their own — labeling those with the single human roster member's name is
- * exact today. When Control grows shared-thread transcript authority for
- * multi-member rooms, turns need real server-side author attribution before
- * this component may claim anyone else's words.
+ * Turn attribution is server-side. Each turn carries the subject Model Plane
+ * recorded as its author at append time, and this component resolves that id
+ * against Control's roster for a display name. It never infers an author from
+ * who is looking: an unrecorded author renders as unnamed, because the one
+ * thing worse than an unlabelled turn is a turn labelled with the wrong person.
+ *
+ * The transcript itself comes from the Space route, not Chat's — Chat resolves
+ * a thread only inside the caller's own durable list, which is why a
+ * colleague's post used to render as its preview and nothing else.
  */
 
 type TranscriptTurn = {
@@ -36,6 +41,10 @@ type TranscriptTurn = {
    * session-core. Absent on turns older than the attribution field and on
    * un-personified assistant turns. */
   readonly agentName?: string
+  /** Who wrote this turn, as recorded server-side. Absent on turns written
+   * before authorship existed — those stay unnamed rather than borrowing a
+   * name from the reader. */
+  readonly authorSubjectId?: string
 }
 
 const MAX_TURNS_PER_POST = 30
@@ -52,17 +61,56 @@ export function normalizeTranscriptTurns(turns: readonly unknown[] | undefined):
     const agentName = typeof record.agentName === 'string' && record.agentName.trim()
       ? record.agentName.trim()
       : undefined
-    normalized.push({ role, content, ...(agentName ? { agentName } : {}) })
+    const authorSubjectId = typeof record.authorSubjectId === 'string' && record.authorSubjectId.trim()
+      ? record.authorSubjectId.trim()
+      : undefined
+    normalized.push({
+      role,
+      content,
+      ...(agentName ? { agentName } : {}),
+      ...(authorSubjectId ? { authorSubjectId } : {}),
+    })
     if (normalized.length >= MAX_TURNS_PER_POST) break
   }
   return normalized
 }
 
+/**
+ * Resolve one recorded author id to something a person can read.
+ *
+ * Three outcomes, kept apart on purpose: a roster match gives the member's
+ * name; an id with no roster entry gives a truthful "former member" rather
+ * than a blank, since someone did write it; and no id at all gives an unnamed
+ * author. `viewerSubjectId` only ever adds "(you)" to a name the server
+ * already attributed — it never supplies one.
+ */
+export function resolveAuthorName(
+  authorSubjectId: string | undefined,
+  roster: readonly SpaceRosterMember[],
+  viewerSubjectId: string | undefined,
+  tr: (no: string, en: string) => string,
+): string {
+  if (!authorSubjectId) return tr('Ukjent avsender', 'Unknown author')
+  const member = roster.find((entry) => entry.subject_id === authorSubjectId)
+  const isViewer = viewerSubjectId !== undefined && viewerSubjectId === authorSubjectId
+  const name = member?.display_name?.trim()
+  if (!name) {
+    return isViewer
+      ? tr('Du', 'You')
+      : tr('Tidligere medlem', 'Former member')
+  }
+  return isViewer ? `${name} ${tr('(deg)', '(you)')}` : name
+}
+
 export interface SpaceRoomTimelineProps {
+  readonly spaceRef: string
   readonly spaceName: string
   readonly threads: () => readonly SpaceThread[]
   readonly roster: () => readonly SpaceRosterMember[]
   readonly agents: () => readonly SpaceAgent[]
+  /** The reading member's own Control subject, used only to mark their own
+   * turns as theirs. Never used to attribute an unattributed turn. */
+  readonly viewerSubjectId?: () => string | undefined
   /** Focuses the room composer — the intro block's primary action. */
   readonly onStartConversation?: () => void
   /** When provided, the intro block offers the in-room create-agent flow. */
@@ -70,6 +118,17 @@ export interface SpaceRoomTimelineProps {
   /** When provided, every post offers "Reply" — the composer then continues
    * that thread through the append authority instead of starting a new one. */
   readonly onReply?: (thread: SpaceThread) => void
+  /** Called after an approval settles, so the room re-reads its projection and
+   * the post's status stops saying it is waiting. */
+  readonly onApprovalSettled?: () => void
+  /**
+   * Posts new since the reader arrived (item 4b), derived by the page from its
+   * arrival-time read marker. Absent means "unknown", and nothing is badged.
+   */
+  readonly unreadThreadIds?: () => ReadonlySet<string>
+  /** Called after a pin or retitle lands, so the room re-reads its projection
+   * and the new order and name come from the server rather than this browser. */
+  readonly onPresentationChanged?: () => void
 }
 
 export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
@@ -80,11 +139,6 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
       (a.updated_at ?? a.latest_run_updated_at ?? '').localeCompare(b.updated_at ?? b.latest_run_updated_at ?? ''),
     ),
   )
-
-  const humanName = createMemo(() => {
-    const humans = props.roster().filter((member) => member.subject_type === 'user')
-    return humans.length === 1 ? humans[0]?.display_name?.trim() || i18n.tr('Du', 'You') : i18n.tr('Du', 'You')
-  })
 
   const agentName = createMemo(() => {
     const active = props.agents().filter((agent) => agent.status === 'active' && agent.name?.trim())
@@ -106,10 +160,15 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
         <For each={orderedThreads()}>
           {(thread) => (
             <SpaceRoomPost
+              spaceRef={props.spaceRef}
               thread={thread}
-              humanName={humanName()}
+              roster={props.roster}
+              viewerSubjectId={props.viewerSubjectId}
               agentName={agentName()}
+              unread={() => props.unreadThreadIds?.().has(thread.thread_id) === true}
+              onPresentationChanged={props.onPresentationChanged}
               onReply={props.onReply}
+              onApprovalSettled={props.onApprovalSettled}
             />
           )}
         </For>
@@ -119,10 +178,16 @@ export function SpaceRoomTimeline(props: SpaceRoomTimelineProps) {
 }
 
 function SpaceRoomPost(props: {
+  readonly spaceRef: string
   readonly thread: SpaceThread
-  readonly humanName: string
+  readonly roster: () => readonly SpaceRosterMember[]
+  readonly viewerSubjectId?: () => string | undefined
   readonly agentName: string
   readonly onReply?: (thread: SpaceThread) => void
+  readonly onApprovalSettled?: () => void
+  /** New since the reader arrived — see `SpaceRoomTimelineProps.unreadThreadIds`. */
+  readonly unread?: () => boolean
+  readonly onPresentationChanged?: () => void
 }) {
   const i18n = useI18n()
   const [transcript] = createResource(
@@ -130,19 +195,93 @@ function SpaceRoomPost(props: {
     // list bumps updated_at, which re-keys this source and refetches the
     // transcript for exactly the post that changed. NUL-joined because thread
     // ids may themselves contain any printable character, including spaces.
-    () => `${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}`,
+    () => `${props.spaceRef}\u0000${props.thread.thread_id}\u0000${props.thread.updated_at ?? props.thread.latest_run_updated_at ?? ''}`,
     async (key) => {
-      const threadId = key.split('\u0000')[0] ?? ''
-      const snapshot = await getChatThreadTranscript(threadId).catch(() => null)
-      return normalizeTranscriptTurns(snapshot?.turns)
+      const [spaceRef = '', threadId = ''] = key.split('\u0000')
+      const snapshot = await getSpaceThreadTranscript(spaceRef, threadId).catch(() => null)
+      return normalizeTranscriptTurns(snapshot?.turns as readonly unknown[] | undefined)
     },
   )
   const turns = () => (transcript.error ? [] : transcript() ?? [])
+  const authorOf = (turn: TranscriptTurn) =>
+    resolveAuthorName(turn.authorSubjectId, props.roster(), props.viewerSubjectId?.(), i18n.tr)
+  // Before any turn has loaded, the post is still attributable: the thread's
+  // own owner started it.
+  const starterName = () =>
+    resolveAuthorName(props.thread.owner_subject_id, props.roster(), props.viewerSubjectId?.(), i18n.tr)
   const isFailed = () => FAILED_RUN_STATUSES.has(props.thread.latest_run_status ?? '')
+  // Someone's agent is producing output in this post right now, per the
+  // server's projection. This is what every OTHER member sees while a turn
+  // streams — the sender has the live exchange in their own composer, but
+  // until this row existed the rest of the room saw nothing until the poll
+  // delivered a finished reply, and the room went dark exactly when it was
+  // busiest. Paused-for-approval is deliberately not "working": nobody is
+  // producing anything, a person is being waited for.
+  const isWorking = () => LIVE_RUN_STATUSES.has(props.thread.latest_run_status ?? '')
+  // Only a run that is actually paused gets a decision surface, and only when
+  // the projection named the run — an approval card with no run to decide on
+  // would be a control that cannot do anything.
+  const awaitingApproval = () =>
+    props.thread.latest_run_status === AWAITING_APPROVAL_RUN_STATUS
+    && Boolean(props.thread.latest_run_id?.trim())
   const when = () => props.thread.updated_at ?? props.thread.latest_run_updated_at
+  // Pinning is owner-bound in Session Core, so the control is offered only to
+  // the member who started the post. Anyone else sees the pin, not the button:
+  // a control that would be refused every time is a control that lies.
+  const isAuthor = () => {
+    const viewer = props.viewerSubjectId?.()?.trim()
+    return Boolean(viewer) && props.thread.owner_subject_id?.trim() === viewer
+  }
+  const [pinBusy, setPinBusy] = createSignal(false)
+  const [pinError, setPinError] = createSignal<string | undefined>(undefined)
+  async function togglePin(): Promise<void> {
+    if (pinBusy()) return
+    setPinBusy(true)
+    setPinError(undefined)
+    try {
+      await updateSpaceThreadPresentation(props.spaceRef, props.thread.thread_id, {
+        pinned: !props.thread.pinned,
+      })
+      // The server owns the order and the flag; re-read rather than flipping a
+      // local copy that the next poll would then have to agree with.
+      props.onPresentationChanged?.()
+    } catch {
+      setPinError(
+        i18n.tr(
+          'Innlegget kunne ikke festes. Ingenting ble endret.',
+          'The post could not be pinned. Nothing was changed.',
+        ),
+      )
+    } finally {
+      setPinBusy(false)
+    }
+  }
 
   return (
-    <li class="verevon-room-post" data-failed={isFailed() || undefined}>
+    <li
+      class="verevon-room-post"
+      data-failed={isFailed() || undefined}
+      data-pinned={props.thread.pinned === true ? 'true' : undefined}
+      data-unread={props.unread?.() ? 'true' : undefined}
+    >
+      {/* Pinned and new are facts about the post, stated before its content so
+          a reader scanning the room sees them first — the way Slack's pin and
+          "new" markers sit above a message rather than in its footer. */}
+      <Show when={props.thread.pinned === true || props.unread?.()}>
+        <div class="verevon-room-post__flags">
+          <Show when={props.thread.pinned === true}>
+            <span class="verevon-room-post__flag verevon-room-post__flag--pinned">
+              <Pin size={12} aria-hidden="true" />
+              {i18n.tr('Festet', 'Pinned')}
+            </span>
+          </Show>
+          <Show when={props.unread?.()}>
+            <span class="verevon-room-post__flag verevon-room-post__flag--new">
+              {i18n.tr('Ny', 'New')}
+            </span>
+          </Show>
+        </div>
+      </Show>
       <Show
         when={turns().length > 0}
         fallback={
@@ -151,7 +290,7 @@ function SpaceRoomPost(props: {
               <MessageCircle size={14} />
             </span>
             <div class="verevon-room-turn__content">
-              <PostTurnHeader author={props.humanName} />
+              <PostTurnHeader author={starterName()} />
               <p class="verevon-room-turn__plain">
                 {(props.thread.preview && stripMarkdownPreview(props.thread.preview))
                   || props.thread.title?.trim()
@@ -173,7 +312,7 @@ function SpaceRoomPost(props: {
                 ]}
                 aria-hidden="true"
               >
-                <Show when={turn.role === 'assistant'} fallback={initials(props.humanName)}>
+                <Show when={turn.role === 'assistant'} fallback={initials(authorOf(turn))}>
                   <Sparkles size={14} />
                 </Show>
               </span>
@@ -181,8 +320,10 @@ function SpaceRoomPost(props: {
                 <PostTurnHeader
                   // The turn's own recorded persona wins; the room-level
                   // heuristic (single active agent, else 'Verevon') covers
-                  // turns persisted before attribution existed.
-                  author={turn.role === 'assistant' ? turn.agentName ?? props.agentName : props.humanName}
+                  // turns persisted before attribution existed. A human turn
+                  // is named by the subject the server recorded, never by who
+                  // happens to be reading.
+                  author={turn.role === 'assistant' ? turn.agentName ?? props.agentName : authorOf(turn)}
                   isAgent={turn.role === 'assistant'}
                 />
                 <Show
@@ -199,12 +340,44 @@ function SpaceRoomPost(props: {
         </For>
       </Show>
 
+      <Show when={awaitingApproval() ? props.thread.latest_run_id : undefined}>
+        {(runId) => (
+          <SpaceApprovalPanel runId={runId()} onSettled={props.onApprovalSettled} />
+        )}
+      </Show>
+
+      {/* The live row. `aria-live="polite"` so a reader using assistive tech
+          hears that work started without the row shouting over the transcript;
+          it disappears on its own when the projection reports a terminal
+          status, which is the "mutate in place" rule from the activity grammar
+          rather than a new line per transition. */}
+      <Show when={isWorking()}>
+        <div class="verevon-room-turn verevon-room-turn--working" role="status" aria-live="polite">
+          <span class="verevon-room-turn__avatar verevon-room-turn__avatar--agent" aria-hidden="true">
+            <Sparkles size={14} />
+          </span>
+          <div class="verevon-room-turn__content">
+            <PostTurnHeader author={props.agentName} isAgent />
+            <p class="verevon-room-turn__working">
+              <span class="verevon-room-turn__working-dots" aria-hidden="true" />
+              {props.thread.latest_run_status === 'queued'
+                ? i18n.tr('venter på å starte', 'waiting to start')
+                : i18n.tr('jobber …', 'is working…')}
+            </p>
+          </div>
+        </div>
+      </Show>
+
       <div class="verevon-room-post__meta">
         <span
           class={[
             {
               'verevon-space-status': true,
               'verevon-space-status--failed': isFailed(),
+              // Defined in the sheet since the cockpit shipped and never
+              // applied by anything — a working post read in the same grey as
+              // a finished one.
+              'verevon-space-status--active': isWorking(),
             },
           ]}
         >
@@ -219,6 +392,23 @@ function SpaceRoomPost(props: {
               {i18n.tr('Svar', 'Reply')}
             </button>
           )}
+        </Show>
+        <Show when={isAuthor()}>
+          <button
+            type="button"
+            class="verevon-room-post__pin"
+            onClick={() => { void togglePin() }}
+            disabled={pinBusy()}
+            aria-pressed={props.thread.pinned === true ? 'true' : 'false'}
+          >
+            <Show when={props.thread.pinned === true} fallback={<Pin size={12} aria-hidden="true" />}>
+              <PinOff size={12} aria-hidden="true" />
+            </Show>
+            {props.thread.pinned === true ? i18n.tr('Løsne', 'Unpin') : i18n.tr('Fest', 'Pin')}
+          </button>
+        </Show>
+        <Show when={pinError()}>
+          {(message) => <span class="verevon-room-post__pin-error" role="alert">{message()}</span>}
         </Show>
       </div>
     </li>

@@ -23,13 +23,33 @@ const startedPacket = z.object({
   target: z.number().int().nonnegative().optional(),
 })
 
+const nullishTitleSource = z
+  .enum(['html', 'model', 'host'])
+  .nullish()
+  .transform((value) => value ?? undefined)
+
+const nullishCount = z
+  .number()
+  .int()
+  .nonnegative()
+  .nullish()
+  .transform((value) => value ?? undefined)
+
 const snippetPacket = z.object({
   id: z.string().trim().min(1),
   kind: z.enum(['text', 'image', 'file', 'link']),
   title: z.string().trim().min(1),
-  // normalize.rs's to_snippet falls back to `None` (-> null) whenever a page
-  // has neither a `text` nor `excerpt` field, common for link/file snippets.
+  // Provenance from quarry's `page_extracted` (`title_source`); the gateway
+  // derives it for a bare `page_fetched`. Nullable like every optional the
+  // gateway serializes through Option<&str>.
+  titleSource: nullishTitleSource,
+  // normalize.rs's to_snippet emits `null` whenever the page had no readable
+  // text yet (pre-transform `page_fetched`) or for link/file snippets.
   excerpt: nullishString,
+  summary: nullishString,
+  wordCount: nullishCount,
+  lang: nullishString,
+  driver: nullishString,
   url: z.string().trim().min(1),
   contentType: z.string().optional(),
   source: z.enum(['seed', 'live']).optional(),

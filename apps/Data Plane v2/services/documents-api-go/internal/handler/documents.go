@@ -272,6 +272,15 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "Space import authority does not match document source type")
 		return
 	}
+	// Record the Space the authority was actually issued for. Until this line
+	// existed, the decision was verified and then discarded, so the row could
+	// not say which room it belonged to and no Space-filtered listing was
+	// possible. The value comes from the signed claims, never from the body —
+	// `CreateDocumentInput.SpaceRef` is `json:"-"` for that reason.
+	input.SpaceRef = ""
+	if spaceImportAuthority != nil {
+		input.SpaceRef = strings.TrimSpace(spaceImportAuthority.SpaceRef)
+	}
 	if pinDocumentOwner(&input, principalID(r)) {
 		writeError(w, http.StatusForbidden, "owner_id must match the verified principal")
 		return

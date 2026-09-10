@@ -384,7 +384,10 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
     })
 }
 
-async fn update_durable_presentation(
+/// `pub(crate)`: the Space room's own presentation route reuses this rather
+/// than duplicating the Model Gateway call. Session Core keeps it owner-bound,
+/// so a room member can only retitle or pin a post they started.
+pub(crate) async fn update_durable_presentation(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
@@ -511,6 +514,14 @@ struct CanonicalMessagesResponse {
 
 #[derive(Debug, Deserialize)]
 struct CanonicalMessage {
+    /// Durable message id from session-core, relayed by Model Gateway.
+    ///
+    /// Empty for rows written before the conversation read returned ids; the
+    /// positional fallback below covers those. Message pinning sends this id
+    /// back, so a synthesised index would name a different turn as soon as the
+    /// thread grew.
+    #[serde(default)]
+    message_id: String,
     #[serde(default)]
     role: String,
     #[serde(default)]
@@ -592,8 +603,18 @@ fn canonical_messages_to_transcript(
         .into_iter()
         .enumerate()
         .map(|(index, message)| {
+            // The durable id when there is one, a positional id otherwise.
+            // The fallback is deliberately still positional rather than random:
+            // it keeps this response stable across reads for the same thread,
+            // and an id a client cannot resolve upstream is better than one
+            // that changes on every fetch.
+            let id = if message.message_id.trim().is_empty() {
+                format!("canonical-{}", index + 1)
+            } else {
+                message.message_id.clone()
+            };
             let mut turn = json!({
-                "id": format!("canonical-{}", index + 1),
+                "id": id,
                 "role": message.role,
                 "content": message.content,
             });
@@ -604,10 +625,7 @@ fn canonical_messages_to_transcript(
             // the conditional shape used for `agentName` above: the SPA treats
             // an absent key as "nothing grounded" and a present one as real
             // evidence, so writing `null` here would be a different claim.
-            if let Some(grounding) = message
-                .grounding
-                .filter(|value| !value.is_null())
-            {
+            if let Some(grounding) = message.grounding.filter(|value| !value.is_null()) {
                 turn["grounding"] = grounding;
             }
             if let Some(citations) = message
@@ -679,6 +697,11 @@ fn strip_support_thread_capabilities(object: &mut serde_json::Map<String, Value>
     object.insert("generate_image".to_owned(), Value::Bool(false));
     object.insert("plan_mode".to_owned(), Value::Bool(false));
     object.insert("deep_research".to_owned(), Value::Bool(false));
+    // Pinning changes the prompt sent upstream, and a support thread's
+    // history is customer-authored transcript text this surface is only ever
+    // allowed to READ. Same posture as every capability above: stripped, not
+    // trusted, so a support turn cannot re-weight that content upstream.
+    object.insert("pinned_message_ids".to_owned(), Value::Array(vec![]));
     object.insert(
         "session_key".to_owned(),
         Value::String(thread_id.to_owned()),
@@ -877,6 +900,7 @@ mod tests {
             "generate_image": true,
             "plan_mode": true,
             "deep_research": true,
+            "pinned_message_ids": ["m1", "m2"],
             "session_key": "spoofed-session"
         });
         strip_support_thread_capabilities(body.as_object_mut().expect("object"), "support_thread");
@@ -887,6 +911,7 @@ mod tests {
         assert_eq!(body["generate_image"], false);
         assert_eq!(body["plan_mode"], false);
         assert_eq!(body["deep_research"], false);
+        assert_eq!(body["pinned_message_ids"], serde_json::json!([]));
         assert_eq!(body["session_key"], "support_thread");
     }
 
@@ -910,12 +935,17 @@ mod tests {
         assert!(enforce_support_thread_policy(&mut invalid_initial).is_err());
     }
 
+    /// Message pinning sends an id back, so the id a client receives has to be
+    /// the durable one whenever session-core has it. A positional index names a
+    /// different turn as soon as the thread grows, which would silently pin the
+    /// wrong message.
     #[test]
-    fn canonical_messages_are_adapted_without_task_steps_or_bff_metadata() {
+    fn durable_message_ids_are_relayed_and_fall_back_positionally() {
         let transcript = canonical_messages_to_transcript(
             "thread-1",
             vec![
                 CanonicalMessage {
+                    message_id: "01JABCDEF".into(),
                     role: "user".into(),
                     content: "Question".into(),
                     agent_name: String::new(),
@@ -923,6 +953,37 @@ mod tests {
                     citations: None,
                 },
                 CanonicalMessage {
+                    // A row written before the conversation read returned ids.
+                    message_id: "   ".into(),
+                    role: "assistant".into(),
+                    content: "Answer".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                },
+            ],
+        )
+        .expect("two messages make a transcript");
+
+        assert_eq!(transcript.turns[0]["id"], "01JABCDEF");
+        assert_eq!(transcript.turns[1]["id"], "canonical-2");
+    }
+
+    #[test]
+    fn canonical_messages_are_adapted_without_task_steps_or_bff_metadata() {
+        let transcript = canonical_messages_to_transcript(
+            "thread-1",
+            vec![
+                CanonicalMessage {
+                    message_id: String::new(),
+                    role: "user".into(),
+                    content: "Question".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                },
+                CanonicalMessage {
+                    message_id: String::new(),
                     role: "assistant".into(),
                     content: "Answer".into(),
                     agent_name: "Statusagent".into(),
@@ -954,6 +1015,7 @@ mod tests {
             "thread-1",
             vec![
                 CanonicalMessage {
+                    message_id: String::new(),
                     role: "user".into(),
                     content: "Which pram is best?".into(),
                     agent_name: String::new(),
@@ -961,6 +1023,7 @@ mod tests {
                     citations: None,
                 },
                 CanonicalMessage {
+                    message_id: String::new(),
                     role: "assistant".into(),
                     content: "The Nuna TRIV LX.".into(),
                     agent_name: String::new(),
@@ -972,6 +1035,7 @@ mod tests {
                     citations: None,
                 },
                 CanonicalMessage {
+                    message_id: String::new(),
                     role: "assistant".into(),
                     content: "Ungrounded reply".into(),
                     agent_name: String::new(),
@@ -999,6 +1063,7 @@ mod tests {
             "thread-1",
             vec![
                 CanonicalMessage {
+                    message_id: String::new(),
                     role: "assistant".into(),
                     content: "Oslo.".into(),
                     agent_name: String::new(),
@@ -1008,6 +1073,7 @@ mod tests {
                     ])),
                 },
                 CanonicalMessage {
+                    message_id: String::new(),
                     role: "assistant".into(),
                     content: "No sources used.".into(),
                     agent_name: String::new(),
@@ -1019,7 +1085,10 @@ mod tests {
         )
         .expect("canonical conversation should render");
 
-        assert_eq!(transcript.turns[0]["citations"][0]["url"], "https://example.test/oslo");
+        assert_eq!(
+            transcript.turns[0]["citations"][0]["url"],
+            "https://example.test/oslo"
+        );
         assert!(transcript.turns[0].get("grounding").is_none());
         assert!(transcript.turns[1].get("citations").is_none());
     }

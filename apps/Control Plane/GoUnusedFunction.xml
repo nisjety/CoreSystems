@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go</file>
+  <line>168</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go" />
+  <problem_class id="GoUnusedFunction" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused function</problem_class>
+  <description>Unused function &lt;code&gt;stripePlanAmountNOK&lt;/code&gt;</description>
+  <highlighted_element>stripePlanAmountNOK</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>19</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go</file>
+  <line>183</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/defaults.go" />
+  <problem_class id="GoUnusedFunction" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused function</problem_class>
+  <description>Unused function &lt;code&gt;stripePlanDisplayName&lt;/code&gt;</description>
+  <highlighted_element>stripePlanDisplayName</highlighted_element>
+  <language>go</language>
+  <offset>5</offset>
+  <length>21</length>
+</problem>
+</problems>

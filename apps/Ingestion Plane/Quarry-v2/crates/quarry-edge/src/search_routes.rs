@@ -353,6 +353,10 @@ pub async fn search(
         org_id: Some(claims.org_id.clone()),
         include_domains: req.include_domains.clone(),
         exclude_domains: req.exclude_domains.clone(),
+        // ZDR: SmartSearchRouter must not send this query to an external
+        // paid SERP SaaS provider (Brave/Serper) when the caller flagged
+        // the request zero-retention. See `SearchOptions::zdr`.
+        zdr,
     };
 
     // ── Cache lookup (org-scoped, intent-driven TTL) ─────────────────────────

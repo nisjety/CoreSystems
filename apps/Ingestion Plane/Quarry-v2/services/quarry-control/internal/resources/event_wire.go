@@ -66,7 +66,7 @@ func eventStageStatus(t quarrycontracts.EventType) (stage string, status string)
 		return "starting", "ok"
 	case quarrycontracts.EvtLeaseReleased:
 		return "running", "ok"
-	case quarrycontracts.EvtSnapshotCreated, quarrycontracts.EvtBrandingExtracted:
+	case quarrycontracts.EvtSnapshotCreated, quarrycontracts.EvtBrandingExtracted, quarrycontracts.EvtPageExtracted:
 		return "running", "ok"
 	case quarrycontracts.EvtChangeDetected, quarrycontracts.EvtChangeUnchanged, quarrycontracts.EvtScheduleFired:
 		return "running", "ok"

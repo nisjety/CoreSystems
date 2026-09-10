@@ -553,6 +553,12 @@ textarea:focus-visible {
   .core-product-shell {
     height: calc(100dvh / 0.9);
     zoom: 0.9;
+    /* `zoom` shrinks CSS pixels, so a 44px target would land at 39.6px on
+       screen. Scale the token by the same factor so the hit area is a real
+       44px. Only the zoomed (>=768px) case needs this; below it there is no
+       zoom and the base 44px is already correct -- which is the case that
+       matters most, since that is where touch happens. */
+    --verevon-touch-target: calc(44px / 0.9);
   }
 }
 
@@ -2295,6 +2301,32 @@ textarea:focus-visible {
   box-shadow: inset 2px 0 0 rgb(28 28 30 / 42%);
 }
 
+/* Found while verifying item 4b (2026-09-08): in dark, every non-active
+   sidebar panel link painted its text in `--verevon-dark-border`, which
+   resolves to the SAME value as `--verevon-dark-sidebar` (#34363d on #34363d,
+   1.0:1). Only the active row was readable, via the override below. "Nytt
+   rom", the other rooms and every thread row were invisible. Pre-existing:
+   the org room has had no threads, so the pinned/unread rows 4b adds are the
+   first sidebar rows anyone would look for in dark. Placed BEFORE the active
+   override so the active row keeps winning at equal specificity. */
+.dark .core-sidebar-panel-link {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .core-sidebar-panel-link:hover {
+  background: rgb(255 255 255 / 8%);
+  color: var(--panel);
+}
+
+.dark .core-sidebar-panel-link__icon {
+  color: color-mix(in srgb, var(--verevon-sidebar-text) 72%, transparent);
+}
+
+.dark .core-sidebar-panel-link:hover .core-sidebar-panel-link__icon,
+.dark .core-sidebar-panel-link__icon--active {
+  color: var(--panel);
+}
+
 .dark .verevon-sidebar-panel-active {
   background: rgb(255 255 255 / 8%);
   color: var(--panel);
@@ -2308,6 +2340,13 @@ textarea:focus-visible {
   padding: 24px 16px;
   color: var(--subtle);
   text-align: center;
+}
+
+/* Same surface, same finding: the dashed empty-state read 1.88:1 in dark. */
+.dark .core-sidebar-empty {
+  border-color: rgb(255 255 255 / 20%);
+  background: rgb(255 255 255 / 6%);
+  color: var(--verevon-sidebar-text);
 }
 
 .core-chat-sidebar {
@@ -7490,17 +7529,18 @@ textarea:focus-visible {
   bottom: calc(100% + 8px);
   left: 0;
   z-index: 90;
-  width: 256px;
+  width: min(340px, calc(100vw - 24px));
   border-radius: 16px;
-  padding: 4px;
+  padding: 6px;
 }
 
 .dashboard-composer-model-menu button {
-  display: flex;
+  display: grid;
   width: 100%;
+  min-height: 38px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  column-gap: 10px;
   border: 0;
   border-radius: 12px;
   background: transparent;
@@ -7525,13 +7565,25 @@ textarea:focus-visible {
 }
 
 .dashboard-composer-model-menu button > span {
-  display: flex;
   min-width: 0;
   align-items: center;
-  gap: 12px;
 }
 
-.dashboard-composer-model-menu button > span > span:first-child {
+.dashboard-composer-model-menu button > span:first-child {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  column-gap: 10px;
+  overflow: hidden;
+}
+
+.dashboard-composer-model-menu button > span:first-child > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-composer-model-menu button > span:first-child > span:first-child {
   display: grid;
   width: 24px;
   height: 24px;
@@ -7555,14 +7607,26 @@ textarea:focus-visible {
   color: var(--panel) !important;
 }
 
-.dark .dashboard-composer-model-menu button > span > span:first-child {
+.dark .dashboard-composer-model-menu button > span:first-child > span:first-child {
   background: rgba(255, 255, 255, 0.1);
   color: var(--verevon-border-warm);
 }
 
 .dashboard-composer-model-menu {
-  max-height: 360px;
+  max-height: min(480px, calc(100vh - 96px));
+  max-height: min(480px, calc(100dvh - 96px));
+  overflow: hidden;
+}
+
+.dashboard-composer-model-catalog {
+  max-height: min(300px, calc(100vh - 280px));
+  max-height: min(300px, calc(100dvh - 280px));
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 6px;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
 .dashboard-composer-model-group {
@@ -7588,6 +7652,47 @@ textarea:focus-visible {
   flex-shrink: 0;
   align-items: center;
   gap: 8px;
+}
+
+/* One model selector contract across Chat, Spaces, Ticketing, and Inbox. The
+   shared picker deliberately reuses the composer's row geometry so icons and
+   labels stay aligned on every surface; only its popover direction changes. */
+.verevon-ai-model-picker {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.verevon-ai-model-picker__trigger {
+  width: auto;
+  max-width: 100%;
+  height: 34px;
+}
+
+.verevon-ai-model-picker__menu {
+  top: calc(100% + 7px);
+  bottom: auto;
+  width: min(340px, calc(100vw - 32px));
+}
+
+.verevon-ai-model-picker__menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.verevon-support-verevon-composer__model-picker,
+.verevon-inbox-verevon-panel__model-picker {
+  justify-self: start;
+  margin-bottom: 2px;
+}
+
+.verevon-space-room-composer__model-picker {
+  align-self: flex-start;
+}
+
+.verevon-space-room-composer__model-picker .verevon-ai-model-picker__menu {
+  top: auto;
+  bottom: calc(100% + 7px);
 }
 
 .dashboard-composer-model-badge {
@@ -17698,6 +17803,182 @@ textarea:focus-visible {
   line-height: 1.2;
 }
 
+/* Subscription connections are intentionally distinct from source integration
+   rows: they grant Model Plane inference access and never sync source data. */
+.verevon-chatgpt-subscription {
+  display: grid;
+  gap: 16px;
+  margin: 24px 0 28px;
+  padding: 20px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgb(16 163 127 / 7%), rgb(255 255 255 / 44%));
+}
+
+.dark .verevon-chatgpt-subscription {
+  border-color: rgb(255 255 255 / 12%);
+  background: linear-gradient(135deg, rgb(16 163 127 / 13%), rgb(255 255 255 / 4%));
+}
+
+.verevon-chatgpt-subscription__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.verevon-chatgpt-subscription__header > div {
+  min-width: 0;
+}
+
+.verevon-chatgpt-subscription__product {
+  display: block;
+  color: #087b62;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.15em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.verevon-chatgpt-subscription h3 {
+  margin: 5px 0 0;
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 720;
+  line-height: 24px;
+}
+
+.dark .verevon-chatgpt-subscription h3 {
+  color: var(--panel);
+}
+
+.verevon-chatgpt-subscription__header p,
+.verevon-chatgpt-subscription__device p,
+.verevon-chatgpt-subscription__privacy,
+.verevon-chatgpt-subscription__notice {
+  margin: 6px 0 0;
+  color: var(--subtle);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.dark .verevon-chatgpt-subscription__header p,
+.dark .verevon-chatgpt-subscription__device p,
+.dark .verevon-chatgpt-subscription__privacy,
+.dark .verevon-chatgpt-subscription__notice {
+  color: var(--sidebar-muted);
+}
+
+.verevon-chatgpt-subscription__status {
+  flex: none;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.verevon-chatgpt-subscription__status--connected {
+  border-color: rgb(16 163 127 / 35%);
+  color: #087b62;
+  background: rgb(16 163 127 / 8%);
+}
+
+.verevon-chatgpt-subscription__status--pending {
+  border-color: rgb(183 121 31 / 36%);
+  color: #916011;
+  background: rgb(183 121 31 / 8%);
+}
+
+.verevon-chatgpt-subscription__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.verevon-chatgpt-subscription__device {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 16px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid rgb(16 163 127 / 20%);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 48%);
+}
+
+.dark .verevon-chatgpt-subscription__device {
+  border-color: rgb(16 163 127 / 30%);
+  background: rgb(0 0 0 / 12%);
+}
+
+.verevon-chatgpt-subscription__device strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.dark .verevon-chatgpt-subscription__device strong {
+  color: var(--panel);
+}
+
+.verevon-chatgpt-subscription__device code {
+  justify-self: end;
+  padding: 9px 11px;
+  border: 1px dashed rgb(16 163 127 / 42%);
+  border-radius: 8px;
+  color: #087b62;
+  font-size: 15px;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+
+.verevon-chatgpt-subscription__device .verevon-chatgpt-subscription__actions {
+  grid-column: 1 / -1;
+}
+
+.verevon-chatgpt-subscription__device a {
+  color: #087b62;
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.verevon-chatgpt-subscription__privacy {
+  margin: 0;
+  font-size: 12px;
+}
+
+.verevon-chatgpt-subscription__notice {
+  margin: 0;
+}
+
+.verevon-chatgpt-subscription--onboarding {
+  margin: 0;
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.verevon-chatgpt-subscription--onboarding h3 {
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.verevon-chatgpt-subscription--onboarding .verevon-chatgpt-subscription__header p,
+.verevon-chatgpt-subscription--onboarding .verevon-chatgpt-subscription__device p,
+.verevon-chatgpt-subscription--onboarding .verevon-chatgpt-subscription__privacy,
+.verevon-chatgpt-subscription--onboarding .verevon-chatgpt-subscription__notice {
+  font-size: 11px;
+  line-height: 17px;
+}
+
 .verevon-settings-social-layer {
   display: grid;
   gap: 16px;
@@ -23196,13 +23477,29 @@ body.verevon-chat-canvas-resizing * {
   font-size: 10px;
 }
 
+/* The contextual canvas carries its width as an INLINE style: a persisted
+   user resize, clamped by ChatWorkspaceCanvas so the conversation keeps
+   MIN_CONVERSATION_WIDTH. This token is the default for the rails that have no
+   stored width. Audit item 24 measured the canvas at 31-40% of the mid band
+   and read it as a miss against UX spec section 10's 48-58%; it is the
+   conversation floor instead, and the specification was amended to match --
+   the two cannot both hold below ~1000px. Do not "fix" this with a
+   percentage: the inline style wins for the canvas, so a percentage here only
+   moves the run-panel rail and makes the two hosts disagree. */
 @media (max-width: 980px) {
   .verevon-chat-page {
     --verevon-workspace-rail: clamp(290px, 38vw, 360px);
   }
 }
 
-@media (max-width: 720px) {
+/* Mobile sheet. 760px, not 720px: UX spec section 10 says the canvas becomes a
+   full-screen sheet below 760px and that chat and preview are never squeezed
+   side by side. At 720px this band did exactly that -- measured 2026-09-04 at
+   745px, a 372px conversation next to a 340px canvas (audit item 24).
+   `.verevon-chat-run-panel` hosts Work during a live run, so it has to become a
+   sheet at the same width; its rule used to sit in the 720px header-chrome
+   block, which flipped the two Work hosts at different widths. */
+@media (max-width: 760px) {
   .verevon-chat-workspace-canvas {
     position: absolute;
     inset: 0;
@@ -23218,6 +23515,15 @@ body.verevon-chat-canvas-resizing * {
 
   .verevon-chat-workspace-canvas__head {
     padding-top: max(14px, env(safe-area-inset-top));
+  }
+
+  .verevon-chat-page--canvas .verevon-chat-run-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    width: 100%;
+    flex-basis: auto;
+    border-left: 0;
   }
 }
 
@@ -25362,6 +25668,23 @@ body.verevon-chat-canvas-resizing * {
   background: var(--verevon-surface-soft);
 }
 
+/* The pinned marker sits in the message action row, but reads as a state
+   rather than a control: no hover affordance, no pointer. A pin steers every
+   later turn in the thread, so it has to be visible while reading. */
+.verevon-chat-message-pinned {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--verevon-chat-accent-strong, #2b5cd9);
+  background-color: var(--verevon-chat-accent-soft, rgba(43, 92, 217, 0.1));
+  white-space: nowrap;
+}
+
 .verevon-chat-message-actions {
   display: flex;
   align-items: center;
@@ -25381,15 +25704,28 @@ body.verevon-chat-canvas-resizing * {
   opacity: 1;
 }
 
+/* 32px of visible button inside a >=44px target. `background-clip:
+   content-box` confines the hover fill to the content box, so the padding
+   that carries the extra target area stays invisible. Sized from a token
+   rather than a literal because the desktop shell is zoomed -- see
+   `.core-product-shell`. */
 .verevon-chat-action-button,
 .verevon-chat-menu > button {
+  --verevon-action-visual: 32px;
   display: grid;
-  width: 32px;
-  height: 32px;
+  box-sizing: border-box;
+  width: var(--verevon-touch-target, 44px);
+  height: var(--verevon-touch-target, 44px);
+  padding: calc((var(--verevon-touch-target, 44px) - var(--verevon-action-visual)) / 2);
   place-items: center;
   border: 0;
   border-radius: 8px;
-  background: transparent;
+  /* `background-color`, not the `background` shorthand: the shorthand resets
+     `background-clip` to border-box, which would paint the hover fill across
+     the whole 44px target and make the button look oversized. Same reason the
+     hover rule below sets `background-color`. */
+  background-color: transparent;
+  background-clip: content-box;
   color: var(--verevon-text-subtle);
   cursor: pointer;
   transition:
@@ -25400,7 +25736,8 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-action-button:hover,
 .verevon-chat-action-button--active,
 .verevon-chat-menu > button:hover {
-  background: var(--verevon-surface-soft);
+  /* Not the shorthand — it would reset the content-box clip set above. */
+  background-color: var(--verevon-surface-soft);
   color: var(--verevon-j-text);
 }
 
@@ -25744,6 +26081,26 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-chat-low-confidence-notice svg {
   flex-shrink: 0;
+}
+
+/* The same score at or above the threshold. Quiet on purpose: a confident
+   answer is the normal case, so this reports the number without claiming any
+   of the caveat's urgency — no warning tint, no icon, muted ink. It exists
+   because a score that only ever appeared when low read as a missing signal
+   rather than a good one. */
+.verevon-chat-confidence-note {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  margin-top: 8px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--verevon-text-muted) 10%, transparent);
+  padding: 5px 12px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Memory-recall indicator: memory was genuinely used on this turn. Neutral
@@ -29335,7 +29692,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-connector-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -29416,6 +29773,246 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-selectable-row--compact strong {
   font-size: 12.5px;
+}
+
+/* Connect step — integration-core's truth about connected accounts. Sits
+   above the connector catalogue so the state of a connection the user just
+   made (provider, account, grants, per-lane sync, next step) is the first
+   thing they read when they come back from the provider consent screen. */
+.onboarding-connected {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--onboarding-accent, var(--ink)) 32%, var(--verevon-border));
+  border-radius: 8px;
+  box-shadow: 0 14px 30px rgb(31 27 23 / 7%);
+}
+
+.onboarding-connected__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.onboarding-connected__eyebrow {
+  margin: 0;
+  color: var(--onboarding-accent, var(--ink));
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.onboarding-connected__refresh {
+  padding: 2px 0;
+  color: var(--verevon-text-muted);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.onboarding-connected__refresh:hover:not(:disabled) {
+  color: var(--foreground);
+}
+
+.onboarding-connected__refresh:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.onboarding-connected-account {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--verevon-border);
+}
+
+.onboarding-connected-account__title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.onboarding-connected-account__title strong {
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.onboarding-connected-account__title small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--verevon-text-muted);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11.5px;
+}
+
+.onboarding-connected-account__title .onboarding-lane-status {
+  margin-left: auto;
+}
+
+.onboarding-connected-account__grants,
+.onboarding-connected-lanes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboarding-grant-chip {
+  padding: 2px 8px;
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10.5px;
+  font-weight: 500;
+  background: var(--onboarding-surface-subtle);
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+}
+
+.onboarding-connected-lanes {
+  display: grid;
+  gap: 3px;
+}
+
+.onboarding-connected-lane {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11.5px;
+}
+
+.onboarding-lane-status {
+  color: var(--subtle);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.onboarding-lane-status--synced {
+  color: #1f7a4d;
+}
+
+.onboarding-lane-status--failed {
+  color: #b42318;
+}
+
+.onboarding-lane-status--running,
+.onboarding-lane-status--pending {
+  color: var(--verevon-text-muted);
+}
+
+.onboarding-connected-next {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: var(--onboarding-surface-subtle);
+  border-radius: 6px;
+}
+
+.onboarding-connected-next p {
+  flex: 1 1 12rem;
+  margin: 0;
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.onboarding-connected-next--attention,
+.onboarding-connected-next--reconnect {
+  background: color-mix(in srgb, #b42318 8%, var(--panel));
+}
+
+.onboarding-connected-next--pick_library {
+  background: color-mix(in srgb, var(--onboarding-accent, var(--ink)) 8%, var(--panel));
+}
+
+.onboarding-connected-next--ready {
+  background: color-mix(in srgb, #1f7a4d 8%, var(--panel));
+}
+
+.onboarding-library-picker {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  background: var(--onboarding-surface-subtle);
+  border: 1px dashed var(--verevon-border);
+  border-radius: 6px;
+}
+
+.onboarding-library-picker__field {
+  display: grid;
+  gap: 3px;
+}
+
+.onboarding-library-picker__field span {
+  color: var(--subtle);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.onboarding-library-picker__field select {
+  min-height: 32px;
+  padding: 4px 8px;
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 12px;
+  background: var(--panel);
+  border: 1px solid var(--verevon-border);
+  border-radius: 6px;
+}
+
+.onboarding-library-picker__error {
+  margin: 0;
+  color: #b42318;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 11.5px;
+}
+
+.onboarding-library-picker__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+/* Settings → Integrations hosts the same picker beneath the refused row, so
+   it inherits the picker's own styles and only needs list-row insetting. */
+.verevon-settings-integration-library-picker {
+  padding: 0 16px 14px;
 }
 
 .verevon-selectable-row--compact small {
@@ -30469,6 +31066,19 @@ body.verevon-chat-canvas-resizing * {
 }
 
 @media (max-width: 640px) {
+  .verevon-chatgpt-subscription__header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .verevon-chatgpt-subscription__device {
+    grid-template-columns: 1fr;
+  }
+
+  .verevon-chatgpt-subscription__device code {
+    justify-self: start;
+  }
+
   .onboarding-connector-tabs {
     grid-template-columns: 1fr;
   }
@@ -33184,19 +33794,25 @@ body.verevon-chat-canvas-resizing * {
 .verevon-inbox-workspace {
   position: relative;
   display: grid;
-  grid-template-columns: var(--inbox-list-w, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, min(var(--inbox-list-w, 340px), 34%)) minmax(0, 1fr);
   gap: 8px;
-  min-height: 100%;
+  height: 100%;
+  min-height: 0;
   padding: 8px;
+  overflow: hidden;
 }
 
 .verevon-inbox-detail-grid {
+  --inbox-aside-track: clamp(220px, var(--inbox-aside-w, 280px), calc(100% - 228px));
+
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--inbox-aside-w, 360px);
+  grid-template-columns: minmax(220px, 1fr) var(--inbox-aside-track);
   gap: 8px;
+  height: 100%;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* Draggable column dividers (widths persisted per-user in localStorage). The
@@ -33221,8 +33837,23 @@ body.verevon-chat-canvas-resizing * {
   width: 2px;
   transform: translateX(-50%);
   border-radius: 2px;
-  background: transparent;
+  background: var(--verevon-border-soft);
   transition: background 120ms ease;
+}
+
+.verevon-inbox-resize-handle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 34px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 8%);
+  transition: border-color 120ms ease, background 120ms ease;
 }
 
 .verevon-inbox-resize-handle:hover::after,
@@ -33230,13 +33861,19 @@ body.verevon-chat-canvas-resizing * {
   background: var(--verevon-accent, #b0532b);
 }
 
+.verevon-inbox-resize-handle:hover::before,
+.verevon-inbox-resize-handle:active::before {
+  border-color: var(--verevon-accent, #b0532b);
+  background: var(--verevon-surface-warm);
+}
+
 .verevon-inbox-resize-handle--list {
-  left: calc(var(--inbox-list-w, 340px) + 8px);
+  left: calc(min(var(--inbox-list-w, 340px), 34%) + 8px);
   transform: translateX(-50%);
 }
 
 .verevon-inbox-resize-handle--aside {
-  right: calc(var(--inbox-aside-w, 360px) + 8px);
+  right: calc(var(--inbox-aside-track) + 4px);
   transform: translateX(50%);
 }
 
@@ -33564,7 +34201,8 @@ body.verevon-chat-canvas-resizing * {
 .verevon-inbox-calendar-row,
 .verevon-inbox-action-suggestion,
 .verevon-inbox-inline-entry,
-.verevon-inbox-ask-verevon > div {
+.verevon-inbox-ask-verevon__header,
+.verevon-inbox-ask-verevon__form {
   display: flex;
   align-items: center;
 }
@@ -34311,9 +34949,7 @@ body.verevon-chat-canvas-resizing * {
   text-align: center;
 }
 
-.verevon-inbox-conversation-empty {
-  min-height: 520px;
-}
+.verevon-inbox-conversation-empty { min-height: 0; }
 
 .verevon-inbox-queue-empty__icon,
 .verevon-inbox-conversation-empty__icon,
@@ -35509,6 +36145,15 @@ body.verevon-chat-canvas-resizing * {
   flex-direction: column;
 }
 
+.verevon-inbox-aside > [role='tabpanel'] {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
 .verevon-inbox-aside__header {
   height: 52px;
   flex-shrink: 0;
@@ -35616,8 +36261,10 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-inbox-aside-scroll {
+  min-width: 0;
   min-height: 0;
   flex: 1;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
@@ -35655,6 +36302,7 @@ body.verevon-chat-canvas-resizing * {
 .verevon-inbox-aside-scroll--panel,
 .verevon-inbox-calendar-panel,
 .verevon-inbox-activity-panel {
+  width: 100%;
   padding: 16px;
 }
 
@@ -35758,6 +36406,7 @@ body.verevon-chat-canvas-resizing * {
 .verevon-inbox-tool-state-list,
 .verevon-inbox-audit-card__logs {
   display: grid;
+  min-width: 0;
   gap: 8px;
 }
 
@@ -35875,6 +36524,7 @@ body.verevon-chat-canvas-resizing * {
 .verevon-inbox-commerce-card,
 .verevon-inbox-stripe-card,
 .verevon-inbox-aside-card {
+  min-width: 0;
   padding: 12px;
 }
 
@@ -35921,6 +36571,7 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-inbox-conversation-context__message > div {
   display: flex;
+  min-width: 0;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
@@ -35928,7 +36579,9 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-inbox-conversation-context__message strong,
 .verevon-inbox-conversation-context__message span {
+  min-width: 0;
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .verevon-inbox-conversation-context__message span {
@@ -35940,6 +36593,7 @@ body.verevon-chat-canvas-resizing * {
   color: var(--verevon-text-soft);
   font-size: 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
@@ -35978,6 +36632,10 @@ body.verevon-chat-canvas-resizing * {
   border-top: 1px solid var(--auth-card);
 }
 
+.verevon-inbox-action-suggestion > div {
+  min-width: 0;
+}
+
 .verevon-inbox-action-suggestion:first-of-type {
   border-top: 0;
 }
@@ -35993,12 +36651,14 @@ body.verevon-chat-canvas-resizing * {
   color: var(--verevon-text-muted);
   font-size: 12px;
   line-height: 18px;
+  overflow-wrap: anywhere;
 }
 
 .verevon-inbox-action-suggestion button,
 .verevon-inbox-inline-entry button,
 .verevon-inbox-macros li button {
   min-height: 28px;
+  flex-shrink: 0;
   padding: 0 10px;
   color: var(--ink);
   font-size: 11px;
@@ -36137,9 +36797,12 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-inbox-verevon-panel {
   display: flex;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
   flex: 1;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .verevon-inbox-ask-verevon {
@@ -36148,7 +36811,7 @@ body.verevon-chat-canvas-resizing * {
   border-top: 1px solid var(--verevon-border-warm);
 }
 
-.verevon-inbox-ask-verevon > div:last-child {
+.verevon-inbox-ask-verevon__form {
   height: 40px;
   padding: 1px;
   background: linear-gradient(90deg, var(--verevon-accent), var(--verevon-accent-soft), var(--verevon-accent-strong));
@@ -36197,6 +36860,123 @@ body.verevon-chat-canvas-resizing * {
   background: var(--ink);
   border: 0;
   border-radius: 999px;
+}
+
+.verevon-inbox-ai-primary-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.verevon-inbox-ai-primary-actions > button {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  color: var(--ink);
+  text-align: left;
+  background: var(--verevon-surface-warm);
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 9px;
+}
+
+.verevon-inbox-ai-primary-actions > button:hover:not(:disabled) {
+  border-color: rgb(221 122 31 / 40%);
+}
+
+.verevon-inbox-ai-primary-actions > button:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.verevon-inbox-ai-primary-actions svg {
+  flex-shrink: 0;
+  color: var(--verevon-accent-strong);
+}
+
+.verevon-inbox-ai-primary-actions span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.verevon-inbox-ai-primary-actions strong,
+.verevon-inbox-ai-primary-actions small {
+  overflow-wrap: anywhere;
+}
+
+.verevon-inbox-ai-primary-actions strong {
+  font-size: 12px;
+}
+
+.verevon-inbox-ai-primary-actions small {
+  color: var(--verevon-text-muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+
+.verevon-inbox-ai-advanced {
+  margin-top: 10px;
+  border-top: 1px solid var(--verevon-border-warm);
+}
+
+.verevon-inbox-ai-advanced > summary,
+.verevon-inbox-context-disclosure > summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.verevon-inbox-ai-advanced > summary {
+  padding-top: 10px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.verevon-inbox-ai-advanced > summary::-webkit-details-marker,
+.verevon-inbox-context-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verevon-inbox-ai-advanced[open] > summary svg,
+.verevon-inbox-context-disclosure[open] > summary > svg {
+  transform: rotate(180deg);
+}
+
+.verevon-inbox-ai-advanced > div {
+  padding-top: 4px;
+}
+
+.verevon-inbox-ai-advanced .verevon-inbox-macros {
+  margin-top: 8px;
+}
+
+.verevon-inbox-context-disclosure > summary > span:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.verevon-inbox-context-disclosure > summary > span:first-child svg {
+  color: var(--verevon-accent-strong);
+}
+
+.verevon-inbox-context-disclosure > summary > span:nth-child(2) {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.verevon-inbox-context-disclosure__content {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
 }
 
 .verevon-inbox-panel-title {
@@ -36783,32 +37563,6 @@ body.verevon-chat-canvas-resizing * {
 
   50% {
     opacity: 1;
-  }
-}
-
-@media (max-width: 1279px) {
-  .verevon-inbox-page {
-    overflow: auto;
-  }
-
-  .verevon-inbox-workspace {
-    grid-template-columns: 320px minmax(0, 1fr);
-    align-items: start;
-  }
-
-  .verevon-inbox-detail-grid {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto;
-  }
-
-  .verevon-inbox-aside {
-    display: flex;
-    height: min(680px, 72dvh);
-    min-height: 420px;
-  }
-
-  .verevon-inbox-resize-handle--aside {
-    display: none;
   }
 }
 
@@ -41796,201 +42550,22 @@ body.verevon-chat-canvas-resizing * {
   box-shadow: 0 16px 42px rgb(29 27 24 / 6%), 0 2px 7px rgb(29 27 24 / 4%);
 }
 
-.verevon-space-room-rail,
 .verevon-space-pulse {
   min-width: 0;
   background: color-mix(in srgb, var(--verevon-surface-soft) 72%, var(--verevon-surface));
 }
 
-.verevon-space-room-rail {
-  display: flex;
-  flex-direction: column;
-  gap: 22px;
-  padding: 20px 14px;
-}
-
-.verevon-space-switcher {
-  display: grid;
-  gap: 6px;
-  padding: 0 4px;
-  color: var(--verevon-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.verevon-space-switcher select {
-  width: 100%;
-  border: 1px solid var(--verevon-border);
-  border-radius: 9px;
-  background: var(--verevon-surface);
-  padding: 8px 28px 8px 10px;
-  color: var(--verevon-text);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: normal;
-  text-transform: none;
-}
-
-.verevon-space-switcher select:focus-visible,
 .verevon-space-secondary-action:focus-visible,
-.verevon-space-thread-rail-list a:focus-visible,
-.verevon-space-conversation-row a:focus-visible,
 .verevon-space-pulse-card:focus-visible,
 .verevon-space-danger-zone button:focus-visible {
   outline: 2px solid var(--verevon-accent-ink);
   outline-offset: 2px;
 }
 
-.verevon-space-room-card {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid var(--verevon-border);
-  border-radius: 14px;
-  background: var(--verevon-surface);
-  padding: 16px 14px;
-}
-
-.verevon-space-room-card::after {
-  position: absolute;
-  right: -16px;
-  bottom: -24px;
-  width: 92px;
-  height: 92px;
-  border-radius: 50%;
-  background: rgb(238 122 80 / 9%);
-  content: '';
-}
-
-.verevon-space-room-mark {
-  display: grid;
-  width: 31px;
-  height: 31px;
-  place-items: center;
-  border-radius: 10px;
-  background: var(--verevon-primary);
-  color: var(--verevon-surface);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.verevon-space-room-card__eyebrow,
-.verevon-space-room-card__name,
-.verevon-space-room-card__status {
-  position: relative;
-  z-index: 1;
-  margin: 0;
-}
-
-.verevon-space-room-card__eyebrow {
-  margin-top: 13px;
-  color: var(--verevon-text-subtle);
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.verevon-space-room-card__name {
-  margin-top: 3px;
-  overflow-wrap: anywhere;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.35;
-}
-
-.verevon-space-room-card__status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 10px;
-  color: var(--verevon-text-muted);
-  font-size: 12px;
-}
-
-.verevon-space-room-card__status svg {
-  color: var(--success);
-}
-
-.verevon-space-rail-section {
-  min-height: 0;
-}
-
-.verevon-space-rail-section__heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 5px 7px;
-  color: var(--verevon-text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.075em;
-  text-transform: uppercase;
-}
-
-.verevon-space-rail-section__heading span:last-child {
-  display: grid;
-  min-width: 18px;
-  height: 18px;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--verevon-surface-muted);
-  color: var(--verevon-text-muted);
-  font-size: 10px;
-  letter-spacing: normal;
-}
-
-.verevon-space-rail-empty {
-  margin: 0;
-  padding: 9px 5px;
-  color: var(--verevon-text-subtle);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.verevon-space-thread-rail-list,
-.verevon-space-conversation-list,
 .verevon-space-deletion-receipt ul {
   margin: 0;
   padding: 0;
   list-style: none;
-}
-
-.verevon-space-thread-rail-list {
-  display: grid;
-  gap: 3px;
-}
-
-.verevon-space-thread-rail-list a {
-  display: grid;
-  gap: 3px;
-  overflow: hidden;
-  border-radius: 8px;
-  padding: 8px 7px;
-  color: inherit;
-  text-decoration: none;
-  transition: background-color 150ms ease;
-}
-
-.verevon-space-thread-rail-list a:hover {
-  background: var(--verevon-surface);
-}
-
-.verevon-space-thread-rail-list__title,
-.verevon-space-thread-rail-list__detail {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.verevon-space-thread-rail-list__title {
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.verevon-space-thread-rail-list__detail {
-  color: var(--verevon-text-subtle);
-  font-size: 11px;
 }
 
 .verevon-space-canvas {
@@ -42514,38 +43089,6 @@ body.verevon-chat-canvas-resizing * {
   font-size: 13px;
 }
 
-.verevon-space-conversation-list {
-  display: grid;
-  gap: 7px;
-}
-
-.verevon-space-conversation-row {
-  border: 1px solid var(--verevon-border);
-  border-radius: 12px;
-  background: var(--verevon-surface);
-  transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
-}
-
-.verevon-space-conversation-row[data-active] {
-  border-color: color-mix(in srgb, var(--verevon-accent-ink) 38%, var(--verevon-border));
-  background: color-mix(in srgb, var(--verevon-accent) 4%, var(--verevon-surface));
-}
-
-.verevon-space-conversation-row:hover {
-  border-color: var(--verevon-border-strong);
-  transform: translateY(-1px);
-}
-
-.verevon-space-conversation-row a {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 13px;
-  color: inherit;
-  text-decoration: none;
-}
-
-.verevon-space-conversation-row__icon,
 .verevon-space-membership-card__icon,
 .verevon-space-pulse-card__icon {
   display: grid;
@@ -42558,46 +43101,9 @@ body.verevon-chat-canvas-resizing * {
   color: var(--verevon-text-muted);
 }
 
-.verevon-space-conversation-row[data-active] .verevon-space-conversation-row__icon,
 .verevon-space-pulse-card--active .verevon-space-pulse-card__icon {
   background: var(--verevon-primary);
   color: var(--verevon-surface);
-}
-
-.verevon-space-conversation-row__body {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-  flex: 1;
-}
-
-.verevon-space-conversation-row__body strong,
-.verevon-space-conversation-row__body > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.verevon-space-conversation-row__body strong {
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.verevon-space-conversation-row__body > span {
-  color: var(--verevon-text-muted);
-  font-size: 12px;
-}
-
-.verevon-space-conversation-row__meta {
-  display: grid;
-  justify-items: end;
-  gap: 4px;
-  color: var(--verevon-text-subtle);
-  font-size: 11px;
-}
-
-.verevon-space-conversation-row__meta time {
-  white-space: nowrap;
 }
 
 .verevon-space-status {
@@ -42612,10 +43118,6 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-space-status--failed {
   color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
-}
-
-.verevon-space-conversation-row[data-failed] {
-  border-color: color-mix(in srgb, var(--danger) 28%, var(--verevon-border));
 }
 
 .verevon-space-view .verevon-activity-feed {
@@ -42737,7 +43239,11 @@ body.verevon-chat-canvas-resizing * {
   background: var(--verevon-text-subtle);
 }
 
-.verevon-space-pulse__signal[aria-label="Active work"] {
+/* Keyed on `data-active`, not on the aria-label. The previous selector matched
+   `[aria-label="Active work"]` — the ENGLISH label — so in Norwegian, the
+   default locale, the signal never lit no matter how busy the room was.
+   Style must never read a translated string. */
+.verevon-space-pulse__signal[data-active] {
   background: var(--verevon-accent);
   box-shadow: 0 0 0 4px rgb(238 122 80 / 13%);
 }
@@ -42838,16 +43344,33 @@ body.verevon-chat-canvas-resizing * {
 
 .dark .verevon-space-workroom,
 .dark .verevon-space-canvas,
-.dark .verevon-space-room-card,
-.dark .verevon-space-switcher select,
-.dark .verevon-space-conversation-row,
 .dark .verevon-space-pulse-card,
-.dark .verevon-space-pulse-stats div {
+.dark .verevon-space-pulse-stats div,
+/* The agent card was the one room surface without a dark variant,
+so it
+   rendered as a white card in a dark room — and any control on it had to
+   choose between being readable there or in the rest of the room. */
+.dark .verevon-space-agent {
   border-color: rgb(255 255 255 / 10%);
   background: var(--verevon-dark-surface);
 }
 
-.dark .verevon-space-room-rail,
+.dark .verevon-space-agent__name,
+.dark .verevon-space-agent__description {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-space-agent__policy li {
+  border-color: rgb(255 255 255 / 14%);
+  background: rgb(255 255 255 / 6%);
+  color: rgb(255 255 255 / 72%);
+}
+
+.dark .verevon-space-agent__avatar {
+  background: rgb(255 255 255 / 10%);
+  color: var(--verevon-sidebar-text);
+}
+
 .dark .verevon-space-pulse,
 .dark .verevon-space-empty-state,
 .dark .verevon-space-membership-card,
@@ -42866,41 +43389,50 @@ body.verevon-chat-canvas-resizing * {
   border-color: rgb(255 255 255 / 10%);
 }
 
+/* Found while verifying presence (2026-09-08): `--verevon-text-muted` is only
+   redefined for dark mode inside `.dark .verevon-chat-page`'s own scope, so on
+   every OTHER dark surface — this header's meta row included — it stays the
+   light-mode value (#66615b, meant for a white card) against the near-black
+   canvas: 2.92:1, below AA for text. Pre-existing on "Rom · Aktiv · Din
+   rolle:" before presence added a fourth item to the same line; fixed here
+   rather than only for the new span, since leaving neighbours broken while a
+   new addition happens to inherit the same fix would be no fix at all. */
+.dark .verevon-space-meta {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-space-presence__dot {
+  background: var(--verevon-success, #4fae76);
+}
+
 .dark .verevon-space-header h1,
 .dark .verevon-space-view h2,
 .dark .verevon-space-pulse h2,
 .dark .verevon-space-danger-zone h3,
-.dark .verevon-space-room-card__name,
 .dark .verevon-space-empty-state strong,
 .dark .verevon-space-empty-state h3,
 .dark .verevon-space-membership-card strong,
-.dark .verevon-space-conversation-row__body strong,
 .dark .verevon-space-pulse-stats dd {
   color: var(--verevon-sidebar-text);
 }
 
 .dark .verevon-space .verevon-space-tab,
-.dark .verevon-space-switcher select,
-.dark .verevon-space-thread-rail-list a,
-.dark .verevon-space-conversation-row,
 .dark .verevon-space-pulse-card {
   color: var(--verevon-sidebar-text);
 }
 
-.dark .verevon-space-conversation-row[data-active],
 .dark .verevon-space-pulse-card--active {
   border-color: rgb(238 122 80 / 45%);
   background: rgb(238 122 80 / 10%);
 }
 
-.dark .verevon-space-conversation-row[data-active] .verevon-space-conversation-row__icon,
 .dark .verevon-space-pulse-card--active .verevon-space-pulse-card__icon {
   background: var(--verevon-sidebar-text);
   color: var(--verevon-dark-surface);
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .verevon-space-pulse__signal[aria-label="Active work"] {
+  .verevon-space-pulse__signal[data-active] {
     animation: verevon-space-pulse-signal 2.4s ease-in-out infinite;
   }
 }
@@ -42951,49 +43483,6 @@ body.verevon-chat-canvas-resizing * {
     box-shadow: none;
   }
 
-  .verevon-space-room-rail {
-    gap: 13px;
-    border-bottom: 1px solid var(--verevon-border);
-    padding: 14px 16px;
-  }
-
-  .verevon-space-switcher {
-    width: min(100%, 280px);
-  }
-
-  .verevon-space-room-card {
-    display: grid;
-    grid-template-columns: 31px 1fr auto;
-    column-gap: 10px;
-    align-items: center;
-    padding: 11px;
-  }
-
-  .verevon-space-room-card__eyebrow,
-  .verevon-space-room-card__name,
-  .verevon-space-room-card__status {
-    margin: 0;
-  }
-
-  .verevon-space-room-card__eyebrow {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .verevon-space-room-card__name {
-    grid-column: 2;
-    grid-row: 2;
-  }
-
-  .verevon-space-room-card__status {
-    grid-column: 3;
-    grid-row: 1 / 3;
-  }
-
-  .verevon-space-rail-section {
-    display: none;
-  }
-
   .verevon-space-canvas {
     border: 0;
   }
@@ -43029,14 +43518,6 @@ body.verevon-chat-canvas-resizing * {
 
   .verevon-space-secondary-action {
     justify-self: start;
-  }
-
-  .verevon-space-conversation-row a {
-    align-items: flex-start;
-  }
-
-  .verevon-space-conversation-row__meta {
-    min-width: 58px;
   }
 
   .verevon-space-pulse {
@@ -43089,7 +43570,6 @@ body.verevon-chat-canvas-resizing * {
   padding: 0;
   border-left: 1px solid var(--verevon-border);
 }
-
 
 .verevon-space-header {
   align-items: center;
@@ -43154,123 +43634,6 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-space-view h2 { font-size: 19px; }
-
-.verevon-space-fresh-conversation {
-  display: grid;
-  width: min(100%, 440px);
-  min-height: min(42vh, 340px);
-  place-content: center;
-  justify-items: center;
-  margin: auto;
-  padding: 32px 24px;
-  text-align: center;
-}
-
-.verevon-space-fresh-conversation__mark {
-  display: grid;
-  position: relative;
-  width: 58px;
-  height: 58px;
-  place-items: center;
-  margin-bottom: 16px;
-  border: 1px solid rgb(255 255 255 / 62%);
-  border-radius: 50%;
-  background: #2c8cf4;
-  color: #fff;
-}
-
-.verevon-space-fresh-conversation__mark::before,
-.verevon-space-fresh-conversation__mark::after {
-  position: absolute;
-  top: 22px;
-  width: 5px;
-  height: 16px;
-  border-radius: 999px;
-  background: #fff;
-  content: '';
-}
-
-.verevon-space-fresh-conversation__mark::before {
-  left: 21px;
-  transform: rotate(18deg);
-}
-
-.verevon-space-fresh-conversation__mark::after {
-  right: 21px;
-  transform: rotate(-18deg);
-}
-
-.verevon-space-fresh-conversation .verevon-space-eyebrow {
-  margin: 0;
-  color: var(--verevon-text-subtle);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.11em;
-}
-
-.verevon-space-fresh-conversation h3 {
-  max-width: 360px;
-  margin: 9px 0 0;
-  color: var(--verevon-text);
-  font-size: 22px;
-  font-weight: 650;
-  letter-spacing: -0.035em;
-  line-height: 1.15;
-}
-
-.verevon-space-fresh-conversation > p {
-  max-width: 340px;
-  margin: 10px 0 0;
-  color: var(--verevon-text-muted);
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-.verevon-space-fresh-conversation__action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 38px;
-  margin-top: 20px;
-  border-radius: 9px;
-  background: #2c8cf4;
-  padding: 0 14px;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 700;
-  text-decoration: none;
-  transition: background-color 150ms ease, transform 150ms ease;
-}
-
-.verevon-space-fresh-conversation__action:hover {
-  background: #1479dd;
-  color: #fff;
-  transform: translateY(-1px);
-}
-
-.verevon-space-fresh-conversation__action:focus-visible {
-  outline: 2px solid var(--verevon-accent-ink);
-  outline-offset: 3px;
-}
-
-.verevon-space-conversation-list { gap: 4px; }
-
-.verevon-space-conversation-row {
-  border-color: transparent;
-  border-radius: 10px;
-  background: var(--verevon-surface-soft);
-}
-
-.verevon-space-conversation-row:hover { border-color: transparent; background: color-mix(in srgb, var(--verevon-surface-soft) 82%, #e9eff2 18%); transform: none; }
-
-.verevon-space-conversation-row[data-active] {
-  border-color: transparent;
-  background: color-mix(in srgb, var(--verevon-surface-soft) 76%, #e4efe9 24%);
-}
-
-.verevon-space-conversation-row a { padding: 12px; }
 
 /* The room's own composer (`SpaceRoomComposer.tsx`) — buzz's "the channel is
    the workspace" plus Grok's teammate ergonomics. Replaces the earlier
@@ -43516,6 +43879,252 @@ body.verevon-chat-canvas-resizing * {
   color: var(--verevon-text-muted);
   font-size: 11px;
   font-weight: 650;
+}
+
+/* Governing one binding, in this room only. Quiet by design: an agent is a
+   participant, not a settings row, so these sit below its description rather
+   than competing with its name. */
+.verevon-space-agent__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.verevon-space-agent__control {
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  padding: 4px 12px;
+  color: var(--verevon-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease, opacity 150ms ease;
+}
+
+.verevon-space-agent__control:hover:not([disabled]) {
+  border-color: var(--verevon-text-subtle);
+}
+
+.verevon-space-agent__control[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Removal reads as removal on hover, and only then — a destructive-looking
+   control sitting permanently red next to "Pause" would make the safe action
+   feel dangerous too. */
+.verevon-space-agent__control--remove:hover:not([disabled]) {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--verevon-border));
+  color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
+}
+
+.verevon-space-agent__control:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+.verevon-space-agent__error {
+  margin: 8px 0 0;
+  color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
+  font-size: 12px;
+}
+
+.dark .verevon-space-agent__control {
+  border-color: rgb(255 255 255 / 18%);
+  background: transparent;
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-space-agent__error {
+  color: #f7a8a0;
+}
+
+/* The in-place confirm that replaced `window.confirm`. The consequence sits
+   next to the armed button rather than in a native dialog, so the sentence
+   explaining what happens is in the product's own voice. */
+.verevon-space-confirm {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.verevon-space-confirm__consequence {
+  color: var(--warning-ink);
+  font-size: 12px;
+}
+
+/* A named gap in the Work tab: something the answer deliberately does not
+   claim. Styled as a statement rather than an error — the room is not broken,
+   one part of the picture is simply missing, and that is worth reading. */
+.verevon-space-work__gap {
+  margin: 8px 0 0;
+  border-left: 2px solid color-mix(in srgb, var(--warning) 45%, var(--verevon-border));
+  padding-left: 10px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.dark .verevon-space-work__gap {
+  color: rgb(255 255 255 / 72%);
+}
+
+.dark .verevon-space-confirm__consequence {
+  color: #f0b366;
+}
+
+/* Naming a new room, in the sidebar where the channel list is. */
+.core-sidebar-new-room-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 8px 10px;
+}
+
+.core-sidebar-new-room-form input,
+.core-sidebar-new-room-form__actions button {
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: transparent;
+  /* The same resting colour the sidebar's own rows use, so the form belongs to
+     the panel in both themes rather than to the page surface. */
+  color: var(--verevon-dark-border);
+  cursor: pointer;
+}
+
+.core-sidebar-new-room-form input {
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: text;
+}
+
+.core-sidebar-new-room-form input::placeholder {
+  color: var(--verevon-text-subtle);
+}
+
+.core-sidebar-new-room-form input:focus-visible,
+.core-sidebar-new-room-form__actions button:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 1px;
+}
+
+.core-sidebar-new-room-form__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.core-sidebar-new-room-form__actions button {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.core-sidebar-new-room-form__actions button[disabled] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.core-sidebar-new-room-form__actions button[type="submit"]:not([disabled]) {
+  border-color: transparent;
+  background: var(--verevon-accent-ink);
+  color: #fff;
+}
+
+.dark .core-sidebar-new-room-form input,
+.dark .core-sidebar-new-room-form__actions button {
+  border-color: var(--verevon-sidebar-border);
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .core-sidebar-new-room-form input::placeholder {
+  color: var(--verevon-sidebar-muted);
+}
+
+/* Managing a room's people, in the Members tab. Quiet: the roster is the
+   subject here and the controls sit under it. */
+.verevon-space-member-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.verevon-space-member-controls__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.verevon-space-member-controls__derived {
+  margin: 12px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-member-picker {
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 10px 12px;
+}
+
+.verevon-space-member-picker__empty {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-member-picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-member-picker__list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.verevon-space-member-picker__who {
+  display: flex;
+  flex-direction: column;
+}
+
+.verevon-space-member-picker__who small {
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+}
+
+.core-sidebar-new-room {
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.core-sidebar-new-room[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.dark .verevon-space-member-picker {
+  border-color: rgb(255 255 255 / 10%);
+  background: var(--verevon-dark-surface);
+}
+
+.dark .verevon-space-member-picker__who strong {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-space-member-picker__who small,
+.dark .verevon-space-member-picker__empty,
+.dark .verevon-space-member-controls__derived {
+  color: rgb(255 255 255 / 72%);
 }
 
 .verevon-room-intro__action strong {
@@ -43786,6 +44395,170 @@ body.verevon-chat-canvas-resizing * {
   font-size: 12px;
 }
 
+/* The composer while its target thread waits on a decision. Styled like the
+   approval card rather than like an error: nothing has gone wrong, the room is
+   just waiting for a person. */
+.verevon-space-room-composer__blocked {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--verevon-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warning) 7%, var(--verevon-surface));
+  padding: 8px 12px;
+  color: var(--warning-ink);
+  font-size: 12px;
+}
+
+/* A pending decision, inside the post that is waiting for it. Warm rather than
+   red: this is work asking for a person, not a failure. */
+.verevon-room-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--verevon-border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning) 6%, var(--verevon-surface));
+  padding: 12px 14px;
+}
+
+.verevon-room-approval__heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.verevon-room-approval__heading h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-room-approval__icon {
+  display: inline-flex;
+  color: var(--warning-ink);
+}
+
+.verevon-room-approval__list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-room-approval__item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.verevon-room-approval__detail {
+  margin: 0;
+  color: var(--verevon-text);
+  font-size: 13px;
+}
+
+.verevon-room-approval__requester,
+.verevon-room-approval__consequence,
+.verevon-room-approval__note {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-room-approval__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.verevon-room-approval__actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 9px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease, opacity 150ms ease;
+}
+
+.verevon-room-approval__actions button[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* The accent-INK variant, not the raw accent. White on --verevon-accent is
+   2.8:1, which fails AA at this size; the ink variant is 5.0:1. The palette
+   already says the raw hue fails as small text, and the label on the button
+   that authorizes an action is the last place to ignore that. */
+.verevon-room-approval__approve {
+  border: 1px solid transparent;
+  background: var(--verevon-accent-ink);
+  color: #fff;
+}
+
+.verevon-room-approval__approve:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--verevon-accent-ink) 88%, #000);
+}
+
+.verevon-room-approval__deny {
+  border: 1px solid var(--verevon-border);
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+}
+
+.verevon-room-approval__deny:hover:not([disabled]) {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--verevon-border));
+  color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
+}
+
+.verevon-room-approval__actions button:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+/* The approval card is the one thing in a post that must not be missed, so it
+   keeps its full contrast when the surrounding post is dimmed as failed. */
+.verevon-room-post[data-failed] .verevon-room-approval {
+  opacity: 1;
+}
+
+/* Dark mode in this sheet does not swap `--verevon-surface`; it restates the
+   colours per component (`.dark .verevon-space-canvas` and friends). An
+   approval card built only from tokens therefore stays a LIGHT card on a dark
+   page, so it is restated here the same way — including the lighter
+   `--warning-ink`, since the light-surface ink is unreadable once the card
+   goes dark. Measured on both themes: every string here is at or above 4.5:1. */
+.dark .verevon-room-approval,
+.dark .verevon-space-room-composer__blocked {
+  --warning-ink: #f0b366;
+  border-color: color-mix(in srgb, var(--warning) 42%, rgb(255 255 255 / 10%));
+  background: color-mix(in srgb, var(--warning) 12%, var(--verevon-dark-surface));
+}
+
+.dark .verevon-room-approval__detail {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-room-approval__heading h4 {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-room-approval__requester,
+.dark .verevon-room-approval__consequence,
+.dark .verevon-room-approval__note {
+  color: rgb(255 255 255 / 72%);
+}
+
+.dark .verevon-room-approval__deny {
+  border-color: rgb(255 255 255 / 18%);
+  background: transparent;
+  color: var(--verevon-sidebar-text);
+}
+
 .verevon-space-room-mentions {
   position: absolute;
   bottom: 100%;
@@ -43825,8 +44598,6 @@ body.verevon-chat-canvas-resizing * {
   color: var(--verevon-text-subtle);
 }
 
-.verevon-space-composer-link > svg { margin-left: auto; color: var(--verevon-text-muted); }
-
 .verevon-space-pulse__heading {
   align-items: center;
   min-height: 62px;
@@ -43850,14 +44621,6 @@ body.verevon-chat-canvas-resizing * {
 .dark .verevon-space-header,
 .dark .verevon-space-pulse__heading { border-color: rgb(255 255 255 / 10%); }
 
-.dark .verevon-space-conversation-row,
-.dark .verevon-space-composer-link { background: var(--verevon-dark-surface-soft); }
-
-.dark .verevon-space-fresh-conversation__mark {
-  border-color: rgb(255 255 255 / 20%);
-  background: #2d83db;
-}
-
 @media (max-width: 1080px) {
   .verevon-space-workroom { grid-template-columns: minmax(0, 1fr) minmax(220px, 260px); }
   .verevon-space-pulse {
@@ -43877,7 +44640,6 @@ body.verevon-chat-canvas-resizing * {
   .verevon-space-pulse__note { margin: 0 16px 14px; }
   .verevon-space-view { padding: 22px 16px; }
   .verevon-space-view__heading { gap: 12px; }
-  .verevon-space-fresh-conversation { min-height: 260px; padding: 24px 16px; }
 }
 
 /* Run console — plan and todo list.
@@ -44669,7 +45431,7 @@ body.verevon-chat-canvas-resizing * {
 
 .dashboard-composer-root--chat .dashboard-composer-model-button {
   height: 32px;
-  max-width: 164px;
+  max-width: 240px;
   border-color: transparent;
   border-radius: 9px;
   background: transparent;
@@ -44873,6 +45635,44 @@ body.verevon-chat-canvas-resizing * {
   margin-top: 20px;
 }
 
+/* The suggested first move (plan item 17). A borderless row that reads as an
+   offer rather than a button, per Fjordlys law 2 (negative space, not
+   hairlines) and its empty-state spec (borderless rows, surface-soft hover). */
+.verevon-chat-empty__resume {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px auto 0;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 12px;
+  background-color: transparent;
+  color: var(--verevon-j-text, #1a1a1a);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease;
+}
+
+.verevon-chat-empty__resume:hover {
+  background-color: var(--verevon-surface-soft);
+}
+
+.verevon-chat-empty__resume > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* The thread's own title, so the offer names the actual work being resumed. */
+.verevon-chat-empty__resume small {
+  color: var(--verevon-text-subtle);
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .verevon-chat-empty__prompt-label {
   margin-bottom: 5px;
   color: var(--verevon-e-subtle);
@@ -45058,6 +45858,61 @@ body.verevon-chat-canvas-resizing * {
   padding: 8px 7px 0;
 }
 
+/* Audit item 19 / UX spec section 7 question 3, "does Verevon need me": the
+   Work canvas's typed-pause callout. Shares the approval card's trust tint so
+   a pause reads as the same class of moment wherever it surfaces. */
+.verevon-chat-steps-attention {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0;
+  border-radius: 10px;
+  background: var(--verevon-coral-soft);
+  padding: 10px 12px;
+}
+
+.verevon-chat-steps-attention strong {
+  font-size: 12px;
+}
+
+.verevon-chat-steps-attention p {
+  margin: 0;
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Audit item 20: the raw provider catalog is a secondary control (UX spec
+   section 6, "advanced model transparency"), so the default model menu shows
+   only the Verevon effort modes and this opens the rest. */
+.dashboard-composer-model-advanced > summary {
+  padding: 7px 10px;
+  color: var(--verevon-e-subtle);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  list-style: none;
+}
+
+.dashboard-composer-model-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dashboard-composer-model-advanced > summary::before {
+  content: '\25B8';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 140ms ease;
+}
+
+.dashboard-composer-model-advanced[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.dashboard-composer-model-advanced > summary:hover,
+.dashboard-composer-model-advanced > summary:focus-visible {
+  color: var(--verevon-j-text);
+}
+
 @media (max-width: 1180px) {
   .verevon-chat-page--canvas .dashboard-composer-root--chat .dashboard-composer-toolbar__left > :is(.dashboard-composer-toolbar__divider, .dashboard-composer-toolbar-icon:nth-of-type(1)) {
     display: none;
@@ -45142,7 +45997,7 @@ body.verevon-chat-canvas-resizing * {
   }
 
   .dashboard-composer-root--chat .dashboard-composer-model-button {
-    max-width: 130px;
+    max-width: 180px;
   }
 
   .dashboard-composer-root--chat .dashboard-composer-toolbar__left > :not(.dashboard-composer-attach):not(.dashboard-composer-web-button) {
@@ -45166,17 +46021,996 @@ body.verevon-chat-canvas-resizing * {
     max-width: 64px;
   }
 
-  .verevon-chat-page--canvas .verevon-chat-run-panel {
-    position: absolute;
-    inset: 0;
-    z-index: 30;
-    width: 100%;
-    flex-basis: auto;
-    border-left: 0;
-  }
-
   .verevon-chat-run-panel__runid,
   .verevon-chat-run-panel__workspace-status {
     display: none;
   }
+}
+
+/* Model-authored <details> blocks in chat answers (chat-media-markdown
+   parseDetails): a quiet collapsible for optional detail such as "Se alle
+   tilbud" under a quote table. */
+.verevon-chat-details {
+  margin: 10px 0;
+  border: 1px solid color-mix(in srgb, var(--verevon-text-muted) 22%, transparent);
+  border-radius: 10px;
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-chat-details > summary {
+  padding: 8px 12px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  list-style: none;
+}
+
+.verevon-chat-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.verevon-chat-details > summary::before {
+  content: '\25B8';
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 140ms ease;
+}
+
+.verevon-chat-details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.verevon-chat-details > summary:hover,
+.verevon-chat-details > summary:focus-visible {
+  color: var(--verevon-j-text);
+  outline: 2px solid var(--verevon-chat-fjord);
+  outline-offset: -2px;
+  border-radius: 10px;
+}
+
+.verevon-chat-details__body {
+  padding: 0 12px 10px;
+}
+
+/* ── Knowledge in a Space ──────────────────────────────────────────────────
+   The room's own archive: which documents and wiki pages an agent here can
+   ground on. Deliberately quiet — this is a reference list a reader scans, not
+   a surface that competes with the transcript for attention. */
+.verevon-space-knowledge__binding {
+  margin: 10px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+/* The workspace id is an identifier a reader compares against a config value,
+   so it gets the panel's full-strength ink rather than inheriting the muted
+   colour of the sentence around it. Measured on the tinted background it sits
+   on: inheriting muted gave 5.64:1 in light and 3.37:1 in dark, and the second
+   fails AA at 11px — the least readable thing on the row was the only part
+   worth reading. */
+.verevon-space-knowledge__binding code {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--verevon-border) 40%, transparent);
+  padding: 1px 5px;
+  color: var(--verevon-text);
+  font-size: 11px;
+}
+
+.verevon-space-knowledge__section {
+  margin-top: 18px;
+}
+
+.verevon-space-knowledge__section h3 {
+  margin: 0 0 8px;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-space-knowledge__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-knowledge__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border-radius: 8px;
+  padding: 7px 8px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-knowledge__item:hover {
+  background: color-mix(in srgb, var(--verevon-border) 22%, transparent);
+}
+
+.verevon-space-knowledge__item > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-knowledge__title {
+  margin: 0;
+  color: var(--verevon-text);
+  font-size: 13px;
+}
+
+/* Source, time, and — only when it is not the ordinary case — status. */
+.verevon-space-knowledge__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 2px 0 0;
+  font-size: 11px;
+}
+
+/* A document that cannot ground an answer yet has to look different from one
+   that can, or the reader blames the agent for ignoring it. */
+.verevon-space-knowledge__status {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warning) 22%, transparent);
+  padding: 0 5px;
+  color: var(--verevon-text);
+}
+
+.verevon-space-knowledge__more {
+  margin: 8px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+}
+
+.dark .verevon-space-knowledge__binding,
+.dark .verevon-space-knowledge__item,
+.dark .verevon-space-knowledge__item > svg,
+.dark .verevon-space-knowledge__more {
+  color: rgb(255 255 255 / 66%);
+}
+
+.dark .verevon-space-knowledge__section h3,
+.dark .verevon-space-knowledge__title,
+.dark .verevon-space-knowledge__status,
+.dark .verevon-space-knowledge__binding code {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-space-knowledge__binding code {
+  background: rgb(255 255 255 / 10%);
+}
+
+.dark .verevon-space-knowledge__item:hover {
+  background: rgb(255 255 255 / 6%);
+}
+
+/* ── Activity: filter lenses and per-row detail ────────────────────────────
+   Activity answers "what happened, on whose authority, with what outcome"
+   across five planes. The lens narrows which classes are shown; the detail
+   list carries the proof a supervisor asks for next without turning the
+   one-line sentence into a paragraph. */
+.verevon-activity-lenses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 4px;
+}
+
+.verevon-activity-lens {
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: transparent;
+  padding: 4px 11px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-activity-lens:hover {
+  border-color: color-mix(in srgb, var(--verevon-accent) 40%, var(--verevon-border));
+  color: var(--verevon-text);
+}
+
+/* The accent carries the selected state in the BORDER and BACKGROUND; the
+   label keeps the panel's ordinary ink.
+   Measured, because the obvious choices both fail at 12px: white-on-accent is
+   2.79:1 (the trap the approve button hit), and `--verevon-accent-ink` on this
+   tint is 4.45:1 — under AA, and 4.72:1 even with the tint halved, which is a
+   margin one accent tweak would erase. Plain ink on the same tint is 15.51:1
+   and cannot regress that way. Border, tint, and weight still make the
+   selection unambiguous without the label carrying the colour. */
+.verevon-activity-lens--active {
+  border-color: color-mix(in srgb, var(--verevon-accent) 55%, var(--verevon-border));
+  background: color-mix(in srgb, var(--verevon-accent) 12%, transparent);
+  color: var(--verevon-text);
+  font-weight: 600;
+}
+
+.verevon-activity-lens:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}
+
+.verevon-activity-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 3px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+}
+
+.verevon-activity-detail li {
+  margin: 0;
+}
+
+.verevon-activity-detail li + li::before {
+  content: '·';
+  margin-right: 8px;
+  opacity: 0.55;
+}
+
+.dark .verevon-activity-lens {
+  border-color: var(--verevon-dark-border);
+  color: rgb(255 255 255 / 66%);
+}
+
+.dark .verevon-activity-lens:hover,
+.dark .verevon-activity-lens--active {
+  color: var(--verevon-sidebar-text);
+}
+
+.dark .verevon-activity-detail {
+  color: rgb(255 255 255 / 62%);
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* Support › Remote support (fjernhjelp) — live screen session surface        */
+/* ------------------------------------------------------------------------- */
+
+.verevon-support-workspace > .verevon-remote-support {
+  flex: 1;
+  min-height: 0;
+}
+
+.verevon-remote-support {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(480px, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: var(--verevon-surface, #fff);
+}
+
+.verevon-remote-support > * {
+  min-width: 0;
+  background: var(--verevon-surface, #fff);
+}
+
+.verevon-remote-support__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  border-right: 1px solid var(--verevon-border-warm);
+  overflow-y: auto;
+}
+
+.verevon-remote-support__rail header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.verevon-remote-support__rail header svg {
+  width: 18px;
+  height: 18px;
+  color: var(--verevon-coral, #ee7a50);
+}
+
+.verevon-remote-support__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__field input {
+  padding: 9px 11px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 8px;
+  background: var(--verevon-surface, #fff);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.verevon-remote-support__field input:focus-visible {
+  outline: 2px solid var(--ring, #ee7a50);
+  outline-offset: 1px;
+}
+
+.verevon-remote-support__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.verevon-remote-support__notice {
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__notice--error {
+  border-color: rgba(220, 68, 68, 0.35);
+  background: rgba(220, 68, 68, 0.06);
+  color: #a83232;
+}
+
+.verevon-remote-support__notice code {
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.verevon-remote-support__status {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.verevon-remote-support__status > div {
+  padding: 8px 10px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 8px;
+}
+
+.verevon-remote-support__status dt {
+  font-size: 11px;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__status dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.verevon-remote-support__permissions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-remote-support__permission {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__permission svg {
+  width: 12px;
+  height: 12px;
+}
+
+.verevon-remote-support__permission--granted {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+  background: rgba(238, 122, 80, 0.08);
+}
+
+.verevon-remote-support__field small {
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.verevon-remote-support__displays {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-remote-support__display {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 8px;
+  background: var(--verevon-surface, #fff);
+  color: var(--verevon-text-muted, #6b6b6b);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-remote-support__display svg {
+  width: 12px;
+  height: 12px;
+}
+
+.verevon-remote-support__display small {
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.verevon-remote-support__display:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+}
+
+.verevon-remote-support__display--active {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+  background: rgba(238, 122, 80, 0.08);
+  cursor: default;
+}
+
+.verevon-remote-support__display:disabled:not(.verevon-remote-support__display--active) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.verevon-remote-support__quality {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.verevon-remote-support__quality-label {
+  width: 100%;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__quality small {
+  width: 100%;
+  font-size: 11px;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__quality-option {
+  padding: 4px 10px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 999px;
+  background: var(--verevon-surface, #fff);
+  color: var(--verevon-text-muted, #6b6b6b);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.verevon-remote-support__quality-option:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+}
+
+.verevon-remote-support__quality-option--active {
+  color: var(--ink);
+  border-color: rgba(238, 122, 80, 0.5);
+  background: rgba(238, 122, 80, 0.08);
+}
+
+.verevon-remote-support__quality-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.verevon-remote-support__stage {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.verevon-remote-support__stage-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 48px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--verevon-border-warm);
+  font-size: 12px;
+  color: var(--verevon-text-muted, #6b6b6b);
+}
+
+.verevon-remote-support__stage-bar strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.verevon-remote-support__screen {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background: #0f1115;
+}
+
+.verevon-remote-support__screen canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  cursor: crosshair;
+}
+
+.verevon-remote-support__screen canvas[data-view-only='true'] {
+  cursor: default;
+}
+
+.verevon-remote-support__screen-empty {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 380px;
+  padding: 24px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-remote-support__screen-empty svg {
+  width: 28px;
+  height: 28px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+@media (max-width: 960px) {
+  .verevon-remote-support {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(320px, 1fr);
+  }
+
+  .verevon-remote-support__rail {
+    border-right: 0;
+    border-bottom: 1px solid var(--verevon-border-warm);
+  }
+}
+
+/* ── Item 1b: a working room is visibly working, and a stop is a stop ────────
+   The sender already had a live exchange in their composer. Every OTHER
+   member saw nothing until the poll delivered a finished reply — the room went
+   dark exactly when it was busiest. These rules give the post, the composer
+   bar and the sidebar one shared, quiet signal for "an agent is producing
+   output here right now". Quiet on purpose: it is ambient state, not an
+   alert, and it must not compete with a failure or an approval. */
+
+/* The live row under a post's turns. Same shape as an agent turn, so it reads
+   as "the next turn, arriving" rather than as a status bar. */
+.verevon-room-turn--working .verevon-room-turn__working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+/* Three dots, drawn with box-shadow so it is one element and one animation.
+   Only the middle dot's opacity moves; the row itself never shifts. */
+.verevon-room-turn__working-dots {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--verevon-accent-ink);
+  box-shadow: 7px 0 0 var(--verevon-accent-ink), 14px 0 0 var(--verevon-accent-ink);
+  opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-room-turn__working-dots {
+    animation: verevon-working-dots 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes verevon-working-dots {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.95; }
+}
+
+/* Stop, inside the streaming exchange. Deliberately not styled as danger: a
+   stop is a normal thing to do to a reply, and red would make every member
+   hesitate to use it. Outlined so it never outweighs the answer it sits under. */
+.verevon-space-room-exchange__stop {
+  align-self: flex-start;
+  margin-top: 6px;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 4px 12px;
+  color: var(--verevon-text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-space-room-exchange__stop:hover {
+  border-color: var(--verevon-text);
+}
+
+.verevon-space-room-exchange__stop:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}
+
+/* The stopped line: neither the error red nor the finished grey. It states
+   whether the stop was RECORDED, which is the fact the room cares about. */
+.verevon-space-room-exchange__stopped {
+  margin: 6px 0 0;
+  border-left: 2px solid var(--verevon-border-strong);
+  padding-left: 10px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+/* Other members' agent work, above the textarea. */
+.verevon-space-room-composer__working {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-composer__working-dot,
+.core-sidebar-working-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--verevon-accent);
+  box-shadow: 0 0 0 3px rgb(238 122 80 / 14%);
+}
+
+/* The sidebar dot sits at the row's trailing edge, like a channel's unread
+   marker — it is the same kind of information. */
+.core-sidebar-panel-link[data-working] .core-sidebar-working-dot {
+  margin-left: auto;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-space-room-composer__working-dot,
+  .core-sidebar-working-dot {
+    animation: verevon-space-pulse-signal 2.4s ease-in-out infinite;
+  }
+}
+
+/* Only the composer line gets a dark override: it sits on the dark panel. The
+   working row, the Stop button and the stopped line sit INSIDE
+   `.verevon-room-post` / `.verevon-space-room-exchange`, which have no dark
+   variant anywhere in this sheet and stay `--verevon-surface` (white) in dark
+   mode — their own turn text is deliberately dark-on-white. A first draft
+   painted these three white too, and measured 1.0:1 / 1.1:1 / 1.0:1 against
+   the real page; matching the card they sit on is the honest fix here, and
+   the cards' missing dark variant is recorded as its own finding. */
+.dark .verevon-space-room-composer__working {
+  color: rgb(255 255 255 / 66%);
+}
+
+/* ── Item 4b: room hygiene — pin, new-since-arrival, auto-title ────────────
+   Slack's channel affordances, for a room: a pinned post reads as pinned
+   before you read it, a post that is new since your last visit says so, and
+   both are stated as facts about the post rather than as chrome around it.
+   The post is a white card in both themes (it has no dark variant anywhere in
+   this sheet — see item 1b's note), so everything here uses the card's own
+   ink and stays readable regardless of the shell's theme. */
+
+.verevon-room-post[data-pinned] {
+  border-color: color-mix(in srgb, var(--verevon-accent-ink) 34%, var(--verevon-border));
+}
+
+.verevon-room-post__flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-room-post__flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.6;
+}
+
+/* Pinned: the accent's readable ink on a faint accent tint. Measured on the
+   card: `--verevon-accent-ink` on a 10% tint was 4.54:1 — AA by 0.04 — so the
+   tint is 6%, which measures 4.7+; the accent itself would not pass at all
+   (2.79:1, the approve-button trap). */
+.verevon-room-post__flag--pinned {
+  background: color-mix(in srgb, var(--verevon-accent) 6%, transparent);
+  color: var(--verevon-accent-ink);
+}
+
+/* New: plain strong ink on a neutral tint. Not the accent — "new" is
+   information, and giving it the same colour as "pinned" would make two
+   different facts read as one. */
+.verevon-room-post__flag--new {
+  background: color-mix(in srgb, var(--verevon-text) 8%, transparent);
+  color: var(--verevon-text);
+}
+
+/* The author's pin control, in the post's meta row beside Reply. Styled as
+   the sibling text control it is, not as a button that competes with Send. */
+.verevon-room-post__pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.verevon-room-post__pin:hover {
+  color: var(--verevon-text);
+}
+
+.verevon-room-post__pin[aria-pressed="true"] {
+  color: var(--verevon-accent-ink);
+}
+
+.verevon-room-post__pin:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.verevon-room-post__pin:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.verevon-room-post__pin-error {
+  color: color-mix(in srgb, var(--danger) 80%, var(--verevon-text));
+  font-size: 11px;
+}
+
+/* Sidebar rows. A pinned thread swaps its glyph rather than adding one, so the
+   row does not get wider; the new-since-arrival dot reuses the working dot's
+   geometry in the neutral ink, and yields to the working dot when both apply
+   — work in progress is the more urgent of the two facts. */
+.core-sidebar-panel-link__icon--pinned {
+  color: var(--verevon-accent-ink);
+}
+
+.core-sidebar-unread-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--verevon-text);
+  opacity: 0.7;
+}
+
+.core-sidebar-panel-link[data-unread] .core-sidebar-panel-link__label {
+  font-weight: 650;
+}
+
+.dark .core-sidebar-panel-link__icon--pinned {
+  color: var(--verevon-accent);
+}
+
+.dark .core-sidebar-unread-dot {
+  background: var(--verevon-sidebar-text);
+}
+
+/* ── Later tier: `/` skills in the room composer ───────────────────────────
+   The picker is the mention list with a highlighted row (it used to be
+   mouse-only), a picked skill is a chip above the textarea, and the scope badge
+   states the two scopes the registry actually has. Theme tokens throughout: the
+   composer follows the shell's theme, unlike the room's white post cards. */
+
+.verevon-space-room-mentions button[aria-selected="true"] {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-space-room-mentions__icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-room-mentions__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-space-room-mentions__empty {
+  padding: 6px 10px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-skill-scope {
+  flex: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--verevon-text) 8%, transparent);
+  padding: 1px 7px;
+  color: var(--verevon-text);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.verevon-space-room-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-room-skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 3px 6px 3px 9px;
+  color: var(--verevon-text);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.verevon-space-room-skill-chip__icon {
+  width: 13px;
+  height: 13px;
+  color: var(--verevon-accent-ink);
+}
+
+.verevon-space-room-skill-chip__remove {
+  display: inline-flex;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  padding: 2px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-space-room-skill-chip__remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+.verevon-space-room-skill-chip__remove:hover {
+  background: color-mix(in srgb, var(--verevon-text) 8%, transparent);
+  color: var(--verevon-text);
+}
+
+.verevon-space-room-skill-chip__remove:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 1px;
+}
+
+/* Work tab: where routines are managed (later tier). A footnote, not a form. */
+.verevon-space-work__routines {
+  margin: 12px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.verevon-space-work__routines a {
+  color: var(--verevon-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ── Presence: who is in the room, and who is writing ──────────────────────
+   The header line is a fact among the room's other facts, so it inherits the
+   meta row's ink rather than introducing a colour. The typing line sits above
+   the composer, matching the agent working line's geometry so the two read as
+   one family — a colleague on top, Verevon below. */
+
+.verevon-space-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.verevon-space-presence__dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--verevon-success, #2f7d4f);
+}
+
+.verevon-space-room-composer__typing {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 6px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-space-room-composer__typing-dots {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 8px;
+}
+
+.verevon-space-room-composer__typing-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: verevon-typing-bounce 1.2s ease-in-out infinite;
+}
+
+.verevon-space-room-composer__typing-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.verevon-space-room-composer__typing-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes verevon-typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.55; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+/* Motion is decoration here: the sentence carries the whole meaning. */
+@media (prefers-reduced-motion: reduce) {
+  .verevon-space-room-composer__typing-dots span {
+    animation: none;
+    opacity: 0.75;
+  }
+}
+
+.dark .verevon-space-room-composer__typing {
+  color: var(--verevon-sidebar-text);
 }

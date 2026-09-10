@@ -1,0 +1,290 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>oidcProvider</highlighted_element>
+  <language>JavaScript</language>
+  <offset>2</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>10</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>oidcProvider</highlighted_element>
+  <language>JavaScript</language>
+  <offset>2</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1058</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>oidcProvider</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1058</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>oidcProvider</highlighted_element>
+  <language>JavaScript</language>
+  <offset>10</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1066</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>oidcProvider</highlighted_element>
+  <language>JavaScript</language>
+  <offset>36</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/auth.ts</file>
+  <line>1066</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/auth.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>oidcProvider</highlighted_element>
+  <language>JavaScript</language>
+  <offset>36</offset>
+  <length>12</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>357</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>20</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>363</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>20</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>369</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>url</highlighted_element>
+  <language>JavaScript</language>
+  <offset>20</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>561</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>url</highlighted_element>
+  <language>JavaScript</language>
+  <offset>19</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>580</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>20</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>593</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>url</highlighted_element>
+  <language>JavaScript</language>
+  <offset>22</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>714</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>20</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>747</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>20</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>754</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>20</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>1071</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>38</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>1168</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>38</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>1311</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>24</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>1346</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>24</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>1535</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>email</highlighted_element>
+  <language>JavaScript</language>
+  <offset>24</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>1584</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>url</highlighted_element>
+  <language>JavaScript</language>
+  <offset>29</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts</file>
+  <line>1590</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/auth/orpc-router.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>url</highlighted_element>
+  <language>JavaScript</language>
+  <offset>22</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/db/redis.ts</file>
+  <line>312</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/db/redis.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>disconnect</highlighted_element>
+  <language>JavaScript</language>
+  <offset>16</offset>
+  <length>10</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts</file>
+  <line>1774</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/orpc/auth.controller.ts" />
+  <problem_class id="JSDeprecatedSymbols" severity="WEAK WARNING" attribute_key="DEPRECATED_ATTRIBUTES">Deprecated symbol used</problem_class>
+  <description>Deprecated symbol used, consult docs for better alternative</description>
+  <highlighted_element>connection</highlighted_element>
+  <language>JavaScript</language>
+  <offset>14</offset>
+  <length>10</length>
+</problem>
+</problems>

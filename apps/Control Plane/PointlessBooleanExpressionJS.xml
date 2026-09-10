@@ -1,0 +1,434 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>487</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.emailVerified</description>
+  <highlighted_element>message.emailVerified !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>487</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.emailVerified</description>
+  <highlighted_element>message.emailVerified !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>621</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.emailVerified</description>
+  <highlighted_element>message.emailVerified !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>621</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.emailVerified</description>
+  <highlighted_element>message.emailVerified !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>31</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>1358</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.isActive</description>
+  <highlighted_element>message.isActive !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>1358</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.isActive</description>
+  <highlighted_element>message.isActive !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>1492</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.isActive</description>
+  <highlighted_element>message.isActive !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>1492</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.isActive</description>
+  <highlighted_element>message.isActive !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>2242</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>2242</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>2292</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>2292</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>3781</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.activeOnly</description>
+  <highlighted_element>message.activeOnly !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>3781</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.activeOnly</description>
+  <highlighted_element>message.activeOnly !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>3831</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.activeOnly</description>
+  <highlighted_element>message.activeOnly !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>3831</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.activeOnly</description>
+  <highlighted_element>message.activeOnly !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>3972</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>3972</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4008</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4008</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4578</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4578</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4614</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4614</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4828</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4828</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4864</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>4864</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5073</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.activeOnly</description>
+  <highlighted_element>message.activeOnly !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5073</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.activeOnly</description>
+  <highlighted_element>message.activeOnly !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5123</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.activeOnly</description>
+  <highlighted_element>message.activeOnly !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5123</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.activeOnly</description>
+  <highlighted_element>message.activeOnly !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>28</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5416</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5416</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5452</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts</file>
+  <line>5452</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/grpc/proto/user/v1/user.ts" />
+  <problem_class id="PointlessBooleanExpressionJS" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Pointless statement or boolean expression</problem_class>
+  <description>Can be simplified to message.success</description>
+  <highlighted_element>message.success !== false</highlighted_element>
+  <language>TypeScript</language>
+  <offset>8</offset>
+  <length>25</length>
+</problem>
+</problems>

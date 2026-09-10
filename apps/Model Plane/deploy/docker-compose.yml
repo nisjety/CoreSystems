@@ -581,6 +581,13 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai,cohere}
+      # Optional ChatGPT subscription route. Add openai-codex-subscription to
+      # INFERENCE_PROVIDER_ORDER only after setting all three variables. This
+      # service gets an opaque connection id plus this dedicated service key;
+      # Codex-managed user auth remains in Integration Core.
+      CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL: ${CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL:-}
+      CODEX_SUBSCRIPTION_INTERNAL_API_KEY: ${CODEX_SUBSCRIPTION_INTERNAL_API_KEY:-}
+      CODEX_SUBSCRIPTION_MODELS: ${CODEX_SUBSCRIPTION_MODELS:-}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
       # Verevon intent layer — turns the verevon-budget/-balance/-genius modes into

@@ -23,7 +23,16 @@ COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # as a BuildKit named context by compose/CI; copying it to the path encoded by
 # the local `file:` dependency keeps the frontend context small without
 # publishing a second, drifting SDK package.
-COPY --from=quarry-client [".", "/Ingestion Plane/Quarry-v2/sdks/typescript/"]
+# `--chown` matters here, and its absence is not cosmetic: `@quarry/client` is a
+# `file:` dependency, and pnpm imports those by HARDLINKING the package's files
+# into the virtual store. This stage runs as `node`, so without the chown the
+# SDK lands root-owned and every hardlink fails with `Operation not permitted`
+# (os error 1) once the kernel has `fs.protected_hardlinks=1` — the default in
+# Docker Desktop's VM, which is why this reproduces there and not in every CI.
+# The error names a different file on each run, so it reads like a flake rather
+# than a permission problem. Prefer this over `package-import-method=copy`,
+# which would hide the cause and copy the whole SDK on every install.
+COPY --from=quarry-client --chown=node:node [".", "/Ingestion Plane/Quarry-v2/sdks/typescript/"]
 RUN --mount=type=cache,target=/home/node/.local/share/pnpm/store,uid=1000,gid=1000 \
     pnpm install --frozen-lockfile
 
@@ -37,6 +46,24 @@ EXPOSE 5173
 CMD ["pnpm", "dev", "--host", "0.0.0.0"]
 
 FROM dev AS build
+# `COPY --chown=node:node . .` above is what first reveals packages/* and
+# apps/remote-dev's own package.json files -- `pnpm install --frozen-lockfile`
+# earlier in the `dev` stage only had the root manifest on disk. pnpm's
+# dependency-status check runs before any `pnpm run <script>` and, seeing the
+# now-complete workspace, decides node_modules needs to be purged and
+# reinstalled to reconcile. That decision needs a confirmation prompt, and a
+# Docker RUN step never has a TTY to answer it. CI=true is pnpm's own
+# documented way to say this is a non-interactive environment (which a Docker
+# build genuinely is), so it proceeds instead of aborting.
+ENV CI=true
+# @verevon/remote-core (packages/remote-core) is a `workspace:*` dep that
+# RemoteSupportPage.tsx imports. `pnpm install` only links the workspace
+# package -- it does not run remote-core's own `build` script -- and its
+# package.json `main`/`types`/`exports` all point at dist/, which is
+# gitignored. Without this step `pnpm build`'s typecheck fails with "Cannot
+# find module '@verevon/remote-core'" instead of a legible build error.
+# Mirrors the same fix in the `spa-verify` CI job's workflow step.
+RUN pnpm --filter @verevon/remote-core run build
 RUN pnpm build
 
 # Static production image. nginx-unprivileged runs as UID 101 and listens on a

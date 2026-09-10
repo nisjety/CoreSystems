@@ -1,0 +1,230 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_DEEP_DIVE.md</file>
+  <line>17</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_DEEP_DIVE.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Service | Path | Runtime | Main ownership | Primary APIs | |---|---|---:|---|---| | `auth-core` | ...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>1159</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md</file>
+  <line>459</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_OWNERSHIP.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Operation | Service | Endpoint | Proc called (DB) | Gating | |-----------|---------|----------|---...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>1154</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md</file>
+  <line>128</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Component | Live result ...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>5819</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md</file>
+  <line>328</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_STATUS.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Target | Tests/static result ...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>5961</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/CONTROL_PLANE_TEST_FLOW.md</file>
+  <line>264</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/CONTROL_PLANE_TEST_FLOW.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Layer | Service | Port | Role | Expected Health | |-------|---------|------|------|---------------...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>492</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/DEPLOYMENT_CHECKLIST.md</file>
+  <line>175</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/DEPLOYMENT_CHECKLIST.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Service | HTTP | gRPC | Metrics | |---------|------|------|---------| | auth-core | 3011 | 50011 |...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>259</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/QUICK_REFERENCE.md</file>
+  <line>110</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/QUICK_REFERENCE.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Table | Purpose | |-------|---------| | `organizations` | Core org data (id, name, slug, plan, sta...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>421</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/README.md</file>
+  <line>18</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/README.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Service | Port (HTTP) | Port (gRPC) | Port (Metrics) | Description |...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>700</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/config/README.md</file>
+  <line>49</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/config/README.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| principal | host-side variable | | --- | --- | | `embedding-engine` | `MODEL_PLANE_EMBEDDING_INFER...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>328</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/PROGRESS.md</file>
+  <line>333</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/PROGRESS.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Metric | Node.js (NestJS) | Go (gRPC) | |--------|------------------|-----------| | **Port** | 300...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>578</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md</file>
+  <line>205</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/SSO_SETUP_GUIDE.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Variable | Required | Description | Example | |----------|----------|-------------|---------| | `S...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>673</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/org-core.md</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/org-core.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Container port | Host port | Purpose (confirmed via logs / curl) | |---|---|---| | 6061 | 6061 | p...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>333</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>56</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Original finding | Current disposition and evidence | |---|---| | Session Core forged bearer/heade...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>3599</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>72</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Command/check | Result | |---|---| | Focused Auth coverage (`reconciliation-http`, outbox revision...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>1102</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>101</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| # | Severity | Service | Finding | Live evidence | |---|---|---|---|---| | 1 | **CRITICAL — FIXED ...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>7759</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>133</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Doc | Verdict | Action taken | |---|---|---| | `README.md` | **delete** | Not edited (per instruct...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>2892</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>153</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Command / check | Result | |---|---| | `bash test-control-plane-integration.sh` | 9/9 pass | | `ba...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>1220</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>196</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Command | Result | Notes | |---|---|---| | `go test ./...` in `audit-core` | Pass | Checked servic...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>500</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md</file>
+  <line>207</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/docs/core-research/plane-audit-2026-07-10.md" />
+  <problem_class id="MarkdownIncorrectTableFormatting" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Incorrect table formatting</problem_class>
+  <description>Table is not correctly formatted</description>
+  <highlighted_element>| Command | Result | Notes | |---|---|---| | `gofmt -l audit-core billing-core org-core session-core...</highlighted_element>
+  <language>Markdown</language>
+  <offset>0</offset>
+  <length>560</length>
+</problem>
+</problems>

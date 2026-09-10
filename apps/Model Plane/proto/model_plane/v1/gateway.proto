@@ -255,6 +255,10 @@ message InvokeRequest {
   // ineligible providers in every chain path and fails closed with a typed
   // precondition naming this tier when none remains.
   PrivacyTier min_privacy_tier = 22;
+
+  // Opaque, user-owned Integration Core subscription connection. It is valid
+  // only with provider="openai-codex-subscription" and is not an OAuth token.
+  string subscription_connection_id = 23;
 }
 
 // ContentPart — one piece of a multimodal turn (chat-parity §9 vision).

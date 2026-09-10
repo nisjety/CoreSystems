@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/repository.go</file>
+  <line>280</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/repository.go" />
+  <problem_class id="GoPreferNilSlice" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Empty slice declared using a literal</problem_class>
+  <description>Empty slice declaration using a literal</description>
+  <highlighted_element>[]interface{}</highlighted_element>
+  <language>go</language>
+  <offset>9</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/users/repository.go</file>
+  <line>308</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/users/repository.go" />
+  <problem_class id="GoPreferNilSlice" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Empty slice declared using a literal</problem_class>
+  <description>Empty slice declaration using a literal</description>
+  <highlighted_element>[]*User</highlighted_element>
+  <language>go</language>
+  <offset>10</offset>
+  <length>7</length>
+</problem>
+</problems>

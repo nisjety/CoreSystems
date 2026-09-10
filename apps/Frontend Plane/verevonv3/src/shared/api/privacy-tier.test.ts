@@ -4,6 +4,7 @@ import {
   normalizePrivacyTier,
   privacyTierBadgeLabel,
   privacyTierBadgeTitle,
+  privacyTierWireValue,
   sovereignCatalogNotice,
 } from './privacy-tier'
 
@@ -64,6 +65,21 @@ describe('claimed-tier predicate (affirmative tint gate)', () => {
     expect(isClaimedPrivacyTier('unspecified')).toBe(false)
     expect(isClaimedPrivacyTier(undefined)).toBe(false)
     expect(isClaimedPrivacyTier(null)).toBe(false)
+  })
+})
+
+describe('invoke wire encoding', () => {
+  it('encodes selectable tiers as protobuf ordinals', () => {
+    expect(privacyTierWireValue('global')).toBe(1)
+    expect(privacyTierWireValue('eu_resident')).toBe(2)
+    expect(privacyTierWireValue('zdr_contractual')).toBe(3)
+    expect(privacyTierWireValue('sovereign')).toBe(4)
+  })
+
+  it('omits unspecified and absent tiers', () => {
+    expect(privacyTierWireValue('unspecified')).toBeUndefined()
+    expect(privacyTierWireValue(undefined)).toBeUndefined()
+    expect(privacyTierWireValue(null)).toBeUndefined()
   })
 })
 

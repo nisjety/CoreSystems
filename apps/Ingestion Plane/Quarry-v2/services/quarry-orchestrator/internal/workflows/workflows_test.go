@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
 
+	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/activities"
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/errs"
 )
@@ -47,6 +48,109 @@ func TestScrapeJobWF_HappyPath(t *testing.T) {
 	// Started + PageFetched + Completed = 3 events.
 	emitCount := emitCallCount(env, a)
 	require.GreaterOrEqual(t, emitCount, 3, "expected at least 3 lifecycle events emitted")
+}
+
+func TestPageExtractedPayload_MirrorsRuntimeExtraction(t *testing.T) {
+	res := activities.RunPageResult{
+		Status:       200,
+		Fingerprint:  "blake3:abc",
+		ContentType:  "text/html; charset=utf-8",
+		Title:        "aquatiq.com",
+		DisplayTitle: "Aquatiq – hygiene for matindustrien",
+		TitleSource:  "model",
+		Excerpt:      "Vi leverer hygieneløsninger til næringsmiddelindustrien.",
+		Summary:      "Leverandør av hygieneløsninger.",
+		WordCount:    42,
+		Lang:         "no",
+		Driver:       "browser",
+	}
+	payload := pageExtractedPayload("https://aquatiq.com/", res)
+	require.NotNil(t, payload)
+	require.Equal(t, "https://aquatiq.com/", payload["url"])
+	require.Equal(t, "Aquatiq – hygiene for matindustrien", payload["title"])
+	require.Equal(t, "model", payload["title_source"])
+	require.Equal(t, res.Excerpt, payload["excerpt"])
+	require.Equal(t, res.Summary, payload["summary"])
+	require.Equal(t, uint64(42), payload["word_count"])
+	require.Equal(t, "no", payload["lang"])
+	require.Equal(t, "browser", payload["driver"])
+	require.Equal(t, "text/html; charset=utf-8", payload["content_type"])
+	require.Equal(t, "blake3:abc", payload["fingerprint"])
+
+	// Host-titled page without summary/lang: optional keys are absent, not "".
+	host := pageExtractedPayload("https://aquatiq.com/", activities.RunPageResult{
+		Title: "aquatiq.com", TitleSource: "host", Excerpt: "text", Driver: "static",
+	})
+	require.NotNil(t, host)
+	require.Equal(t, "aquatiq.com", host["title"])
+	_, hasSummary := host["summary"]
+	require.False(t, hasSummary)
+	_, hasLang := host["lang"]
+	require.False(t, hasLang)
+
+	// Runtime without extraction (older edge / non-HTML) → no event.
+	require.Nil(t, pageExtractedPayload("https://aquatiq.com/x.pdf", activities.RunPageResult{
+		Status: 200, Title: "x",
+	}))
+}
+
+func TestScrapeJobWF_EmitsPageExtractedWhenRuntimeProvidesExtraction(t *testing.T) {
+	env, a := newEnv(t)
+
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(activities.RunPageResult{
+		Status:       200,
+		Fingerprint:  "blake3:abc",
+		Title:        "aquatiq.com",
+		DisplayTitle: "Om Aquatiq",
+		TitleSource:  "model",
+		Excerpt:      "Vi leverer hygieneløsninger.",
+		WordCount:    4,
+		Driver:       "browser",
+	}, nil).Once()
+
+	var types []quarrycontracts.EventType
+	var extracted map[string]any
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			evt, ok := args.Get(2).(quarrycontracts.Event)
+			if !ok {
+				if p, okp := args.Get(2).(*quarrycontracts.Event); okp && p != nil {
+					evt, ok = *p, true
+				}
+			}
+			if ok {
+				types = append(types, evt.Type)
+				if evt.Type == quarrycontracts.EvtPageExtracted {
+					extracted = evt.Payload
+				}
+			}
+		}).
+		Return(nil)
+
+	env.ExecuteWorkflow(ScrapeJobWF, ScrapeJobInput{
+		RunID: "run_test_extracted",
+		URL:   "https://aquatiq.com",
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Contains(t, types, quarrycontracts.EvtPageFetched)
+	require.Contains(t, types, quarrycontracts.EvtPageExtracted)
+	// page_extracted follows page_fetched, as documented.
+	fetchedIdx, extractedIdx := -1, -1
+	for i, tp := range types {
+		if tp == quarrycontracts.EvtPageFetched && fetchedIdx < 0 {
+			fetchedIdx = i
+		}
+		if tp == quarrycontracts.EvtPageExtracted && extractedIdx < 0 {
+			extractedIdx = i
+		}
+	}
+	require.Greater(t, extractedIdx, fetchedIdx)
+	require.NotNil(t, extracted)
+	require.Equal(t, "Om Aquatiq", extracted["title"])
+	require.Equal(t, "model", extracted["title_source"])
+	require.Equal(t, "Vi leverer hygieneløsninger.", extracted["excerpt"])
 }
 
 func TestScrapeJobWF_PageFailureBubblesUpAndEmitsRunFailed(t *testing.T) {

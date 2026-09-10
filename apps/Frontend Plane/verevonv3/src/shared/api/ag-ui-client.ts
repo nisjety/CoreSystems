@@ -21,6 +21,7 @@ import {
   type ChatInvokeRequest,
   type ChatStreamHandlers,
 } from './chat-client'
+import { isSelectablePrivacyTier } from './privacy-tier'
 import { readSseStream, type SseEvent } from './sse'
 import { toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 
@@ -276,7 +277,10 @@ export function buildAgentRunInputBody(request: ChatInvokeRequest): Record<strin
     ['spaceRef', request.spaceRef],
     ['mentionedAgentRef', request.mentionedAgentRef],
     ['supportContextQuery', wireBody.support_context_query],
-    ['minPrivacyTier', wireBody.min_privacy_tier],
+    // `wireBody.min_privacy_tier` is chat-client's own numeric wire ordinal
+    // for its invoke boundary — not what a lossless RunAgentInput passthrough
+    // wants. Forward the readable PrivacyTier string the caller selected.
+    ['minPrivacyTier', isSelectablePrivacyTier(request.minPrivacyTier) ? request.minPrivacyTier : undefined],
   ] as const) {
     if (value !== undefined && value !== null && value !== '') forwardedProps[key] = value
   }

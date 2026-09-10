@@ -74,6 +74,11 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	readers.POST("/conversations/search", handler.SearchConversations)
 	readers.GET("/tickets", handler.ListTickets)
 	readers.GET("/ticket-operations/:idempotency_key", handler.GetTicketOperation)
+	// S2.3 slice 5: correlate the owner event into Space Activity. A read-only
+	// projection of the operation ledger, filtered by the grant that
+	// authorized each effect for that Space — see ListSpaceActivity for why the
+	// Space membership gate belongs to the calling gateway and not here.
+	readers.GET("/spaces/:space_ref/activity", handler.ListSpaceActivity)
 	readers.GET("/tickets/:id/activity", handler.ListTicketActivity)
 	readers.GET("/tickets/:id/csat-outcome", handler.GetTicketCSATOutcome)
 	readers.GET("/tickets/:id", handler.GetTicket)

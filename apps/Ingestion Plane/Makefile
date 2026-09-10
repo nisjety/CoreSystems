@@ -249,3 +249,29 @@ ci-push: ci-build push-images
 
 # Default target
 .DEFAULT_GOAL := help
+
+
+# -- Docker base images -------------------------------------------------------
+
+# Every plane pins its Docker bases by digest (FROM ...@sha256:...). Docker
+# re-pulls a missing digest on demand, so nothing breaks without this -- but the
+# pull lands mid-build and stalls it, and one `docker image prune -a` strips
+# every pin at once. Warm them first instead.
+#
+# Deliberately NON-FATAL: offline, or on a machine without Docker, the build
+# should still proceed and let Docker pull (or fail) on its own terms. Warming
+# is an optimisation; `make check-bases` at the root is the gate.
+#
+# Written as a ONE-LINE recipe on purpose. A backslash continuation needs the
+# backslash immediately before the newline, and these files still check out
+# CRLF on Windows, which puts a CR in between and silently breaks the join.
+#
+# The rules below are prerequisite-only: they ADD warm-bases to targets defined
+# earlier in this file without redefining their recipes.
+REPO_ROOT ?= $(shell git rev-parse --show-toplevel 2>/dev/null || echo ../..)
+
+.PHONY: warm-bases
+warm-bases:
+	@$(MAKE) --no-print-directory -C "$(REPO_ROOT)" warm-bases 2>/dev/null || echo "  warm-bases skipped; Docker will pull pinned bases on demand"
+
+build: warm-bases

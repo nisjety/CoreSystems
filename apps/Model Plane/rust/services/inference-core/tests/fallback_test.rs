@@ -70,6 +70,7 @@ impl ProviderRouterDyn for MockProvider {
                     stop_reason: "end_turn".to_owned(),
                     provider_used: String::new(),
                     residency: String::new(),
+                    token_confidence: None,
                 })
                 .await;
         });
@@ -259,6 +260,9 @@ fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
         anthropic_api_key: None,
         openai_api_base: None,
         openai_api_key: None,
+        codex_subscription_integration_core_url: None,
+        codex_subscription_internal_api_key: None,
+        codex_subscription_models: vec![],
         azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
         azure_openai_api_key: Some("test-key".to_owned()),
         azure_openai_api_version: "2025-01-01-preview".to_owned(),
@@ -309,6 +313,9 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
         anthropic_api_key: Some("direct-but-broke".to_owned()),
         openai_api_base: None,
         openai_api_key: None,
+        codex_subscription_integration_core_url: None,
+        codex_subscription_internal_api_key: None,
+        codex_subscription_models: vec![],
         azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
         azure_openai_api_key: Some("test-key".to_owned()),
         azure_openai_api_version: "2025-01-01-preview".to_owned(),
@@ -381,6 +388,9 @@ fn cohere_registers_alongside_azure_openai_without_stealing_its_traffic() {
         anthropic_api_key: None,
         openai_api_base: None,
         openai_api_key: None,
+        codex_subscription_integration_core_url: None,
+        codex_subscription_internal_api_key: None,
+        codex_subscription_models: vec![],
         azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
         azure_openai_api_key: Some("test-key".to_owned()),
         azure_openai_api_version: "2025-01-01-preview".to_owned(),

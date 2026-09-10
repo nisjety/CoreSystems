@@ -4,6 +4,7 @@ import {
   activityFromThread,
   activitySentence,
   buildSpaceActivity,
+  buildSpaceRecord,
   orderActivity,
   type SpaceActivityItem,
   type ThreadLikeActivitySource,
@@ -158,6 +159,29 @@ describe('activity grammar', () => {
     })
   })
 
+  describe('where a row sends you', () => {
+    // The Activity tab is where a supervisor sees that something needs them.
+    // The decision itself lives on the post, in the Chat tab, so a row that
+    // dropped the reader on whichever tab the hash happened to hold would show
+    // them a duty and hide the control for it.
+    it('lands on the chat tab, where the decision surface is', () => {
+      const items = activityFromThread(
+        thread({ space_id: 'space-room', latest_run_status: 'awaiting_approval' }),
+      )
+      for (const item of items) {
+        expect(item.href).toContain('/spaces/space-room')
+        expect(item.href?.endsWith('#chat')).toBe(true)
+      }
+    })
+
+    // Unchanged by the hash: an item whose owning Space is unknown still has
+    // nowhere honest to point.
+    it('still refuses to link when the owning Space is unknown', () => {
+      const items = activityFromThread(thread({ space_id: '', latest_run_status: 'failed' }))
+      expect(items.every((item) => item.href === undefined)).toBe(true)
+    })
+  })
+
   describe('the sentence', () => {
     it('reads as verb, object, outcome', () => {
       const run = activityFromThread(
@@ -165,5 +189,31 @@ describe('activity grammar', () => {
       ).find((item) => item.renderClass === 'run')
       expect(activitySentence(run!)).toBe('Kjøring: Fakturakontroll → venter på godkjenning')
     })
+  })
+})
+
+describe('run cost detail — a zero is not a figure', () => {
+  const run = (extra: Record<string, unknown>) => ({
+    run_id: 'run_1',
+    thread_id: 't1',
+    space_id: 's1',
+    goal: 'Tell lageret',
+    status: 'completed',
+    ...extra,
+  })
+
+  it('never prints a zero token figure: session-core reports 0 for every run', () => {
+    const [item] = buildSpaceRecord({ runs: [run({ input_tokens: 0, output_tokens: 0, steps_completed: 3 })] })
+    expect(item?.detail ?? []).toEqual(['3 steg'])
+  })
+
+  it('prints tokens only when the listing actually carries some', () => {
+    const [item] = buildSpaceRecord({ runs: [run({ input_tokens: 80, output_tokens: 40, steps_completed: 0 })] })
+    expect(item?.detail).toEqual(['120 tokens'])
+  })
+
+  it('has no detail at all when nothing is known', () => {
+    const [item] = buildSpaceRecord({ runs: [run({})] })
+    expect(item?.detail).toBeUndefined()
   })
 })

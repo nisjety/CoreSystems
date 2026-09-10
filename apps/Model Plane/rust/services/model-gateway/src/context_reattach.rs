@@ -173,6 +173,7 @@ mod tests {
 
     fn message(role: &str, content: &str) -> SessionMessage {
         SessionMessage {
+            message_id: String::new(),
             role: role.to_owned(),
             content: content.to_owned(),
             ..Default::default()

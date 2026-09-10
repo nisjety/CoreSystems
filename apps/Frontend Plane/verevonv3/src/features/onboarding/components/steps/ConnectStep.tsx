@@ -1,6 +1,7 @@
 import { Minus, Plus, RotateCcw } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, Show, untrack } from 'solid-js'
 import { OnboardingLinkButton } from '@/features/onboarding/components/shared/OnboardingLinkButton'
+import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
 import {
   type ConnectorCategory,
   type ConnectorOption,
@@ -8,6 +9,8 @@ import {
   onboardingConnectorOptions,
 } from '@/features/onboarding/lib/model'
 import { truncateGraphLabel } from '@/features/onboarding/lib/view'
+import type { ConnectedAccountView } from '@/features/onboarding/lib/connection-truth'
+import { ConnectedAccountsPanel, type LibraryPickerActions } from '@/features/onboarding/components/steps/ConnectedAccountsPanel'
 import { Badge } from '@/shared/ui/Badge'
 import { Button } from '@/shared/ui/Button'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
@@ -39,11 +42,19 @@ const connectorTabs: Array<{
     label: 'Other apps',
     description: 'Commerce, billing, shipping and operational sources',
   },
+  {
+    id: 'ai',
+    label: 'AI',
+    description: 'Use an existing ChatGPT subscription',
+  },
 ]
 
 type ConnectStepContentProps = {
   connectedSources: OnboardingState['connectors']
   connectingId?: string
+  /** The org exists by this step in the standard flow. It is optional only so
+   * the static onboarding preview remains renderable before org creation. */
+  orgId?: string
   onConnect: (option: ConnectorOption) => void | Promise<void>
   onContinue: () => void
   onSkip: () => void
@@ -51,6 +62,14 @@ type ConnectStepContentProps = {
    * can start fetching early (only armed by the caller when a source is
    * connected), so it's ready by the time the user reaches the plan step. */
   onPrefetch?: () => void
+  /** integration-core's truth about what is connected (connections +
+   * syncLanes), shown prominently above the connector catalogue. */
+  accounts?: ConnectedAccountView[]
+  accountsLoading?: boolean
+  accountsUnavailable?: boolean
+  onRefreshAccounts?: () => void
+  onReconnect?: (account: ConnectedAccountView) => void
+  library?: LibraryPickerActions
 }
 
 export function ConnectStepContent(props: ConnectStepContentProps) {
@@ -64,6 +83,15 @@ export function ConnectStepContent(props: ConnectStepContentProps) {
       <p class="onboarding-eyebrow">Integrations</p>
       <h1>Koble systemer</h1>
       <p>Velg systemene Verevon skal lære fra, svare på vegne av, eller bruke som signaler for automasjon.</p>
+
+      <ConnectedAccountsPanel
+        accounts={props.accounts ?? []}
+        loading={props.accountsLoading}
+        unavailable={props.accountsUnavailable}
+        onRefresh={props.onRefreshAccounts}
+        onReconnect={props.onReconnect}
+        library={props.library}
+      />
 
       <div class="onboarding-connector-tabs" role="tablist" aria-label="Integration categories">
         <For each={connectorTabs}>
@@ -83,29 +111,38 @@ export function ConnectStepContent(props: ConnectStepContentProps) {
       </div>
 
       <div class="onboarding-connector-group" role="tabpanel">
-        <h3>{connectorTabs.find((tab) => tab.id === activeTab())?.label}</h3>
-        <div class="onboarding-connector-list">
-          <For each={visibleConnectors()}>
-            {(item) => {
-              const status = () => props.connectedSources.find((connector) => connector.id === item.id)?.status
+        <Show
+          when={activeTab() === 'ai'}
+          fallback={
+            <>
+              <h3>{connectorTabs.find((tab) => tab.id === activeTab())?.label}</h3>
+              <div class="onboarding-connector-list">
+                <For each={visibleConnectors()}>
+                  {(item) => {
+                    const status = () => props.connectedSources.find((connector) => connector.id === item.id)?.status
 
-              return (
-                <VerevonSelectableRow
-                  compact
-                  onClick={() => void props.onConnect(item)}
-                  disabled={props.connectingId === item.id}
-                  title={item.label}
-                  description={item.hint}
-                  meta={
-                    <Badge tone={status() === 'connected' ? 'accent' : 'neutral'}>
-                      {connectorStatusLabel(status(), props.connectingId === item.id)}
-                    </Badge>
-                  }
-                />
-              )
-            }}
-          </For>
-        </div>
+                    return (
+                      <VerevonSelectableRow
+                        compact
+                        onClick={() => void props.onConnect(item)}
+                        disabled={props.connectingId === item.id}
+                        title={item.label}
+                        description={item.hint}
+                        meta={
+                          <Badge tone={status() === 'connected' ? 'accent' : 'neutral'}>
+                            {connectorStatusLabel(status(), props.connectingId === item.id)}
+                          </Badge>
+                        }
+                      />
+                    )
+                  }}
+                </For>
+              </div>
+            </>
+          }
+        >
+          <ChatGptSubscriptionPanel orgId={props.orgId ?? ''} variant="onboarding" />
+        </Show>
       </div>
 
       <div class="onboarding-actions onboarding-actions--connect">

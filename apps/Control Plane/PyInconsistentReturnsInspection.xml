@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/sync-disposable-email-domains.py</file>
+  <line>24</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/sync-disposable-email-domains.py" />
+  <problem_class id="PyInconsistentReturnsInspection" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Inconsistent return statements</problem_class>
+  <description>Missing return statement on some paths</description>
+  <highlighted_element>with urllib.request.urlopen(request, timeout=timeout_s) as response:</highlighted_element>
+  <language>Python</language>
+  <offset>4</offset>
+  <length>68</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/scripts/sync-nvd-feeds.py</file>
+  <line>27</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/scripts/sync-nvd-feeds.py" />
+  <problem_class id="PyInconsistentReturnsInspection" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Inconsistent return statements</problem_class>
+  <description>Missing return statement on some paths</description>
+  <highlighted_element>with urllib.request.urlopen(request, timeout=timeout_s) as response:</highlighted_element>
+  <language>Python</language>
+  <offset>4</offset>
+  <length>68</length>
+</problem>
+</problems>

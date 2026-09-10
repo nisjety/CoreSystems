@@ -56,6 +56,7 @@ import { ApiError } from '@/shared/api/http'
 import { getCSATScorecard, getTicketCSATOutcome, listTicketMacros, type SupportTicket, type TicketMacro } from '@/shared/api/tickets-client'
 import { cn } from '@/shared/lib/cn'
 import { localeDateTime, useI18n } from '@/shared/i18n'
+import { AiModelPicker } from '@/shared/components/AiModelPicker'
 
 type AsideTab = 'details' | 'verevon' | 'actions' | 'audit'
 
@@ -325,20 +326,24 @@ function VerevonPanel(props: {
     // from a prior result visible beside a newer uncited answer or a new case.
     setSources(next)
   }
-  const selectionScopeKey = () => JSON.stringify([
+  const selectionScopeKey = createMemo(() => JSON.stringify([
     props.userId.trim(),
     props.orgId.trim(),
     props.selectedTicket?.id ?? null,
     props.selectedTicket?.conversationId?.trim() ?? null,
-  ])
+  ]))
   const isCurrentSelection = (scopeKey: string) => selectionScopeKey() === scopeKey
 
   createEffect(
-    // compute: track the selection scope key (its value is unused downstream,
-    // it only needs to trigger a re-run) plus the support-thread scope, which
-    // the effect consults to look up the shared thread id.
-    () => ({ scopeKey: selectionScopeKey(), scope: supportThreadScope() }),
-    ({ scope }) => {
+    // Track only the stable, primitive identity. Inbox polling replaces the
+    // selected ticket object with a fresh copy, but that must not look like a
+    // different conversation and clear an in-progress question or AI result.
+    () => selectionScopeKey(),
+    (scopeKey) => {
+      const [userId, orgId, , conversationId] = JSON.parse(scopeKey) as [string, string, number | null, string | null]
+      const scope: SupportChatThreadScope | null = userId && orgId && conversationId
+        ? { userId, orgId, conversationId }
+        : null
       draftRequestID += 1
       summaryRequestID += 1
       answerRequestID += 1
@@ -376,9 +381,14 @@ function VerevonPanel(props: {
       setDraftSupportAiMode(res.supportAiMode)
       setDraftProposalGroupId(undefined)
       applySources(res.sources)
-    } catch {
+    } catch (cause) {
       if (!isCurrentSelection(selectionKey) || requestID !== draftRequestID) return
-      setError(i18n.tr('Verevon kunne ikke generere et svar. Prøv igjen.', 'Verevon could not generate a reply. Try again.'))
+      setError(cause instanceof ApiError && cause.code === 'model_request_timeout'
+        ? i18n.tr(
+            'Den valgte modellen brukte for lang tid. Prøv igjen eller velg en raskere modell.',
+            'The selected model took too long to respond. Try again or choose a faster model.',
+          )
+        : i18n.tr('Verevon kunne ikke generere et svar. Prøv igjen.', 'Verevon could not generate a reply. Try again.'))
     } finally {
       if (isCurrentSelection(selectionKey) && requestID === draftRequestID) setDraftLoading(false)
     }
@@ -420,8 +430,9 @@ function VerevonPanel(props: {
         setDraftZdr(res.zdr)
         setDraftSupportAiMode(res.supportAiMode)
         setDraftProposalGroupId(undefined)
+      } else {
+        setAnswer(res.text)
       }
-      else setAnswer(res.text)
     } catch {
       if (!isCurrentSelection(selectionKey) || requestID !== cardRequestID) return
       setError(i18n.tr('Verevon-handlingen feilet. Prøv igjen.', 'Verevon action failed. Try again.'))
@@ -635,6 +646,7 @@ function VerevonPanel(props: {
   return (
     <div class="verevon-inbox-verevon-panel">
       <div class="verevon-inbox-aside-scroll verevon-inbox-aside-scroll--panel">
+        <AiModelPicker orgId={props.orgId} respectOrgZdr class="verevon-inbox-verevon-panel__model-picker" />
         <Show
           when={props.selectedTicket}
           fallback={
@@ -649,35 +661,6 @@ function VerevonPanel(props: {
           }
         >
           <div class="verevon-inbox-card-stack">
-            <section class="verevon-inbox-aside-card verevon-inbox-aside-card--soft" aria-label={i18n.tr('Samtalegrunnlag', 'Conversation context')}>
-              <div class="verevon-inbox-card-heading verevon-inbox-card-heading--between">
-                <div>
-                  <MessageCircle class="size-4" />
-                  <h2>{i18n.tr('Samtalegrunnlag', 'Conversation context')}</h2>
-                </div>
-                <span class="verevon-inbox-muted">{props.articles.length} {i18n.tr('meldinger', 'messages')}</span>
-              </div>
-              <Show
-                when={props.articles.length > 0}
-                fallback={<p class="verevon-inbox-muted">{i18n.tr('Ingen meldinger er tilgjengelige i denne lesingen.', 'No messages are available in this authorized read.')}</p>}
-              >
-                <div class="verevon-inbox-conversation-context">
-                  <For each={props.articles.slice(-6)}>
-                    {(article) => (
-                      <article class="verevon-inbox-conversation-context__message">
-                        <div>
-                          <strong>{article.internal ? i18n.tr('Privat notat', 'Internal note') : article.from || i18n.tr('Kunde', 'Customer')}</strong>
-                          <span>{article.internal ? i18n.tr('Kun for teamet', 'Team-only') : article.sender || i18n.tr('Kunde', 'Customer')}</span>
-                        </div>
-                        <p>{article.bodyText || stripToText(article.body ?? '')}</p>
-                      </article>
-                    )}
-                  </For>
-                </div>
-                <small class="verevon-inbox-muted">{i18n.tr('Verevon bruker denne autoriserte samtalen sammen med valgt sak.', 'Verevon uses this permission-scoped conversation together with the selected case.')}</small>
-              </Show>
-            </section>
-
             <Show when={error()}>
               <div class="verevon-inbox-aside-card verevon-inbox-aside-card--error" role="alert">
                 {error()}
@@ -686,55 +669,109 @@ function VerevonPanel(props: {
 
             <section class="verevon-inbox-aside-card">
               <div class="verevon-inbox-card-heading">
-                <Bot class="size-4" />
-                <h2>{i18n.tr('Verevon handlingsplan', 'Verevon action plan')}</h2>
+                <Sparkles class="size-4" />
+                <h2>{i18n.tr('AI-verktøy', 'AI tools')}</h2>
               </div>
-              <ActionSuggestion
-                title={i18n.tr('Internt handlingsnotat', 'Internal action note')}
-                body={i18n.tr('Utkast et kort privat notat for operatører; det sendes aldri til kunden.', 'Draft a concise private operator note; it is never sent to the customer.')}
-                actionLabel={draftLoading() && draftKind() === 'note' ? i18n.tr('Lager utkast …', 'Drafting…') : i18n.tr('Utkast', 'Draft')}
-                onRun={() => void generateDraft('Write a concise internal note for support operators. Do not address the customer, do not promise delivery, and state only transcript-supported facts.', 'note')}
-              />
-              <ActionSuggestion
-                title={i18n.tr('Bekreft hensikt', 'Confirm intent')}
-                body={i18n.tr("Oppdag kundens primære hensikt og beste neste handling.", "Detect the customer's primary intent and the best next action.")}
-                actionLabel={runningCard() === 'intent' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
-                onRun={() => void runCard('intent', 'intent')}
-              />
-              <ActionSuggestion
-                title={i18n.tr('Kildebasert svar', 'Source-backed reply')}
-                body={i18n.tr(
-                  'Utkast et svar som kun er basert på fakta som støttes av samtalen.',
-                  'Draft a reply grounded only in facts supported by the conversation.',
-                )}
-                actionLabel={runningCard() === 'source' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
-                onRun={() =>
-                  void runCard(
-                    'source',
-                    'draft',
-                    'Only assert facts supported by the transcript; do not invent policy or promises.',
-                  )
-                }
-              />
-              <ActionSuggestion
-                title={i18n.tr('Foreslå triage', 'Propose triage')}
-                body={i18n.tr(
-                  'Opprett et begrenset, gjennomgåbart forslag til arbeidstype, kategori, hensikt, prioritet og alvorlighetsgrad.',
-                  'Create a bounded, reviewable proposal for work type, category, intent, priority, and severity.',
-                )}
-                actionLabel={runningCard() === 'route' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
-                onRun={() => void proposeTriage()}
-              />
-              <ActionSuggestion
-                title={i18n.tr('Lag løsningsplan', 'Prepare resolution plan')}
-                body={i18n.tr(
-                  'Samle et svarutkast, privat notat og begrenset triage i én plan som fortsatt må iscenesettes og gjennomgås separat.',
-                  'Prepare a reply, private note, and bounded triage in one plan; every item still has to be staged and reviewed separately.',
-                )}
-                actionLabel={runningCard() === 'resolution' ? i18n.tr('Forbereder …', 'Preparing…') : i18n.tr('Forbered', 'Prepare')}
-                onRun={() => void createResolutionPlan()}
-              />
+              <div class="verevon-inbox-ai-primary-actions">
+                <button type="button" aria-label={i18n.tr('Lag svarutkast', 'Draft reply')} disabled={draftLoading()} onClick={() => void generateDraft()}>
+                  <MessageCircle class="size-4" />
+                  <span>
+                    <strong>{draftLoading() ? i18n.tr('Lager utkast …', 'Drafting…') : i18n.tr('Lag svarutkast', 'Draft reply')}</strong>
+                    <small>{i18n.tr('Basert på samtalen', 'Grounded in the conversation')}</small>
+                  </span>
+                </button>
+                <button type="button" aria-label={i18n.tr('Oppsummer', 'Summarize')} disabled={summaryLoading()} onClick={() => void generateSummary()}>
+                  <FileText class="size-4" />
+                  <span>
+                    <strong>{summaryLoading() ? i18n.tr('Oppsummerer …', 'Summarizing…') : i18n.tr('Oppsummer', 'Summarize')}</strong>
+                    <small>{i18n.tr('Hensikt og neste steg', 'Intent and next step')}</small>
+                  </span>
+                </button>
+              </div>
+
+              <details class="verevon-inbox-ai-advanced">
+                <summary>
+                  <span>{i18n.tr('Flere handlinger', 'More actions')}</span>
+                  <ChevronDown class="size-4" />
+                </summary>
+                <div>
+                  <ActionSuggestion
+                    title={i18n.tr('Internt handlingsnotat', 'Internal action note')}
+                    body={i18n.tr('Utkast et kort privat notat for operatører; det sendes aldri til kunden.', 'Draft a concise private operator note; it is never sent to the customer.')}
+                    actionLabel={draftLoading() && draftKind() === 'note' ? i18n.tr('Lager utkast …', 'Drafting…') : i18n.tr('Utkast', 'Draft')}
+                    onRun={() => void generateDraft('Write a concise internal note for support operators. Do not address the customer, do not promise delivery, and state only transcript-supported facts.', 'note')}
+                  />
+                  <ActionSuggestion
+                    title={i18n.tr('Bekreft hensikt', 'Confirm intent')}
+                    body={i18n.tr("Oppdag kundens primære hensikt og beste neste handling.", "Detect the customer's primary intent and the best next action.")}
+                    actionLabel={runningCard() === 'intent' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
+                    onRun={() => void runCard('intent', 'intent')}
+                  />
+                  <ActionSuggestion
+                    title={i18n.tr('Kildebasert svar', 'Source-backed reply')}
+                    body={i18n.tr('Utkast et svar som kun er basert på fakta som støttes av samtalen.', 'Draft a reply grounded only in facts supported by the conversation.')}
+                    actionLabel={runningCard() === 'source' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
+                    onRun={() => void runCard('source', 'draft', 'Only assert facts supported by the transcript; do not invent policy or promises.')}
+                  />
+                  <ActionSuggestion
+                    title={i18n.tr('Foreslå triage', 'Propose triage')}
+                    body={i18n.tr(
+                      'Opprett et gjennomgåbart forslag til kategori, prioritet og alvorlighetsgrad.',
+                      'Create a reviewable category, priority, and severity proposal.',
+                    )}
+                    actionLabel={runningCard() === 'route' ? i18n.tr('Kjører …', 'Running…') : i18n.tr('Kjør', 'Run')}
+                    onRun={() => void proposeTriage()}
+                  />
+                  <ActionSuggestion
+                    title={i18n.tr('Lag løsningsplan', 'Prepare resolution plan')}
+                    body={i18n.tr(
+                      'Samle svarutkast, privat notat og triage i én plan for gjennomgang.',
+                      'Prepare a reply, private note, and triage plan for review.',
+                    )}
+                    actionLabel={runningCard() === 'resolution' ? i18n.tr('Forbereder …', 'Preparing…') : i18n.tr('Forbered', 'Prepare')}
+                    onRun={() => void createResolutionPlan()}
+                  />
+                  <MacrosPanel
+                    orgId={props.orgId}
+                    onMacroExecuted={props.onMacroExecuted}
+                    selectedTicket={props.selectedTicket}
+                    userId={props.userId}
+                  />
+                </div>
+              </details>
             </section>
+
+            <details class="verevon-inbox-aside-card verevon-inbox-aside-card--soft verevon-inbox-context-disclosure" role="region" aria-label={i18n.tr('Samtalegrunnlag', 'Conversation context')}>
+              <summary>
+                <span>
+                  <MessageCircle class="size-4" />
+                  <strong>{i18n.tr('Samtalegrunnlag', 'Conversation context')}</strong>
+                </span>
+                <span class="verevon-inbox-muted">{props.articles.length} {i18n.tr('meldinger', 'messages')}</span>
+                <ChevronDown class="size-4" />
+              </summary>
+              <div class="verevon-inbox-context-disclosure__content">
+                <Show
+                  when={props.articles.length > 0}
+                  fallback={<p class="verevon-inbox-muted">{i18n.tr('Ingen meldinger er tilgjengelige i denne lesingen.', 'No messages are available in this authorized read.')}</p>}
+                >
+                  <div class="verevon-inbox-conversation-context">
+                    <For each={props.articles.slice(-6)}>
+                      {(article) => (
+                        <article class="verevon-inbox-conversation-context__message">
+                          <div>
+                            <strong>{article.internal ? i18n.tr('Privat notat', 'Internal note') : article.from || i18n.tr('Kunde', 'Customer')}</strong>
+                            <span>{article.internal ? i18n.tr('Kun for teamet', 'Team-only') : article.sender || i18n.tr('Kunde', 'Customer')}</span>
+                          </div>
+                          <p>{article.bodyText || stripToText(article.body ?? '')}</p>
+                        </article>
+                      )}
+                    </For>
+                  </div>
+                  <small class="verevon-inbox-muted">{i18n.tr('Verevon bruker denne autoriserte samtalen sammen med valgt sak.', 'Verevon uses this permission-scoped conversation together with the selected case.')}</small>
+                </Show>
+              </div>
+            </details>
 
             <Show when={resolutionPlan()}>
               {(plan) => (
@@ -828,6 +865,7 @@ function VerevonPanel(props: {
               </section>
             </Show>
 
+            <Show when={draftLoading() || draft()}>
             <section class="verevon-inbox-aside-card verevon-inbox-aside-card--soft">
               <div class="verevon-inbox-card-heading verevon-inbox-card-heading--between">
                 <div>
@@ -874,7 +912,9 @@ function VerevonPanel(props: {
                 </Show>
               </Show>
             </section>
+            </Show>
 
+            <Show when={summaryLoading() || summary()}>
             <section class="verevon-inbox-aside-card">
               <div class="verevon-inbox-card-heading verevon-inbox-card-heading--between">
                 <h2>{i18n.tr('Samtalesammendrag', 'Conversation summary')}</h2>
@@ -888,11 +928,13 @@ function VerevonPanel(props: {
                   : summary() ?? i18n.tr('Oppsummer samtalen og finn kundens hensikt.', 'Summarize the conversation and extract the customer intent.')}
               </p>
             </section>
+            </Show>
 
+            <Show when={sources().length > 0 || answer() || draft() || summary()}>
             <section class="verevon-inbox-aside-card">
               <h2>{i18n.tr('Relevante kilder', 'Relevant sources')}</h2>
               <Show
-                when={sources().length}
+                when={sources().length > 0}
                 fallback={<p class="verevon-inbox-muted">{i18n.tr('Det siste Verevon-svaret hadde ingen eksterne kilder; visningen er kun basert på samtaleutskriften.', 'The latest Verevon output has no external sources; it is based only on the conversation transcript.')}</p>}
               >
                 <div class="verevon-inbox-source-stack">
@@ -900,13 +942,7 @@ function VerevonPanel(props: {
                 </div>
               </Show>
             </section>
-
-              <MacrosPanel
-                orgId={props.orgId}
-                onMacroExecuted={props.onMacroExecuted}
-                selectedTicket={props.selectedTicket}
-                userId={props.userId}
-            />
+            </Show>
           </div>
         </Show>
       </div>
@@ -927,21 +963,24 @@ function VerevonPanel(props: {
             <em>{i18n.tr('Delt tråd aktiv', 'Shared thread active')}</em>
           </Show>
         </div>
-        <div>
+        <form
+          class="verevon-inbox-ask-verevon__form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void askVerevon()
+          }}
+        >
           <input
             value={question()}
             onInput={(event) => setQuestion(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') void askVerevon()
-            }}
             placeholder={i18n.tr('Spør Verevon om denne samtalen', 'Ask Verevon about this conversation')}
             aria-label={i18n.tr('Spør Verevon et spørsmål', 'Ask Verevon a question')}
             disabled={!ready()}
           />
-          <button type="button" disabled={answerLoading() || !ready()} onClick={() => void askVerevon()} aria-label={i18n.tr('Send spørsmål til Verevon', 'Send Verevon question')}>
+          <button type="submit" disabled={answerLoading() || !ready()} aria-label={i18n.tr('Send spørsmål til Verevon', 'Send Verevon question')}>
             <Send class={cn('size-3.5', answerLoading() && 'verevon-inbox-spin')} />
           </button>
-        </div>
+        </form>
       </div>
     </div>
   )

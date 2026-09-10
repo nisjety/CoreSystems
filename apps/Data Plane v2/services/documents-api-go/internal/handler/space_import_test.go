@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/triodelab/dataplane/services/documents-api-go/internal/model"
 	"github.com/triodelab/dataplane/services/documents-api-go/pkg/authctx"
 )
 
@@ -70,4 +72,25 @@ func signedSpaceImportDecision(t *testing.T, privateKey ed25519.PrivateKey, keyI
 	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
 	signed := "v2." + encodedID + "." + encodedPayload
 	return signed + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(signed)))
+}
+
+// The defect this guards: the decision was verified and then discarded, so the
+// document row could not say which room it belonged to and no Space-filtered
+// listing was possible. The Space must come from the signed claims — a
+// body-supplied `space_ref` is a claim, not authority.
+func TestCreateDocumentInputTakesTheSpaceFromClaimsAndNeverFromTheBody(t *testing.T) {
+	var input model.CreateDocumentInput
+	body := []byte(`{"title":"t","content":"c","type":"notion","space_ref":"space:org-1:someone-elses-room"}`)
+	if err := json.Unmarshal(body, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.SpaceRef != "" {
+		t.Fatalf("a body-supplied space_ref must not deserialize; got %q", input.SpaceRef)
+	}
+
+	authority := &spaceImportDecisionClaims{SpaceRef: " space:org-1:room-7 "}
+	input.SpaceRef = strings.TrimSpace(authority.SpaceRef)
+	if input.SpaceRef != "space:org-1:room-7" {
+		t.Fatalf("verified space_ref = %q", input.SpaceRef)
+	}
 }

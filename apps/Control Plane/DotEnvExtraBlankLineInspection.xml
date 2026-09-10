@@ -1,0 +1,86 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>45</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvExtraBlankLineInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Extra blank line</problem_class>
+  <description>Only one extra line between properties is allowed</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>64</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env</file>
+  <line>174</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env" />
+  <problem_class id="DotEnvExtraBlankLineInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Extra blank line</problem_class>
+  <description>Only one extra line between properties is allowed</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>110</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>21</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvExtraBlankLineInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Extra blank line</problem_class>
+  <description>Only one extra line between properties is allowed</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>64</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>124</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvExtraBlankLineInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Extra blank line</problem_class>
+  <description>Only one extra line between properties is allowed</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>56</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.docker</file>
+  <line>156</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.docker" />
+  <problem_class id="DotEnvExtraBlankLineInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Extra blank line</problem_class>
+  <description>Only one extra line between properties is allowed</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>110</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>36</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvExtraBlankLineInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Extra blank line</problem_class>
+  <description>Only one extra line between properties is allowed</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>64</offset>
+  <length>3</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/.env.production</file>
+  <line>161</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/.env.production" />
+  <problem_class id="DotEnvExtraBlankLineInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Extra blank line</problem_class>
+  <description>Only one extra line between properties is allowed</description>
+  <highlighted_element />
+  <language>DotEnv</language>
+  <offset>106</offset>
+  <length>3</length>
+</problem>
+</problems>

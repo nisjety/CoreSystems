@@ -1,0 +1,14 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/observability/grafana/datasource.yml</file>
+  <line>3</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/observability/grafana/datasource.yml" />
+  <problem_class id="KubernetesUnknownResourcesInspection" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unknown Kubernetes resources</problem_class>
+  <description>Unknown API version</description>
+  <highlighted_element>1</highlighted_element>
+  <language>yaml</language>
+  <offset>12</offset>
+  <length>1</length>
+</problem>
+</problems>

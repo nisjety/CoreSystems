@@ -222,6 +222,12 @@ impl ResearchExecutor {
             org_id: Some(org_id.to_string()),
             include_domains: Vec::new(),
             exclude_domains: Vec::new(),
+            // No ZDR signal reaches this call chain today — `run_search`
+            // takes no zdr parameter and nothing upstream threads one in.
+            // Unlike `/v1/search` and `/v1/answer*`, this is not yet a
+            // considered "ZDR doesn't apply here" — see the 2026-09-03
+            // ledger entry.
+            zdr: false,
         };
         let results = provider.search(query, &opts).await?;
         Ok(ResearchArtifacts {

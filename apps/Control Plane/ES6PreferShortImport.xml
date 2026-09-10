@@ -1,0 +1,50 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts</file>
+  <line>3</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts" />
+  <problem_class id="ES6PreferShortImport" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Import can be shortened</problem_class>
+  <description>Import can be shortened</description>
+  <highlighted_element>'./templates/email-verification.template'</highlighted_element>
+  <language>JavaScript</language>
+  <offset>50</offset>
+  <length>41</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts</file>
+  <line>4</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts" />
+  <problem_class id="ES6PreferShortImport" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Import can be shortened</problem_class>
+  <description>Import can be shortened</description>
+  <highlighted_element>'./templates/password-reset.template'</highlighted_element>
+  <language>JavaScript</language>
+  <offset>46</offset>
+  <length>37</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts</file>
+  <line>5</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts" />
+  <problem_class id="ES6PreferShortImport" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Import can be shortened</problem_class>
+  <description>Import can be shortened</description>
+  <highlighted_element>'./templates/otp.template'</highlighted_element>
+  <language>JavaScript</language>
+  <offset>36</offset>
+  <length>26</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts</file>
+  <line>6</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/auth-core/src/email/resend.service.ts" />
+  <problem_class id="ES6PreferShortImport" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Import can be shortened</problem_class>
+  <description>Import can be shortened</description>
+  <highlighted_element>'./templates/email-constants'</highlighted_element>
+  <language>JavaScript</language>
+  <offset>32</offset>
+  <length>29</length>
+</problem>
+</problems>

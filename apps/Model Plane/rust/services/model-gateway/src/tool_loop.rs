@@ -2274,6 +2274,12 @@ pub async fn dispatch_tool(
                 ListConversationRequest {
                     org_id: org_id.to_owned(),
                     thread_id: thread_id.to_owned(),
+                    // Internal context read for the caller's own thread: no
+                    // shared-Space read authority is involved, so it stays
+                    // on the owner-bound path.
+                    space_id: String::new(),
+                    space_read_decision_ref: String::new(),
+                    space_read_decision_token: String::new(),
                 },
                 session_bearer,
             );
@@ -3834,6 +3840,9 @@ pub async fn run_tool_rounds(
                 // No caller here has a residency floor to express yet; left for
                 // a future org-policy wiring (see inference.proto's field doc).
                 min_residency: String::new(),
+                // Tool loops must not inherit a subscription selected for a
+                // text-only answer; the broker rejects tool execution.
+                subscription_connection_id: String::new(),
             },
             inference_bearer,
         ));

@@ -46,10 +46,90 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+describe('OnboardingPage connect step reads integration-core truth', () => {
+  // The connect step used to show only what the user had clicked
+  // (`state.connectors`). It now reads GET /api/v1/integrations/connections
+  // and shows provider, account, granted capabilities, per-lane sync health
+  // and the concrete next step — and folds the truth back into the graph.
+  it('shows the connected Microsoft account, its grants and the library next step', async () => {
+    seedOnboardingState({
+      step: 'connect',
+      organization: { name: 'Aquatiq AS', id: 'org_aquatiq', zeroDataRetention: false },
+      connectors: [],
+    })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/onboarding/theme')) {
+        return new Response(JSON.stringify({ persisted: true, mode: 'verevon', primaryColor: '#111111' }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        })
+      }
+      if (url.endsWith('/api/v1/integrations/connections')) {
+        return new Response(JSON.stringify({
+          data: {
+            connections: [{
+              id: 'conn_f019f69a',
+              providerKey: 'microsoft',
+              connectorType: 'microsoft-graph',
+              organizationId: 'org_aquatiq',
+              userEmail: 'ima.dacosta@aquatiq.com',
+              displayName: 'Ima Fernandes Da Costa',
+              status: 'active',
+              capabilities: ['profile.read', 'sharepoint.read', 'teams.read', 'teams.messages.read', 'mail.read', 'mail.send'],
+              scopes: ['Files.Read.All', 'Sites.Read.All', 'Mail.Read', 'ChannelMessage.Read.All'],
+              lastSyncStatus: 'failed',
+              createdAt: '2026-09-04T01:00:00.000Z',
+              syncLanes: {
+                mail: { status: 'synced', source: 'email-worker', lastSyncAt: '2026-09-04T02:00:00.000Z' },
+                collaboration: { status: 'pending', source: 'email-worker' },
+                documents: {
+                  status: 'failed',
+                  source: 'finspo-core',
+                  failureCode: 'no_sources_registered',
+                  lastError: 'no SharePoint or OneDrive library is registered for this organization yet',
+                },
+              },
+            }],
+          },
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithProviders(() => <OnboardingPage />)
+
+    const panel = await screen.findByRole('region', { name: 'Tilkoblede kontoer' })
+    await waitFor(() => expect(panel.textContent).toContain('ima.dacosta@aquatiq.com'))
+    expect(panel.textContent).toContain('Microsoft 365')
+    const grants = screen.getByRole('list', { name: 'Tilganger gitt' })
+    expect(Array.from(grants.querySelectorAll('li')).map((item) => item.textContent)).toEqual(['Outlook', 'Teams', 'SharePoint', 'OneDrive'])
+    // Mailbox health is the mail lane (synced) — not the connection-level
+    // lastSyncStatus that carried the SharePoint failure.
+    expect(panel.textContent).toContain('Synkronisert')
+    expect(panel.textContent).toContain('Mangler bibliotek')
+    expect(panel.textContent).toContain('Velg hvilket SharePoint- eller OneDrive-bibliotek')
+
+    // The truth is folded into the UI record so the catalogue row and the
+    // graph agree with integration-core.
+    const stored = JSON.parse(window.localStorage.getItem(storageKey) ?? '{}') as OnboardingState
+    await waitFor(() => {
+      const latest = JSON.parse(window.localStorage.getItem(storageKey) ?? '{}') as OnboardingState
+      expect(latest.connectors.some((connector) => connector.id === 'microsoft365' && connector.status === 'connected')).toBe(true)
+    })
+    expect(stored).toBeTruthy()
+  })
+})
+
 describe('OnboardingPage paywall commit guard', () => {
+  // The first-step back control exits onboarding (sign out + wipe state), so
+  // it must ask first -- through an in-app dialog, not `window.confirm`, which
+  // embedded webviews and automation-driven browsers auto-dismiss with `false`
+  // without rendering (that made the button look dead in the Claude desktop
+  // browser pane). Nothing destructive may happen until the dialog is confirmed.
   it('asks before the first-step back control deletes onboarding state and signs out', async () => {
     seedOnboardingState({ step: 'website' })
-    const confirm = vi.fn(() => false)
     const fetchMock = vi.fn<typeof fetch>(async (input) => new Response(JSON.stringify(
       String(input).includes('/onboarding/theme')
         ? { persisted: true, mode: 'verevon', primaryColor: '#111111' }
@@ -58,16 +138,48 @@ describe('OnboardingPage paywall commit guard', () => {
       headers: { 'Content-Type': 'application/json' },
       status: 200,
     }))
-    vi.stubGlobal('confirm', confirm)
     vi.stubGlobal('fetch', fetchMock)
 
     renderWithProviders(() => <OnboardingPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: 'Tilbake' }))
 
-    expect(confirm).toHaveBeenCalledTimes(1)
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog.getAttribute('aria-labelledby')).toBe('leave-onboarding-dialog-title')
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/auth/sign-out'))).toBe(false)
     expect(window.localStorage.getItem(storageKey)).not.toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Avbryt' }))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/auth/sign-out'))).toBe(false)
+    expect(window.localStorage.getItem(storageKey)).not.toBeNull()
+  })
+
+  it('confirming the leave dialog wipes onboarding state and signs out', async () => {
+    seedOnboardingState({ step: 'website' })
+    const fetchMock = vi.fn<typeof fetch>(async (input) => new Response(JSON.stringify(
+      String(input).includes('/onboarding/theme')
+        ? { persisted: true, mode: 'verevon', primaryColor: '#111111' }
+        : {},
+    ), {
+      headers: { 'Content-Type': 'application/json' },
+      status: 200,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderWithProviders(() => <OnboardingPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Tilbake' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Logg ut og slett oppsett' }))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/auth/sign-out'))).toBe(true)
+    })
+    expect(window.localStorage.getItem(storageKey)).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 
   // Regression test: onboardingPlanCards.checkoutEnabled (model.ts) must gate

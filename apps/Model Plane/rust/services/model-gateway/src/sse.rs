@@ -552,6 +552,8 @@ pub async fn invoke_stream_sse(
     // `stream_buffer::scoped_stream_key`.
     let buffer_key = crate::stream_buffer::scoped_stream_key(&org_clone, &user_clone, &req_id);
     let model_clone = model.clone();
+    let provider_hint = normalized.provider_hint.clone();
+    let subscription_connection_id = normalized.subscription_connection_id.clone();
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
 
     // chat-parity §1 — stream-path idempotency. A concurrent duplicate (same
@@ -851,6 +853,7 @@ pub async fn invoke_stream_sse(
         &org_id,
         &session_run.thread_id,
         &user_content,
+        &req.pinned_message_ids,
         &model_bearer,
         &SummarizerContext {
             request_id: &request_id,
@@ -1070,8 +1073,18 @@ pub async fn invoke_stream_sse(
     // learned) and inject the top matches as system context so a triggered skill
     // actually steers the model. This is the load-bearing Claude-Code skill
     // behaviour that was previously absent (MatchSkills had no internal caller).
-    let skill_context =
-        fetch_skill_context(&state, &model_bearer, &org_id, &user_id, &req.content).await;
+    let SkillContext {
+        blocks: skill_context,
+        requested_ids: requested_skill_ids,
+    } = fetch_skill_context(
+        &state,
+        &model_bearer,
+        &org_id,
+        &user_id,
+        &req.content,
+        &req.skill_ids,
+    )
+    .await;
     // Remember which skills this turn injected, keyed by the request_id the SPA
     // already has. A thumbs-up has to credit the skills that actually shaped the
     // answer, and the client must not be trusted to name them — so the mapping
@@ -1083,6 +1096,7 @@ pub async fn invoke_stream_sse(
         &user_id,
         &session_run.run_id,
         &req.content,
+        &requested_skill_ids,
         MAX_INJECTED_SKILLS,
     );
     // Implicit dissatisfaction: did this turn signal that the PREVIOUS answer
@@ -1250,6 +1264,21 @@ pub async fn invoke_stream_sse(
     // reopened thread showed no sources anywhere but the browser that streamed
     // it. Cloned here because the persist task outlives `grounding`'s use above.
     let session_grounding = grounding.clone();
+    // Cloned in for the low-confidence verification pass (see verification.rs).
+    // It runs once the answer is complete and re-queries Data Plane with the
+    // ANSWER'S claims — a different question from the pre-answer lookup above,
+    // which used the user's prompt and is precisely what came back empty on the
+    // turns that score low. Web escalation is gated on this turn ALREADY having
+    // had `web_search`: a low score justifies searching harder in what the org
+    // owns, never sending the answer to an external engine unasked.
+    let verify_bearer = data_plane_bearer.clone();
+    let verify_sovereign = sovereign_retrieval;
+    let verify_space_decision = req
+        .space_context
+        .as_ref()
+        .map(|context| context.retrieval_decision_token.clone());
+    let verify_web_allowed =
+        crate::verification::may_escalate_to_web(tool_defs.iter().map(|tool| &tool.name));
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
     let tool_phase_query = req.content.clone();
     // Provider-bound copy for the title inference: `user_content` already has
@@ -1587,7 +1616,8 @@ pub async fn invoke_stream_sse(
             request_id: req_id.clone(),
             org_id: org_clone.clone(),
             model: answer_model.clone(),
-            provider_hint: String::new(),
+            provider_hint,
+            subscription_connection_id,
             messages,
             temperature: 0.7,
             max_tokens: answer_token_budget(),
@@ -1672,7 +1702,12 @@ pub async fn invoke_stream_sse(
                     &features,
                     &answer_model,
                     &title_user_content,
-                    &cached,
+                    &cached.answer,
+                    // The score this answer earned when it was generated. A
+                    // replay cannot re-derive it — no tokens, no retrieval, no
+                    // provider logprobs — so re-scoring would report a
+                    // different number for identical text.
+                    cached.confidence,
                     is_first_exchange,
                     start,
                 )
@@ -1988,6 +2023,309 @@ pub async fn invoke_stream_sse(
                         );
                     }
 
+                    // The answer is final, so score it — and if it scored low,
+                    // go looking for backing before that score is emitted
+                    // (verification.rs). Deliberately ahead of the persist
+                    // below: evidence found here belongs to the turn's durable
+                    // record, not just to this stream's frames.
+                    //
+                    // Evidence is COUNTED, not a boolean: tool successes/failures
+                    // and web citations were accumulated as the turn ran, and KB
+                    // citations + session-core assembly grounding join here. The
+                    // old bool collapsed every grounded answer to the same flat
+                    // bonus — the "always 87%" users called out. `max_tokens` is
+                    // the real answer budget (was a stale 1024, which made the
+                    // truncation penalty mis-fire on any answer past 1024 tokens
+                    // now that the budget is larger).
+                    let mut evidence = crate::confidence::Evidence {
+                        kb_citations: grounding
+                            .as_ref()
+                            .map_or(0, |g| u32::try_from(g.citations.len()).unwrap_or(u32::MAX)),
+                        assembly_grounded: assembly_supplied_grounding,
+                        ..turn_evidence
+                    };
+                    // The serving model's own certainty, accumulated over the
+                    // whole stream and carried on this final chunk. `None` for
+                    // providers that report no logprobs (Anthropic).
+                    let certainty = model_certainty(chunk.token_confidence.as_ref());
+                    let answer_budget = answer_token_budget().max(0) as u32;
+                    let mut weak_retrieval =
+                        grounding.as_ref().is_some_and(|g| g.low_confidence);
+                    let mut confidence = crate::confidence::score_with_retrieval_confidence(
+                        &assistant_output,
+                        output_tokens,
+                        answer_budget,
+                        evidence,
+                        weak_retrieval,
+                        certainty,
+                    );
+                    // Every guardrail lives in one decision so the reason is
+                    // loggable: "we did not check" and "we checked and found
+                    // nothing" are different facts about a low score.
+                    let mut verification_decision =
+                        crate::verification::decide(confidence, evidence, output_tokens);
+                    // Claimed only once the cheap checks have already said yes,
+                    // so a turn that was never going to verify does not consume
+                    // the org's allowance.
+                    if verification_decision.should_verify()
+                        && !crate::verification::VerificationBudget::global()
+                            .try_claim(&org_clone)
+                    {
+                        verification_decision =
+                            crate::verification::VerificationDecision::SkipBudgetExhausted;
+                    }
+                    if !verification_decision.should_verify() {
+                        tracing::debug!(
+                            request_id = %req_id,
+                            decision = verification_decision.as_str(),
+                            confidence,
+                            "verification skipped"
+                        );
+                    }
+                    let verification_query = verification_decision
+                        .should_verify()
+                        .then(|| {
+                            crate::verification::verification_query(
+                                &tool_phase_query,
+                                &assistant_output,
+                            )
+                        })
+                        .flatten();
+                    // What the sources turned out to say. Stays `Unrelated`
+                    // when nothing was retrieved or nothing was judged, which
+                    // is the neutral reading: not confirmed, not refuted.
+                    let mut verdict = crate::verification::SourceVerdict::Unrelated;
+                    // Whether re-sampling reproduced the answer, when it was
+                    // tried. `None` means not tried — which is not the same as
+                    // "reproduced", and the calibration row must keep them
+                    // apart.
+                    let mut reproduced = None;
+                    if let Some(query) = verification_query.as_deref() {
+                        // Step one: the org's own knowledge, queried with what
+                        // the answer asserted.
+                        if let Some(bearer) = verify_bearer.as_ref() {
+                            if let Some(found) = crate::retrieval::retrieve(
+                                &session_state,
+                                bearer,
+                                &org_clone,
+                                query,
+                                effective_zdr,
+                                verify_sovereign,
+                                verify_space_decision.as_deref(),
+                            )
+                            .await
+                            {
+                                let found_citations =
+                                    u32::try_from(found.citations.len()).unwrap_or(u32::MAX);
+                                if found_citations > 0 {
+                                    // Read the sources before believing them.
+                                    // Counting them was enough to confirm
+                                    // anything: a search for an invented fact
+                                    // returns pages ABOUT the invention.
+                                    let snippets: Vec<String> = found
+                                        .citations
+                                        .iter()
+                                        .map(|citation| {
+                                            format!("{} — {}", citation.title, citation.snippet)
+                                        })
+                                        .collect();
+                                    verdict = judge_sources(
+                                        &session_state,
+                                        &req_id,
+                                        &org_clone,
+                                        &tool_phase_query,
+                                        &assistant_output,
+                                        &snippets,
+                                        &inference_bearer,
+                                        effective_zdr,
+                                    )
+                                    .await;
+                                    // Emitted whichever way the verdict went:
+                                    // sources that DISAGREE are exactly what a
+                                    // reader needs to see. Only the score
+                                    // treats the two differently.
+                                    if verdict != crate::verification::SourceVerdict::Unrelated {
+                                        for citation in &found.citations {
+                                            sink.emit(crate::sse_events::ChatEvent::Citation {
+                                                id: citation.id.clone(),
+                                                title: citation.title.clone(),
+                                                url: citation.url.clone(),
+                                                snippet: citation.snippet.clone(),
+                                            })
+                                            .await;
+                                        }
+                                    }
+                                    if verdict.is_support() {
+                                        evidence.kb_citations =
+                                            evidence.kb_citations.saturating_add(found_citations);
+                                        // REPLACES the earlier verdict rather
+                                        // than OR-ing with it: the pre-answer
+                                        // lookup was flagged weak precisely
+                                        // because it came back empty, and
+                                        // carrying that forward would cap every
+                                        // verified answer at 0.74 —
+                                        // verification could then never do
+                                        // anything.
+                                        weak_retrieval = found.low_confidence;
+                                        confidence =
+                                            crate::confidence::score_with_retrieval_confidence(
+                                                &assistant_output,
+                                                output_tokens,
+                                                answer_budget,
+                                                evidence,
+                                                weak_retrieval,
+                                                certainty,
+                                            );
+                                    } else if verdict
+                                        == crate::verification::SourceVerdict::Contradicts
+                                    {
+                                        // Contradicted is worse than
+                                        // unverified: we looked, found relevant
+                                        // material, and it says otherwise.
+                                        confidence = confidence.map(|score| {
+                                            crate::confidence::debit(
+                                                score,
+                                                crate::verification::CONTRADICTED_PENALTY,
+                                            )
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        // Step two, only if the documents did not settle it AND
+                        // this turn already had web search.
+                        if crate::verification::should_verify(confidence) && verify_web_allowed {
+                            let before = sink.recorded_citations().len();
+                            let searched = crate::tool_loop::run_forced_web_search(
+                                &session_state,
+                                &req_id,
+                                &session_run_for_terminal.run_id,
+                                &org_clone,
+                                &user_clone,
+                                &thread_scope,
+                                session_bearer.as_str(),
+                                capability_bearer
+                                    .as_ref()
+                                    .map(VerifiedCapabilityBearer::as_str),
+                                effective_zdr,
+                                Vec::new(),
+                                query,
+                                Some(&sink),
+                            )
+                            .await;
+                            let recorded = sink.recorded_citations();
+                            let gained = if searched.is_ok() {
+                                recorded.len().saturating_sub(before)
+                            } else {
+                                0
+                            };
+                            if gained > 0 {
+                                // The web gets read too. Searching an invented
+                                // claim reliably returns pages about the
+                                // invention, so this is the branch where
+                                // counting-without-reading was most wrong.
+                                let snippets: Vec<String> = recorded[before..]
+                                    .iter()
+                                    .map(|citation| {
+                                        format!("{} — {}", citation.title, citation.snippet)
+                                    })
+                                    .collect();
+                                verdict = judge_sources(
+                                    &session_state,
+                                    &req_id,
+                                    &org_clone,
+                                    &tool_phase_query,
+                                    &assistant_output,
+                                    &snippets,
+                                    &inference_bearer,
+                                    effective_zdr,
+                                )
+                                .await;
+                                if verdict.is_support() {
+                                    evidence.web_citations = evidence.web_citations.saturating_add(
+                                        u32::try_from(gained).unwrap_or(u32::MAX),
+                                    );
+                                    confidence =
+                                        crate::confidence::score_with_retrieval_confidence(
+                                            &assistant_output,
+                                            output_tokens,
+                                            answer_budget,
+                                            evidence,
+                                            weak_retrieval,
+                                            certainty,
+                                        );
+                                } else if verdict
+                                    == crate::verification::SourceVerdict::Contradicts
+                                {
+                                    confidence = confidence.map(|score| {
+                                        crate::confidence::debit(
+                                            score,
+                                            crate::verification::CONTRADICTED_PENALTY,
+                                        )
+                                    });
+                                }
+                            }
+                        }
+                        // Step three, the last resort: neither the documents
+                        // nor the web had anything to say, so ask the model
+                        // again and see whether it says the same thing.
+                        if crate::verification::should_verify(confidence)
+                            && crate::verification::self_consistency_applies(
+                                output_tokens,
+                                verdict,
+                            )
+                        {
+                            let samples = resample_answer(
+                                &session_state,
+                                &req_id,
+                                &org_clone,
+                                &model_used,
+                                &tool_phase_query,
+                                output_tokens.try_into().unwrap_or(i32::MAX),
+                                &inference_bearer,
+                                effective_zdr,
+                            )
+                            .await;
+                            if !samples.is_empty() {
+                                let agrees = crate::verification::samples_agree(
+                                    &assistant_output,
+                                    &samples,
+                                    &tool_phase_query,
+                                );
+                                reproduced = Some(agrees);
+                                if !agrees {
+                                    confidence = confidence.map(|score| {
+                                        crate::confidence::debit(
+                                            score,
+                                            crate::verification::INCONSISTENT_PENALTY,
+                                        )
+                                    });
+                                }
+                            }
+                        }
+                        tracing::info!(
+                            request_id = %req_id,
+                            web_allowed = verify_web_allowed,
+                            reproduced,
+                            verdict = verdict.as_str(),
+                            kb_citations = evidence.kb_citations,
+                            web_citations = evidence.web_citations,
+                            confidence,
+                            "verified a low-confidence answer"
+                        );
+                        // Say what happened. A score that moved (or pointedly
+                        // did not) is only trustworthy if the reader can tell
+                        // "we checked and found nothing" from "we never
+                        // looked".
+                        sink.emit(crate::sse_events::ChatEvent::Verification {
+                            verdict: verdict.as_str(),
+                            kb_citations: evidence.kb_citations,
+                            web_citations: evidence.web_citations,
+                            web_allowed: verify_web_allowed,
+                        })
+                        .await;
+                    }
+
                     if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
                         &session_state,
                         &session_thread_id,
@@ -1997,6 +2335,21 @@ pub async fn invoke_stream_sse(
                         crate::session_flow::turn_evidence_metadata(
                             session_grounding.as_ref(),
                             &sink.recorded_citations(),
+                            // Scored, and where applicable verified, just
+                            // above — so the durable turn carries the same
+                            // number the stream reported, and a reader who
+                            // opens this thread on another device sees why.
+                            crate::session_flow::TurnQuality {
+                                confidence,
+                                verification: verification_decision.should_verify().then(|| {
+                                    crate::session_flow::TurnVerification {
+                                        verdict: verdict.as_str(),
+                                        kb_citations: evidence.kb_citations,
+                                        web_citations: evidence.web_citations,
+                                        web_allowed: verify_web_allowed,
+                                    }
+                                }),
+                            },
                         ),
                     )
                     .await
@@ -2133,19 +2486,43 @@ pub async fn invoke_stream_sse(
                     // the real answer budget (was a stale 1024, which made the
                     // truncation penalty mis-fire on any answer past 1024 tokens
                     // now that the budget is larger).
-                    let evidence = crate::confidence::Evidence {
-                        kb_citations: grounding
-                            .as_ref()
-                            .map_or(0, |g| u32::try_from(g.citations.len()).unwrap_or(u32::MAX)),
-                        assembly_grounded: assembly_supplied_grounding,
-                        ..turn_evidence
-                    };
-                    let confidence = crate::confidence::score_with_retrieval_confidence(
-                        &assistant_output,
-                        output_tokens,
-                        answer_token_budget().max(0) as u32,
-                        evidence,
-                        grounding.as_ref().is_some_and(|g| g.low_confidence),
+                    // Held against this request id so a rating can label it.
+                    // Every band in `confidence` was placed by hand from eight
+                    // probe answers; this is what lets them be fitted instead.
+                    crate::calibration::record(
+                        &req_id,
+                        crate::calibration::AnswerScoring {
+                            model: model_used.clone(),
+                            confidence: confidence.unwrap_or(f64::NAN),
+                            claim_probability: certainty
+                                .filter(|c| c.claim_token_count() > 0)
+                                .map(crate::confidence::ModelCertainty::per_token_probability),
+                            whole_probability: certainty
+                                .map(crate::confidence::ModelCertainty::whole_answer_probability),
+                            claim_tokens: certainty
+                                .map_or(0, crate::confidence::ModelCertainty::claim_token_count),
+                            output_tokens,
+                            kb_citations: evidence.kb_citations,
+                            web_citations: evidence.web_citations,
+                            tool_successes: evidence.tool_successes,
+                            assembly_grounded: evidence.assembly_grounded,
+                            verdict: verification_decision
+                                .should_verify()
+                                .then(|| verdict.as_str()),
+                            reproduced,
+                        },
+                    );
+                    // Scored (and, when it came out low, verified) above —
+                    // before the persist, so the evidence that verification
+                    // found is part of the durable turn rather than only of
+                    // this stream.
+                    tracing::info!(
+                        request_id = %req_id,
+                        model = %model_used,
+                        certainty = certainty.map(crate::confidence::ModelCertainty::per_token_probability),
+                        certainty_tokens = certainty.map(crate::confidence::ModelCertainty::token_count),
+                        confidence,
+                        "answer token certainty"
                     );
                     let usage_event = crate::sse_events::ChatEvent::Usage {
                         input_tokens,
@@ -2181,7 +2558,13 @@ pub async fn invoke_stream_sse(
                                         user_id: &user_clone,
                                         model: &answer_model,
                                     },
-                                    &assistant_output,
+                                    // Stored WITH the score, so a replay of this
+                                    // answer reports what it earned rather than
+                                    // what its text alone suggests.
+                                    &crate::langcache::CachedAnswer::new(
+                                        assistant_output.clone(),
+                                        confidence,
+                                    ),
                                     effective_zdr,
                                 )
                                 .await;
@@ -2396,6 +2779,19 @@ const CONTEXT_LENGTH_KEEP_TAIL: usize = 4;
 /// Cap on skills injected as system context per turn (keeps the prompt bounded;
 /// the matcher already ranks by keyword overlap so the top few are the relevant ones).
 const MAX_INJECTED_SKILLS: i32 = 3;
+/// How many skills a member may name explicitly on one turn. Above the
+/// keyword-match cap on purpose: a deliberate pick outranks a guess, but the
+/// context budget (`skills::SKILL_CONTEXT_BUDGET_CHARS`) still bounds the total.
+const MAX_REQUESTED_SKILLS: usize = 4;
+
+/// What `fetch_skill_context` injected: the formatted blocks, plus the ids of
+/// the member's explicit picks that actually resolved — the server's list, for
+/// the turn registry, never the client's claim.
+#[derive(Default)]
+struct SkillContext {
+    blocks: Vec<String>,
+    requested_ids: Vec<String>,
+}
 const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
 const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
 const MAX_CONTEXT_ASSEMBLY_TOKENS: u32 = 32_768;
@@ -2410,6 +2806,24 @@ const MAX_CONTEXT_ASSEMBLY_TOKENS: u32 = 32_768;
 const DEFAULT_ANSWER_TOKENS: i32 = 4096;
 const MIN_ANSWER_TOKENS: i32 = 256;
 const MAX_ANSWER_TOKENS: i32 = 16_384;
+
+/// Project the contract's `TokenConfidence` onto the scorer's input.
+///
+/// Both chat paths (streamed final chunk, non-streamed response) carry the
+/// same summary, and both must reject a malformed one rather than read it as
+/// certainty — hence the shared constructor rather than two field copies.
+fn model_certainty(
+    summary: Option<&mp_contracts::model_plane::v1::TokenConfidence>,
+) -> Option<crate::confidence::ModelCertainty> {
+    summary.and_then(|summary| {
+        crate::confidence::ModelCertainty::new(
+            summary.token_count,
+            summary.mean_logprob,
+            summary.claim_token_count,
+            summary.claim_mean_logprob,
+        )
+    })
+}
 
 /// Max output tokens for a user-facing answer: `MODEL_GATEWAY_ANSWER_TOKENS`
 /// env override clamped to a sane band, else [`DEFAULT_ANSWER_TOKENS`].
@@ -2932,6 +3346,7 @@ async fn load_recent_thread_messages(
     org_id: &str,
     thread_id: &str,
     current_user_content: &str,
+    pinned_message_ids: &[String],
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
 ) -> Vec<ChatMessage> {
@@ -2944,6 +3359,12 @@ async fn load_recent_thread_messages(
         ListConversationRequest {
             org_id: org_id.to_owned(),
             thread_id: thread_id.to_owned(),
+            // Internal context read for the caller's own thread: no
+            // shared-Space read authority is involved, so it stays on
+            // the owner-bound path.
+            space_id: String::new(),
+            space_read_decision_ref: String::new(),
+            space_read_decision_token: String::new(),
         },
         bearer,
     ) {
@@ -2953,7 +3374,10 @@ async fn load_recent_thread_messages(
             return Vec::new();
         }
     };
-    let mut messages: Vec<ChatMessage> = match state
+    // `message_id` is carried alongside each turn only as far as the pin
+    // resolution below; `ChatMessage` (what the provider sees) has no field for
+    // our identifiers and must not gain one.
+    let loaded: Vec<crate::compaction::IdentifiedMessage> = match state
         .session_client
         .clone()
         .list_conversation(request)
@@ -2967,10 +3391,13 @@ async fn load_recent_thread_messages(
                 matches!(message.role.as_str(), "system" | "user" | "assistant")
                     && !message.content.trim().is_empty()
             })
-            .map(|message| ChatMessage {
-                role: message.role,
-                content: message.content,
-                name: String::new(),
+            .map(|message| crate::compaction::IdentifiedMessage {
+                id: message.message_id,
+                message: ChatMessage {
+                    role: message.role,
+                    content: message.content,
+                    name: String::new(),
+                },
             })
             .collect(),
         Err(error) => {
@@ -2978,19 +3405,73 @@ async fn load_recent_thread_messages(
             Vec::new()
         }
     };
-
-    match messages
+    // The current turn is spliced in while the durable ids are still attached,
+    // so the indices the pin bound is measured against are the ones the hoist
+    // will see.
+    let mut loaded = loaded;
+    match loaded
         .iter_mut()
         .rev()
-        .find(|message| message.role == "user")
+        .find(|entry| entry.message.role == "user")
     {
-        Some(message) => current_user_content.clone_into(&mut message.content),
-        None => messages.push(ChatMessage {
-            role: "user".to_owned(),
-            content: current_user_content.to_owned(),
-            name: String::new(),
+        Some(entry) => current_user_content.clone_into(&mut entry.message.content),
+        None => loaded.push(crate::compaction::IdentifiedMessage {
+            // No durable id: session-core has not persisted this turn yet, and an
+            // empty id matches no pin.
+            id: String::new(),
+            message: ChatMessage {
+                role: "user".to_owned(),
+                content: current_user_content.to_owned(),
+                name: String::new(),
+            },
         }),
     }
+
+    // How far the load-time shedder will reach. Measured with the real planner
+    // over a role-only projection -- `plan_head_summary` reads only the length
+    // and the position of the first non-system message, so this costs no content
+    // clones and cannot drift from the planner that runs for real below.
+    let shape: Vec<ChatMessage> = loaded
+        .iter()
+        .map(|entry| ChatMessage {
+            role: entry.message.role.clone(),
+            content: String::new(),
+            name: String::new(),
+        })
+        .collect();
+    let protect_below = crate::compaction::plan_head_summary(
+        &shape,
+        MAX_THREAD_CONTEXT_MESSAGES,
+        COMPACTED_TAIL_MESSAGES,
+    )
+    .map_or(0, |head| head.end);
+
+    // Counted with the same filters the hoist applies -- including the index
+    // bound -- so the log cannot claim a pin the hoist declined.
+    let resolved_pins = if pinned_message_ids.is_empty() || protect_below == 0 {
+        0
+    } else {
+        loaded
+            .iter()
+            .take(protect_below)
+            .filter(|entry| {
+                !entry.id.trim().is_empty()
+                    && entry.message.role != "system"
+                    && pinned_message_ids.iter().any(|id| *id == entry.id)
+            })
+            .count()
+    };
+    if !pinned_message_ids.is_empty() {
+        tracing::debug!(
+            %thread_id,
+            requested = pinned_message_ids.len(),
+            hoisted = resolved_pins,
+            protect_below,
+            "pins resolved; hoisting only what load-time compaction would remove"
+        );
+    }
+    let mut messages: Vec<ChatMessage> =
+        crate::compaction::hoist_pinned_messages(loaded, pinned_message_ids, protect_below);
 
     // A long thread used to lose its head to a bare `drain`, which took the
     // user's earlier constraints with it and left no trace that anything was
@@ -3056,11 +3537,12 @@ async fn fetch_skill_context(
     org_id: &str,
     user_id: &str,
     query: &str,
-) -> Vec<String> {
-    use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest};
+    requested: &[String],
+) -> SkillContext {
+    use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest, Skill};
 
     if org_id.trim().is_empty() {
-        return Vec::new();
+        return SkillContext::default();
     }
     // §G7 read path: pull this org's LEARNED skills (session-core agent_skills)
     // into the match cache, re-pulling once the cached copy goes stale so an
@@ -3105,7 +3587,21 @@ async fn fetch_skill_context(
             }
         }
     }
-    let Ok(matched) = crate::skills::handle_match_skills(
+    // Explicit picks first (the composer's `/` picker), resolved against the
+    // catalogue and the ownership rule; then keyword matches fill in behind
+    // them, minus anything already picked. A match that fails is not a reason
+    // to drop what the member deliberately asked for.
+    let requested_skills = crate::skills::resolve_requested_skills(
+        &state.skills,
+        org_id,
+        &state.ownership,
+        user_id,
+        requested,
+        MAX_REQUESTED_SKILLS,
+    );
+    let requested_ids: Vec<String> = requested_skills.iter().map(|s| s.id.clone()).collect();
+    let mut chosen: Vec<Skill> = requested_skills;
+    if let Ok(matched) = crate::skills::handle_match_skills(
         &state.skills,
         MatchSkillsRequest {
             request_id: String::new(),
@@ -3116,15 +3612,17 @@ async fn fetch_skill_context(
         },
         &state.ownership,
         user_id,
-    ) else {
-        return Vec::new();
-    };
+    ) {
+        for skill in matched.matches.into_iter().filter_map(|m| m.skill) {
+            if !chosen.iter().any(|c| c.id == skill.id) {
+                chosen.push(skill);
+            }
+        }
+    }
     // Bounded by SIZE as well as count — see `skills::fit_skill_blocks`.
     let fitted = crate::skills::fit_skill_blocks(
-        matched
-            .matches
+        chosen
             .into_iter()
-            .filter_map(|m| m.skill)
             .filter(|s| !s.body.trim().is_empty())
             .map(|s| crate::skills::format_skill_block(&s))
             .collect(),
@@ -3138,7 +3636,10 @@ async fn fetch_skill_context(
             "skill guidance exceeded its context budget; degraded to fit"
         );
     }
-    fitted.blocks
+    SkillContext {
+        blocks: fitted.blocks,
+        requested_ids,
+    }
 }
 
 /// SSE stream for a multimodal (vision) turn: route the image + the user's
@@ -3865,6 +4366,7 @@ async fn serve_cached_answer(
     model: &str,
     user_content: &str,
     cached: &str,
+    cached_confidence: Option<f64>,
     is_first_exchange: bool,
     start: std::time::Instant,
 ) {
@@ -3922,16 +4424,23 @@ async fn serve_cached_answer(
         output_tokens: 0,
         cost_usd: Some(0.0),
         latency_ms,
-        // A cached answer is exactly as good as it was when it was generated,
-        // and it only got here because the turn had no external evidence to go
-        // stale. Score it the way an ungrounded answer of this length scores,
-        // rather than inventing a bonus or a penalty for having been cached.
-        confidence: crate::confidence::score(
-            cached,
-            0,
-            u32::try_from(answer_token_budget()).unwrap_or(0),
-            crate::confidence::Evidence::default(),
-        ),
+        // A cached answer is exactly as good as it was when it was generated —
+        // so it reports the score it earned then, replayed alongside the text.
+        // Re-deriving one here cannot see what that turn saw (the provider's
+        // logprobs, the tools it ran, anything verification found), so the same
+        // answer would read 0.88 live and 0.72 replayed.
+        //
+        // The fallback covers entries stored before the score travelled with
+        // them: score the text the way an ungrounded answer of this length
+        // scores, rather than inventing a bonus or a penalty for being cached.
+        confidence: cached_confidence.or_else(|| {
+            crate::confidence::score(
+                cached,
+                0,
+                u32::try_from(answer_token_budget()).unwrap_or(0),
+                crate::confidence::Evidence::default(),
+            )
+        }),
     };
     if usage.should_emit(features) {
         let _ = tx.send(Ok(usage.to_sse(request_id))).await;
@@ -4081,6 +4590,28 @@ async fn run_infer_fallback(
                 }
                 seq += 1;
             }
+            // Scored before the persist for the same reason as the streaming
+            // path: the durable turn must carry the number the stream
+            // reported, or a thread reopened elsewhere shows a scored answer
+            // on one path and an unscored one on the other.
+            // Same reasoning as the streaming site: assembly evidence is
+            // grounding, and KB citations are counted rather than boolean.
+            let evidence = crate::confidence::Evidence {
+                kb_citations: grounding
+                    .as_ref()
+                    .map_or(0, |g| u32::try_from(g.citations.len()).unwrap_or(u32::MAX)),
+                assembly_grounded: assembly_supplied_grounding,
+                ..crate::confidence::Evidence::default()
+            };
+            // Real answer budget, not a stale 1024 — see the streaming site.
+            let confidence = crate::confidence::score_with_retrieval_confidence(
+                &resp.content,
+                output_tokens,
+                answer_token_budget().max(0) as u32,
+                evidence,
+                grounding.as_ref().is_some_and(|g| g.low_confidence),
+                model_certainty(resp.token_confidence.as_ref()),
+            );
             if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
                 state,
                 &thread_id,
@@ -4088,8 +4619,16 @@ async fn run_infer_fallback(
                 session_bearer,
                 None,
                 // The fallback path runs no tool loop, so retrieval grounding
-                // is the only evidence it can have.
-                crate::session_flow::turn_evidence_metadata(grounding, &[]),
+                // is the only evidence it can have — and it runs no
+                // verification pass either, so there is no verdict to record.
+                crate::session_flow::turn_evidence_metadata(
+                    grounding,
+                    &[],
+                    crate::session_flow::TurnQuality {
+                        confidence,
+                        verification: None,
+                    },
+                ),
             )
             .await
             {
@@ -4191,23 +4730,7 @@ async fn run_infer_fallback(
                     i64::from(output_tokens),
                 )
                 .await;
-            // Same reasoning as the streaming site: assembly evidence is
-            // grounding, and KB citations are counted rather than boolean.
-            let evidence = crate::confidence::Evidence {
-                kb_citations: grounding
-                    .as_ref()
-                    .map_or(0, |g| u32::try_from(g.citations.len()).unwrap_or(u32::MAX)),
-                assembly_grounded: assembly_supplied_grounding,
-                ..crate::confidence::Evidence::default()
-            };
-            // Real answer budget, not a stale 1024 — see the streaming site.
-            let confidence = crate::confidence::score_with_retrieval_confidence(
-                &resp.content,
-                output_tokens,
-                answer_token_budget().max(0) as u32,
-                evidence,
-                grounding.as_ref().is_some_and(|g| g.low_confidence),
-            );
+            // Scored above, before the persist.
             let usage_event = crate::sse_events::ChatEvent::Usage {
                 input_tokens,
                 output_tokens,
@@ -4632,6 +5155,12 @@ async fn read_latest_assistant(
         ListConversationRequest {
             org_id: org_id.to_owned(),
             thread_id: thread_id.to_owned(),
+            // Internal context read for the caller's own thread: no
+            // shared-Space read authority is involved, so it stays on
+            // the owner-bound path.
+            space_id: String::new(),
+            space_read_decision_ref: String::new(),
+            space_read_decision_token: String::new(),
         },
         bearer,
     )
@@ -4769,6 +5298,139 @@ const FOLLOW_UPS_QUESTION_SNIPPET_CHARS: usize = 1000;
 /// above this floor, still gets follow-ups; only a near-empty completion does
 /// not).
 const FOLLOW_UPS_MIN_CONFIDENCE: f64 = 0.15;
+
+/// Same pinned-cheap-model posture as the title and follow-up calls: judging
+/// whether five snippets back one claim is not work that justifies a premium
+/// model, and a tier indirection here would resolve to a reasoning model that
+/// returns empty (the failure that silently broke both of those).
+const VERIFICATION_JUDGE_MODEL: &str = "gpt-4o-mini";
+/// The judge holds the turn's `usage` frame back, so it must degrade to "not
+/// confirmed" rather than stall. One word out of a short prompt lands well
+/// inside this.
+const VERIFICATION_JUDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+/// One word. Budgeted a little above it so a model that insists on punctuation
+/// or a leading space still emits the word itself.
+const VERIFICATION_JUDGE_MAX_TOKENS: i32 = 8;
+
+/// Ask whether the retrieved sources actually back the answer.
+///
+/// Without this, verification counts sources rather than reading them — and a
+/// search for an invented fact returns pages ABOUT the invention, which by
+/// volume alone lifted the score exactly like real support. Best-effort: every
+/// failure path returns [`SourceVerdict::Unrelated`], the neutral verdict, so a
+/// judge that times out or errors can never raise a score.
+async fn judge_sources(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    question: &str,
+    answer: &str,
+    snippets: &[String],
+    inference_bearer: &VerifiedInferenceBearer,
+    zdr: bool,
+) -> crate::verification::SourceVerdict {
+    use crate::verification::SourceVerdict;
+    if snippets.is_empty() {
+        return SourceVerdict::Unrelated;
+    }
+    let mut client = state.inference_client.clone();
+    let response = tokio::time::timeout(
+        VERIFICATION_JUDGE_TIMEOUT,
+        client.infer(authenticated_inference_request(
+            InferRequest {
+                request_id: format!("{request_id}-verify"),
+                org_id: org_id.to_owned(),
+                model: VERIFICATION_JUDGE_MODEL.to_owned(),
+                provider_hint: String::new(),
+                messages: vec![ChatMessage {
+                    role: "user".to_owned(),
+                    content: crate::verification::entailment_prompt(question, answer, snippets),
+                    name: String::new(),
+                }],
+                // A classification, not a composition: the same snippets must
+                // produce the same verdict twice.
+                temperature: 0.0,
+                max_tokens: VERIFICATION_JUDGE_MAX_TOKENS,
+                structured_output_schema: String::new(),
+                // Carries the answer and retrieved source text, so it inherits
+                // the turn's retention posture rather than assuming the title
+                // path's non-ZDR shortcut.
+                zdr,
+                ..Default::default()
+            },
+            inference_bearer,
+        )),
+    )
+    .await;
+    match response {
+        Ok(Ok(resp)) => crate::verification::parse_verdict(&resp.into_inner().content),
+        Ok(Err(error)) => {
+            tracing::debug!(%error, %request_id, "source judge failed; treating as unconfirmed");
+            SourceVerdict::Unrelated
+        }
+        Err(_) => {
+            tracing::debug!(%request_id, "source judge timed out; treating as unconfirmed");
+            SourceVerdict::Unrelated
+        }
+    }
+}
+
+/// Re-ask the question and see whether the answer holds.
+///
+/// The signal available exactly when retrieval had nothing to say: truth is
+/// stable across samples and invention is not — the same question produced
+/// 2000, 2020 and 2005 across draws in measurement. Temperature is deliberately
+/// NOT zero; a greedy re-draw would reproduce the first answer whether or not
+/// the model believes it, which measures nothing.
+///
+/// Best-effort and bounded: any failure returns an empty sample set, and an
+/// empty set never debits.
+async fn resample_answer(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    model: &str,
+    question: &str,
+    max_tokens: i32,
+    inference_bearer: &VerifiedInferenceBearer,
+    zdr: bool,
+) -> Vec<String> {
+    let mut samples = Vec::new();
+    for index in 0..crate::verification::SELF_CONSISTENCY_SAMPLES {
+        let mut client = state.inference_client.clone();
+        let response = tokio::time::timeout(
+            VERIFICATION_JUDGE_TIMEOUT,
+            client.infer(authenticated_inference_request(
+                InferRequest {
+                    request_id: format!("{request_id}-resample-{index}"),
+                    org_id: org_id.to_owned(),
+                    model: model.to_owned(),
+                    provider_hint: String::new(),
+                    messages: vec![ChatMessage {
+                        role: "user".to_owned(),
+                        content: question.to_owned(),
+                        name: String::new(),
+                    }],
+                    temperature: 1.0,
+                    max_tokens,
+                    structured_output_schema: String::new(),
+                    zdr,
+                    ..Default::default()
+                },
+                inference_bearer,
+            )),
+        )
+        .await;
+        match response {
+            Ok(Ok(resp)) => samples.push(resp.into_inner().content),
+            _ => {
+                tracing::debug!(%request_id, "resample failed; skipping self-consistency");
+                return Vec::new();
+            }
+        }
+    }
+    samples
+}
 
 /// Summarize a thread's first exchange into a short sidebar title.
 ///

@@ -30,10 +30,15 @@ export interface ConnectedEmailAccount {
   providerKey: 'google' | 'microsoft'
   label: string
   sharedMailboxes: string[]
-  /** Source health is limited to the most recent provider inbox-sync attempt.
-   * It is never a claim that a customer received, read, or replied to mail. */
+  /** Source health is limited to the most recent provider inbox-sync attempt
+   * — integration-core's `syncLanes.mail`, written only by the email worker.
+   * It is never a claim that a customer received, read, or replied to mail,
+   * and never reflects SharePoint/Data Plane document jobs on the same
+   * connection. */
   syncHealth: EmailAccountSyncHealth
   lastSyncAt?: string
+  /** The email worker's own failure text for `attention`, when it gave one. */
+  syncDetail?: string
 }
 
 export type EmailAccountSyncHealth = 'synced' | 'syncing' | 'needs_reconnect' | 'attention' | 'unknown'
@@ -212,7 +217,9 @@ export function isDiscordInboxChannelAwaitingSetup(connections: InboxConnection[
     return ['messages.read', 'bot'].some((grant) => granted.has(grant))
   })
   if (activeDiscordConnections.length === 0) return true
-  return activeDiscordConnections.some((connection) => ['failed', 'error'].includes((connection.lastSyncStatus ?? '').trim().toLowerCase()))
+  // Discord conversations are the email worker's `collaboration` lane; the
+  // connection-level lastSyncStatus is not consulted (see emailAccountSyncHealth).
+  return activeDiscordConnections.some((connection) => (connection.syncLanes?.collaboration?.status ?? '').trim().toLowerCase() === 'failed')
 }
 
 function hasMetadataAssetValue(raw: unknown): boolean {
@@ -239,27 +246,52 @@ export function deriveConnectedEmailAccounts(connections: InboxConnection[]): Co
       providerKey,
     )
     const sharedMailboxes = isMicrosoftMailbox ? readSharedMailboxes(connection.metadata) : []
+    const mailLane = connection.syncLanes?.mail
+    const syncHealth = emailAccountSyncHealth(connection)
     return [{
       id: connection.id,
       providerKey: isMicrosoftMailbox ? 'microsoft' : 'google',
       label,
       sharedMailboxes,
-      syncHealth: emailAccountSyncHealth(connection),
-      lastSyncAt: connection.lastSyncAt,
+      syncHealth,
+      lastSyncAt: mailLane?.lastSyncAt,
+      syncDetail: syncHealth === 'attention' || syncHealth === 'needs_reconnect' ? mailLane?.lastError : undefined,
     }]
   }).sort((left, right) => providerOrder(left.providerKey) - providerOrder(right.providerKey) || left.label.localeCompare(right.label))
 }
 
+const reconnectErrorPattern = /access token|refresh token|token_expired|invalid_grant|authorization|reauthoriz|consent/i
+const localCredentialErrorPattern = /decrypt ciphertext|message authentication failed|ciphertext too short|decode ciphertext/i
+
+/**
+ * Mailbox health comes from the mail lane alone. The connection-level
+ * `lastSyncStatus` is a single cell shared by every worker that touches the
+ * connection — it once reported an unrelated SharePoint (finspo-core) failure
+ * as "Trenger oppmerksomhet" on the Outlook lane — so it is deliberately not
+ * read here. Only the connection's own authorization state (`needs_refresh`)
+ * is connection-wide.
+ */
 function emailAccountSyncHealth(connection: InboxConnection): EmailAccountSyncHealth {
-  const connectionStatus = connection.status.trim().toLowerCase()
-  const syncStatus = connection.lastSyncStatus?.trim().toLowerCase() ?? ''
-  if (connectionStatus === 'needs_refresh' || ['authorization_incomplete', 'needs_refresh', 'token_expired'].includes(syncStatus)) {
-    return 'needs_reconnect'
+  if (connection.status.trim().toLowerCase() === 'needs_refresh') return 'needs_reconnect'
+  const lane = connection.syncLanes?.mail
+  if (!lane) return 'unknown'
+  switch (lane.status.trim().toLowerCase()) {
+    case 'failed':
+      // A vault/decryption failure is our deployment problem, not a Microsoft
+      // or Google authorization verdict. Calling it "Reconnect" sends the user
+      // through consent again even though the provider was never contacted.
+      if (localCredentialErrorPattern.test(lane.lastError ?? '')) return 'attention'
+      return reconnectErrorPattern.test(lane.lastError ?? '') ? 'needs_reconnect' : 'attention'
+    case 'running':
+    case 'pending':
+      // `pending` = the mail grant exists and the email worker has not made
+      // its first pass yet (it polls every minute); shown as in progress.
+      return 'syncing'
+    case 'synced':
+      return 'synced'
+    default:
+      return 'unknown'
   }
-  if (['failed', 'error'].includes(syncStatus)) return 'attention'
-  if (['queued', 'pending', 'running', 'syncing'].includes(syncStatus)) return 'syncing'
-  if (['synced', 'completed', 'success'].includes(syncStatus)) return 'synced'
-  return 'unknown'
 }
 
 function formatSourceLabel(channel: InboxSourceChannel, labels: string[]): string {

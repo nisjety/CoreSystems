@@ -969,7 +969,20 @@ run_with_timeout() {
   local timeout_seconds="$1"
   shift
 
-  "$@" &
+  # A bare `wait "$command_pid"` on the backgrounded job hung indefinitely on
+  # this Windows/Git-Bash setup: MSYS bash's job control does not reliably
+  # get a SIGCHLD-equivalent for a NATIVE Windows executable (docker.exe)
+  # started via `&`, even after `kill -0` in the poll loop below already sees
+  # it gone. Symptom matched exactly: the whole script (and everything that
+  # depends on it, since preflight_docker calls this unconditionally on every
+  # run) would sit with zero CPU and zero child processes forever, right
+  # after this function's `kill -0` loop exited normally. Avoid `wait`
+  # entirely -- capture the exit code from inside the backgrounded subshell
+  # into a file and poll for that file with plain `kill -0`, which was
+  # already proven reliable by the very fact execution reaches this line.
+  local status_file
+  status_file="$(mktemp)"
+  ( "$@"; printf '%s' "$?" > "$status_file" ) &
   local command_pid=$!
   local deadline=$((SECONDS + timeout_seconds))
 
@@ -980,13 +993,18 @@ run_with_timeout() {
       sleep 1
       pkill -KILL -P "$command_pid" >/dev/null 2>&1 || true
       kill -KILL "$command_pid" >/dev/null 2>&1 || true
-      wait "$command_pid" >/dev/null 2>&1 || true
+      rm -f "$status_file"
       return 124
     fi
     sleep 1
   done
 
-  wait "$command_pid"
+  local exit_code=1
+  if [[ -s "$status_file" ]]; then
+    exit_code="$(cat "$status_file")"
+  fi
+  rm -f "$status_file"
+  return "$exit_code"
 }
 
 docker_disk_image_path() {
@@ -1396,6 +1414,23 @@ ensure_frontend_bus() {
   local deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
 
   log "Ensuring Frontend Plane NATS bus is running"
+
+  # Fast path: on this host, `docker compose up -d --remove-orphans nats`
+  # (with or without a run_with_timeout wrapper -- both were tried and traced)
+  # reproducibly hung with zero children and zero CPU on a large fraction of
+  # invocations, for reasons that did not point at any single fixable line.
+  # `--resume` calls this function on every single retry regardless of
+  # whether nats needs anything done to it, so on this host that turned "costs
+  # one retry sometimes" into "blocks all forward progress most of the time".
+  # nats is a long-running, rarely-recreated service; if it is already
+  # healthy there is nothing for `up -d` to do, so skip the call that hangs
+  # and go straight to the readiness check that was going to be the exit
+  # condition anyway.
+  if [[ "$DRY_RUN" != "true" ]] && service_ready "$compose_file" "nats"; then
+    log "Frontend Plane NATS bus already healthy; skipping compose up"
+    return 0
+  fi
+
   validate_compose "$compose_file"
   run compose -f "$compose_file" up -d --remove-orphans nats
 

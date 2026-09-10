@@ -30,6 +30,11 @@ export function FeedbackWidget() {
   const [state, setState] = createSignal<SubmitState>('idle')
   const orgId = createMemo(() => getSession().activeOrg?.id ?? null)
   const canSubmit = createMemo(() => note().trim().length > 0 && state() !== 'sending' && state() !== 'sent')
+  // Support already owns the bottom-right corner for its persistent Verevon
+  // composer. The global feedback trigger is redundant there and can cover the
+  // send control on narrower viewports, so keep feedback available everywhere
+  // else without layering two composers on top of one another.
+  const isSupportInbox = createMemo(() => location.pathname.startsWith('/support'))
   // The chat page docks its composer to the same bottom-right corner this
   // widget floats in, and that dock's height is unbounded (autosizing
   // textarea). --docked reads the live measured height ChatPage publishes
@@ -68,7 +73,7 @@ export function FeedbackWidget() {
   }
 
   return (
-    <Show when={orgId()}>
+    <Show when={orgId() && !isSupportInbox()}>
       <div class={`feedback-widget${isDocked() ? ' feedback-widget--docked' : ''}`}>
         <Show
           when={open()}

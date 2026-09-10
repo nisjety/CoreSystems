@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Footer } from "@/components/core/footer/Footer";
 import { ArrowButton } from "@/components/ui/ArrowButton";
+import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion";
 import { waitingProblemShots } from "@/components/home/sections/problemVideoSequences";
 import { ResponseTimeHeader } from "./ResponseTimeHeader";
 
@@ -39,8 +40,11 @@ const delaySteps = [
  */
 export function ResponseTimePage() {
 	const heroVideoRef = useRef<HTMLVideoElement>(null);
+	const corridorVideoRef = useRef<HTMLVideoElement>(null);
 	const advancedHeroShot = useRef<number | null>(null);
 	const [heroShotIndex, setHeroShotIndex] = useState(0);
+	const [shouldLoadCorridor, setShouldLoadCorridor] = useState(false);
+	const prefersReducedMotion = usePrefersReducedMotion();
 	const heroShot = waitingProblemShots[heroShotIndex];
 
 	function advanceHeroShot() {
@@ -59,11 +63,52 @@ export function ResponseTimePage() {
 			return;
 		}
 
+		if (prefersReducedMotion) {
+			video.pause();
+			return;
+		}
+
 		video.load();
 		video.play().catch(() => {
 			// The poster and hero copy remain available if autoplay is blocked.
 		});
-	}, [heroShotIndex]);
+	}, [heroShotIndex, prefersReducedMotion]);
+
+	useEffect(() => {
+		const video = corridorVideoRef.current;
+		if (!video || prefersReducedMotion) {
+			video?.pause();
+			return;
+		}
+
+		const observer = new IntersectionObserver(
+			([entry]) => {
+				if (entry.isIntersecting) {
+					setShouldLoadCorridor(true);
+					return;
+				}
+
+				video.pause();
+			},
+			{ rootMargin: "200px 0px" },
+		);
+
+		observer.observe(video);
+
+		return () => observer.disconnect();
+	}, [prefersReducedMotion]);
+
+	useEffect(() => {
+		const video = corridorVideoRef.current;
+		if (!video || prefersReducedMotion || !shouldLoadCorridor) {
+			video?.pause();
+			return;
+		}
+
+		void video.play().catch(() => {
+			// The poster remains available when autoplay is blocked.
+		});
+	}, [prefersReducedMotion, shouldLoadCorridor]);
 
 	return (
 		<div className="min-h-screen bg-background text-verevon-text [--verevon-edge:clamp(32px,5.55vw,208px)] [--verevon-page-pad:clamp(20px,4vw,56px)] [--verevon-section-vpad:clamp(80px,11vw,160px)]">
@@ -76,7 +121,6 @@ export function ResponseTimePage() {
 				>
 					<video
 						aria-label="Sekvens av venting, tid og forsinkelse"
-						autoPlay
 						className="absolute inset-0 size-full object-cover"
 						muted
 						onEnded={advanceHeroShot}
@@ -96,7 +140,7 @@ export function ResponseTimePage() {
 						className="absolute inset-0 bg-[linear-gradient(90deg,rgba(20,20,18,0.78)_0%,rgba(20,20,18,0.46)_42%,rgba(20,20,18,0.14)_100%),linear-gradient(0deg,rgba(20,20,18,0.58)_0%,transparent_52%)]"
 					/>
 					<div className="relative z-10 mx-auto flex min-h-[calc(100svh-72px)] max-w-[1680px] items-end px-[var(--verevon-edge)] pb-[clamp(56px,8vw,128px)] pt-20 max-[760px]:px-[var(--verevon-page-pad)]">
-						<div className="max-w-[700px]">
+						<div className="verevon-type-inverse max-w-[700px]">
 							<p className="verevon-eyebrow text-white/70">Problemet / Tid</p>
 							<h1 className="verevon-display mt-7 max-w-[12ch] text-balance text-white">
 								Svaret er raskt. Prosessen rundt det er ikke.
@@ -175,14 +219,18 @@ export function ResponseTimePage() {
 
 						<figure className="relative min-h-[480px] overflow-hidden rounded-[30px] border border-verevon-j-text/8 bg-verevon-surface-soft shadow-[0_24px_80px_rgba(23,23,23,0.08)]">
 							<video
-								autoPlay
 								className="absolute inset-0 size-full object-cover object-center"
 								loop
 								muted
 								playsInline
 								poster="/verevon-vibe/problem-waiting/corridor-poster.jpg"
 								preload="metadata"
-								src="/verevon-vibe/problem-waiting/corridor.mp4"
+								ref={corridorVideoRef}
+								src={
+									shouldLoadCorridor
+										? "/verevon-vibe/problem-waiting/corridor-web.mp4"
+										: undefined
+								}
 							/>
 							<div className="absolute bottom-5 left-5 right-5 rounded-[20px] border border-white/82 bg-white/94 p-5 shadow-[0_18px_50px_rgba(23,23,23,0.16)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:right-7">
 								<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">

@@ -48,6 +48,7 @@ import { listTicketTeams, listTickets, type SupportTicket, type TicketTeam } fro
 import { executeTicketCreate, executeTicketPatch, executeTicketResourceLink } from '@/features/tickets/lib/ticket-actions'
 import { getSession } from '@/shared/session/session-store'
 import { ApiError } from '@/shared/api/http'
+import { connectBundlesForSources } from '@/shared/integrations/connect-bundles'
 import { translateApiError, useI18n } from '@/shared/i18n'
 
 function mergeConversationPages(preferred: LiveTicket[], existing: LiveTicket[]): LiveTicket[] {
@@ -300,9 +301,10 @@ export default function InboxPage() {
     setConnectingInboxProvider(provider)
     setNotice(null)
     try {
-      // This is the scoped, user-initiated full inbox grant. OAuth ownership
-      // remains in integration-core; Inbox never receives a provider token.
-      const session = await startConnectSession(id, provider, { bundles: ['full'] })
+      // One bundle policy for every surface (shared/integrations/connect-bundles).
+      // OAuth ownership remains in integration-core; Inbox never receives a
+      // provider token.
+      const session = await startConnectSession(id, provider, { bundles: connectBundlesForSources(provider) })
       const connectUrl = session.connectUrl || session.redirectUrl
       const sessionToken = session.sessionToken || session.id
       if (!connectUrl || !sessionToken) throw new Error(i18n.tr('Tilkoblingen kunne ikke startes.', 'The connection could not be started.'))

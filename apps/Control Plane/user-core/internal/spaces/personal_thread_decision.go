@@ -96,6 +96,7 @@ type PersonalThreadDecisionEvidence struct {
 	RecipientSubjectID       string
 	Privacy                  PrivacyPolicySnapshot
 	ThreadCreateEntitled     bool
+	ThreadReadEntitled       bool
 	RetrievalReadEntitled    bool
 	ImportWriteEntitled      bool
 	AgentActionEntitled      bool
@@ -177,6 +178,34 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedRetrieval() error {
 	}
 	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.RetrievalReadEntitled {
 		return fmt.Errorf("shared Space retrieval authority is incomplete")
+	}
+	return e.Privacy.Validate()
+}
+
+// ValidateForSharedThreadRead authorizes reading a shared Space's whole
+// conversation record — every member's turns, not only the caller's own.
+//
+// The role floor is `viewer`, matching shared retrieval: reading the room is
+// what a viewer is for. What it does NOT relax is the audience join. Control
+// resolves this evidence only when the caller appears in the Space's CURRENT
+// recipient audience, so a removed participant stops being able to read the
+// moment their membership or the audience revision changes, without the
+// reading service needing its own copy of the participant list.
+func (e PersonalThreadDecisionEvidence) ValidateForSharedThreadRead() error {
+	if err := e.Membership.Validate(); err != nil {
+		return err
+	}
+	if e.Membership.Kind == KindPersonal {
+		return fmt.Errorf("shared thread read decision requires a non-personal Space")
+	}
+	if !matchesOneOf(e.Membership.Role, "viewer", "editor", "manager", "owner") {
+		return fmt.Errorf("Space role %q cannot read a shared Space", e.Membership.Role)
+	}
+	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
+		return fmt.Errorf("shared Space recipient audience is required")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.ThreadReadEntitled {
+		return fmt.Errorf("shared Space thread read authority is incomplete")
 	}
 	return e.Privacy.Validate()
 }

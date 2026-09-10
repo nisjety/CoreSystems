@@ -65,6 +65,19 @@ pub enum EventType {
     /// detected logo immediately, instead of waiting for downstream
     /// model-plane interpretation.
     BrandingExtracted,
+    /// Emitted by the page pipeline once per successfully transformed HTML
+    /// page, AFTER readability/markdown/metadata have run. Carries the
+    /// page-level extraction the earlier `page_fetched` (pre-transform, only
+    /// `{url,status,duration_ms,content_type}`) and `artifact_written`
+    /// (artifact ids + byte counts) never could: `title`, `title_source`
+    /// (`html` | `model` | `host`), a whitespace-collapsed ~300-char
+    /// `excerpt` of the markdown, `word_count`, `lang`, the `driver` that
+    /// served the fetch, and an optional one-sentence model `summary`.
+    /// Additive and backward compatible — consumers that only know
+    /// `page_fetched` keep working; the verevon onboarding wizard maps this
+    /// into its snippet cards so a crawl shows real titles and text instead
+    /// of `N utdrag samlet` over empty excerpts.
+    PageExtracted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

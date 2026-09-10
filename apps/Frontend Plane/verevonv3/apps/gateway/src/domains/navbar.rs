@@ -201,6 +201,12 @@ async fn navbar(
     // Plan ← billing-core is the source of truth for the org's plan (user-core
     // /me carries no plan). Fall back to any plan on /me, then "trial" only when
     // billing-core is unavailable / no account exists.
+    // billing-core elevates a trialing org to the `pro` tier (TrialPlan), so
+    // `plan` alone cannot tell a 14-day trial from a paid subscription; the
+    // account's `subscription_state` + `trial_ends_at` can. Surface both so the
+    // SPA can badge the trial honestly instead of showing a bare "Expert".
+    let mut plan_trial = false;
+    let mut trial_ends_at: Option<String> = None;
     let plan = {
         let (status, Json(acct)) = proxy_json(
             &state,
@@ -217,6 +223,10 @@ async fn navbar(
         .await;
         let billing_plan = if status.is_success() {
             let data = crate::envelope::unwrap_data(&acct);
+            trial_ends_at = first_str(&data, &["trial_ends_at", "trialEndsAt"]).map(str::to_owned);
+            plan_trial = trial_ends_at.is_some()
+                && first_str(&data, &["subscription_state", "subscriptionState"])
+                    == Some("trialing");
             first_str(&data, &["plan"])
                 .filter(|p| !p.trim().is_empty())
                 .map(str::to_owned)
@@ -231,6 +241,8 @@ async fn navbar(
     Json(ok(json!({
         "profile": profile,
         "plan": plan,
+        "planTrial": plan_trial,
+        "trialEndsAt": trial_ends_at,
         "notifications": {
             "configured": notif_status.is_success(),
             "messages": [],

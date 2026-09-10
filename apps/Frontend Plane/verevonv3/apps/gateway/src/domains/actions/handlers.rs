@@ -30,7 +30,8 @@ use super::dispatchers::{
     dispatch_inbox_workspace_set_read, dispatch_ingestions_create_run,
     dispatch_ingestions_create_schedule, dispatch_ingestions_create_source,
     dispatch_ingestions_delete_source, dispatch_ingestions_run_schedule_action,
-    dispatch_integrations_disconnect, dispatch_integrations_extend_inbox_history,
+    dispatch_integrations_disconnect, dispatch_integrations_disconnect_chatgpt_subscription,
+    dispatch_integrations_extend_inbox_history, dispatch_integrations_start_chatgpt_subscription,
     dispatch_integrations_start_connect_session, dispatch_integrations_trigger_inbox_sync,
     dispatch_integrations_trigger_sync, dispatch_knowledge_create_document,
     dispatch_knowledge_extract_products, dispatch_knowledge_summarize_products,
@@ -262,6 +263,19 @@ pub(super) async fn execute_action(
         }
         "integrations.disconnect" => {
             dispatch_integrations_disconnect(&state, &user, &headers, &body.input).await
+        }
+        "integrations.start_chatgpt_subscription" => {
+            dispatch_integrations_start_chatgpt_subscription(&state, &user, &headers, &body.input)
+                .await
+        }
+        "integrations.disconnect_chatgpt_subscription" => {
+            dispatch_integrations_disconnect_chatgpt_subscription(
+                &state,
+                &user,
+                &headers,
+                &body.input,
+            )
+            .await
         }
         "integrations.trigger_sync" => {
             dispatch_integrations_trigger_sync(&state, &user, &headers, &body.input).await

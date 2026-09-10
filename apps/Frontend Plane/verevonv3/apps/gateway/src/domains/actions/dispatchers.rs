@@ -43,6 +43,9 @@ use crate::domains::integrations::connections::{
     extend_inbox_history as extend_integration_inbox_history,
     trigger_inbox_sync as trigger_integration_inbox_sync, trigger_sync as trigger_integration_sync,
 };
+use crate::domains::integrations::model_subscriptions::{
+    disconnect_openai_codex_subscription, start_openai_codex_subscription,
+};
 use crate::domains::integrations::providers::start_connect_session as start_integration_connect_session;
 use crate::domains::knowledge::documents::create_document;
 use crate::domains::knowledge::products::{extract_products, summarize_products};
@@ -201,7 +204,7 @@ fn owner_contract_is_human_executable(action: &Value) -> bool {
 
 fn canonical_schema_sha256(schema: &Value) -> Option<String> {
     let canonical = serde_json::to_vec(schema).ok()?;
-    Some(format!("sha256:{:x}", Sha256::digest(canonical)))
+    Some(format!("sha256:{}", hex::encode(Sha256::digest(canonical))))
 }
 
 pub(super) async fn dispatch_recrawl(
@@ -4067,6 +4070,58 @@ pub(super) async fn dispatch_integrations_disconnect(
     .into_response();
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("integrations.disconnect", user, status, payload)
+}
+
+pub(super) async fn dispatch_integrations_start_chatgpt_subscription(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    _input: &Value,
+) -> Response {
+    let response = start_openai_codex_subscription(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(json!({})),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope(
+        "integrations.start_chatgpt_subscription",
+        user,
+        status,
+        payload,
+    )
+}
+
+pub(super) async fn dispatch_integrations_disconnect_chatgpt_subscription(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let connection_id = ticket_string(input, "connectionId");
+    if connection_id.is_empty() {
+        return ticket_bad_request(
+            "integrations.disconnect_chatgpt_subscription requires a non-empty 'connectionId'",
+        );
+    }
+    let response = disconnect_openai_codex_subscription(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(connection_id.to_owned()),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope(
+        "integrations.disconnect_chatgpt_subscription",
+        user,
+        status,
+        payload,
+    )
 }
 
 pub(super) async fn dispatch_integrations_trigger_sync(

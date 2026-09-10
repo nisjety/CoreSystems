@@ -24,6 +24,13 @@ type Config struct {
 	AuthCoreURL                      string
 	AuthCoreInternalAPIKey           string
 	AuthCoreJWKSURL                  string
+	// AuthCoreOAuth* identify integration-corev2 to auth-core's scoped
+	// `/internal/oauth/*` surface (principal registry
+	// AUTH_INTERNAL_SERVICE_CREDENTIALS). Used to re-mint a Microsoft
+	// sign-in credential that Control Plane owns. Empty token = disabled.
+	AuthCoreOAuthCredentialID        string
+	AuthCoreOAuthPrincipal           string
+	AuthCoreOAuthServiceToken        string
 	PlaneTokenIssuer                 string
 	IngestionAuthAudience            string
 	ProviderWriteAttestationKeysJSON string
@@ -71,46 +78,56 @@ type Config struct {
 	RateLimitMax                     int
 	RateLimitWindow                  time.Duration
 	TokenLeaseConsumers              []string
-	MicrosoftTenantID                string
-	MicrosoftClientID                string
-	MicrosoftClientSecret            string
-	MicrosoftClientAuthMode          string
-	MicrosoftTokenOrigin             string
-	MicrosoftAuthorizationURL        string
-	MicrosoftTokenURL                string
-	MicrosoftGraphBaseURL            string
-	SlackClientID                    string
-	SlackClientSecret                string
-	SlackSigningSecret               string
-	SlackAuthorizationURL            string
-	SlackTokenURL                    string
-	SlackAPIBaseURL                  string
-	GoogleClientID                   string
-	GoogleClientSecret               string
-	GoogleAuthorizationURL           string
-	GoogleTokenURL                   string
-	GoogleAPIBaseURL                 string
-	NotionClientID                   string
-	NotionClientSecret               string
-	NotionAuthorizationURL           string
-	NotionTokenURL                   string
-	NotionAPIBaseURL                 string
-	GitHubClientID                   string
-	GitHubClientSecret               string
-	GitHubWebhookSecret              string
-	GitHubAuthorizationURL           string
-	GitHubTokenURL                   string
-	GitHubAPIBaseURL                 string
-	ShopifyClientID                  string
-	ShopifyClientSecret              string
-	ShopifyWebhookSecret             string
-	ShopifyAPIBaseURL                string
-	StripeClientID                   string
-	StripeClientSecret               string
-	StripeAuthorizationURL           string
-	StripeTokenURL                   string
-	StripeAPIBaseURL                 string
-	StripeWebhookSecret              string
+
+	// Codex subscription auth is retained by the official Codex app-server in
+	// this service-owned directory, never copied into the integration database.
+	CodexSubscriptionEnabled           bool
+	CodexAppServerCommand              string
+	CodexSubscriptionHome              string
+	CodexSubscriptionModelPlaneAPIKey  string
+	CodexSubscriptionLoginTTL          time.Duration
+	CodexSubscriptionInvocationTimeout time.Duration
+
+	MicrosoftTenantID         string
+	MicrosoftClientID         string
+	MicrosoftClientSecret     string
+	MicrosoftClientAuthMode   string
+	MicrosoftTokenOrigin      string
+	MicrosoftAuthorizationURL string
+	MicrosoftTokenURL         string
+	MicrosoftGraphBaseURL     string
+	SlackClientID             string
+	SlackClientSecret         string
+	SlackSigningSecret        string
+	SlackAuthorizationURL     string
+	SlackTokenURL             string
+	SlackAPIBaseURL           string
+	GoogleClientID            string
+	GoogleClientSecret        string
+	GoogleAuthorizationURL    string
+	GoogleTokenURL            string
+	GoogleAPIBaseURL          string
+	NotionClientID            string
+	NotionClientSecret        string
+	NotionAuthorizationURL    string
+	NotionTokenURL            string
+	NotionAPIBaseURL          string
+	GitHubClientID            string
+	GitHubClientSecret        string
+	GitHubWebhookSecret       string
+	GitHubAuthorizationURL    string
+	GitHubTokenURL            string
+	GitHubAPIBaseURL          string
+	ShopifyClientID           string
+	ShopifyClientSecret       string
+	ShopifyWebhookSecret      string
+	ShopifyAPIBaseURL         string
+	StripeClientID            string
+	StripeClientSecret        string
+	StripeAuthorizationURL    string
+	StripeTokenURL            string
+	StripeAPIBaseURL          string
+	StripeWebhookSecret       string
 	// AllowUnverifiedWebhooks is a dev-only escape hatch: provider webhooks
 	// are rejected fail-closed when their signature scheme is unconfigured
 	// or unimplemented, unless this is explicitly true (never in production).
@@ -226,6 +243,9 @@ func Load() (Config, error) {
 		AuthCoreURL:                      envOr("AUTH_CORE_URL", "http://auth-core:3011"),
 		AuthCoreInternalAPIKey:           strings.TrimSpace(envOr("AUTH_CORE_INTERNAL_API_KEY", strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")))),
 		AuthCoreJWKSURL:                  strings.TrimSpace(os.Getenv("AUTH_CORE_JWKS_URL")),
+		AuthCoreOAuthCredentialID:        envOr("AUTH_CORE_OAUTH_CREDENTIAL_ID", "integration-core-primary"),
+		AuthCoreOAuthPrincipal:           envOr("AUTH_CORE_OAUTH_PRINCIPAL", "integration-core"),
+		AuthCoreOAuthServiceToken:        strings.TrimSpace(os.Getenv("AUTH_CORE_OAUTH_SERVICE_TOKEN")),
 		PlaneTokenIssuer:                 strings.TrimSpace(os.Getenv("PLANE_TOKEN_ISSUER")),
 		IngestionAuthAudience:            envOr("INGESTION_AUTH_AUDIENCE", "ingestion"),
 		ProviderWriteAttestationKeysJSON: strings.TrimSpace(os.Getenv("INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON")),
@@ -270,12 +290,20 @@ func Load() (Config, error) {
 		// NATS_TOKEN authenticates against the shared cross-plane verevon-nats
 		// broker, which enforces `authorization { token: $VEREVON_NATS_TOKEN }`
 		// (see nats-shared.conf) rather than username/password.
-		NATSToken:                 strings.TrimSpace(envOr("NATS_TOKEN", os.Getenv("VEREVON_NATS_TOKEN"))),
-		NATSSubjectPrefix:         envOr("NATS_SUBJECT_PREFIX", ""),
-		RateLimitEnabled:          envBool("INTEGRATION_RATE_LIMIT_ENABLED", true),
-		RateLimitMax:              envInt("INTEGRATION_RATE_LIMIT_MAX", 120),
-		RateLimitWindow:           envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
-		TokenLeaseConsumers:       envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
+		NATSToken:           strings.TrimSpace(envOr("NATS_TOKEN", os.Getenv("VEREVON_NATS_TOKEN"))),
+		NATSSubjectPrefix:   envOr("NATS_SUBJECT_PREFIX", ""),
+		RateLimitEnabled:    envBool("INTEGRATION_RATE_LIMIT_ENABLED", true),
+		RateLimitMax:        envInt("INTEGRATION_RATE_LIMIT_MAX", 120),
+		RateLimitWindow:     envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
+		TokenLeaseConsumers: envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
+
+		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
+		CodexAppServerCommand:              strings.TrimSpace(envOr("CODEX_APP_SERVER_COMMAND", "codex")),
+		CodexSubscriptionHome:              strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_HOME")),
+		CodexSubscriptionModelPlaneAPIKey:  strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY")),
+		CodexSubscriptionLoginTTL:          envDuration("CODEX_SUBSCRIPTION_LOGIN_TTL", 10*time.Minute),
+		CodexSubscriptionInvocationTimeout: envDuration("CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT", 90*time.Second),
+
 		MicrosoftTenantID:         tenant,
 		MicrosoftClientID:         envOr("AZURE_CLIENT_ID", os.Getenv("MICROSOFT_CLIENT_ID")),
 		MicrosoftClientSecret:     envOr("AZURE_CLIENT_SECRET", os.Getenv("MICROSOFT_CLIENT_SECRET")),
@@ -390,6 +418,23 @@ func (c Config) ValidateRuntime() error {
 	}
 	if c.ControlPlaneInternalAPIKey() == "" {
 		return fmt.Errorf("AUTH_CORE_INTERNAL_API_KEY or INTERNAL_API_KEY is required")
+	}
+	if c.CodexSubscriptionEnabled {
+		if strings.TrimSpace(c.CodexAppServerCommand) == "" {
+			return fmt.Errorf("CODEX_APP_SERVER_COMMAND is required when CODEX_SUBSCRIPTION_ENABLED=true")
+		}
+		if strings.TrimSpace(c.CodexSubscriptionHome) == "" {
+			return fmt.Errorf("CODEX_SUBSCRIPTION_HOME is required when CODEX_SUBSCRIPTION_ENABLED=true")
+		}
+		if strings.TrimSpace(c.CodexSubscriptionModelPlaneAPIKey) == "" {
+			return fmt.Errorf("CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY is required when CODEX_SUBSCRIPTION_ENABLED=true")
+		}
+		if c.CodexSubscriptionLoginTTL <= 0 {
+			return fmt.Errorf("CODEX_SUBSCRIPTION_LOGIN_TTL must be positive")
+		}
+		if c.CodexSubscriptionInvocationTimeout <= 0 {
+			return fmt.Errorf("CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT must be positive")
+		}
 	}
 	if c.OrgCoreURL == "" {
 		return fmt.Errorf("ORG_CORE_URL is required")
@@ -737,6 +782,19 @@ func (c Config) ProviderReadiness() map[string][]string {
 	}
 	if strings.TrimSpace(c.SCIMBearerToken) == "" && len(c.SCIMBearerTokens) == 0 {
 		readiness["scim"] = append(readiness["scim"], "SCIM_BEARER_TOKEN or SCIM_ORG_BEARER_TOKENS")
+	}
+	if !c.CodexSubscriptionEnabled {
+		readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_SUBSCRIPTION_ENABLED=true")
+	} else {
+		if strings.TrimSpace(c.CodexAppServerCommand) == "" {
+			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_APP_SERVER_COMMAND")
+		}
+		if strings.TrimSpace(c.CodexSubscriptionHome) == "" {
+			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_SUBSCRIPTION_HOME")
+		}
+		if strings.TrimSpace(c.CodexSubscriptionModelPlaneAPIKey) == "" {
+			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY")
+		}
 	}
 	return readiness
 }

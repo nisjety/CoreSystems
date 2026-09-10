@@ -22,7 +22,9 @@ export type SpaceSummary = {
   lifecycle: string
   /** True for the organization's own shared room (its org-wide channel).
    * Absent on older gateway responses and on the Control-outage fallback
-   * listing, so absence means "unknown", not "no". */
+   * listing, so absence means "unknown", not "no". Callers that gate an
+   * ACTION on this must test `=== false`, never `!value`: the room whose
+   * membership is derived is the one where an editor would silently fail. */
   is_organization_room?: boolean
 }
 
@@ -38,18 +40,40 @@ export type SpaceContext = {
 export type SpaceThread = {
   thread_id: string
   space_id: string
+  /**
+   * Who started this post. Present once Model Plane returns it; absent on an
+   * older gateway. Absence means "unknown author", never "you".
+   */
+  owner_subject_id?: string
   title?: string
   preview?: string
   updated_at?: string
   latest_run_id?: string
   latest_run_status?: string
   latest_run_updated_at?: string
+  /**
+   * Pinned in the room. Server-owned and relayed from Session Core's listing,
+   * which already orders pinned posts first. Absent on an older gateway.
+   */
+  pinned?: boolean
+}
+
+/**
+ * Where the reader last caught up with this room (item 4b). `last_read_at` is
+ * epoch milliseconds, `null` when they have never had the room open — which
+ * is "nothing is new yet", not "everything is new". An absent marker means it
+ * could not be read; the listing names that as a gap.
+ */
+export type SpaceReadMarker = {
+  readonly last_read_at: number | null
 }
 
 export type SpaceThreads = {
   space: SpaceSummary
   membership: SpaceMembership
   threads: readonly SpaceThread[]
+  read_marker?: SpaceReadMarker
+  unavailable?: readonly SpaceWorkGap[]
 }
 
 /** Actor-filtered owner contracts available in a Space. This is an availability
@@ -130,8 +154,418 @@ export function getSpaceContext(spaceRef: string): Promise<SpaceContext> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/context`)
 }
 
-export function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
-  return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
+export async function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
+  const response = await requestJson<{
+    space: SpaceSummary
+    membership: SpaceMembership
+    threads: readonly SpaceThread[]
+    read_marker?: unknown
+    unavailable?: unknown
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
+  const marker = response.read_marker
+  const lastReadAt =
+    marker && typeof marker === 'object' ? (marker as { last_read_at?: unknown }).last_read_at : undefined
+  // Only a real object counts as "the marker was read". `null` inside it is
+  // the member who has never caught up; a missing object is the gap.
+  const read_marker: SpaceReadMarker | undefined =
+    marker && typeof marker === 'object'
+      ? { last_read_at: typeof lastReadAt === 'number' && Number.isFinite(lastReadAt) ? lastReadAt : null }
+      : undefined
+  return {
+    space: response.space,
+    membership: response.membership,
+    threads: response.threads,
+    ...(read_marker ? { read_marker } : {}),
+    unavailable: workGaps(response.unavailable),
+  }
+}
+
+/**
+ * Retitle or pin a post in the room.
+ *
+ * Owner-bound in Session Core: only the member who started the post may. The
+ * room route relays a refusal as `thread_presentation_owner_only`, and the UI
+ * offers the control only to the author — so anyone else reaches this only by
+ * racing a membership change, and it fails honestly then.
+ */
+export async function updateSpaceThreadPresentation(
+  spaceRef: string,
+  threadId: string,
+  presentation: { readonly title?: string; readonly pinned?: boolean },
+): Promise<{ thread_id: string; title?: string; pinned?: boolean }> {
+  return requestJson(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads/${encodeURIComponent(threadId)}/presentation`,
+    { method: 'PATCH', body: JSON.stringify(presentation) },
+  )
+}
+
+/** The reader has this room open now. Advances their read marker. */
+export async function markSpaceRead(spaceRef: string): Promise<SpaceReadMarker> {
+  const response = await requestJson<{ last_read_at?: unknown }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/read`,
+    { method: 'POST', body: '{}' },
+  )
+  const at = response.last_read_at
+  return { last_read_at: typeof at === 'number' && Number.isFinite(at) ? at : null }
+}
+
+/** Someone else in the room right now. Identifiers and a status, never content. */
+export type SpacePresentMember = {
+  readonly subject_id: string
+  readonly status: 'online' | 'typing'
+  readonly last_seen_at: number
+}
+
+export type SpacePresence = {
+  readonly present: readonly SpacePresentMember[]
+  /** How long a heartbeat counts as present, per Application Plane. */
+  readonly ttl_seconds: number | null
+}
+
+/**
+ * "I am here" — and, in the same answer, "who else is?".
+ *
+ * One request per beat rather than a write plus a read, on a timer that
+ * already runs. `offline` is the polite goodbye a room can send when the
+ * reader leaves; it is never required, because a heartbeat that stops coming
+ * expires on its own.
+ */
+export async function recordSpacePresence(
+  spaceRef: string,
+  status: 'online' | 'typing' | 'offline' = 'online',
+): Promise<SpacePresence> {
+  const response = await requestJson<{ present?: unknown; ttl_seconds?: unknown }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/presence`,
+    { method: 'POST', body: JSON.stringify({ status }) },
+  )
+  const present = Array.isArray(response.present) ? response.present : []
+  return {
+    present: present.flatMap((row) => {
+      if (!row || typeof row !== 'object') return []
+      const member = row as Record<string, unknown>
+      const subjectId = typeof member.subject_id === 'string' ? member.subject_id.trim() : ''
+      if (!subjectId) return []
+      return [{
+        subject_id: subjectId,
+        status: member.status === 'typing' ? ('typing' as const) : ('online' as const),
+        last_seen_at: typeof member.last_seen_at === 'number' ? member.last_seen_at : 0,
+      }]
+    }),
+    ttl_seconds: typeof response.ttl_seconds === 'number' ? response.ttl_seconds : null,
+  }
+}
+
+/** One evidence section this response deliberately does not claim, with why. */
+export type SpaceWorkGap = {
+  readonly section: 'runs' | 'schedules' | string
+  /**
+   * Stable identifier for the reason, so the UI can say it in the reader's
+   * language. Absent on an older gateway, which is why `reason` is still sent
+   * and still rendered when the code is unrecognised — a gap stated in the
+   * wrong language beats a gap not stated.
+   */
+  readonly code?: string
+  readonly reason: string
+}
+
+/**
+ * What a room has running and scheduled.
+ *
+ * Composed by the gateway from two upstreams with two different authorities:
+ * runs come through the same shared-read decision the transcript uses, so Work
+ * reaches exactly as far as Chat; schedules are filtered by Space over a
+ * listing that was already org-readable.
+ *
+ * `unavailable` is always present and may be non-empty alongside real data —
+ * either upstream can fail on its own. A caller must render the gap rather
+ * than treating a short list as the whole answer: the Work tab's entire job is
+ * "what needs me", and a room with pending work that looks idle is the one
+ * failure mode worth designing against.
+ */
+export type SpaceWork = {
+  readonly space: SpaceSummary
+  readonly membership: SpaceMembership
+  readonly runs: readonly Record<string, unknown>[]
+  readonly schedules: readonly Record<string, unknown>[]
+  readonly unavailable: readonly SpaceWorkGap[]
+}
+
+function workGaps(value: unknown): SpaceWorkGap[] {
+  if (!Array.isArray(value)) return []
+  const gaps: SpaceWorkGap[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const section = typeof record.section === 'string' ? record.section : ''
+    const reason = typeof record.reason === 'string' ? record.reason : ''
+    const code = typeof record.code === 'string' && record.code.trim() ? record.code.trim() : undefined
+    if (section && reason) gaps.push({ section, reason, ...(code ? { code } : {}) })
+  }
+  return gaps
+}
+
+function workRows(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object')
+    : []
+}
+
+export async function getSpaceWork(spaceRef: string): Promise<SpaceWork> {
+  const response = await requestJson<{
+    space: SpaceSummary
+    membership: SpaceMembership
+    runs?: unknown
+    schedules?: unknown
+    unavailable?: unknown
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/work`)
+  return {
+    space: response.space,
+    membership: response.membership,
+    runs: workRows(response.runs),
+    schedules: workRows(response.schedules),
+    unavailable: workGaps(response.unavailable),
+  }
+}
+
+/**
+ * One owner-plane effect performed under this Space's authority.
+ *
+ * Correlated through the grant, not a Space column: the operation ledger binds
+ * each effect to the exact grant that authorized it, and the grant carries the
+ * `space_ref` Control decided. So an effect appears in a room's record only if
+ * it was genuinely authorized for that room.
+ *
+ * `status` includes `unknown`, which is a real terminal answer and NOT a
+ * synonym for failure — the effect may have landed and the receipt may not have
+ * come back. `ticket_id` is present only on `completed`; its absence means the
+ * effect is not claimed to have landed.
+ */
+export type SpaceOperationReceipt = {
+  readonly operation_id: string
+  readonly action_id: string
+  readonly status: 'pending_control_commit' | 'reserved' | 'completed' | 'cancelled' | 'unknown' | string
+  readonly subject_id?: string
+  readonly granted_by_user_id?: string
+  readonly conversation_id?: string
+  readonly ticket_id?: string
+  readonly audit_event_id?: string
+  readonly terminal_reason?: string
+  readonly created_at?: string
+  readonly updated_at?: string
+}
+
+/**
+ * One owner-side grant of an effect in this Space.
+ *
+ * The resource half of `effective_access`: Control decides whether a subject
+ * may act in the Space at all, and this records that the owner plane also
+ * admitted it to one conversation and action. A revoked grant is the more
+ * useful of the two — "this agent could write tickets here until Tuesday" is
+ * what explains a refusal after the fact.
+ */
+export type SpaceAuthorityEvent = {
+  readonly grant_id: string
+  readonly action_id: string
+  readonly subject_id?: string
+  readonly conversation_id?: string
+  readonly created_by_user_id?: string
+  readonly created_at?: string
+  readonly revoked_at?: string
+  readonly revoked_by_user_id?: string
+}
+
+/**
+ * What has happened in this Space, from every plane that can currently say.
+ *
+ * Activity and Work read overlapping evidence to answer different questions:
+ * Work asks what is in flight, Activity asks what happened, on whose authority,
+ * and with what outcome. So `runs` here keeps terminal runs and carries the
+ * token/step counts a run has always recorded and Work never used.
+ *
+ * `unavailable` always includes the evidence classes that have no source yet
+ * (durable delivery, watches), because the tab has promised since the cockpit
+ * shipped that they join when their projection lands — a reader deserves to
+ * know which are still out rather than reading their absence as calm.
+ */
+export type SpaceActivity = {
+  readonly space: SpaceSummary
+  readonly membership: SpaceMembership
+  readonly runs: readonly Record<string, unknown>[]
+  readonly approvals: readonly Record<string, unknown>[]
+  readonly operations: readonly SpaceOperationReceipt[]
+  readonly authority: readonly SpaceAuthorityEvent[]
+  readonly unavailable: readonly SpaceWorkGap[]
+}
+
+function operationReceipts(value: unknown): SpaceOperationReceipt[] {
+  return workRows(value)
+    .filter((row) => typeof row.operation_id === 'string' && row.operation_id.trim())
+    .map((row) => ({
+      operation_id: String(row.operation_id),
+      action_id: typeof row.action_id === 'string' ? row.action_id : '',
+      status: typeof row.status === 'string' ? row.status : 'unknown',
+      subject_id: typeof row.subject_id === 'string' ? row.subject_id : undefined,
+      granted_by_user_id:
+        typeof row.granted_by_user_id === 'string' ? row.granted_by_user_id : undefined,
+      conversation_id: typeof row.conversation_id === 'string' ? row.conversation_id : undefined,
+      ticket_id: typeof row.ticket_id === 'string' && row.ticket_id ? row.ticket_id : undefined,
+      audit_event_id:
+        typeof row.audit_event_id === 'string' && row.audit_event_id ? row.audit_event_id : undefined,
+      terminal_reason:
+        typeof row.terminal_reason === 'string' && row.terminal_reason ? row.terminal_reason : undefined,
+      created_at: typeof row.created_at === 'string' ? row.created_at : undefined,
+      updated_at: typeof row.updated_at === 'string' ? row.updated_at : undefined,
+    }))
+}
+
+function authorityEvents(value: unknown): SpaceAuthorityEvent[] {
+  return workRows(value)
+    .filter((row) => typeof row.grant_id === 'string' && row.grant_id.trim())
+    .map((row) => ({
+      grant_id: String(row.grant_id),
+      action_id: typeof row.action_id === 'string' ? row.action_id : '',
+      subject_id: typeof row.subject_id === 'string' ? row.subject_id : undefined,
+      conversation_id: typeof row.conversation_id === 'string' ? row.conversation_id : undefined,
+      created_by_user_id:
+        typeof row.created_by_user_id === 'string' ? row.created_by_user_id : undefined,
+      created_at: typeof row.created_at === 'string' ? row.created_at : undefined,
+      revoked_at: typeof row.revoked_at === 'string' && row.revoked_at ? row.revoked_at : undefined,
+      revoked_by_user_id:
+        typeof row.revoked_by_user_id === 'string' && row.revoked_by_user_id
+          ? row.revoked_by_user_id
+          : undefined,
+    }))
+}
+
+export async function getSpaceActivity(spaceRef: string): Promise<SpaceActivity> {
+  const response = await requestJson<{
+    space: SpaceSummary
+    membership: SpaceMembership
+    runs?: unknown
+    approvals?: unknown
+    operations?: unknown
+    authority?: unknown
+    unavailable?: unknown
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/activity`)
+  return {
+    space: response.space,
+    membership: response.membership,
+    runs: workRows(response.runs),
+    approvals: workRows(response.approvals),
+    operations: operationReceipts(response.operations),
+    authority: authorityEvents(response.authority),
+    unavailable: workGaps(response.unavailable),
+  }
+}
+
+/** One document in this Space's knowledge scope. */
+export type SpaceKnowledgeDocument = {
+  readonly document_id: string
+  readonly title: string
+  readonly source?: string
+  readonly type?: string
+  readonly status?: string
+  readonly zdr_classification?: string
+  readonly updated_at?: string
+}
+
+/** One published wiki page in the workspace this Space is bound to. */
+export type SpaceKnowledgeWikiPage = {
+  readonly page_id: string
+  readonly title: string
+  readonly path?: string
+  readonly updated_at?: string
+}
+
+/**
+ * The Data target this Space resolves to.
+ *
+ * Shown, not hidden: which archive a room reads from is the single most
+ * consequential fact about its answers, and a room whose binding names a
+ * workspace nobody expected is a configuration error you can only see if the
+ * binding is visible. `null` when the read was not authorized at all.
+ */
+export type SpaceKnowledgeBinding = {
+  readonly workspace_id?: string | null
+  readonly collection_id?: string | null
+  readonly owner_resource_ref?: string
+}
+
+/**
+ * What a room knows about.
+ *
+ * Documents resolve through `documents.space_ref` — the edge Data records when
+ * a document is imported under a verified Control Space decision. Wiki pages
+ * resolve through the workspace the Space's `space_retrieval_bindings` row
+ * names. Two mechanisms, two ways to be missing, hence a per-section
+ * `unavailable`.
+ *
+ * `documents_truncated` says the list is a page rather than the room: a reader
+ * cannot otherwise tell a capped listing from a complete archive, and quietly
+ * showing the first fifty of five hundred is how someone concludes a document
+ * is not in the room.
+ */
+export type SpaceKnowledge = {
+  readonly space: SpaceSummary
+  readonly membership: SpaceMembership
+  readonly binding: SpaceKnowledgeBinding | null
+  readonly documents: readonly SpaceKnowledgeDocument[]
+  readonly documents_truncated: boolean
+  readonly wiki_pages: readonly SpaceKnowledgeWikiPage[]
+  readonly unavailable: readonly SpaceWorkGap[]
+}
+
+function knowledgeDocuments(value: unknown): SpaceKnowledgeDocument[] {
+  return workRows(value)
+    .filter((row) => typeof row.document_id === 'string' && row.document_id.trim())
+    .map((row) => ({
+      document_id: String(row.document_id),
+      // A document with no title is a real row, so it still belongs in the
+      // list; the panel names it rather than dropping it.
+      title: typeof row.title === 'string' ? row.title : '',
+      source: typeof row.source === 'string' ? row.source : undefined,
+      type: typeof row.type === 'string' ? row.type : undefined,
+      status: typeof row.status === 'string' ? row.status : undefined,
+      zdr_classification:
+        typeof row.zdr_classification === 'string' ? row.zdr_classification : undefined,
+      updated_at: typeof row.updated_at === 'string' ? row.updated_at : undefined,
+    }))
+}
+
+function knowledgeWikiPages(value: unknown): SpaceKnowledgeWikiPage[] {
+  return workRows(value)
+    .filter((row) => typeof row.page_id === 'string' && row.page_id.trim())
+    .map((row) => ({
+      page_id: String(row.page_id),
+      title: typeof row.title === 'string' ? row.title : '',
+      path: typeof row.path === 'string' ? row.path : undefined,
+      updated_at: typeof row.updated_at === 'string' ? row.updated_at : undefined,
+    }))
+}
+
+export async function getSpaceKnowledge(spaceRef: string): Promise<SpaceKnowledge> {
+  const response = await requestJson<{
+    space: SpaceSummary
+    membership: SpaceMembership
+    binding?: unknown
+    documents?: unknown
+    documents_truncated?: unknown
+    wiki_pages?: unknown
+    unavailable?: unknown
+  }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/knowledge`)
+  const binding =
+    response.binding && typeof response.binding === 'object'
+      ? (response.binding as SpaceKnowledgeBinding)
+      : null
+  return {
+    space: response.space,
+    membership: response.membership,
+    binding,
+    documents: knowledgeDocuments(response.documents),
+    documents_truncated: response.documents_truncated === true,
+    wiki_pages: knowledgeWikiPages(response.wiki_pages),
+    unavailable: workGaps(response.unavailable),
+  }
 }
 
 /** One participant of a Space as shown to another participant. */
@@ -154,6 +588,86 @@ export async function getSpaceRoster(spaceRef: string): Promise<readonly SpaceRo
     `/api/v1/spaces/${encodeURIComponent(spaceRef)}/roster`,
   )
   return response.members
+}
+
+/** One turn of a Space thread, as the room reads it. */
+export type SpaceThreadTurn = {
+  readonly role: 'user' | 'assistant' | 'system' | 'tool'
+  readonly content: string
+  /** The persona an assistant turn answered as, recorded at the time. */
+  readonly agentName?: string
+  /**
+   * Which member wrote this turn, from Model Plane's at-the-time record.
+   *
+   * Absent on assistant turns (use `agentName`), on system/tool turns, and on
+   * rows written before authorship was recorded. Absent must render as an
+   * unnamed author — never as the reader, which is what the room did while
+   * every transcript was owner-bound and one name was always right by accident.
+   */
+  readonly authorSubjectId?: string
+}
+
+export type SpaceThreadTranscript = {
+  readonly threadId: string
+  readonly turns: readonly SpaceThreadTurn[]
+}
+
+function normalizeSpaceThreadTurns(value: unknown): readonly SpaceThreadTurn[] {
+  if (!Array.isArray(value)) return []
+  const turns: SpaceThreadTurn[] = []
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue
+    const record = entry as Record<string, unknown>
+    const role = record.role
+    const content = typeof record.content === 'string' ? record.content.trim() : ''
+    if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'tool') continue
+    if (!content) continue
+    const agentName = typeof record.agent_name === 'string' && record.agent_name.trim()
+      ? record.agent_name.trim()
+      : typeof record.agentName === 'string' && record.agentName.trim()
+        ? record.agentName.trim()
+        : undefined
+    const authorSubjectId =
+      typeof record.author_subject_id === 'string' && record.author_subject_id.trim()
+        ? record.author_subject_id.trim()
+        : typeof record.authorSubjectId === 'string' && record.authorSubjectId.trim()
+          ? record.authorSubjectId.trim()
+          : undefined
+    turns.push({
+      role,
+      content,
+      ...(agentName ? { agentName } : {}),
+      ...(authorSubjectId ? { authorSubjectId } : {}),
+    })
+  }
+  return turns
+}
+
+/**
+ * One Space thread's transcript, read through the room's own authority.
+ *
+ * Distinct from Chat's `getChatThreadTranscript`, which resolves a thread only
+ * inside the caller's own durable list — correct for a personal chat history,
+ * and the reason a colleague's post in a shared room could previously render
+ * as nothing but its preview. This route asks Control whether the caller is a
+ * current recipient of the Space instead, so the room can show what the room
+ * actually said.
+ *
+ * A 403 here is a real answer, not a glitch: the organization has not enabled
+ * shared reads for this Space (deny-by-default), so the caller may take part in
+ * the room without being admitted to other members' turns.
+ */
+export async function getSpaceThreadTranscript(
+  spaceRef: string,
+  threadId: string,
+): Promise<SpaceThreadTranscript> {
+  const response = await requestJson<{ transcript?: { threadId?: string; turns?: unknown } }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads/${encodeURIComponent(threadId)}/transcript`,
+  )
+  return {
+    threadId: response.transcript?.threadId ?? threadId,
+    turns: normalizeSpaceThreadTurns(response.transcript?.turns),
+  }
 }
 
 /** A channel a bound agent's work can reach, beyond the room itself. */
@@ -291,6 +805,58 @@ export function bindSpaceAgent(spaceRef: string, agentRef: string): Promise<Crea
 }
 
 /**
+ * Pause or resume one bound agent, in this room only.
+ *
+ * The dividing rule from `space-defenition.md`: pausing HERE is a room
+ * decision, and pausing everywhere is an Agent page decision. This is the
+ * former, so it changes one binding and nothing about the definition or its
+ * other installations.
+ *
+ * Server-gated to owner/manager, the same roles that may add an agent —
+ * governing one is the same class of decision as granting one. A paused
+ * binding stays a member of the room and stops being invokable; the gateway
+ * already refuses a mention of it.
+ */
+export async function setSpaceAgentState(
+  spaceRef: string,
+  bindingRef: string,
+  status: 'active' | 'paused',
+): Promise<{ status: string; changed: boolean }> {
+  const response = await requestJson<{ status?: string; changed?: boolean }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/agents/${encodeURIComponent(bindingRef)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    },
+  )
+  return { status: response.status ?? status, changed: response.changed === true }
+}
+
+/**
+ * Revoke a bound agent from this room.
+ *
+ * Its own verb rather than a third status on the call above, because it is the
+ * one option that cannot be undone by pressing the other button: reinstating
+ * means binding again, through the same grant flow as the first time.
+ *
+ * The binding record survives for audit history — the room keeps being able to
+ * say who was here — but Control drops the agent from the room's roster, which
+ * is what actually stops it acting. A `agent_revocation_unconfirmed` response
+ * means the binding was revoked and Control has not converged yet, so the
+ * agent may still show as a member until it does.
+ */
+export async function revokeSpaceAgent(
+  spaceRef: string,
+  bindingRef: string,
+): Promise<{ status: string }> {
+  const response = await requestJson<{ status?: string }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/agents/${encodeURIComponent(bindingRef)}`,
+    { method: 'DELETE' },
+  )
+  return { status: response.status ?? 'revoked' }
+}
+
+/**
  * One agent definition and every Space it is installed in, org-wide —
  * ADR-0002 (`apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md`). Each
  * installation's `status` is the Application binding's own status field, the
@@ -350,6 +916,70 @@ export async function createPersonalSpace(name?: string): Promise<SpaceSummary> 
     body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
   })
   return response.space
+}
+
+/**
+ * Create a named shared room.
+ *
+ * Until this existed the sidebar drew a "Channels" heading over a list that
+ * could only ever hold one entry, because the organization room was the only
+ * room the product could make.
+ *
+ * Same two-step lifecycle as every other Space: the room exists when this
+ * returns, and Control must register it before anything may happen in it. It
+ * starts with its creator and grows by explicit grant — it is NOT an
+ * organization room, so it does not inherit the organization's roster.
+ */
+export async function createRoom(name: string): Promise<SpaceSummary> {
+  const response = await requestJson<{ space: SpaceSummary }>('/api/v1/spaces', {
+    method: 'POST',
+    body: JSON.stringify({ kind: 'room', name: name.trim() }),
+  })
+  return response.space
+}
+
+/**
+ * Add one person to a named room.
+ *
+ * Gated to the room's owner or manager, the same floor as granting an agent:
+ * deciding who may read a room's shared record is at least as consequential.
+ * The person must already be in the organization — a room grant is not a way
+ * into the tenant.
+ *
+ * A `room_membership_unconfirmed` response means the grant was recorded and
+ * Control has not accepted the roster yet, so the person is not a member: the
+ * room should say that rather than showing them as present.
+ */
+export async function addSpaceMember(
+  spaceRef: string,
+  memberId: string,
+): Promise<{ memberCount: number; changed: boolean }> {
+  const response = await requestJson<{ member_count?: number; changed?: boolean }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/members`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ member_id: memberId }),
+    },
+  )
+  return { memberCount: response.member_count ?? 0, changed: response.changed === true }
+}
+
+/**
+ * Remove one person from a named room.
+ *
+ * The room's registered owner cannot be removed: Control keeps them as owner
+ * regardless, so dropping the grant would only make this list disagree with the
+ * roster it describes.
+ */
+export async function removeSpaceMember(
+  spaceRef: string,
+  memberId: string,
+): Promise<{ memberCount: number; changed: boolean }> {
+  const response = await requestJson<{ member_count?: number; changed?: boolean }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/members/${encodeURIComponent(memberId)}`,
+    { method: 'DELETE' },
+  )
+  return { memberCount: response.member_count ?? 0, changed: response.changed === true }
 }
 
 /**

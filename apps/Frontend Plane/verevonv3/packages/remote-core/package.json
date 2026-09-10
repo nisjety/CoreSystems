@@ -1,0 +1,40 @@
+{
+  "name": "@verevon/remote-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-first remote desktop client library for Verevon support sessions. Framework-agnostic; does not depend on React or Solid.",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "fzstd": "^0.1.1",
+    "libsodium": "^0.8.4",
+    "libsodium-wrappers": "^0.8.4"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers": "^0.8.2",
+    "@types/node": "^26.4.1",
+    "eslint": "^10.10.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.69.0",
+    "vitest": "^4.1.10"
+  }
+}

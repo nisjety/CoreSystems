@@ -17,6 +17,14 @@ use std::collections::BTreeMap;
 
 use crate::pipeline::types::RetrievalFiltersInput;
 
+/// Upper bound on a Space's document set for the first vertical.
+///
+/// The set becomes a `document_id` any-of filter, so it must be bounded. It is
+/// a REFUSAL bound, never a truncation: silently keeping the newest N would
+/// narrow a room's retrieval to a subset the reader cannot see or predict,
+/// which is the same silent-narrowing failure this module exists to prevent.
+pub const MAX_SPACE_DOCUMENTS: i64 = 2_000;
+
 const DECISION_VERSION: &str = "v2";
 const RETRIEVAL_AUDIENCE: &str = "data-plane-retrieval";
 const MAX_DECISION_BYTES: usize = 16 * 1024;
@@ -196,6 +204,23 @@ impl VerifiedSpaceAuthority {
 pub struct ResolvedSpaceRetrievalScope {
     pub authority: VerifiedSpaceAuthority,
     pub collection_id: Option<String>,
+    /// Documents imported into this Space under verified Control authority
+    /// (`documents.space_ref`). This is the only Space predicate the document
+    /// vertical can actually enforce: `workspace_id` / `collection_id` are
+    /// payload keys that ONLY the wiki consumer writes, so a document-chunk
+    /// search filtered on them matches nothing at all.
+    ///
+    /// Needed only where the predicate cannot be expressed in SQL — the vector
+    /// search. A Postgres read filters on `space_ref` directly and is exact.
+    pub document_ids: Vec<String>,
+    /// The Space holds more documents than [`MAX_SPACE_DOCUMENTS`], so
+    /// `document_ids` is a prefix rather than the set.
+    ///
+    /// Carried rather than raised at resolution time because it only matters to
+    /// the vector search: a truncated id list there would narrow a room's
+    /// retrieval to an unpredictable subset, while a Postgres read of the same
+    /// Space is unaffected and must keep working.
+    pub document_ids_truncated: bool,
     pub owner_resource_ref: String,
     pub workspace_id: Option<String>,
 }
@@ -235,6 +260,52 @@ impl ResolvedSpaceRetrievalScope {
             self.collection_id.as_deref(),
             "collection",
         )?;
+        Ok(())
+    }
+
+    /// Constrain a document-vertical search to this Space's own documents.
+    ///
+    /// `apply_to_filters` above pins the workspace/collection the binding
+    /// names, which is what the wiki arm needs. It does nothing for document
+    /// chunks: their Qdrant payload carries `document_id`, `org_id`, `title`,
+    /// `source`, `type` and `chunk_tokens` — no workspace and no collection.
+    /// A Space-scoped dense search that relied on `apply_to_filters` alone was
+    /// therefore filtering on a key no point has, and answered every query
+    /// with zero candidates while returning 200.
+    ///
+    /// A Space with no documents refuses rather than clearing the filter: an
+    /// empty `document_ids` list means "unconstrained", so falling through
+    /// would search the whole org under Space authority.
+    pub fn apply_document_scope_to_filters(
+        &self,
+        filters: &mut RetrievalFiltersInput,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        if self.document_ids_truncated {
+            anyhow::bail!(
+                "Space-scoped vector search needs an indexed Space predicate to span this many documents"
+            );
+        }
+        if self.document_ids.is_empty() {
+            anyhow::bail!("verified Space has no documents imported under Space authority");
+        }
+        if filters.document_ids.is_empty() {
+            filters.document_ids = self.document_ids.clone();
+            return Ok(());
+        }
+        let allowed: std::collections::HashSet<&str> =
+            self.document_ids.iter().map(String::as_str).collect();
+        let intersection: Vec<String> = filters
+            .document_ids
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| allowed.contains(value))
+            .map(str::to_owned)
+            .collect();
+        if intersection.is_empty() {
+            anyhow::bail!("requested documents are outside the verified Space");
+        }
+        filters.document_ids = intersection;
         Ok(())
     }
 }
@@ -291,14 +362,63 @@ pub async fn resolve_space_retrieval_scope(
         anyhow::bail!("verified Space has no unique active Data retrieval binding");
     }
     let row = rows.into_iter().next().expect("checked exactly one row");
+    let (document_ids, document_ids_truncated) =
+        resolve_space_document_ids(pool, &authority.org_id, &authority.space_ref).await?;
     let scope = ResolvedSpaceRetrievalScope {
         authority,
         collection_id: row.collection_id,
+        document_ids,
+        document_ids_truncated,
         owner_resource_ref: row.owner_resource_ref,
         workspace_id: row.workspace_id,
     };
     scope.validate()?;
     Ok(scope)
+}
+
+/// The documents `documents-api` recorded against this Space, newest first.
+///
+/// Reads `documents.space_ref`, which is written only from a verified Control
+/// Space import decision. It is deliberately not a name match, a metadata
+/// lookup, or a workspace guess — the binding table's own contract is that
+/// those are never a mapping.
+///
+/// Ownership/grant visibility is NOT applied here: this answers "what is in the
+/// room", and the per-viewer post-filter that answers "what may this reader
+/// see" still runs downstream. A Space never widens a document ACL.
+/// Returns the ids and whether the Space holds more than the bound. Being over
+/// the bound is not an error here: only the vector search cannot work with a
+/// prefix, and it says so at the point where the prefix would be used.
+pub async fn resolve_space_document_ids(
+    pool: &PgPool,
+    org_id: &str,
+    space_ref: &str,
+) -> anyhow::Result<(Vec<String>, bool)> {
+    if org_id.trim().is_empty() || space_ref.trim().is_empty() {
+        anyhow::bail!("Space document scope requires an org and a Space reference");
+    }
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+    let rows = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT document_id
+        FROM documents
+        WHERE org_id = $1
+          AND space_ref = $2
+          AND deleted_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(org_id)
+    .bind(space_ref)
+    .bind(MAX_SPACE_DOCUMENTS + 1)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let truncated = rows.len() as i64 > MAX_SPACE_DOCUMENTS;
+    let mut rows = rows;
+    rows.truncate(MAX_SPACE_DOCUMENTS as usize);
+    Ok((rows, truncated))
 }
 
 #[derive(sqlx::FromRow)]
@@ -351,6 +471,8 @@ mod tests {
                 space_ref: "space_1".into(),
             },
             collection_id: Some("collection_1".into()),
+            document_ids: vec!["document_1".into(), "document_2".into()],
+            document_ids_truncated: false,
             owner_resource_ref: "document_1".into(),
             workspace_id: Some("workspace_1".into()),
         }
@@ -387,6 +509,71 @@ mod tests {
         invalid = scope();
         invalid.authority.resource_authorization_ref.clear();
         assert!(invalid.validate().is_err());
+    }
+
+    // The defect this method was added for: the workspace/collection targets
+    // are wiki-only payload keys, so a document search pinned to them returned
+    // nothing while reporting success.
+    #[test]
+    fn document_scope_pins_the_spaces_own_documents() {
+        let mut filters = RetrievalFiltersInput::default();
+        scope()
+            .apply_document_scope_to_filters(&mut filters)
+            .expect("scope is valid");
+        assert_eq!(filters.document_ids, ["document_1", "document_2"]);
+    }
+
+    #[test]
+    fn document_scope_narrows_a_caller_list_and_refuses_one_outside_the_space() {
+        let mut filters = RetrievalFiltersInput {
+            document_ids: vec!["document_2".into(), "document_elsewhere".into()],
+            ..Default::default()
+        };
+        scope()
+            .apply_document_scope_to_filters(&mut filters)
+            .expect("one requested document is in the Space");
+        assert_eq!(filters.document_ids, ["document_2"]);
+
+        let mut outside = RetrievalFiltersInput {
+            document_ids: vec!["document_elsewhere".into()],
+            ..Default::default()
+        };
+        let error = scope()
+            .apply_document_scope_to_filters(&mut outside)
+            .expect_err("a document outside the Space must fail");
+        assert!(error.to_string().contains("outside the verified Space"));
+    }
+
+    // An empty document_ids list means "unconstrained" downstream, so an empty
+    // Space must refuse rather than quietly search the whole org.
+    #[test]
+    fn an_empty_space_refuses_instead_of_clearing_the_filter() {
+        let mut empty = scope();
+        empty.document_ids.clear();
+        let mut filters = RetrievalFiltersInput {
+            document_ids: vec!["document_1".into()],
+            ..Default::default()
+        };
+        let error = empty
+            .apply_document_scope_to_filters(&mut filters)
+            .expect_err("an empty Space must not clear the filter");
+        assert!(error.to_string().contains("no documents"));
+        assert_eq!(filters.document_ids, ["document_1"]);
+    }
+
+    // A prefix would narrow the room's retrieval to a subset no reader can see
+    // or predict, so the vector search refuses. The same Space still lists and
+    // still reads through Postgres, where the predicate is exact.
+    #[test]
+    fn a_truncated_document_set_refuses_the_vector_search() {
+        let mut capped = scope();
+        capped.document_ids_truncated = true;
+        let mut filters = RetrievalFiltersInput::default();
+        let error = capped
+            .apply_document_scope_to_filters(&mut filters)
+            .expect_err("a prefix must not become a filter");
+        assert!(error.to_string().contains("indexed Space predicate"));
+        assert!(filters.document_ids.is_empty());
     }
 
     #[test]

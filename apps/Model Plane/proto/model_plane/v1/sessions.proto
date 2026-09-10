@@ -786,6 +786,18 @@ message ListConversationRequest {
   string org_id = 1;
   // Required. The thread whose conversation to return.
   string thread_id = 2;
+
+  // Optional Control-issued authority to read a SHARED Space's conversation
+  // record. Absent means the historical behaviour, unchanged: the caller must
+  // own the thread. Present and valid means the caller is a current member and
+  // current recipient of `space_id`, so Session Core authorizes against the
+  // thread's Space instead of its owner — and still drops any row whose stored
+  // audience revision is newer than the one this decision was issued under.
+  //
+  // This never widens a personal Space: Control refuses to issue for one.
+  string space_id = 3;
+  string space_read_decision_ref = 4;
+  string space_read_decision_token = 5;
 }
 
 // One conversation turn. Named SessionMessage (not ThreadMessage, which the
@@ -804,6 +816,19 @@ message SessionMessage {
   // role/content and every evidence surface renders empty away from the
   // browser that created the turn. Absent for turns appended without metadata.
   google.protobuf.Struct metadata = 4;
+  // Durable id of this message, the same one the thread-messages read path
+  // returns as `ThreadMessage.message_id`. Present so a caller can refer to
+  // one specific earlier turn — message pinning needs to name a message that
+  // survives a gateway restart, and until this field existed the durable
+  // conversation read returned role/content only, leaving nothing to name.
+  // Empty for rows written before ids were selected on this path.
+  string message_id = 5;
+  // Which subject wrote this turn, recorded at append time from the verified
+  // caller. Present on user turns in a shared Space, where "whose words are
+  // these" has no other answer; empty on assistant/system/tool turns (use
+  // agent_name) and on rows written before authorship was recorded. A reader
+  // must render an empty value as an unnamed author, never as itself.
+  string author_subject_id = 6;
 }
 
 message ListConversationResponse {
@@ -831,6 +856,15 @@ message ListThreadsRequest {
   // Agent Run Console, Support-assist -- is excluded by a declared fact
   // rather than an inferred one. Empty means no filter.
   string origin = 5;
+  // Optional Control-issued authority to read a SHARED Space's conversation
+  // record. Without it this listing stays owner-bound, which is why members of
+  // one room each used to see a disjoint slice of it. With it, Session Core
+  // returns every thread in `space_id` the decision's audience revision covers.
+  //
+  // `space_id` above still selects the Space; this only changes whose threads
+  // in that Space are visible.
+  string space_read_decision_ref = 6;
+  string space_read_decision_token = 7;
 }
 
 message ThreadSummary {
@@ -857,6 +891,11 @@ message ThreadSummary {
 
   // See CreateThreadRequest.origin.
   string origin = 12;
+
+  // The subject who owns this thread — in a room, who started this post. Sent
+  // so a shared listing can attribute a thread whose transcript the reader has
+  // not fetched yet; presentation only, and never a grant.
+  string owner_subject_id = 13;
 }
 
 message ListThreadsResponse {

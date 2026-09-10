@@ -21,10 +21,23 @@ import { describe, expect, it } from 'vitest'
 const CONTROLLER = 'src/features/chat/components/use-chat-controller.ts'
 const PAGE = 'src/features/chat/components/ChatPage.tsx'
 
+/**
+ * Read a source file with its line endings normalised to LF.
+ *
+ * The guards below search for multi-line anchors written as LF string
+ * literals. `use-chat-controller.ts` is checked out with CRLF (2,813 pairs,
+ * not one bare LF), so every multi-line anchor silently failed to match and
+ * the guard reported the effect it was protecting as "gone". Normalising
+ * here makes these tests work under either convention instead of depending
+ * on how git happened to materialise the file.
+ */
 async function source(relative: string): Promise<string> {
   const { readFileSync } = await import('node:fs')
   const { resolve } = await import('node:path')
+  const carriageReturn = String.fromCharCode(13)
   return readFileSync(resolve(process.cwd(), relative), 'utf8')
+    .split(carriageReturn)
+    .join('')
 }
 
 describe('mid-run input is never dropped', () => {
@@ -90,12 +103,48 @@ describe('mid-run input is never dropped', () => {
     )
     expect(start, 'the deferred-send flush effect is gone').toBeGreaterThan(-1)
     const effect = text.slice(start, text.indexOf('  const addAssistantCitation', start))
-    expect(effect.indexOf('setDeferredSends([])')).toBeGreaterThan(-1)
+    expect(effect.indexOf('setDeferredSends(remaining)')).toBeGreaterThan(-1)
     expect(
-      effect.indexOf('setDeferredSends([])') <
-        effect.indexOf('sendContent(content)'),
-      'clearing after sending re-runs this effect over the same text and sends it twice',
+      effect.indexOf('setDeferredSends(remaining)') <
+        effect.indexOf('sendContent(next.content, next.modelOverride, next.options)'),
+      'advancing after sending re-runs this effect over the same item and sends it twice',
     ).toBe(true)
+  })
+
+  it('preserves the selected model and subscription route when a missed delivery is replayed', async () => {
+    const text = await source(CONTROLLER)
+    const delivery = text.slice(
+      text.indexOf('const deliverMidRun'),
+      text.indexOf('const sendContent = async'),
+    )
+    const start = text.indexOf(
+      "createEffect(\n    () => ({\n      status: state.status,\n      deferred: deferredSends(),",
+    )
+    const effect = text.slice(start, text.indexOf('  const addAssistantCitation', start))
+
+    expect(delivery).toContain('{ content, modelOverride, options: { ...options } }')
+    expect(effect).toContain('sendContent(next.content, next.modelOverride, next.options)')
+  })
+
+  it('never retries a subscription selection through a platform-paid fallback provider', async () => {
+    const text = await source(CONTROLLER)
+    const handler = text.slice(
+      text.indexOf('onError: ({ message })'),
+      text.indexOf('onFrameId:', text.indexOf('onError: ({ message })')),
+    )
+
+    expect(handler).toContain('options.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER')
+  })
+
+  it('preserves the subscription route when regenerating the latest answer', async () => {
+    const text = await source(CONTROLLER)
+    const regenerate = text.slice(
+      text.indexOf('const regenerateLatest'),
+      text.indexOf('const rerunAsNewTurn'),
+    )
+
+    expect(regenerate).toContain('provider: lastUser.provider')
+    expect(regenerate).toContain('subscriptionConnectionId: lastUser.subscriptionConnectionId')
   })
 
   it('renders the strip, so a queued message is visible while it is in flight', async () => {

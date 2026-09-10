@@ -248,6 +248,8 @@ type Repository interface {
 	// an effect: CreateTicketOperation performs the decisive locked recheck.
 	ResolveAgentTicketActionGrant(ctx context.Context, input CreateTicketInput) (string, error)
 	GetTicketOperation(ctx context.Context, orgID, actorUserID, idempotencyKey string) (*TicketOperationReceipt, error)
+	ListSpaceOperationReceipts(ctx context.Context, orgID, spaceRef string) ([]SpaceOperationReceipt, error)
+	ListSpaceAuthorityEvents(ctx context.Context, orgID, spaceRef string) ([]SpaceAuthorityEvent, error)
 	CreateAgentTicketActionGrant(ctx context.Context, input CreateAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error)
 	RevokeAgentTicketActionGrant(ctx context.Context, input RevokeAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error)
 	UpdateTicket(ctx context.Context, input UpdateTicketInput) (*Ticket, error)
@@ -1289,6 +1291,65 @@ type TicketOperationReceipt struct {
 	TerminalReason       string  `json:"terminal_reason,omitempty"`
 	Ticket               *Ticket `json:"ticket,omitempty"`
 	Replayed             bool    `json:"replayed"`
+}
+
+// SpaceOperationReceipt is one owner-plane effect that happened under a
+// Space's authority, as Space Activity reads it.
+//
+// The Space is not a column on the operation ledger and is deliberately not
+// added as one: an operation is bound to the exact owner GRANT that authorized
+// it (`grant_ref`), and that grant already carries the `space_ref` Control
+// decided. Reading the Space through the grant means Activity shows effects
+// that were genuinely authorized for this room, rather than effects that
+// merely mention it.
+//
+// Content-free by construction, same as the ledger it reads: identifiers,
+// status, and timestamps only. A ticket's subject line is conversation
+// content and stays under its own retention rules.
+type SpaceOperationReceipt struct {
+	OperationID string `json:"operation_id"`
+	ActionID    string `json:"action_id"`
+	// One of pending_control_commit | reserved | completed | cancelled |
+	// unknown. `unknown` is a real terminal answer, never a synonym for
+	// failure — the effect may have landed and the receipt did not come back.
+	Status string `json:"status"`
+	// The acting agent subject, and the human whose authority it acted on.
+	SubjectID       string `json:"subject_id"`
+	GrantedByUserID string `json:"granted_by_user_id"`
+	ConversationID  string `json:"conversation_id"`
+	// Present only on `completed`; the ledger's own CHECK constraint enforces
+	// that, so an empty value here means the effect is not claimed to have
+	// landed.
+	TicketID       string    `json:"ticket_id,omitempty"`
+	AuditEventID   string    `json:"audit_event_id,omitempty"`
+	TerminalReason string    `json:"terminal_reason,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// SpaceAuthorityEvent is one owner-side grant of an effect in a Space: who was
+// allowed to do what here, on whose say-so, and whether it was taken away.
+//
+// This is the resource half of `effective_access`. Control decides whether a
+// subject may act in the Space at all; this records that Application also
+// admitted it to one specific conversation and action. Both halves have to be
+// current for an effect to be possible, so a room reading only Control's
+// membership cannot explain why an agent's ticket write is refused.
+type SpaceAuthorityEvent struct {
+	GrantID         string     `json:"grant_id"`
+	ActionID        string     `json:"action_id"`
+	SubjectID       string     `json:"subject_id"`
+	ConversationID  string     `json:"conversation_id"`
+	CreatedByUserID string     `json:"created_by_user_id"`
+	CreatedAt       time.Time  `json:"created_at"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+	RevokedByUserID string     `json:"revoked_by_user_id,omitempty"`
+}
+
+// SpaceActivityEvidence is what Conversation Core can say about one Space.
+type SpaceActivityEvidence struct {
+	Operations []SpaceOperationReceipt `json:"operations"`
+	Authority  []SpaceAuthorityEvent   `json:"authority"`
 }
 
 type UpdateTicketInput struct {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/actions"
 	"github.com/triodelab/integration-corev2/internal/api"
 	"github.com/triodelab/integration-corev2/internal/attestation"
+	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
@@ -22,15 +24,34 @@ import (
 	"github.com/triodelab/integration-corev2/internal/discovery"
 	"github.com/triodelab/integration-corev2/internal/egress"
 	"github.com/triodelab/integration-corev2/internal/events"
+	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/hotpath"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 	"github.com/triodelab/integration-corev2/internal/webhookorg"
 )
 
+// logLevelFromEnv reads LOG_LEVEL (trace|debug|info|warn|error); anything
+// unset or unparseable means INFO.
+func logLevelFromEnv() zerolog.Level {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
+	if raw == "" {
+		return zerolog.InfoLevel
+	}
+	level, err := zerolog.ParseLevel(raw)
+	if err != nil || level == zerolog.NoLevel {
+		return zerolog.InfoLevel
+	}
+	return level
+}
+
 func main() {
 	zerolog.TimeFieldFormat = time.RFC3339Nano
-	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339})
+	// INFO by default: zerolog's zero value is DEBUG, which made the request
+	// logger print the workers' idle claim polls (demoted to DEBUG in
+	// api.requestLogLevel) as if nothing had changed. LOG_LEVEL=debug brings
+	// them back when tracing the claim loop.
+	logger := log.Output(zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339}).Level(logLevelFromEnv())
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -44,6 +65,18 @@ func main() {
 		logger.Fatal().Err(err).Msg("initialize provider-write attestation verifier")
 	}
 	writeAttestations := attestation.NewVerifier(writeAttestationKeys, nil)
+	var codexSubscriptions *codexsubscription.Manager
+	if cfg.CodexSubscriptionEnabled {
+		codexSubscriptions, err = codexsubscription.NewManager(codexsubscription.Config{
+			Enabled:           true,
+			Home:              cfg.CodexSubscriptionHome,
+			LoginTTL:          cfg.CodexSubscriptionLoginTTL,
+			InvocationTimeout: cfg.CodexSubscriptionInvocationTimeout,
+		}, codexsubscription.NewProcessRunner(cfg.CodexAppServerCommand))
+		if err != nil {
+			logger.Fatal().Err(err).Msg("initialize Codex subscription broker")
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -92,6 +125,14 @@ func main() {
 	}
 	defer eventCleanup()
 	controlPlaneClient := &http.Client{Timeout: 5 * time.Second}
+	// Let the OAuth service re-mint Control Plane-owned Microsoft sign-in
+	// tokens through auth-core when its own refresh token is absent or dead.
+	// NewAuthOAuthClient returns a nil *pointer* when AUTH_CORE_OAUTH_SERVICE_TOKEN
+	// is unset; only a non-nil client may be stored in the interface, or the
+	// nil-interface check in the service would silently pass.
+	if authOAuth := controlplane.NewAuthOAuthClient(cfg, controlPlaneClient); authOAuth != nil {
+		service.SetControlPlaneTokenSource(authOAuth)
+	}
 	hotPathClient := &http.Client{Timeout: 2 * time.Second}
 	auditClient := controlplane.NewAuditClient(cfg, controlPlaneClient)
 	auditOutbox := api.NewAuditOutbox(repo, auditClient, &logger)
@@ -113,10 +154,16 @@ func main() {
 		// independent second DNS resolution. Every other provider these two
 		// services call gets the same connect-timeout/DNS-pinning hardening
 		// for free since the client is shared.
-		Discovery:         discovery.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 8 * time.Second})),
-		Actions:           actions.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})),
-		WriteAttestations: writeAttestations,
-		HotPath:           hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
+		Discovery:          discovery.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 8 * time.Second})),
+		Actions:            actions.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})),
+		WriteAttestations:  writeAttestations,
+		HotPath:            hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
+		CodexSubscriptions: codexSubscriptions,
+		// Same finspo-core client the finspo worker uses; lets the generic
+		// sync route answer 409 no_sources_registered instead of queuing a
+		// Microsoft job that has no library to sync. ErrNotConfigured (no
+		// FINSPO_API_KEY) falls through to the normal queue path.
+		Finspo: handoff.NewFinspoClientFromConfig(cfg, controlPlaneClient),
 		WebhookOrg: &webhookorg.Resolver{
 			Store: repo,
 			Meta: &webhookorg.GraphAssetLister{

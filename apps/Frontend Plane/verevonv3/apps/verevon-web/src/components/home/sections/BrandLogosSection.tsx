@@ -4,6 +4,7 @@ import { animate, motion, useMotionValue, useReducedMotion } from "motion/react"
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import useMeasure from "react-use-measure";
+import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion";
 
 type InfiniteSliderProps = {
 	children: ReactNode;
@@ -173,6 +174,19 @@ function getLogoClassName(index: number) {
 }
 
 export function BrandLogosSection() {
+	const prefersReducedMotion = usePrefersReducedMotion();
+	const marks = logoMarks.map((logo, index) => (
+		<span
+			className={[
+				"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)]",
+				getLogoClassName(index),
+			].join(" ")}
+			key={`${logo}-${index}`}
+		>
+			{logo}
+		</span>
+	));
+
 	return (
 		<section
 			aria-label="Systemer Verevon kobler til"
@@ -183,25 +197,21 @@ export function BrandLogosSection() {
 				<span>systemene deres</span>
 			</p>
 
-			<BlurredInfiniteSlider
-				containerClassName="flex h-full min-w-0 items-center overflow-hidden max-[760px]:h-12"
-				fadeWidth={80}
-				gap={112}
-				speed={40}
-				speedOnHover={20}
-			>
-				{logoMarks.map((logo, index) => (
-					<span
-						className={[
-							"inline-flex min-w-max flex-none items-center justify-center leading-none opacity-85 saturate-[0.2] text-[color-mix(in_srgb,var(--verevon-j-text)_62%,transparent)]",
-							getLogoClassName(index),
-						].join(" ")}
-						key={`${logo}-${index}`}
-					>
-						{logo}
-					</span>
-				))}
-			</BlurredInfiniteSlider>
+			{prefersReducedMotion ? (
+				<div className="flex flex-wrap items-center gap-x-10 gap-y-5 py-2">
+					{marks}
+				</div>
+			) : (
+				<BlurredInfiniteSlider
+					containerClassName="flex h-full min-w-0 items-center overflow-hidden max-[760px]:h-12"
+					fadeWidth={80}
+					gap={112}
+					speed={40}
+					speedOnHover={20}
+				>
+					{marks}
+				</BlurredInfiniteSlider>
+			)}
 		</section>
 	);
 }

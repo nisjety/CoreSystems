@@ -1,0 +1,86 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/control-event-bridge/main_test.go</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/control-event-bridge/main_test.go" />
+  <problem_class id="GoRedundantImportAlias" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant import alias</problem_class>
+  <description>Redundant alias</description>
+  <highlighted_element>server</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/nats-consumer-migrate/main_test.go" />
+  <problem_class id="GoRedundantImportAlias" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant import alias</problem_class>
+  <description>Redundant alias</description>
+  <highlighted_element>server</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/provisioner/provisioner_test.go" />
+  <problem_class id="GoRedundantImportAlias" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant import alias</problem_class>
+  <description>Redundant alias</description>
+  <highlighted_element>server</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/control_runtime_acl_integration_test.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/control_runtime_acl_integration_test.go" />
+  <problem_class id="GoRedundantImportAlias" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant import alias</problem_class>
+  <description>Redundant alias</description>
+  <highlighted_element>server</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/scoped_acl_integration_test.go</file>
+  <line>13</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/scoped_acl_integration_test.go" />
+  <problem_class id="GoRedundantImportAlias" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant import alias</problem_class>
+  <description>Redundant alias</description>
+  <highlighted_element>server</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_integration_test.go</file>
+  <line>11</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_integration_test.go" />
+  <problem_class id="GoRedundantImportAlias" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant import alias</problem_class>
+  <description>Redundant alias</description>
+  <highlighted_element>server</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>6</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_security_coverage_test.go</file>
+  <line>9</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/internal/subscriber/subscriber_security_coverage_test.go" />
+  <problem_class id="GoRedundantImportAlias" severity="WEAK WARNING" attribute_key="INFO_ATTRIBUTES">Redundant import alias</problem_class>
+  <description>Redundant alias</description>
+  <highlighted_element>server</highlighted_element>
+  <language>go</language>
+  <offset>1</offset>
+  <length>6</length>
+</problem>
+</problems>

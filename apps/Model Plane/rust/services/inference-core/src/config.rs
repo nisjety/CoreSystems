@@ -23,6 +23,22 @@ pub struct InferenceConfig {
     /// `OpenAI` API key (from `OPENAI_API_KEY`).
     pub openai_api_key: Option<String>,
 
+    /// Internal Integration Core URL for ChatGPT subscription-backed Codex
+    /// execution (from `CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL`). The broker
+    /// keeps managed ChatGPT auth; this service gets only an opaque connection
+    /// id on each request.
+    pub codex_subscription_integration_core_url: Option<String>,
+
+    /// Service credential accepted by Integration Core's internal broker route
+    /// (from `CODEX_SUBSCRIPTION_INTERNAL_API_KEY`). It authenticates this
+    /// service, not the end user's ChatGPT subscription.
+    pub codex_subscription_internal_api_key: Option<String>,
+
+    /// Exact Codex models enabled for subscription-backed execution (from
+    /// `CODEX_SUBSCRIPTION_MODELS`). A non-empty catalog is required before the
+    /// provider registers, so it cannot capture arbitrary OpenAI model traffic.
+    pub codex_subscription_models: Vec<String>,
+
     /// Azure `OpenAI` endpoint (from `AZURE_OPENAI_ENDPOINT`).
     pub azure_openai_endpoint: Option<String>,
 
@@ -270,6 +286,11 @@ impl InferenceConfig {
             anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             openai_api_base: std::env::var("OPENAI_API_BASE").ok(),
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
+            codex_subscription_integration_core_url: trimmed_env(
+                "CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL",
+            ),
+            codex_subscription_internal_api_key: trimmed_env("CODEX_SUBSCRIPTION_INTERNAL_API_KEY"),
+            codex_subscription_models: csv_env("CODEX_SUBSCRIPTION_MODELS", &[]),
             azure_openai_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok(),
             azure_openai_api_key: std::env::var("AZURE_OPENAI_API_KEY").ok(),
             azure_openai_api_version: std::env::var("AZURE_OPENAI_API_VERSION")

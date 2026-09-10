@@ -17,8 +17,11 @@ export type ChatSurfaceAvailability = {
   stepCount: number
   hasRun: boolean
   /**
-   * Steps that are work rather than bookkeeping (see `isWorkStep`). Optional:
-   * only `claimsFocus` reads it, and only ChatPage has the state to supply it.
+   * Steps that are work rather than bookkeeping (see `isWorkStep`). Optional
+   * because not every caller can compute it, but a caller that omits it gets
+   * no Work destination unless a durable run exists -- both `available` and
+   * `claimsFocus` read it, so guessing from `stepCount` would reopen the bug
+   * items 18 and 27 closed.
    */
   workStepCount?: number
   /** Tool calls the model actually made across the thread. Optional, as above. */
@@ -49,6 +52,15 @@ export type ChatSurfaceSpec = {
  * new tab id or independently decide whether an empty destination is useful.
  * Availability is evidence-driven so the default Chat experience stays calm.
  */
+/**
+ * Evidence that the agent did work, as opposed to the lifecycle bookkeeping
+ * every answer emits (connect, compose, model selected, usage recorded ...).
+ * `isWorkStep` in chat-normalizers.ts owns the classification.
+ */
+function hasWorkEvidence(state: ChatSurfaceAvailability): boolean {
+  return (state.workStepCount ?? 0) > 0 || (state.toolCallCount ?? 0) > 0
+}
+
 export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
   {
     id: 'chat',
@@ -65,11 +77,12 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
     description: 'Følg plan, fremdrift og beslutninger.',
     icon: ListChecks,
     priority: 10,
-    available: (state) => state.stepCount > 0 || state.hasRun,
-    // Lifecycle steps (connect, compose, model, usage, memory ...) keep the tab
-    // available but must not open it; a plain answer produces six of them.
-    claimsFocus: (state) =>
-      state.hasRun || (state.toolCallCount ?? 0) > 0 || (state.workStepCount ?? 0) > 0,
+    // Lifecycle steps (connect, compose, model, usage, memory ...) are not a
+    // destination: a plain answer produces six of them and nothing to inspect,
+    // and UX spec section 4 says only evidence-backed destinations appear. The
+    // durable run stands on its own -- it has receipts and a Trace either way.
+    available: (state) => hasWorkEvidence(state) || state.hasRun,
+    claimsFocus: (state) => state.hasRun || hasWorkEvidence(state),
   },
   {
     id: 'artifacts',

@@ -147,6 +147,22 @@ describe('SpaceCockpit', () => {
     )
   })
 
+  // Measured live before this was fixed: one context resolve produced six
+  // identical `/work` and six identical `/knowledge` requests inside 3ms, and
+  // another six on every membership recheck. `props.tabs` is a getter over the
+  // caller's object literal, this `For` read it twice per tab across six tabs,
+  // and Solid JSX constructs a component eagerly — so every read mounted every
+  // panel again.
+  it('constructs each panel once, however many tabs read the tabs object', () => {
+    let mounted = 0
+    const Counting = () => {
+      mounted += 1
+      return <p>panel</p>
+    }
+    render(() => <SpaceCockpit initialTab="chat" tabs={{ chat: <Counting /> }} />)
+    expect(mounted).toBe(1)
+  })
+
   it('keeps every aria-controls target in the DOM, including inactive tabs', () => {
     render(() => <SpaceCockpit initialTab="chat" />)
     for (const tab of screen.getAllByRole('tab')) {

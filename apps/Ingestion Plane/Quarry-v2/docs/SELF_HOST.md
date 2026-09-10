@@ -92,6 +92,17 @@ When a scrape request includes `"ingest": true` and an `org_id`, Quarry posts to
 
 The agentic browser loop calls Model Plane's `/v1/invoke` for each step decision. Structured extract uses the same gateway with a JSON Schema in the prompt. AI formats (`summary`, `json`, `query`) all flow through `/v1/invoke`.
 
+**Page-title enrichment (`page_extracted`).** When a fetched page has no usable `<title>` (missing, or generic such as the host name, "Home", "Forside"), `PageRunner` asks `/v1/invoke` for a clean ≤ 60-char title and a one-sentence summary from a bounded excerpt, and emits them on the `page_extracted` event with `title_source: "model"`. Configuration:
+
+| Env | Default | Notes |
+|-----|---------|-------|
+| `QUARRY_EDGE__MODEL_PLANE_URL` | — | Enables the hop (and every other Model Plane consumer). Unset → `title_source` is `html`/`host` only. |
+| `QUARRY_EDGE__PAGE_TITLE_MODEL` | `verevon-budget` | A Model Plane **routing alias** (`verevon-budget` = cheapest capable model via inference-core's `RoutingPolicy`; also `verevon-balance`, `verevon-genius`). Never a vendor model id. |
+| `QUARRY_EDGE__PAGE_TITLE_ENRICH` | `true` | Set `false` to keep extraction fully local. |
+| `QUARRY_BROWSER_SETTLE_MS` | `3500` | Hydration settle budget for JS-shell pages fetched by the browser fallback (see `ONBOARDING_LIVE_CRAWL.md`). |
+
+Guards: 2 s time-box, 3 concurrent calls, 600 calls/hour per edge process, fingerprint-keyed cache, JSON-only reply validation. Any failure degrades to `title_source: "host"`; a page never fails because of the hop.
+
 ### Model Plane → Quarry (browser grants)
 
 When Model Plane wants Quarry to execute browser actions, it issues a *grant* via `BrowserBroker.AcquireGrant`. Enable Quarry Edge's `grpc` feature and set `QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` to validate each privileged action over gRPC. `QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_URL` remains the HTTP-shim compatibility path; when neither is configured, only development may fall back to `NoopGrantValidator`.
@@ -108,8 +119,19 @@ Set `zdr: true` on any scrape, agent, or structured extract request. Quarry:
 - Skips artifact persistence
 - Refuses Data Plane ingest with payload (returns 403 Forbidden)
 - Sends source markdown to Model Plane ephemerally only (Model Plane is contracted to not persist)
+- Skips the page-title Model Plane hop entirely (`page_extracted.title_source` is `html` or `host`), writes nothing to its title cache, and routes `page_extracted` through `emit_for_zdr` so it reaches only live SSE subscribers — never the durable publisher or NATS
 
 ZDR violations bubble up as typed `Forbidden` errors. Audit them via the `agent.failed` and `page.blocked` events.
+
+Set `zdr: true` on `/v1/search`, `/v1/answer`, or `/v1/answer/stream` and, in
+addition to the cache/event skips above, `SmartSearchRouter` never invokes
+Brave or Serper for that request — only in-infra providers (Tantivy /
+Stract / SearXNG + Data Plane) are queried, so the query text itself never
+egresses to a third party. This is a hard per-request override: it applies
+even when `QUARRY_EDGE__ZERO_SAAS_SEARCH` is left at its default (`0`), which
+only controls whether Brave/Serper are registered for *non-ZDR* traffic. See
+`SearchOptions::zdr` in `crates/quarry-runtime/src/serp.rs`, and the gate itself in
+`crates/quarry-runtime/src/smart_router.rs`.
 
 ## 8. Operations
 

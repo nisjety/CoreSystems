@@ -462,6 +462,7 @@ async fn scrape(
         // Ad-hoc single-page scrape, not a crawl target — don't materialize
         // a "tracked website" row for it.
         source_registrar: None,
+        title_enricher: state.page_title_enricher.clone(),
     };
 
     let run_id: RunKind = quarry_core::ids::Id::new();
@@ -732,6 +733,58 @@ pub struct InternalRunPageResult {
     /// onboarding wizard) see real brand signals.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branding: Option<serde_json::Value>,
+    /// Display title after provenance resolution (`html` → cleaned
+    /// `<title>`, `model` → Model Plane proposal, `host` → host label).
+    /// `title` above stays the raw HTML title for backward compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_title: Option<String>,
+    /// `html` | `model` | `host` — see `quarry_core::output::TitleSource`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<String>,
+    /// ~300-char plain-text excerpt of the readable markdown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+    /// One-sentence model summary (only with `title_source == model`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub word_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// Driver that served the fetch: `static` | `tls` | `browser`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+}
+
+impl InternalRunPageResult {
+    /// Project a `NormalizedOutput` onto the orchestrator wire shape. The
+    /// orchestrator forwards `title`/`branding` as `page_fetched` /
+    /// `branding_extracted` and the extraction fields as `page_extracted`
+    /// into control's per-job event log.
+    pub fn from_output(run_id: String, out: &NormalizedOutput) -> Self {
+        let ex = out.extraction.as_ref();
+        Self {
+            run_id,
+            status: out.status,
+            fingerprint: out.fingerprint.clone(),
+            links: out.formats.links.iter().map(|l| l.href.clone()).collect(),
+            content_type: out.metadata.content_type.clone(),
+            title: out.metadata.title.clone(),
+            branding: out.branding.clone(),
+            display_title: ex.map(|e| e.title.clone()),
+            title_source: ex.map(|e| e.title_source.as_str().to_string()),
+            excerpt: ex.map(|e| e.excerpt.clone()),
+            summary: ex.and_then(|e| e.summary.clone()),
+            word_count: ex.map(|e| e.word_count),
+            lang: ex.and_then(|e| e.lang.clone()),
+            driver: ex.map(|e| {
+                serde_json::to_value(e.driver)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_default()
+            }),
+        }
+    }
 }
 
 /// The shared runtime service token, latched once at startup (mirrors
@@ -912,6 +965,7 @@ async fn internal_run_page(
                 state: state.clone(),
             },
         )),
+        title_enricher: state.page_title_enricher.clone(),
     };
 
     let run_id: RunKind = match req.run_id.as_deref() {
@@ -922,20 +976,10 @@ async fn internal_run_page(
     if !zdr.is_active() && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
             if let Some(cached) = cache.get(prev).await {
-                return Ok(Json(InternalRunPageResult {
-                    run_id: run_id.to_string(),
-                    status: cached.status,
-                    fingerprint: cached.fingerprint,
-                    links: cached
-                        .formats
-                        .links
-                        .iter()
-                        .map(|l| l.href.clone())
-                        .collect(),
-                    content_type: cached.metadata.content_type.clone(),
-                    title: cached.metadata.title.clone(),
-                    branding: cached.branding.clone(),
-                }));
+                return Ok(Json(InternalRunPageResult::from_output(
+                    run_id.to_string(),
+                    &cached,
+                )));
             }
         }
     }
@@ -951,15 +995,10 @@ async fn internal_run_page(
                     }
                 }
             }
-            Ok(Json(InternalRunPageResult {
-                run_id: run_id.to_string(),
-                status: out.status,
-                fingerprint: out.fingerprint,
-                links: out.formats.links.iter().map(|l| l.href.clone()).collect(),
-                content_type: out.metadata.content_type.clone(),
-                title: out.metadata.title.clone(),
-                branding: out.branding.clone(),
-            }))
+            Ok(Json(InternalRunPageResult::from_output(
+                run_id.to_string(),
+                &out,
+            )))
         }
         Err(err) => Err((
             StatusCode::from_u16(err.code.http_status())
@@ -1029,6 +1068,7 @@ async fn scrape_stream(
             // Ad-hoc streamed single-page scrape, not a crawl target — don't
             // materialize a "tracked website" row for it.
             source_registrar: None,
+            title_enricher: state.page_title_enricher.clone(),
         };
         let run_id = RunKind::new();
         let mut rx = state.event_sink.subscribe(&run_id);
@@ -1230,6 +1270,7 @@ mod tests {
             searxng_url: None,
             model_plane_url: None,
             model_plane_token: None,
+            page_title_enricher: None,
             service_token_provider: None,
             answer_pipeline: None,
             local_index: None,

@@ -1,0 +1,710 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/audit-core/cmd/control-event-bridge/main.go</file>
+  <line>71</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/audit-core/cmd/control-event-bridge/main.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Unsubscribe</highlighted_element>
+  <language>go</language>
+  <offset>20</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/cmd/server/main.go</file>
+  <line>88</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/cmd/server/main.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/adapters/hyperswitch/adapter.go</file>
+  <line>245</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/adapters/hyperswitch/adapter.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/adapters/lago/adapter.go</file>
+  <line>81</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/adapters/lago/adapter.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/adapters/nexi/adapter.go</file>
+  <line>305</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/adapters/nexi/adapter.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/adapters/stripe/adapter.go</file>
+  <line>216</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/adapters/stripe/adapter.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>121</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/billing/service.go</file>
+  <line>135</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/billing/service.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>22</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go</file>
+  <line>79</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/grpc/server_test.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>16</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go</file>
+  <line>124</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/billing-core/internal/nats/shared_publisher.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Drain</highlighted_element>
+  <language>go</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/cmd/server/main.go</file>
+  <line>89</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/cmd/server/main.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/brreg/client.go</file>
+  <line>114</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/brreg/client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/brreg/client.go</file>
+  <line>143</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/brreg/client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go</file>
+  <line>75</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/grpc/server_test.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>16</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>498</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>19</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>831</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>13</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>839</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>12</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>869</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>24</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>895</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/http/handlers.go</file>
+  <line>936</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/metrics/server_test.go</file>
+  <line>69</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/metrics/server_test.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>16</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go</file>
+  <line>126</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/nats/shared_publisher.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Drain</highlighted_element>
+  <language>go</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger.go</file>
+  <line>65</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/deletion_ledger.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>16</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/repository.go</file>
+  <line>798</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/repository.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>16</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>989</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Publish</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>1003</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Publish</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>1017</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Publish</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>1057</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Publish</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go</file>
+  <line>1072</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/service_enhanced.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Publish</highlighted_element>
+  <language>go</language>
+  <offset>14</offset>
+  <length>7</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/billing_client.go</file>
+  <line>58</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/billing_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/org_client.go</file>
+  <line>66</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/org_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/org_client.go</file>
+  <line>109</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/org_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/org_client.go</file>
+  <line>147</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/org_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/user_client.go</file>
+  <line>143</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/user_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/clients/user_client.go</file>
+  <line>164</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/clients/user_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/convex/client.go</file>
+  <line>68</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/convex/client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/convex/client.go</file>
+  <line>107</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/convex/client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/convex/client.go</file>
+  <line>162</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/convex/client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/database/database.go</file>
+  <line>103</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/database/database.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Rollback</highlighted_element>
+  <language>go</language>
+  <offset>6</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/database/database.go</file>
+  <line>108</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/database/database.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Rollback</highlighted_element>
+  <language>go</language>
+  <offset>6</offset>
+  <length>8</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/handlers.go</file>
+  <line>233</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Unsubscribe</highlighted_element>
+  <language>go</language>
+  <offset>13</offset>
+  <length>11</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/http/server.go</file>
+  <line>260</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/http/server.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/redis/client.go</file>
+  <line>28</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/redis/client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>8</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/session-core/internal/service/session_service.go</file>
+  <line>67</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/session-core/internal/service/session_service.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Write</highlighted_element>
+  <language>go</language>
+  <offset>3</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/cmd/server/main.go</file>
+  <line>195</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/cmd/server/main.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/cmd/server/main.go</file>
+  <line>195</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/cmd/server/main.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/cmd/server/main.go</file>
+  <line>403</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/cmd/server/main.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/cmd/server/main.go</file>
+  <line>403</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/cmd/server/main.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>27</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/authcore_oauth_client.go</file>
+  <line>106</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/authcore_oauth_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/authcore_oauth_client.go</file>
+  <line>187</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/authcore_oauth_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>293</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go</file>
+  <line>516</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/betterauth_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/microsoft_graph_client.go</file>
+  <line>97</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/microsoft_graph_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/microsoft_graph_client.go</file>
+  <line>157</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/microsoft_graph_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/clients/orgcore_client.go</file>
+  <line>84</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/clients/orgcore_client.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>93</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>21</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/handlers.go</file>
+  <line>1932</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/handlers.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/http/server.go</file>
+  <line>583</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/http/server.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Close</highlighted_element>
+  <language>go</language>
+  <offset>17</offset>
+  <length>5</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go</file>
+  <line>129</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/user-core/internal/nats/shared_publisher.go" />
+  <problem_class id="GoUnhandledErrorResult" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unhandled error</problem_class>
+  <description>Unhandled error</description>
+  <highlighted_element>Drain</highlighted_element>
+  <language>go</language>
+  <offset>10</offset>
+  <length>5</length>
+</problem>
+</problems>

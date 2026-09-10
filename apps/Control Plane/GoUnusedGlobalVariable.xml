@@ -1,0 +1,26 @@
+<problems>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/types.go</file>
+  <line>286</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/types.go" />
+  <problem_class id="GoUnusedGlobalVariable" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global variable</problem_class>
+  <description>Unused variable &lt;code&gt;defaultQuotas&lt;/code&gt;</description>
+  <highlighted_element>defaultQuotas</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>13</length>
+</problem>
+<problem>
+  <file>file://$PROJECT_DIR$/org-core/internal/org/types.go</file>
+  <line>319</line>
+  <module>Control Plane</module>
+  <entry_point TYPE="file" FQNAME="file://$PROJECT_DIR$/org-core/internal/org/types.go" />
+  <problem_class id="GoUnusedGlobalVariable" severity="WARNING" attribute_key="WARNING_ATTRIBUTES">Unused global variable</problem_class>
+  <description>Unused variable &lt;code&gt;defaultRolePermissions&lt;/code&gt;</description>
+  <highlighted_element>defaultRolePermissions</highlighted_element>
+  <language>go</language>
+  <offset>4</offset>
+  <length>22</length>
+</problem>
+</problems>
