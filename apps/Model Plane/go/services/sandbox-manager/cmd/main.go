@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
@@ -40,6 +41,23 @@ func main() {
 	if err != nil {
 		slog.Error("sandbox-manager authentication configuration is invalid", "error", err)
 		os.Exit(1)
+	}
+
+	// Space capability verification pins a lease request to the exact
+	// sandbox-manager instance its capability decision named. A production
+	// deployment must always be able to do this check — any request could
+	// carry a space_id — so a missing or malformed Control public key /
+	// backend id here is fatal unless ephemeral development is explicitly
+	// opted in (the same escape hatch as the in-memory-store gate above).
+	backendID := strings.TrimSpace(os.Getenv("SANDBOX_MANAGER_BACKEND_ID"))
+	capabilityVerifier, capabilityVerifierErr := authz.LoadSpaceCapabilityVerifierFromEnv(os.Getenv)
+	if capabilityVerifierErr != nil || backendID == "" {
+		if !ephemeralDevelopmentEnabled(os.Getenv("SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT")) {
+			slog.Error("refusing to start sandbox-manager without Space capability verification configured", "verifier_error", capabilityVerifierErr, "backend_id_configured", backendID != "")
+			os.Exit(1)
+		}
+		slog.Warn("starting sandbox-manager without Space capability verification (ephemeral development only); any AcquireLease naming a space_id will be refused", "verifier_error", capabilityVerifierErr, "backend_id_configured", backendID != "")
+		capabilityVerifier = nil
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -74,8 +92,12 @@ func main() {
 	leaseStore := lease.NewStore()
 	snapStore := snapshot.NewStore()
 
+	server := sbxserver.NewServer(leaseStore, snapStore)
+	if capabilityVerifier != nil {
+		server = server.WithCapabilityVerifier(capabilityVerifier.Verify, backendID)
+	}
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
-	sbxserver.Register(grpcServer, sbxserver.NewServer(leaseStore, snapStore))
+	sbxserver.Register(grpcServer, server)
 	healthServerGRPC := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
 	healthServerGRPC.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)

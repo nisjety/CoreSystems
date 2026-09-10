@@ -30,6 +30,8 @@ func mapErr(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, lease.ErrLeaseExpired):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, lease.ErrLeaseBackendMismatch):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, snapshot.ErrInvalidLease):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	default:
@@ -49,6 +51,8 @@ func leaseOutcome(err error) string {
 		return "not_found"
 	case errors.Is(err, lease.ErrLeaseExpired):
 		return "expired"
+	case errors.Is(err, lease.ErrLeaseBackendMismatch):
+		return "backend_mismatch"
 	default:
 		return "internal_error"
 	}
@@ -66,6 +70,8 @@ func snapshotLeaseOutcome(err error) string {
 		return "lease_not_found"
 	case errors.Is(err, lease.ErrLeaseExpired):
 		return "lease_expired"
+	case errors.Is(err, lease.ErrLeaseBackendMismatch):
+		return "lease_backend_mismatch"
 	default:
 		return "lease_internal_error"
 	}

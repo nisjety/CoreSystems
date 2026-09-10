@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 )
@@ -259,6 +261,130 @@ func TestSnapshotSandbox_Success(t *testing.T) {
 	}
 	if resp.GetObjectKey() == "" {
 		t.Error("expected non-empty ObjectKey")
+	}
+}
+
+func TestAcquireLeaseWithoutSpaceIDNeverConsultsCapabilityVerification(t *testing.T) {
+	s := newTestServer()
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		t.Fatal("capability verification must not run for a non-Space lease request")
+		return authz.SpaceCapabilityClaims{}, nil
+	}
+	if _, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
+	}); err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+}
+
+func TestAcquireLeaseRejectsSpaceScopedRequestWhenCapabilityVerificationIsNotConfigured(t *testing.T) {
+	s := newTestServer()
+	_, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition", got)
+	}
+}
+
+func TestAcquireLeaseRejectsAnInvalidCapabilityDecision(t *testing.T) {
+	s := newTestServer()
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{}, errors.New("Space capability decision does not match the claimed lease request")
+	}
+	s.backendID = "backend-1"
+	_, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("code = %v, want PermissionDenied", got)
+	}
+}
+
+// TestAcquireLeaseFailsClosedWhenClaimedBackendMismatchesInstance is the
+// design doc's "backend loss/downgrade" scenario (S3.2 close-out design,
+// §5): a capability decision verified as authentic but pinned to a
+// different backend than this instance must still be refused.
+func TestAcquireLeaseFailsClosedWhenClaimedBackendMismatchesInstance(t *testing.T) {
+	s := newTestServer()
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-other"}, nil
+	}
+	s.backendID = "backend-1"
+	_, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition", got)
+	}
+}
+
+func TestAcquireLeaseGrantsASpaceScopedLeaseOnAMatchingVerifiedBackend(t *testing.T) {
+	s := newTestServer()
+	var gotExpectation authz.CapabilityExpectation
+	s.capabilityVerify = func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		gotExpectation = expect
+		if token != "signed-token" || claimsJSON != "{}" {
+			t.Fatalf("unexpected verify input: token=%q claims=%q", token, claimsJSON)
+		}
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+	resp, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "signed-token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if resp.GetBackendId() != "backend-1" {
+		t.Fatalf("BackendId = %q, want backend-1", resp.GetBackendId())
+	}
+	if resp.GetState() != mpv1.SandboxLifecycleState_SCRATCH {
+		t.Fatalf("State = %v, want SCRATCH", resp.GetState())
+	}
+	if gotExpectation.OrgID != "org-1" || gotExpectation.SpaceRef != "space-1" || gotExpectation.SubjectID != "user-1" {
+		t.Fatalf("verifier was not given the request's own identity: %+v", gotExpectation)
+	}
+}
+
+func TestReleaseLeaseAndSnapshotSandboxEnforceTheBackendPinOnASpaceScopedLease(t *testing.T) {
+	s := newTestServer()
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+
+	if _, err := s.SnapshotSandbox(context.Background(), &SnapshotRequest{
+		LeaseId: acquired.GetLeaseId(), Label: "x", BackendId: "backend-wrong",
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("snapshot with wrong backend_id: code = %v, want FailedPrecondition", status.Code(err))
+	}
+	if _, err := s.ReleaseLease(context.Background(), &ReleaseLeaseRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-wrong",
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("release with wrong backend_id: code = %v, want FailedPrecondition", status.Code(err))
+	}
+
+	if _, err := s.SnapshotSandbox(context.Background(), &SnapshotRequest{
+		LeaseId: acquired.GetLeaseId(), Label: "x", BackendId: "backend-1",
+	}); err != nil {
+		t.Fatalf("snapshot with matching backend_id: unexpected error: %v", err)
+	}
+	if _, err := s.ReleaseLease(context.Background(), &ReleaseLeaseRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	}); err != nil {
+		t.Fatalf("release with matching backend_id: unexpected error: %v", err)
 	}
 }
 

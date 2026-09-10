@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -25,11 +26,30 @@ type Server struct {
 	leases    *lease.Store
 	snapshots *snapshot.Store
 	principal func(context.Context) (authctx.Principal, error)
+	// capabilityVerify verifies a Space capability decision + its unsigned
+	// claims sidecar, mirroring authz.SpaceCapabilityVerifier.Verify. A
+	// func field, not the concrete type, so tests can inject a fake without
+	// a real Ed25519 keypair — the same pattern as principal above. Nil
+	// means "not configured": any AcquireLease request naming a space_id is
+	// then refused, never served unverified.
+	capabilityVerify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error)
+	// backendID is this instance's own SANDBOX_MANAGER_BACKEND_ID. Empty
+	// only when capabilityVerify is also nil (an unconfigured instance).
+	backendID string
 }
 
-// NewServer constructs a Server with the given stores.
+// NewServer constructs a Server with the given stores. Space capability
+// verification starts disabled; call WithCapabilityVerifier to enable it.
 func NewServer(leases *lease.Store, snaps *snapshot.Store) *Server {
 	return &Server{leases: leases, snapshots: snaps, principal: authz.Principal}
+}
+
+// WithCapabilityVerifier wires Space capability-decision verification and
+// this instance's own backend id into AcquireLease.
+func (s *Server) WithCapabilityVerifier(verify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error), backendID string) *Server {
+	s.capabilityVerify = verify
+	s.backendID = backendID
+	return s
 }
 
 // AcquireLease creates a new lease for the requested scope.
@@ -61,7 +81,28 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 	if ttl <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "ttl must be greater than zero")
 	}
-	l, err := s.leases.Create(req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, ttl)
+
+	spaceID := strings.TrimSpace(req.GetSpaceId())
+	backendID := ""
+	if spaceID != "" {
+		if s.capabilityVerify == nil {
+			return nil, status.Error(codes.FailedPrecondition, "Space capability verification is not configured")
+		}
+		claims, err := s.capabilityVerify(req.GetCapabilityDecision(), req.GetCapabilityClaimsJson(), authz.CapabilityExpectation{
+			OrgID: principal.OrganizationID, SpaceRef: spaceID, SubjectID: principal.ActorID, Now: time.Now().UTC(),
+		})
+		if err != nil {
+			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "capability_denied")))
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
+		if claims.BackendID != s.backendID {
+			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "backend_mismatch")))
+			return nil, mapErr(lease.ErrLeaseBackendMismatch)
+		}
+		backendID = claims.BackendID
+	}
+
+	l, err := s.leases.Create(req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, ttl)
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -71,6 +112,8 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		LeaseId:   l.ID,
 		Endpoint:  l.Endpoint,
 		ExpiresAt: timestamppb.New(l.ExpiresAt),
+		BackendId: l.BackendID,
+		State:     l.State,
 	}, nil
 }
 
@@ -84,7 +127,7 @@ func (s *Server) ReleaseLease(ctx context.Context, req *ReleaseLeaseRequest) (*R
 	if req.GetLeaseId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
 	}
-	ok, err := s.leases.ReleaseScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal))
+	ok, err := s.leases.ReleaseScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -106,7 +149,7 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 	if req.GetLabel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "label is required")
 	}
-	l, err := s.leases.GetScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal))
+	l, err := s.leases.GetScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotLeaseOutcome(err))))
 		return nil, mapErr(err)
