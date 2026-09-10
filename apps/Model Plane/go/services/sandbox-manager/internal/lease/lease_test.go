@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 )
 
 func TestStoreScopesCopiesAndReleasesLeases(t *testing.T) {
@@ -98,5 +100,144 @@ func TestGetScopedRejectsBackendMismatch(t *testing.T) {
 	}
 	if _, err := store.GetScoped(created.ID, "org-a", "user-a", "backend-a"); err != nil {
 		t.Fatalf("matching backend id should succeed: %v", err)
+	}
+}
+
+func TestCreateStartsASpaceScopedLeaseInScratch(t *testing.T) {
+	store := NewStore()
+	created, err := store.Create("scope-a", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.State != mpv1.SandboxLifecycleState_SCRATCH {
+		t.Fatalf("State = %v, want SCRATCH", created.State)
+	}
+}
+
+func TestActivateTransitionsScratchToActiveAndIsIdempotent(t *testing.T) {
+	store := NewStore()
+	created, err := store.Create("scope-a", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activated, err := store.Activate(created.ID, "org-a", "user-a", "backend-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activated.State != mpv1.SandboxLifecycleState_ACTIVE {
+		t.Fatalf("State = %v, want ACTIVE", activated.State)
+	}
+	// Activating an already-ACTIVE lease is a no-op, not an error.
+	activatedAgain, err := store.Activate(created.ID, "org-a", "user-a", "backend-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activatedAgain.State != mpv1.SandboxLifecycleState_ACTIVE {
+		t.Fatalf("State = %v, want ACTIVE", activatedAgain.State)
+	}
+}
+
+func TestActivateEnforcesTheSameScopeAndBackendPinAsGetScoped(t *testing.T) {
+	store := NewStore()
+	created, err := store.Create("scope-a", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(created.ID, "org-b", "user-a", "backend-a"); !errors.Is(err, ErrLeaseNotFound) {
+		t.Fatalf("wrong org: error = %v, want ErrLeaseNotFound", err)
+	}
+	if _, err := store.Activate(created.ID, "org-a", "user-a", "backend-b"); !errors.Is(err, ErrLeaseBackendMismatch) {
+		t.Fatalf("wrong backend: error = %v, want ErrLeaseBackendMismatch", err)
+	}
+}
+
+func TestBeginSnapshotRejectsAScratchSpaceScopedLeaseButNotANonSpaceLease(t *testing.T) {
+	store := NewStore()
+
+	spaceScoped, err := store.Create("scope-a", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginSnapshot(spaceScoped.ID, "org-a", "user-a", "backend-a"); !errors.Is(err, ErrLeaseNotActivated) {
+		t.Fatalf("error = %v, want ErrLeaseNotActivated", err)
+	}
+	if _, err := store.Activate(spaceScoped.ID, "org-a", "user-a", "backend-a"); err != nil {
+		t.Fatal(err)
+	}
+	snapshotting, err := store.BeginSnapshot(spaceScoped.ID, "org-a", "user-a", "backend-a")
+	if err != nil {
+		t.Fatalf("snapshot of an ACTIVE Space-scoped lease should succeed: %v", err)
+	}
+	if snapshotting.State != mpv1.SandboxLifecycleState_SNAPSHOTTING {
+		t.Fatalf("State = %v, want SNAPSHOTTING", snapshotting.State)
+	}
+	store.EndSnapshot(spaceScoped.ID)
+	returned, err := store.GetScoped(spaceScoped.ID, "org-a", "user-a", "backend-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if returned.State != mpv1.SandboxLifecycleState_ACTIVE {
+		t.Fatalf("State after EndSnapshot = %v, want ACTIVE", returned.State)
+	}
+
+	// A non-Space lease predates this state machine entirely: it starts in
+	// SCRATCH like every lease, but SnapshotSandbox must keep working for it
+	// exactly as it always has, unconditionally.
+	nonSpace, err := store.Create("scope-b", "agent", "org-a", "user-a", "", "", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginSnapshot(nonSpace.ID, "org-a", "user-a", ""); err != nil {
+		t.Fatalf("non-Space lease snapshot should never require activation: %v", err)
+	}
+}
+
+func TestEndSnapshotReturnsToActiveEvenWhenTheSnapshotFailed(t *testing.T) {
+	store := NewStore()
+	created, err := store.Create("scope-a", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(created.ID, "org-a", "user-a", "backend-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BeginSnapshot(created.ID, "org-a", "user-a", "backend-a"); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the caller's snapshot-creation step failing after
+	// BeginSnapshot succeeded: EndSnapshot must still run (the caller's own
+	// defer) and leave the lease usable, never stuck in SNAPSHOTTING.
+	store.EndSnapshot(created.ID)
+	returned, err := store.GetScoped(created.ID, "org-a", "user-a", "backend-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if returned.State != mpv1.SandboxLifecycleState_ACTIVE {
+		t.Fatalf("State = %v, want ACTIVE", returned.State)
+	}
+}
+
+func TestReleaseIsIdempotentAndDestroyedLeaseRejectsFurtherSnapshotAndActivate(t *testing.T) {
+	store := NewStore()
+	created, err := store.Create("scope-a", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.ReleaseScoped(created.ID, "org-a", "user-a", "backend-a"); err != nil || !ok {
+		t.Fatalf("first release: ok=%v err=%v", ok, err)
+	}
+	// A second release of the same lease is a clean idempotent success, not
+	// ErrLeaseNotFound.
+	if ok, err := store.ReleaseScoped(created.ID, "org-a", "user-a", "backend-a"); err != nil || !ok {
+		t.Fatalf("second (idempotent) release: ok=%v err=%v", ok, err)
+	}
+	if _, err := store.GetScoped(created.ID, "org-a", "user-a", "backend-a"); !errors.Is(err, ErrLeaseNotFound) {
+		t.Fatalf("GetScoped after destroy: error = %v, want ErrLeaseNotFound", err)
+	}
+	if _, err := store.BeginSnapshot(created.ID, "org-a", "user-a", "backend-a"); !errors.Is(err, ErrLeaseNotFound) {
+		t.Fatalf("BeginSnapshot after destroy: error = %v, want ErrLeaseNotFound", err)
+	}
+	if _, err := store.Activate(created.ID, "org-a", "user-a", "backend-a"); !errors.Is(err, ErrLeaseNotFound) {
+		t.Fatalf("Activate after destroy: error = %v, want ErrLeaseNotFound", err)
 	}
 }

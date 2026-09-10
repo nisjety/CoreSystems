@@ -149,11 +149,12 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 	if req.GetLabel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "label is required")
 	}
-	l, err := s.leases.GetScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	l, err := s.leases.BeginSnapshot(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotLeaseOutcome(err))))
 		return nil, mapErr(err)
 	}
+	defer s.leases.EndSnapshot(l.ID)
 	sn, err := s.snapshots.Create(l, req.GetLabel())
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotCreateOutcome(err))))
@@ -164,6 +165,29 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 		SnapshotId: sn.ID,
 		ObjectKey:  sn.ObjectKey,
 	}, nil
+}
+
+// ActivateLease promotes a Space-scoped lease from SCRATCH to ACTIVE — the
+// first time a caller needs more than the credential-free scratch
+// allowlist (e.g. real backend network/egress permission per the
+// capability decision's granted Permissions). A no-op returning the
+// lease's current state if it is already ACTIVE or SNAPSHOTTING.
+func (s *Server) ActivateLease(ctx context.Context, req *ActivateLeaseRequest) (*ActivateLeaseResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ActivateLease")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetLeaseId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	l, err := s.leases.Activate(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	if err != nil {
+		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
+		return nil, mapErr(err)
+	}
+	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "activated")))
+	return &ActivateLeaseResponse{State: l.State}, nil
 }
 
 // Health reports serving status.

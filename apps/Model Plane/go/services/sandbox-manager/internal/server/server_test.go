@@ -376,6 +376,11 @@ func TestReleaseLeaseAndSnapshotSandboxEnforceTheBackendPinOnASpaceScopedLease(t
 		t.Fatalf("release with wrong backend_id: code = %v, want FailedPrecondition", status.Code(err))
 	}
 
+	if _, err := s.ActivateLease(context.Background(), &ActivateLeaseRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	}); err != nil {
+		t.Fatalf("ActivateLease with matching backend_id: unexpected error: %v", err)
+	}
 	if _, err := s.SnapshotSandbox(context.Background(), &SnapshotRequest{
 		LeaseId: acquired.GetLeaseId(), Label: "x", BackendId: "backend-1",
 	}); err != nil {
@@ -385,6 +390,136 @@ func TestReleaseLeaseAndSnapshotSandboxEnforceTheBackendPinOnASpaceScopedLease(t
 		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
 	}); err != nil {
 		t.Fatalf("release with matching backend_id: unexpected error: %v", err)
+	}
+}
+
+func TestSnapshotSandboxRejectsAScratchSpaceScopedLease(t *testing.T) {
+	s := newTestServer()
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	// Never activated: still SCRATCH, so nothing durable exists yet.
+	_, err = s.SnapshotSandbox(context.Background(), &SnapshotRequest{
+		LeaseId: acquired.GetLeaseId(), Label: "x", BackendId: "backend-1",
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
+	}
+}
+
+func TestActivateLeasePromotesScratchToActiveAndIsIdempotent(t *testing.T) {
+	s := newTestServer()
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	resp, err := s.ActivateLease(context.Background(), &ActivateLeaseRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	})
+	if err != nil {
+		t.Fatalf("ActivateLease: unexpected error: %v", err)
+	}
+	if resp.GetState() != mpv1.SandboxLifecycleState_ACTIVE {
+		t.Fatalf("State = %v, want ACTIVE", resp.GetState())
+	}
+	// Idempotent: activating again is a no-op, not an error.
+	if _, err := s.ActivateLease(context.Background(), &ActivateLeaseRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	}); err != nil {
+		t.Fatalf("second ActivateLease: unexpected error: %v", err)
+	}
+}
+
+func TestActivateLeaseFailsClosedOnWrongBackend(t *testing.T) {
+	s := newTestServer()
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	_, err = s.ActivateLease(context.Background(), &ActivateLeaseRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-wrong",
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
+	}
+}
+
+func TestActivateLeaseRequiresLeaseID(t *testing.T) {
+	s := newTestServer()
+	_, err := s.ActivateLease(context.Background(), &ActivateLeaseRequest{})
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument", got)
+	}
+}
+
+// TestReleaseLeaseTransitionsStateToDestroyed and
+// TestSnapshotAfterDestroyIsRejected are the S3.2 close-out design's own
+// named "suspend/destroy" scenario (§5): a destroyed lease must reject
+// further snapshot/activate, and a second release must not surprise a
+// caller with NotFound.
+func TestReleaseLeaseTransitionsStateToDestroyed(t *testing.T) {
+	s := newTestServer()
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if _, err := s.ReleaseLease(context.Background(), &ReleaseLeaseRequest{LeaseId: acquired.GetLeaseId()}); err != nil {
+		t.Fatalf("ReleaseLease: unexpected error: %v", err)
+	}
+	// A second release of the same lease is a clean idempotent success.
+	resp, err := s.ReleaseLease(context.Background(), &ReleaseLeaseRequest{LeaseId: acquired.GetLeaseId()})
+	if err != nil {
+		t.Fatalf("second ReleaseLease: unexpected error: %v", err)
+	}
+	if !resp.GetReleased() {
+		t.Fatal("second ReleaseLease should still report Released=true")
+	}
+}
+
+func TestSnapshotAfterDestroyIsRejected(t *testing.T) {
+	s := newTestServer()
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if _, err := s.ReleaseLease(context.Background(), &ReleaseLeaseRequest{LeaseId: acquired.GetLeaseId()}); err != nil {
+		t.Fatalf("ReleaseLease: unexpected error: %v", err)
+	}
+	if _, err := s.SnapshotSandbox(context.Background(), &SnapshotRequest{
+		LeaseId: acquired.GetLeaseId(), Label: "x",
+	}); status.Code(err) != codes.NotFound {
+		t.Fatalf("snapshot after destroy: code = %v, want NotFound", status.Code(err))
+	}
+	if _, err := s.ActivateLease(context.Background(), &ActivateLeaseRequest{
+		LeaseId: acquired.GetLeaseId(),
+	}); status.Code(err) != codes.NotFound {
+		t.Fatalf("activate after destroy: code = %v, want NotFound", status.Code(err))
 	}
 }
 

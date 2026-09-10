@@ -23,6 +23,9 @@ var (
 	// sandbox-manager instance than the one its capability decision named
 	// must be refused, never silently served by whichever instance answered.
 	ErrLeaseBackendMismatch = errors.New("lease backend mismatch")
+	// ErrLeaseNotActivated signals a snapshot attempt against a Space-scoped
+	// lease still in SCRATCH — nothing durable exists yet by definition.
+	ErrLeaseNotActivated = errors.New("lease has not been activated")
 )
 
 // Lease is an issued sandbox reservation.
@@ -97,17 +100,16 @@ func (s *Store) Create(scopeID, scopeType, orgID, ownerID, spaceID, backendID st
 	return clone(l), nil
 }
 
-// GetScoped returns a lease by ID only within the verified organization,
-// optional user owner, and asserted backend id. Not-found and expiry are
-// checked first so a stale or foreign lease ID never leaks a backend
-// mismatch signal; backendID is compared last and only matters for a
-// Space-scoped lease (both sides are empty for the pre-existing path, so it
-// trivially matches).
-func (s *Store) GetScoped(id, orgID, ownerID, backendID string) (*Lease, error) {
-	s.mu.RLock()
+// lookup finds and validates a lease under a lock the caller already holds
+// (read or write — this never mutates), in the order every scoped operation
+// needs: not-found (missing id, wrong org/owner, or DESTROYED — a destroyed
+// lease is unfindable, not merely inert, so further Snapshot/Activate calls
+// against it fail closed the same way a stale id does), then expiry, then
+// the caller's asserted backend id. It returns the live pointer, not a
+// clone, so a mutating caller can transition State directly.
+func (s *Store) lookup(id, orgID, ownerID, backendID string) (*Lease, error) {
 	l, ok := s.byID[id]
-	s.mu.RUnlock()
-	if !ok || l.OrgID != orgID || (ownerID != "" && l.OwnerID != ownerID) {
+	if !ok || l.OrgID != orgID || (ownerID != "" && l.OwnerID != ownerID) || l.State == mpv1.SandboxLifecycleState_DESTROYED {
 		return nil, ErrLeaseNotFound
 	}
 	if l.IsExpired(s.nowFn()) {
@@ -116,11 +118,86 @@ func (s *Store) GetScoped(id, orgID, ownerID, backendID string) (*Lease, error) 
 	if l.BackendID != backendID {
 		return nil, ErrLeaseBackendMismatch
 	}
+	return l, nil
+}
+
+// GetScoped returns a lease by ID only within the verified organization,
+// optional user owner, and asserted backend id. backendID is only
+// meaningful for a Space-scoped lease (both sides are empty for the
+// pre-existing path, so it trivially matches).
+func (s *Store) GetScoped(id, orgID, ownerID, backendID string) (*Lease, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	l, err := s.lookup(id, orgID, ownerID, backendID)
+	if err != nil {
+		return nil, err
+	}
 	return clone(l), nil
 }
 
-// ReleaseScoped removes a lease only inside the verified identity scope and
-// asserted backend id.
+// Activate transitions a Space-scoped lease from SCRATCH to ACTIVE — the
+// first time a caller needs more than the credential-free scratch
+// allowlist. A no-op (state unchanged) if already ACTIVE or SNAPSHOTTING.
+// Meaningless for a non-Space lease: its State starts at SCRATCH but
+// nothing in this store gates behavior on it, so Activate on one always
+// succeeds without doing anything.
+func (s *Store) Activate(id, orgID, ownerID, backendID string) (*Lease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l, err := s.lookup(id, orgID, ownerID, backendID)
+	if err != nil {
+		return nil, err
+	}
+	if l.State == mpv1.SandboxLifecycleState_SCRATCH {
+		l.State = mpv1.SandboxLifecycleState_ACTIVE
+	}
+	return clone(l), nil
+}
+
+// BeginSnapshot marks a Space-scoped lease SNAPSHOTTING, or reports
+// ErrLeaseNotActivated if it is still SCRATCH — nothing durable exists yet
+// by definition. A non-Space lease (SpaceID == "") is exempt from this gate
+// entirely: the SCRATCH/ACTIVE/SNAPSHOTTING state machine exists only for
+// the Space capability feature, and the pre-existing thread/agent-scoped
+// snapshot path predates it and must keep working exactly as it did before.
+// Every call must be paired with EndSnapshot so a lease is never left
+// stuck.
+func (s *Store) BeginSnapshot(id, orgID, ownerID, backendID string) (*Lease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l, err := s.lookup(id, orgID, ownerID, backendID)
+	if err != nil {
+		return nil, err
+	}
+	if l.SpaceID != "" {
+		if l.State == mpv1.SandboxLifecycleState_SCRATCH {
+			return nil, ErrLeaseNotActivated
+		}
+		l.State = mpv1.SandboxLifecycleState_SNAPSHOTTING
+	}
+	return clone(l), nil
+}
+
+// EndSnapshot returns a Space-scoped lease to ACTIVE after a snapshot
+// attempt, regardless of whether it succeeded — callers invoke this via
+// defer immediately after a successful BeginSnapshot so a lease is never
+// left stuck in SNAPSHOTTING. A no-op for a non-Space lease or one no
+// longer present (e.g. released concurrently).
+func (s *Store) EndSnapshot(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.byID[id]; ok && l.SpaceID != "" {
+		l.State = mpv1.SandboxLifecycleState_ACTIVE
+	}
+}
+
+// ReleaseScoped marks a lease DESTROYED rather than deleting it outright.
+// This store performs no separate garbage collection, so keeping the
+// record — instead of removing it — means a second release of the same
+// lease, or one racing a concurrent release, sees a clean idempotent
+// success instead of a confusing ErrLeaseNotFound. Deliberately does not
+// use lookup: unlike every other operation, a lease already DESTROYED must
+// still be found here, not treated as absent.
 func (s *Store) ReleaseScoped(id, orgID, ownerID, backendID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -131,7 +208,7 @@ func (s *Store) ReleaseScoped(id, orgID, ownerID, backendID string) (bool, error
 	if l.BackendID != backendID {
 		return false, ErrLeaseBackendMismatch
 	}
-	delete(s.byID, id)
+	l.State = mpv1.SandboxLifecycleState_DESTROYED
 	return true, nil
 }
 
