@@ -223,6 +223,17 @@ message ExecuteStepRequest {
   // UNSPECIFIED imposes no constraint. Field 10 was free on this message; it
   // is unrelated to `RunAgentRequest`'s 11, which is a different message.
   PrivacyTier min_privacy_tier = 10;
+
+  // Canonical Control-registered Space this step's run belongs to, empty for
+  // the pre-existing non-Space path (mirrors `ExecuteScheduledStepRequest`'s
+  // own `space_id`, field 4 on that message). Threaded by the caller from
+  // whatever Space context it already resolved (e.g. model-gateway's
+  // `ThreadSpaceContext`) rather than looked up here — the same pattern
+  // `org_id`/`user_id` above already use. Presence alone does not grant
+  // sandbox capability; see
+  // apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+  // §3.5 phase B for the signed decision that actually does.
+  string space_id = 11;
 }
 
 // ExecuteStepResponse — result of a single step execution.

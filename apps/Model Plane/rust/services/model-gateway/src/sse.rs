@@ -1558,6 +1558,10 @@ pub async fn invoke_stream_sse(
                 &org_clone,
                 &user_clone,
                 &thread_scope,
+                req.space_context
+                    .as_ref()
+                    .map(|context| context.space_id.as_str())
+                    .unwrap_or_default(),
                 data_plane_bearer.as_ref(),
                 execution_bearer.as_ref(),
                 inference_bearer.as_str(),

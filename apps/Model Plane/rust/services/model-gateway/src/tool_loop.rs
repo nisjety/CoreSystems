@@ -1744,6 +1744,13 @@ pub async fn dispatch_tool(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    // Canonical Control-registered Space this turn's thread belongs to, empty
+    // for the pre-existing non-Space path. Sourced from the caller's own
+    // already-resolved `ThreadSpaceContext` (see
+    // S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 phase A) — this
+    // function does not look it up itself, matching how `org_id`/`user_id`
+    // above are already threaded rather than re-derived here.
+    space_id: &str,
     prompt_contents: &[String],
     // Every turn except the system prompt, for grounding supplied arguments.
     // Separate from `prompt_contents` because that one keeps the system turn
@@ -1821,6 +1828,7 @@ pub async fn dispatch_tool(
                 run_id,
                 org_id,
                 user_id,
+                space_id,
                 zdr,
                 &language,
                 &code,
@@ -2894,6 +2902,7 @@ async fn dispatch_audited_tool(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    space_id: &str,
     prompt_contents: &[String],
     // Every turn except the system prompt, for grounding supplied arguments.
     // Separate from `prompt_contents` because that one keeps the system turn
@@ -2955,6 +2964,7 @@ async fn dispatch_audited_tool(
             org_id,
             user_id,
             thread_id,
+            space_id,
             prompt_contents,
             conversation,
             data_plane_bearer,
@@ -3040,6 +3050,11 @@ pub(crate) async fn dispatch_web_tool_audited(
         org_id,
         user_id,
         thread_id,
+        // Web tools only, per this function's doc: neither web_search nor
+        // fetch_url is code_interpreter/browser_agent, the only tools that
+        // read ExecuteStepRequest.space_id, so this path has no use for a
+        // real value.
+        "",
         // Web tools only on these paths, and `reattach_context` is not one of
         // them — there is no prompt to exclude from a recovery that cannot
         // happen here.
@@ -3409,6 +3424,10 @@ pub async fn run_forced_web_search(
         org_id,
         user_id,
         thread_id,
+        // web_search only, never code_interpreter/browser_agent (the only
+        // tools that read ExecuteStepRequest.space_id) — see
+        // dispatch_web_tool_audited's identical reasoning above.
+        "",
         // Web tools only on these paths, and `reattach_context` is not one of
         // them — there is no prompt to exclude from a recovery that cannot
         // happen here.
@@ -3724,6 +3743,12 @@ pub async fn run_tool_rounds(
     org_id: &str,
     user_id: &str,
     thread_id: &str,
+    // Canonical Control-registered Space `thread_id` belongs to, empty for
+    // the pre-existing non-Space path. Sourced by the caller from its own
+    // already-resolved `ThreadSpaceContext` (see
+    // S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 phase A) — this
+    // function does not look it up itself.
+    space_id: &str,
     data_plane_bearer: Option<&VerifiedBearer>,
     execution_bearer: Option<&VerifiedExecutionBearer>,
     inference_bearer: &str,
@@ -3982,6 +4007,7 @@ pub async fn run_tool_rounds(
                     org_id,
                     user_id,
                     thread_id,
+                    space_id,
                     &prompt_contents,
                     grounding_conversation,
                     data_plane_bearer,
@@ -4275,6 +4301,7 @@ mod tests {
             "org_test",
             "user_test",
             "thread_test",
+            "",
             &[],
             "",
             None,
@@ -4442,6 +4469,7 @@ mod tests {
             "org",
             "user",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4490,6 +4518,7 @@ mod tests {
             "org",
             "user",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4540,6 +4569,7 @@ mod tests {
             "org",
             "user",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4584,6 +4614,7 @@ mod tests {
             "org",
             "user_b",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4665,6 +4696,7 @@ mod tests {
             "org",
             "user",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4701,6 +4733,7 @@ mod tests {
             "org",
             "user",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4740,6 +4773,7 @@ mod tests {
             "org",
             "user",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4775,6 +4809,7 @@ mod tests {
             "org",
             "user",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4806,6 +4841,7 @@ mod tests {
             "org",
             "user",
             "thread",
+            "",
             &[],
             "",
             None,
@@ -4988,6 +5024,7 @@ mod tests {
                     "org_test",
                     "user_test",
                     "thread_test",
+                    "",
                     &[],
                     "",
                     None,
@@ -5159,6 +5196,7 @@ mod tests {
             "org_1",
             "user_1",
             "thread_1",
+            "",
             &[],
             "",
             None,
@@ -5190,6 +5228,7 @@ mod tests {
             "org_1",
             "user_1",
             "thread_1",
+            "",
             &[],
             "",
             None,
@@ -6671,6 +6710,7 @@ mod tests {
             "org_test",
             "user_test",
             "",
+            "",
             &[],
             "",
             None,
@@ -6705,6 +6745,7 @@ mod tests {
             "org_test",
             "user_test",
             "thread_test",
+            "",
             &[],
             "",
             None,
@@ -6896,6 +6937,7 @@ mod tests {
             "org_test",
             "user_test",
             "thread_test",
+            "",
             &[],
             "",
             None,

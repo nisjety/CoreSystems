@@ -429,6 +429,13 @@ async fn browser_run_start(
             // browser_agent never reaches knowledge_search, so there is no
             // sovereignty derivation for this field to feed.
             min_privacy_tier: mp_contracts::model_plane::v1::PrivacyTier::Unspecified as i32,
+            // Always empty here, not yet a deliberate choice: BrowserRunStartRequest
+            // (this handler's own HTTP request type) carries no Space context
+            // field at all today, unlike the chat/invoke path's ThreadSpaceContext
+            // (see S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 phase A,
+            // which wired code_interpreter's ExecuteStepRequest.space_id but
+            // explicitly left this path's own separate gap for a follow-up).
+            space_id: String::new(),
         });
         let authorization = format!("Bearer {}", execution_bearer.as_str())
             .parse()
