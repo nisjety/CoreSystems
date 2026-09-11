@@ -109,9 +109,11 @@ export class PlaneTokenController {
    * non-Model-Plane plane without duplicate route handlers.
    *
    * Routes registered: `/api/:audience/token` for interactive audiences in
-   * `PlaneAudience`. The `control-policy` audience is deliberately excluded
-   * and available only through the scoped service-principal path. Unknown or
-   * service-only audiences → 404, no session → 401, no active org → 400
+   * `PlaneAudience`. The service-only audiences — `control-policy` and
+   * `orchestrator-core`, listed once in `SERVICE_ONLY_PLANE_AUDIENCES` — are
+   * deliberately excluded and available only through the scoped
+   * service-principal path. Unknown or service-only audiences → 404, no
+   * session → 401, no active org → 400
    * (fail-closed; a token with empty `org_id` would be rejected downstream
    * anyway, so surface it here as a clear error).
    */

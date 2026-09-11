@@ -108,21 +108,45 @@ export type PlaneAudience =
 export type AuthCoreAudience = 'model-gateway' | PlaneAudience;
 
 /**
- * Audiences a signed-in USER may mint a token for through the interactive
- * session route.
+ * Audiences that ONLY a service principal may mint a token for. The
+ * interactive session route (`GET /api/:audience/token`) must never issue a
+ * user-bound JWT for one of these; services are unaffected because they mint
+ * through the internal-token route, which is not gated on this list.
  *
- * `control-policy` is excluded because it is a machine-to-machine decision
- * surface. `orchestrator-core` is excluded for a sharper reason: its
- * StartWorkflow lets a NON-service caller start any run-scoped workflow
+ * `control-policy` is service-only because it is a machine-to-machine
+ * decision surface. `orchestrator-core` is service-only for a sharper reason:
+ * its StartWorkflow lets a NON-service caller start any run-scoped workflow
  * (`authorizePolicy`'s `PolicyRunScoped` returns early for `!caller.Service`).
  * People already start runs through model-gateway, so an interactive
  * orchestrator-core token would add a way to drive the durable tier directly
- * with no product need for it. Service principals are unaffected — they mint
- * through the internal-token route, which is not gated on this type.
+ * with no product need for it.
+ *
+ * This tuple is the single source of truth for the exclusion: the
+ * `InteractivePlaneAudience` type is derived from it and the runtime guard
+ * `isInteractivePlaneAudience` checks membership in it, so the compile-time
+ * contract and the HTTP gate cannot drift apart again. The `satisfies` clause
+ * rejects a slug that is not a `PlaneAudience`, which a bare `Exclude<>`
+ * would silently ignore.
+ */
+export const SERVICE_ONLY_PLANE_AUDIENCES = [
+  'control-policy',
+  'orchestrator-core',
+] as const satisfies readonly PlaneAudience[];
+
+export type ServiceOnlyPlaneAudience =
+  (typeof SERVICE_ONLY_PLANE_AUDIENCES)[number];
+
+const serviceOnlyPlaneAudienceSet: ReadonlySet<string> = new Set(
+  SERVICE_ONLY_PLANE_AUDIENCES,
+);
+
+/**
+ * Audiences a signed-in USER may mint a token for through the interactive
+ * session route: every `PlaneAudience` except `SERVICE_ONLY_PLANE_AUDIENCES`.
  */
 export type InteractivePlaneAudience = Exclude<
   PlaneAudience,
-  'control-policy' | 'orchestrator-core'
+  ServiceOnlyPlaneAudience
 >;
 
 type ServiceRetentionPosture = {
@@ -729,8 +753,16 @@ export class ConvexTokenService {
     return value === 'model-gateway' || this.isKnownPlaneAudience(value);
   }
 
+  /**
+   * Interactive (session-cookie) gate for `GET /api/:audience/token`. Fails
+   * closed for unknown slugs AND for `SERVICE_ONLY_PLANE_AUDIENCES`, so the
+   * runtime answer matches the `InteractivePlaneAudience` type by construction.
+   */
   isInteractivePlaneAudience(value: string): value is InteractivePlaneAudience {
-    return this.isKnownPlaneAudience(value) && value !== 'control-policy';
+    return (
+      this.isKnownPlaneAudience(value) &&
+      !serviceOnlyPlaneAudienceSet.has(value)
+    );
   }
 
   getJwks() {
