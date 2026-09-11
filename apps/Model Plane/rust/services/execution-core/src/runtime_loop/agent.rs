@@ -353,6 +353,14 @@ struct LoopContext<'a> {
     inference_bearer: &'a str,
     capability_policy: &'a dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &'a dyn ManagedRunTokenProvider,
+    /// Present only when `req.space_id` is non-empty — see
+    /// `auth::authenticate_delegated_sandbox_manager`'s doc for why this
+    /// specific bearer must be user-bound. Read only by the `code_interpreter`
+    /// dispatch arm in `run_rounds`, and only when `req.space_id` is set.
+    sandbox_bearer: Option<&'a str>,
+    capability_client: Option<&'a crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &'a crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &'a str,
     agent_model: String,
     permission_wire: &'static str,
     /// Nesting depth: 0 is the user-facing run, 1 a delegated subagent. Bounds
@@ -427,6 +435,10 @@ pub(crate) async fn run_agent(
     inference_bearer: String,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &dyn ManagedRunTokenProvider,
+    sandbox_bearer: Option<String>,
+    capability_client: Option<&crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &str,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let tools = merged_tool_defs(
         &req.run_id,
@@ -447,6 +459,10 @@ pub(crate) async fn run_agent(
         inference_bearer,
         capability_policy,
         terminal_tokens,
+        sandbox_bearer,
+        capability_client,
+        sandbox_manager_client,
+        backend_id,
     )
     .await
 }
@@ -561,6 +577,10 @@ async fn run_agent_with_tools(
     inference_bearer: String,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &dyn ManagedRunTokenProvider,
+    sandbox_bearer: Option<String>,
+    capability_client: Option<&crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &str,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
@@ -622,6 +642,10 @@ async fn run_agent_with_tools(
         inference_bearer: &inference_bearer,
         capability_policy,
         terminal_tokens,
+        sandbox_bearer: sandbox_bearer.as_deref(),
+        capability_client,
+        sandbox_manager_client,
+        backend_id,
         agent_model,
         permission_wire,
         depth: 0,
@@ -1325,6 +1349,27 @@ async fn run_rounds(
                     // ambiguous, so replaying a write is how one booking
                     // becomes two — and for any non-transient failure, where a
                     // second identical attempt can only fail identically.
+                    // Present only when this run is Space-scoped AND the call
+                    // about to dispatch is code_interpreter — the only tool
+                    // that reads it. Built fresh per call rather than once per
+                    // round: `ctx.req.space_id`/`ctx.sandbox_bearer` never
+                    // change within a run, but constructing the borrow only
+                    // where it is used keeps the "absent unless relevant"
+                    // invariant visible at the one call site that cares.
+                    let sandbox = if call.name == "code_interpreter" && !ctx.req.space_id.is_empty()
+                    {
+                        ctx.sandbox_bearer.map(|sandbox_bearer| {
+                            crate::sandbox_lease::SandboxLeaseContext {
+                                space_id: &ctx.req.space_id,
+                                sandbox_bearer,
+                                capability_client: ctx.capability_client,
+                                sandbox_manager_client: ctx.sandbox_manager_client,
+                                backend_id: ctx.backend_id,
+                            }
+                        })
+                    } else {
+                        None
+                    };
                     let mut outcome = None;
                     for attempt in 1..=runtime_loop::retry::MAX_TOOL_ATTEMPTS {
                         if attempt > 1 {
@@ -1353,6 +1398,7 @@ async fn run_rounds(
                             Some(ctx.inference_bearer),
                             ctx.capability_policy,
                             Some(dispatch),
+                            sandbox.as_ref(),
                         )
                         .await;
                         let retryable = attempt < runtime_loop::retry::MAX_TOOL_ATTEMPTS
@@ -2024,6 +2070,10 @@ async fn run_subagent(
         inference_bearer: parent.inference_bearer,
         capability_policy: parent.capability_policy,
         terminal_tokens: parent.terminal_tokens,
+        sandbox_bearer: parent.sandbox_bearer,
+        capability_client: parent.capability_client,
+        sandbox_manager_client: parent.sandbox_manager_client,
+        backend_id: parent.backend_id,
         agent_model: parent.agent_model.clone(),
         permission_wire: parent.permission_wire,
         depth: parent.depth + 1,
@@ -4100,6 +4150,19 @@ mod tests {
 
     static STATIC_TERMINAL_TOKENS: StaticTerminalTokens = StaticTerminalTokens;
 
+    /// A lazily-connecting client to an address nothing listens on. Every
+    /// `run_agent`/`run_agent_with_tools` test below is non-Space (`space_id`
+    /// empty on `sample_request()` by default), so `sandbox_lease::
+    /// ensure_sandbox_lease` is never reached — this exists only to satisfy
+    /// the signature.
+    fn test_sandbox_manager_client() -> crate::sandbox_manager_client::SandboxManagerClient {
+        crate::sandbox_manager_client::SandboxManagerClient::new(
+            tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                .expect("valid endpoint")
+                .connect_lazy(),
+        )
+    }
+
     /// One scripted inference outcome the mock returns per round.
     #[derive(Clone)]
     enum Scripted {
@@ -5226,6 +5289,9 @@ mod tests {
             // No graded constraint stated, which is what an ordinary run sends —
             // the ladder narrows a run only when a grant put it there.
             autonomy_rung: 0,
+            // Non-Space by default, matching every other unconstrained field
+            // above — the tests that DO care set it explicitly.
+            space_id: String::new(),
         }
     }
 
@@ -5429,6 +5495,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("ordinary agent run should succeed");
@@ -5510,6 +5580,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("ZDR agent run should succeed");
@@ -5576,6 +5650,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("tier-constrained agent run should succeed");
@@ -5607,6 +5685,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("inference failure should be finalized as a response");
@@ -5671,6 +5753,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect_err("a missing durable terminal receipt must fail the agent run");
@@ -5734,6 +5820,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("multi-tool agent run should succeed");
@@ -5822,6 +5912,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("duplicate retrieval run should succeed");
@@ -5882,6 +5976,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("durable approval should pause the run");
@@ -5946,6 +6044,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect_err("an unpersisted approval must fail the agent HITL path");
@@ -6021,6 +6123,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("provider write run should succeed");
@@ -6145,6 +6251,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -6221,6 +6331,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a ZDR delegation still runs");
@@ -6279,6 +6393,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -6351,6 +6469,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a delegating agent run should succeed");
@@ -6579,6 +6701,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a refused nested delegation must not fail the run");
@@ -6720,6 +6846,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a refused record read inside a subagent must not fail the run");
@@ -6796,6 +6926,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a refused rung must not fail the run");
@@ -6872,6 +7006,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a refused risky tool inside a subagent must not fail the run");
@@ -6945,6 +7083,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a truncated round must not fail the run");
@@ -7018,6 +7160,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a refused plan-mode tool call must not fail the run");
@@ -7076,6 +7222,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a failed delegation must not fail the parent run");
@@ -7142,6 +7292,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -7229,6 +7383,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a resumed delegation completes the run");
@@ -7303,6 +7461,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a refused replay must not fail the run");
@@ -7362,6 +7524,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("an in-flight replay must not fail the run");
@@ -7427,6 +7593,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("a refused delegation must not fail the run");
@@ -7501,6 +7671,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -7583,6 +7757,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("durable approval should pause the run");
@@ -7652,6 +7830,10 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
         )
         .await
         .expect("durable approval should pause the run");

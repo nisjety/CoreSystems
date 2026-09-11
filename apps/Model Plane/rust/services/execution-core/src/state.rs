@@ -57,10 +57,25 @@ impl RunSnapshot {
     }
 }
 
+/// A sandbox-manager lease acquired for one run's Space-scoped
+/// `code_interpreter` calls. `AcquireLease` mints a fresh lease (and lease
+/// id) on every call — it is not idempotent by scope — so a run's FIRST
+/// Space-scoped step caches its result here and every later step in the same
+/// run reuses it, mirroring `owners`' own "insert-once, read-many" idiom.
+/// See `sandbox_lease::ensure_sandbox_lease`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxLease {
+    pub lease_id: String,
+    /// The backend this lease is pinned to; `SnapshotSandbox`/`ReleaseLease`
+    /// must present the same value back (S3.2's own backend-pin invariant).
+    pub backend_id: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StateStore {
     runs: Arc<DashMap<String, RunSnapshot>>,
     owners: Arc<DashMap<String, RunOwner>>,
+    leases: Arc<DashMap<String, SandboxLease>>,
 }
 
 impl StateStore {
@@ -167,6 +182,21 @@ impl StateStore {
         self.update(next);
         true
     }
+
+    #[must_use]
+    pub fn sandbox_lease(&self, run_id: &str) -> Option<SandboxLease> {
+        self.leases.get(run_id).map(|entry| entry.clone())
+    }
+
+    /// Cache the lease this run acquired for its first Space-scoped
+    /// `code_interpreter` step. Unconditional insert-or-replace: a caller that
+    /// already checked `sandbox_lease` and found nothing is the only caller
+    /// that should reach this, so there is no existing value worth preserving
+    /// over a fresh one (unlike `cache_verified_owner`, which must never let a
+    /// second principal silently rebind an owner).
+    pub fn cache_sandbox_lease(&self, run_id: &str, lease: SandboxLease) {
+        self.leases.insert(run_id.to_owned(), lease);
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +291,24 @@ mod tests {
         assert_eq!(store.resume_approved("run_paused"), None);
         assert_eq!(store.resume_paused("run_paused"), Some(2));
         assert_eq!(store.resume_approved("run_approval"), Some(7));
+    }
+
+    #[test]
+    fn a_run_with_no_lease_yet_reads_as_absent() {
+        let store = StateStore::new();
+        assert_eq!(store.sandbox_lease("run-1"), None);
+    }
+
+    #[test]
+    fn a_cached_lease_is_reused_by_later_reads_for_the_same_run() {
+        let store = StateStore::new();
+        let lease = SandboxLease {
+            lease_id: "lease-1".to_owned(),
+            backend_id: "backend-1".to_owned(),
+        };
+        store.cache_sandbox_lease("run-1", lease.clone());
+        assert_eq!(store.sandbox_lease("run-1"), Some(lease));
+        assert_eq!(store.sandbox_lease("run-2"), None);
     }
 
     #[test]

@@ -152,6 +152,20 @@ message RunAgentRequest {
   // when they approved the plan. A run can be out of plan mode and still be
   // held at `WORKSPACE_WRITE`.
   AutonomyRung autonomy_rung = 12;
+
+  // Canonical Control-registered Space this run belongs to, empty for the
+  // pre-existing non-Space path — the same field, same meaning, and same
+  // "presence alone grants nothing" posture as `ExecuteStepRequest.space_id`
+  // (field 11 on that message). Needed because `RunAgent`'s own governed
+  // multi-tool loop (`runtime_loop::agent::run_agent_with_tools`) dispatches
+  // through the SAME `execute_step_inner` core `ExecuteStep` does — despite
+  // this message's field 8 doc comment still describing an "MVP no-tool
+  // slice" that the code has moved past. Without this field, a Space-scoped
+  // agent run's own `code_interpreter` calls had no way to reach a sandbox
+  // lease at all. See
+  // apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+  // §3.5 phase B.2.
+  string space_id = 14;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.

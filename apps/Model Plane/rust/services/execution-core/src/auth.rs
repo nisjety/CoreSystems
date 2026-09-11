@@ -182,6 +182,24 @@ impl DelegatedBrowserBearer {
     }
 }
 
+/// Opaque, independently verified `aud=sandbox-manager` credential. It is
+/// bound to the same canonical user, tenant, and ZDR posture as the Execution
+/// Core caller and is presented to sandbox-manager's `AcquireLease` ONLY —
+/// that RPC's own identity check binds a Space capability decision's subject
+/// to the CALLING principal, which a service-level credential can never
+/// satisfy for an actual Space member. See
+/// `apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md`
+/// §3.5 phase B.2.
+#[derive(Clone)]
+pub struct DelegatedSandboxBearer(Arc<str>);
+
+impl DelegatedSandboxBearer {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl fmt::Debug for DelegatedInferenceBearer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DelegatedInferenceBearer([REDACTED])")
@@ -191,6 +209,12 @@ impl fmt::Debug for DelegatedInferenceBearer {
 impl fmt::Debug for DelegatedBrowserBearer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("DelegatedBrowserBearer([REDACTED])")
+    }
+}
+
+impl fmt::Debug for DelegatedSandboxBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DelegatedSandboxBearer([REDACTED])")
     }
 }
 
@@ -459,6 +483,35 @@ impl JwtVerifier {
             ));
         }
         Ok(DelegatedDataPlaneBearer(Arc::from(token)))
+    }
+
+    /// Verify a separately delegated sandbox-manager credential and bind it to
+    /// the already authenticated Execution Core caller. Demanded only for a
+    /// Space-scoped `code_interpreter` step (see `grpc.rs::execute_step`) —
+    /// every other step never calls this, so an older or non-Space caller is
+    /// unaffected.
+    ///
+    /// # Errors
+    /// Returns an authentication or authorization status for a missing,
+    /// invalid, unavailable, wrong-audience, or identity-mismatched
+    /// credential.
+    #[allow(clippy::result_large_err)]
+    pub async fn authenticate_delegated_sandbox_manager<T>(
+        &self,
+        request: &Request<T>,
+        caller: &AuthenticatedUser,
+    ) -> Result<DelegatedSandboxBearer, Status> {
+        let token = extract_metadata_bearer(request, "x-sandbox-authorization")?;
+        let delegated = self.verify_user_token(token, "sandbox-manager").await?;
+        if delegated.org_id != caller.org_id
+            || delegated.user_id != caller.user_id
+            || delegated.zdr != caller.zdr
+        {
+            return Err(Status::permission_denied(
+                "delegated sandbox-manager identity or retention posture does not match caller",
+            ));
+        }
+        Ok(DelegatedSandboxBearer(Arc::from(token)))
     }
 
     async fn verify_user_token(
@@ -977,6 +1030,78 @@ mod tests {
         assert_eq!(
             verifier
                 .authenticate_delegated_browser(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_sandbox_credential_requires_exact_audience_and_identity() {
+        let verifier = verifier("key-sandbox").await;
+        let execution_token = sign(&claims(), "key-sandbox");
+        let caller = verifier
+            .authenticate(&authenticated_request(&execution_token))
+            .await
+            .expect("execution caller");
+
+        let missing = Request::new(());
+        assert_eq!(
+            verifier
+                .authenticate_delegated_sandbox_manager(&missing, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        let mut sandbox_claims = claims();
+        sandbox_claims["aud"] = json!("sandbox-manager");
+        let sandbox_token = sign(&sandbox_claims, "key-sandbox");
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {sandbox_token}").parse().expect("metadata"),
+        );
+        let delegated = verifier
+            .authenticate_delegated_sandbox_manager(&request, &caller)
+            .await
+            .expect("delegated sandbox bearer");
+        assert_eq!(delegated.as_str(), sandbox_token);
+        assert_eq!(
+            format!("{delegated:?}"),
+            "DelegatedSandboxBearer([REDACTED])"
+        );
+
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {execution_token}")
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_delegated_sandbox_manager(&request, &caller)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+
+        let mut wrong_identity = sandbox_claims;
+        wrong_identity["sub"] = json!("user-2");
+        wrong_identity["user_id"] = json!("user-2");
+        let wrong_identity = sign(&wrong_identity, "key-sandbox");
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {wrong_identity}")
+                .parse()
+                .expect("metadata"),
+        );
+        assert_eq!(
+            verifier
+                .authenticate_delegated_sandbox_manager(&request, &caller)
                 .await
                 .unwrap_err()
                 .code(),

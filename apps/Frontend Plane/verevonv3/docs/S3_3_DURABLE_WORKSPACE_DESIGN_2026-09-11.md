@@ -715,7 +715,7 @@ an existing pattern," not a second implementation of the same capability.
    - **3.5.B.1 — DONE** (`execution-core/src/sandbox_manager_client.rs`,
      same day) — the sandbox-manager gRPC client itself (all four RPCs +
      `Health`), tested, uninvoked.
-   - **3.5.B.2 — DECIDED (same day), not yet implemented.** Per-run lease
+   - **3.5.B.2 — slices (a)-(c) DONE, (d)-(e) remain.** Per-run lease
      acquire/activate lifecycle, chaining S3.2 step 3's `capability_client.rs`
      and step 4's verification together with B.1's client for the first time.
      The blocker found while designing it — sandbox-manager's `AcquireLease`
@@ -744,11 +744,89 @@ an existing pattern," not a second implementation of the same capability.
      rather than round-tripping to a refusal — execution-core remains the
      enforcement point. Loose end (e)(1) closed in the same slice: `sse.rs`
      now reads `space_id` from `space_context` OR `space_append_context`);
-     (c) execution-core verify + `capability_client.rs` claims
-     capture + service-token provider + `AcquireLease` on the first
-     Space-scoped `code_interpreter` step; (d) `StateStore.leases` + release
-     on cancel/complete; (e) the two Phase A loose ends
-     (`space_append_context`, `RunAgentRequest.space_id`).
+     (c) execution-core verify + `capability_client.rs` claims capture +
+     `AcquireLease` on the first Space-scoped step, cached in `StateStore` —
+     **DONE**. What actually landed, and where it differs from the original
+     sketch:
+     - **`auth::authenticate_delegated_sandbox_manager`** — the ninth
+       delegated-bearer verifier, mirroring `authenticate_delegated_data_plane`
+       exactly (org/user/zdr equality against the caller). Demanded in
+       `grpc.rs::execute_step` only when `tool_name == "code_interpreter" &&
+       !space_id.is_empty()` (mirrors the browser-bearer conditional); demanded
+       in `grpc.rs::run_agent` whenever `space_id` is non-empty AT ALL,
+       unconditional on tool name — a governed run decides tool-by-tool only
+       once the loop is already running, so there is no earlier point to gate
+       per-tool the way `execute_step` can.
+     - **`capability_client.rs`** now returns `(decision, SpaceCapabilityClaims)`
+       from `request_decision` — a new pub struct mirroring user-core's
+       `sandboxCapabilityClaims`/sandbox-manager's `SpaceCapabilityClaims` Go
+       structs field-for-field (JSON key order doesn't need to match; field
+       names and types do, since sandbox-manager independently re-derives the
+       payload digest from whatever claims JSON it receives — it never trusts
+       byte-identical reproduction). `http_health.rs`'s existing caller
+       discards the claims half; nothing else needed to change.
+     - **`sandbox_lease.rs`** (new module) — `SandboxLeaseContext` (space_id +
+       bearer + the two clients + backend_id, one bundle so only ONE new
+       parameter threads through the dispatch chain) and `ensure_sandbox_lease`
+       (cache hit on `StateStore.sandbox_lease(run_id)`, else request a
+       decision + `AcquireLease`, cache the result). `ActivateLease` is
+       deliberately never called: `code_interpreter` stays `SCRATCH` because it
+       is hermetic (`egress: "disabled_by_default"`) — no capability here needs
+       more than the credential-free allowlist `AcquireLease` already grants.
+     - **The real surprise, found only by tracing the actual call graph, not by
+       inspecting doc comments**: `RunAgent`'s own governed multi-tool loop
+       (`runtime_loop::agent::run_agent_with_tools` → `run_rounds`) dispatches
+       through the EXACT SAME `execute_step_inner` core `ExecuteStep` does —
+       both `grpc.rs::run_agent` and `RunAgent`'s stale "MVP no-tool slice" doc
+       comment (both the proto's own field-8 comment and `grpc.rs`'s own, now
+       fixed) were simply wrong about the code's current behavior. This meant
+       threading `SandboxLeaseContext` through `execute_step_inner` ONCE (via
+       `execute_step_with_browser_grant`/`execute_step_with_subagent`, its two
+       wrapper entry points) covers BOTH `ExecuteStep` and `RunAgent`'s
+       `code_interpreter` calls with one implementation, not two — closing
+       loose end (e)(2) as a side effect of doing (c) correctly, rather than as
+       separate follow-up work. `RunAgentRequest` gained `space_id` (proto
+       field 14) and a `LoopContext` field carrying the bearer + clients,
+       inherited verbatim by delegated subagents exactly like every other
+       run-identity field already is.
+     - **A precondition the design flagged but had not verified turned out to
+       be UNMET, and needed its own fix**: `apps/Control Plane/config/
+       plane-service-principals.json`'s `execution-core` entry listed
+       `capability-core`/`session-core`/`quarry` as its only audiences — no
+       `sandbox-manager`, no `sandbox:read`/`sandbox:write` scope anywhere.
+       Without this, `POST /api/sandbox-manager/internal-token` (slice (d)'s
+       own service-token lifecycle) would 403 even after all the code above
+       shipped. Added `sandbox-manager` to `audiences`/`scopesByAudience` with
+       `sandbox:read`+`sandbox:write` and `retentionByAudience: "persistent"`
+       (lease/snapshot metadata is durable compute state, the same rationale
+       as execution-core's existing `session-core` entry).
+       `scripts/run-control-plane.sh` reuses the already-minted credential —
+       nothing in the running fleet needs to rotate.
+     - Also fixed the model-gateway side that RunAgent threading exposed:
+       `sse.rs::spawn_run_dispatch` builds the `RunAgentRequest` sent to
+       execution-core, and had never read `req.space_context`/
+       `space_append_context` at all — the new proto field would otherwise
+       have gone out empty on literally every agentic-run call, making all of
+       the above execution-core work unreachable in practice. Threaded
+       `space_id` and the (already-verified-by-slice-(b)) `sandbox_bearer`
+       through `agentic_run_stream` → `spawn_run_dispatch` →
+       `authenticated_run_agent_request`'s conditional
+       `x-sandbox-authorization` header, the same shape
+       `tools.rs::handle_code_interpreter` already uses for `ExecuteStep`.
+     Tests: `cargo test -p execution-core --all-targets` and
+     `cargo test -p model-gateway --lib` both green (the 2 pre-existing
+     execution-core failures — `executor.rs`'s Windows path-format assertion,
+     `grpc.rs`'s timing-sensitive HITL test — reproduce identically in
+     isolation and are unrelated, per the same check done for phase B.1).
+     `go build`/`go vet` clean for sandbox-manager. Full workspace `cargo
+     check` surfaces only the pre-existing Windows `tokio::signal::unix`
+     failure in `inference-core`'s bin target and a pre-existing
+     `SessionMessage` fixture gap in `e2e_invoke_chain_test.rs` (tracked since
+     `97b25766`), neither related to this change.
+     Next: (d) `StateStore.leases`' release-on-cancel/complete lifecycle using
+     execution-core's own `sandbox:write` service token, plus the
+     `SandboxManagerTokenProvider` that mints it; (e) the one remaining Phase A
+     loose end this slice didn't already close.
    - **3.5.C** — `code_interpreter.rs` uses the lease's hydrated workspace
      instead of its own ephemeral one when Space-scoped; `shell` explicitly
      out of scope for this phase. Depends on B.2.

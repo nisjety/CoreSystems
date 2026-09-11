@@ -321,7 +321,20 @@ type RunAgentRequest struct {
 	// what you would do" gate, while this is the graded authority a human granted
 	// when they approved the plan. A run can be out of plan mode and still be
 	// held at `WORKSPACE_WRITE`.
-	AutonomyRung  AutonomyRung `protobuf:"varint,12,opt,name=autonomy_rung,json=autonomyRung,proto3,enum=model_plane.v1.AutonomyRung" json:"autonomy_rung,omitempty"`
+	AutonomyRung AutonomyRung `protobuf:"varint,12,opt,name=autonomy_rung,json=autonomyRung,proto3,enum=model_plane.v1.AutonomyRung" json:"autonomy_rung,omitempty"`
+	// Canonical Control-registered Space this run belongs to, empty for the
+	// pre-existing non-Space path — the same field, same meaning, and same
+	// "presence alone grants nothing" posture as `ExecuteStepRequest.space_id`
+	// (field 11 on that message). Needed because `RunAgent`'s own governed
+	// multi-tool loop (`runtime_loop::agent::run_agent_with_tools`) dispatches
+	// through the SAME `execute_step_inner` core `ExecuteStep` does — despite
+	// this message's field 8 doc comment still describing an "MVP no-tool
+	// slice" that the code has moved past. Without this field, a Space-scoped
+	// agent run's own `code_interpreter` calls had no way to reach a sandbox
+	// lease at all. See
+	// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §3.5 phase B.2.
+	SpaceId       string `protobuf:"bytes,14,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -445,6 +458,13 @@ func (x *RunAgentRequest) GetAutonomyRung() AutonomyRung {
 		return x.AutonomyRung
 	}
 	return AutonomyRung_AUTONOMY_RUNG_UNSPECIFIED
+}
+
+func (x *RunAgentRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.
@@ -1036,7 +1056,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"receipt_id\x18\x03 \x01(\tR\treceiptId\x12\x16\n" +
 	"\x06output\x18\x04 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x05 \x01(\tR\x05error\x12'\n" +
-	"\x0funknown_outcome\x18\x06 \x01(\bR\x0eunknownOutcome\"\xc1\x03\n" +
+	"\x0funknown_outcome\x18\x06 \x01(\bR\x0eunknownOutcome\"\xdc\x03\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -1052,7 +1072,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	" \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\x12E\n" +
 	"\x10min_privacy_tier\x18\v \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\x0eminPrivacyTier\x12\x1b\n" +
 	"\tplan_mode\x18\r \x01(\bR\bplanMode\x12A\n" +
-	"\rautonomy_rung\x18\f \x01(\x0e2\x1c.model_plane.v1.AutonomyRungR\fautonomyRung\"\xc5\x01\n" +
+	"\rautonomy_rung\x18\f \x01(\x0e2\x1c.model_plane.v1.AutonomyRungR\fautonomyRung\x12\x19\n" +
+	"\bspace_id\x18\x0e \x01(\tR\aspaceId\"\xc5\x01\n" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +

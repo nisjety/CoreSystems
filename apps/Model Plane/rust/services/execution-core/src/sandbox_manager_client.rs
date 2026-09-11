@@ -77,7 +77,7 @@ impl SandboxManagerClient {
     pub fn from_env() -> Result<Self, String> {
         let url = std::env::var("SANDBOX_MANAGER_URL")
             .or_else(|_| std::env::var("SANDBOX_MANAGER_ADDR"))
-            .unwrap_or_else(|_| "http://sandbox-manager:9098".to_owned());
+            .unwrap_or_else(|_| "http://sandbox-manager:9094".to_owned());
         let channel = tonic::transport::Endpoint::from_shared(url)
             .map_err(|error| format!("sandbox-manager endpoint is invalid: {error}"))?
             .connect_lazy();

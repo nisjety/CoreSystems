@@ -1972,3 +1972,61 @@ Type/runtime divergence on an auth gate — filed separately.
 
 Full mechanism and implementation order:
 `apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md` §3.5 B.2.
+
+## S3.3 step 3.5 slices (a)-(c) implemented same day — RunAgent's own "MVP no-tool slice" doc comment was stale (2026-09-11)
+
+Followed through on the decision above. Slices (a) (BFF mint) and (b)
+(model-gateway verify/forward) landed first; slice (c) — execution-core
+verification + `AcquireLease` itself — surfaced one finding worth recording on
+its own, because it changed the slice's actual scope for the better.
+
+**The finding.** `RunAgentRequest`'s field-8 proto comment
+("`max_rounds` ... reserved for the multi-tool loop; the MVP no-tool slice
+executes a single round") and `grpc.rs::run_agent`'s own doc comment/log line
+("driving agent run (no-tool slice)") both describe a state the code moved
+past. Tracing the actual call graph —
+`runtime_loop::agent::run_agent_with_tools` → `run_rounds` → dispatch via
+`runtime_loop::execute_step_with_subagent` — shows it reaches the EXACT SAME
+`execute_step_inner` core the direct `ExecuteStep` RPC dispatches through,
+tool calls (including `code_interpreter`) included. This is not a new gap;
+it is a stale comment that would have led anyone reading it before writing code
+to under-scope this slice — build the lease wiring for `ExecuteStep` only,
+call it done, and leave `RunAgent`'s identical `code_interpreter` calls with
+no lease path at all.
+
+**Consequence, positive.** Because both callers share one dispatch core,
+threading a single `SandboxLeaseContext` bundle (space_id + verified bearer +
+the two sandbox-manager-adjacent clients + backend_id) through
+`execute_step_with_browser_grant`/`execute_step_with_subagent` →
+`execute_step_inner` covers both `ExecuteStep` and `RunAgent` with one
+implementation. This closed the design doc's own loose end (e)(2)
+("`RunAgentRequest` has no `space_id` at all... decide, don't drift") as a
+side effect of doing (c) correctly, rather than as separately-scheduled
+follow-up work.
+
+**A verified-not-assumed precondition turned out to be unmet.** The B.2 design
+flagged, but did not check, whether Auth Core's service-principal registry
+grants execution-core `sandbox:write` for the `sandbox-manager` audience (it
+needs this later, for slice (d)'s release lifecycle). It did not:
+`apps/Control Plane/config/plane-service-principals.json`'s `execution-core`
+entry listed only `capability-core`/`session-core`/`quarry`. Fixed by adding
+the audience with `sandbox:read`+`sandbox:write` and
+`retentionByAudience: "persistent"` — policy-only, reviewable in git per this
+registry's own split-from-credentials design; `scripts/run-control-plane.sh`
+reuses the already-minted credential.
+
+**Also found while wiring RunAgent's side, and fixed in the same commit.**
+model-gateway's `sse.rs::spawn_run_dispatch` — the ONLY constructor of
+`RunAgentRequest` — never read `req.space_context`/`space_append_context` at
+all. Left unfixed, the new `space_id` proto field would have gone out empty on
+every real agentic-run call, making every line of the execution-core work
+above unreachable in production despite compiling and testing clean in
+isolation. Threaded `space_id` and slice (b)'s already-verified
+`sandbox_bearer` through `agentic_run_stream` → `spawn_run_dispatch` →
+`authenticated_run_agent_request`'s conditional `x-sandbox-authorization`
+header — same shape `tools.rs::handle_code_interpreter` already uses for
+`ExecuteStep`. Caught by asking "who actually calls this and do they have the
+data" rather than trusting that adding a proto field plus a consumer was
+sufficient.
+
+Full detail: design doc §3.5's B.2 sub-bullets and §8 item 3.5.B.2.

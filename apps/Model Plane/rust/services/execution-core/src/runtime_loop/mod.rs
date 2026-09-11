@@ -287,6 +287,7 @@ pub async fn execute_step(
     session_bearer: Option<&str>,
     inference_bearer: Option<&str>,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -309,6 +310,7 @@ pub async fn execute_step(
         capability_policy,
         None,
         None,
+        sandbox,
     )
     .await
 }
@@ -344,6 +346,7 @@ pub(crate) async fn execute_step_with_browser_grant(
     inference_bearer: Option<&str>,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -366,6 +369,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         capability_policy,
         browser_grant,
         None,
+        sandbox,
     )
     .await
 }
@@ -406,6 +410,7 @@ pub(crate) async fn execute_step_with_subagent(
     inference_bearer: Option<&str>,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -428,6 +433,7 @@ pub(crate) async fn execute_step_with_subagent(
         capability_policy,
         None,
         subagent_dispatch,
+        sandbox,
     )
     .await
 }
@@ -460,6 +466,11 @@ async fn execute_step_inner(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
     subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
+    // Present only for a Space-scoped step, and only after the caller already
+    // verified the delegated sandbox-manager bearer it carries — see
+    // `sandbox_lease::SandboxLeaseContext`'s own doc. Read by exactly one
+    // dispatch arm, `code_interpreter`, below.
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
 ) -> StepOutcome {
     match capability_policy
         .evaluate_with_evidence(tool_name, run_id, org_id)
@@ -549,6 +560,19 @@ async fn execute_step_inner(
     } else if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
+        if let Some(sandbox) = sandbox {
+            let Some(state) = state else {
+                return StepOutcome::failed(
+                    "Space-scoped code_interpreter requires run state tracking",
+                );
+            };
+            if let Err(status) =
+                crate::sandbox_lease::ensure_sandbox_lease(sandbox, state, run_id, org_id, user_id)
+                    .await
+            {
+                return StepOutcome::failed(status.message());
+            }
+        }
         execute_code_interpreter(tool_input, run_id, step_id).await
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
         execute_web_search(tool_input, org_id).await
@@ -2033,6 +2057,7 @@ mod tests {
                 None,
                 None,
                 &policy,
+                None,
             )
             .await;
             assert_eq!(out.status, expected);
@@ -2063,6 +2088,7 @@ mod tests {
                 None,
                 None,
                 &policy,
+                None,
             )
             .await;
             assert_eq!(
@@ -2090,6 +2116,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(denied.status, "permission_denied");
@@ -2121,6 +2148,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         if crate::sandbox::is_supported() {
@@ -2158,6 +2186,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -2185,6 +2214,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -2212,6 +2242,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "completed");
@@ -2240,6 +2271,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -2329,6 +2361,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "permission_denied");

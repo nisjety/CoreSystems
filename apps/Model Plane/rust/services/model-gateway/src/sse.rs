@@ -785,6 +785,15 @@ pub async fn invoke_stream_sse(
                 parameters_json: t.parameters_json.clone(),
             })
             .collect();
+        // Same fallback as `run_tool_rounds`'s own call below: a scoped
+        // thread's FIRST message carries `space_context`, every later one
+        // `space_append_context` instead.
+        let agentic_space_id = req
+            .space_context
+            .as_ref()
+            .or(req.space_append_context.as_ref())
+            .map(|context| context.space_id.clone())
+            .unwrap_or_default();
         return agentic_run_stream(
             state.clone(),
             session_run,
@@ -803,6 +812,8 @@ pub async fn invoke_stream_sse(
             data_plane_bearer,
             model_bearer,
             inference_bearer,
+            agentic_space_id,
+            sandbox_bearer,
             idem_guard,
         );
     }
@@ -5911,6 +5922,7 @@ fn authenticated_run_agent_request(
     data_plane_bearer: &VerifiedBearer,
     session_bearer: &VerifiedModelBearer,
     inference_bearer: &VerifiedInferenceBearer,
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
 ) -> Result<tonic::Request<RunAgentRequest>, tonic::Status> {
     let authorization = format!("Bearer {}", execution_bearer.as_str())
         .parse()
@@ -5941,6 +5953,19 @@ fn authenticated_run_agent_request(
                 tonic::Status::unauthenticated("malformed verified inference credential")
             })?,
     );
+    // Conditional, unlike the four above: execution-core demands this only
+    // for a Space-scoped run, and an empty `Bearer ` would be refused there,
+    // never treated as absent.
+    if let Some(sandbox_bearer) = sandbox_bearer {
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {}", sandbox_bearer.as_str())
+                .parse()
+                .map_err(|_| {
+                    tonic::Status::unauthenticated("malformed verified sandbox-manager credential")
+                })?,
+        );
+    }
     Ok(request)
 }
 
@@ -5969,6 +5994,8 @@ fn spawn_run_dispatch(
     data_plane_bearer: &VerifiedBearer,
     session_bearer: &VerifiedModelBearer,
     inference_bearer: &VerifiedInferenceBearer,
+    space_id: &str,
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     let run_agent_req = RunAgentRequest {
@@ -6024,6 +6051,7 @@ fn spawn_run_dispatch(
                 .unwrap_or(mp_contracts::model_plane::v1::AutonomyRung::Unspecified)
                 as i32
         },
+        space_id: space_id.to_owned(),
     };
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
@@ -6031,6 +6059,7 @@ fn spawn_run_dispatch(
         data_plane_bearer,
         session_bearer,
         inference_bearer,
+        sandbox_bearer,
     )?;
     Ok(tokio::spawn(async move {
         execution_client
@@ -6136,6 +6165,11 @@ fn agentic_run_stream(
     data_plane_bearer: VerifiedBearer,
     model_bearer: VerifiedModelBearer,
     inference_bearer: VerifiedInferenceBearer,
+    // Empty for the pre-existing non-Space path. Present only for a
+    // Space-scoped turn (see `auth::VerifiedSandboxBearer`'s doc for why the
+    // governed agent loop needs it too, not only the inline ExecuteStep path).
+    space_id: String,
+    sandbox_bearer: Option<VerifiedSandboxBearer>,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
@@ -6178,6 +6212,8 @@ fn agentic_run_stream(
             &data_plane_bearer,
             &model_bearer,
             &inference_bearer,
+            &space_id,
+            sandbox_bearer.as_ref(),
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -7818,6 +7854,7 @@ mod tests {
             &super::VerifiedBearer::for_test("data-token"),
             &super::VerifiedModelBearer::for_test("session-token"),
             &super::VerifiedInferenceBearer::for_test("inference-token"),
+            None,
         )
         .expect("build execution request");
 
@@ -7852,6 +7889,31 @@ mod tests {
         assert!(request.metadata().get("x-api-key").is_none());
         assert!(request.metadata().get("x-user-id").is_none());
         assert!(request.metadata().get("x-org-id").is_none());
+        assert!(
+            request.metadata().get("x-sandbox-authorization").is_none(),
+            "a non-Space run must carry no sandbox-manager header at all"
+        );
+    }
+
+    #[test]
+    fn execution_dispatch_forwards_the_sandbox_bearer_only_when_present() {
+        let request = super::authenticated_run_agent_request(
+            super::RunAgentRequest::default(),
+            &super::VerifiedExecutionBearer::for_test("execution-token"),
+            &super::VerifiedBearer::for_test("data-token"),
+            &super::VerifiedModelBearer::for_test("session-token"),
+            &super::VerifiedInferenceBearer::for_test("inference-token"),
+            Some(&super::VerifiedSandboxBearer::for_test("sandbox-token")),
+        )
+        .expect("build execution request");
+
+        assert_eq!(
+            request
+                .metadata()
+                .get("x-sandbox-authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer sandbox-token")
+        );
     }
 
     #[test]

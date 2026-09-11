@@ -244,6 +244,11 @@ impl VerifiedSandboxBearer {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
+    }
 }
 
 /// Independently verified, user-bound bearer for capability-core. A Model

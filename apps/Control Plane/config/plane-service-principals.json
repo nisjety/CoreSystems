@@ -109,13 +109,15 @@
     "audiences": [
       "capability-core",
       "session-core",
-      "quarry"
+      "quarry",
+      "sandbox-manager"
     ],
     "consumerEnv": "EXECUTION_CORE_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
       "capability-core": "persistent",
       "quarry": "zdr",
+      "sandbox-manager": "persistent",
       "session-core": "persistent"
     },
     "scopes": [
@@ -123,6 +125,8 @@
       "browser:execute",
       "capability:health:global:write",
       "capability:read",
+      "sandbox:read",
+      "sandbox:write",
       "scrape:write",
       "session:heartbeat",
       "session:terminalize"
@@ -135,6 +139,10 @@
       "quarry": [
         "browser:execute",
         "scrape:write"
+      ],
+      "sandbox-manager": [
+        "sandbox:read",
+        "sandbox:write"
       ],
       "session-core": [
         "approval:deliver",

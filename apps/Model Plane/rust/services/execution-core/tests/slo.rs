@@ -66,6 +66,7 @@ async fn bench_step() -> runtime_loop::StepOutcome {
         None,
         None,
         &ALLOW_POLICY,
+        None, // no Space context → the SLO path is intentionally non-Space
     )
     .await
 }

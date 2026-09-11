@@ -31,6 +31,7 @@ pub mod quarry_agent;
 mod quarry_auth;
 pub mod runtime_loop;
 pub mod sandbox;
+pub mod sandbox_lease;
 pub mod sandbox_manager_client;
 pub(crate) mod scheduled_inference_auth;
 pub(crate) mod scheduled_step_decision;

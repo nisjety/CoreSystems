@@ -48,7 +48,7 @@ impl Readiness {
 /// non-empty identifier rather than an empty string a pinning check could
 /// mishandle. Never fabricated as random per-call data: the whole point is
 /// that the SAME value is presented on every request from this process.
-fn resolve_backend_id() -> String {
+pub(crate) fn resolve_backend_id() -> String {
     for var in ["EXECUTION_CORE_BACKEND_ID", "HOSTNAME"] {
         if let Ok(value) = std::env::var(var) {
             let value = value.trim();
@@ -182,7 +182,7 @@ async fn capability_profile(
                 idempotency_key: &idempotency_key,
             };
             match client.request_decision(&request).await {
-                Ok(token) => Some(token),
+                Ok((token, _claims)) => Some(token),
                 Err(error) => {
                     tracing::warn!(error = %error, "sandbox capability decision request failed");
                     None

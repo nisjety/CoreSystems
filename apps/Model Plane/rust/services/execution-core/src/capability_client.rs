@@ -50,6 +50,29 @@ struct DecisionResponseEnvelope {
 #[derive(Debug, Deserialize)]
 struct DecisionResponseData {
     decision: String,
+    claims: SpaceCapabilityClaims,
+}
+
+/// Mirrors Control's unsigned claims sidecar byte-for-byte
+/// (`user-core/internal/http/spaces.go`'s `sandboxCapabilityClaims`, and
+/// independently sandbox-manager's own copy of the same shape,
+/// `internal/authz/capability_verifier.go`'s `SpaceCapabilityClaims` — kept as
+/// separate structs on both Go sides because the services are independently
+/// deployed modules with no shared package for this envelope; this is the
+/// THIRD independent copy, for the same reason). Field order does not need to
+/// match on the wire — JSON object keys are unordered for `encoding/json`
+/// unmarshaling — but the field NAMES and JSON tags must, since
+/// sandbox-manager's `AcquireLease` deserializes this exact JSON via
+/// `json.Unmarshal` into its own copy of the struct.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpaceCapabilityClaims {
+    pub backend_id: String,
+    pub profile_digest: String,
+    pub persistence: String,
+    pub processes: String,
+    pub backup: bool,
+    pub egress: String,
+    pub credential_mode: String,
 }
 
 /// Everything a caller needs to request one signed capability decision for
@@ -120,10 +143,14 @@ impl CapabilityClient {
     }
 
     /// Requests a signed decision binding `request`'s measured profile to
-    /// its backend and Space. Returns the opaque decision token; the caller
-    /// already holds every field the recipient needs to reconstruct the
-    /// claims sidecar (profile + backend_id), so this does not also parse
-    /// and return a claims struct.
+    /// its backend and Space. Returns the opaque decision token AND the
+    /// unsigned claims sidecar Control returned alongside it — a caller that
+    /// only reports the profile (like `http_health::capability_profile`) can
+    /// discard the claims, but a caller that presents this decision onward to
+    /// sandbox-manager's `AcquireLease` needs both: the decision's
+    /// `PayloadDigest` binds to exactly these claims, and sandbox-manager
+    /// recomputes that binding independently rather than trusting a
+    /// caller-reconstructed copy.
     ///
     /// # Errors
     /// Returns an error for any transport failure, non-2xx response, or
@@ -133,7 +160,7 @@ impl CapabilityClient {
     pub async fn request_decision(
         &self,
         request: &CapabilityDecisionRequest<'_>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, SpaceCapabilityClaims), String> {
         let endpoint = service_endpoint(&self.base_url, CONTROL_SANDBOX_CAPABILITY_PATH)?;
         let profile_digest = capability_profile_digest(request.profile);
         let body = DecisionRequest {
@@ -170,7 +197,7 @@ impl CapabilityClient {
             .json()
             .await
             .map_err(|error| format!("sandbox capability decision response malformed: {error}"))?;
-        Ok(envelope.data.decision)
+        Ok((envelope.data.decision, envelope.data.claims))
     }
 }
 
@@ -209,5 +236,60 @@ mod tests {
             false
         )
         .is_ok());
+    }
+
+    #[tokio::test]
+    async fn request_decision_returns_both_the_token_and_the_claims_sidecar() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(CONTROL_SANDBOX_CAPABILITY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "decision": "v2.<key>.<payload>.<sig>",
+                    "claims": {
+                        "backend_id": "backend-1",
+                        "profile_digest": "sha256:abc",
+                        "persistence": "ephemeral",
+                        "processes": "bounded_oneshot",
+                        "backup": false,
+                        "egress": "disabled_by_default",
+                        "credential_mode": "none",
+                    },
+                },
+            })))
+            .mount(&server)
+            .await;
+        let client =
+            CapabilityClient::new_with_transport(&server.uri(), &"a".repeat(32), true).unwrap();
+        let profile = crate::sandbox::capability_profile();
+
+        let (decision, claims) = client
+            .request_decision(&CapabilityDecisionRequest {
+                org_id: "org-a",
+                space_ref: "space-1",
+                subject_id: "user-1",
+                backend_id: "backend-1",
+                profile: &profile,
+                idempotency_key: "run-1",
+            })
+            .await
+            .expect("decision request succeeds");
+
+        assert_eq!(decision, "v2.<key>.<payload>.<sig>");
+        assert_eq!(
+            claims,
+            SpaceCapabilityClaims {
+                backend_id: "backend-1".to_owned(),
+                profile_digest: "sha256:abc".to_owned(),
+                persistence: "ephemeral".to_owned(),
+                processes: "bounded_oneshot".to_owned(),
+                backup: false,
+                egress: "disabled_by_default".to_owned(),
+                credential_mode: "none".to_owned(),
+            }
+        );
     }
 }
