@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	sbxserver "github.com/triodelab/model-plane/services/sandbox-manager/internal/server"
@@ -26,15 +27,20 @@ func main() {
 	slog.SetDefault(logger)
 
 	slog.Info("sandbox-manager starting")
-	// The current lease and snapshot stores are deliberately in-memory test
-	// doubles. Starting this binary as though they were a durable Space
-	// computer would make a restart silently discard a lease/snapshot that a
-	// caller may rely on for an effect. A real backend-pinned durable store is
-	// required before this service may run in a normal deployment. The explicit
-	// development switch keeps unit/manual experiments possible without letting
-	// an accidental default become production behaviour.
-	if !ephemeralDevelopmentEnabled(os.Getenv("SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT")) {
-		slog.Error("refusing to start sandbox-manager with in-memory lease/snapshot stores", "required", "durable backend-pinned store", "development_override", "SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT=true")
+	// Lease/snapshot durability: a real Postgres-backed store (migrations
+	// 0001-0002, internal/lease + internal/snapshot) is required before this
+	// binary may run in a normal deployment — starting it with the in-memory
+	// fallback as though it were a durable Space computer would make a
+	// restart silently discard a lease/snapshot a caller may rely on for an
+	// effect. The explicit development switch keeps unit/manual experiments
+	// possible (in-memory when DATABASE_URL is also absent, mirroring
+	// cost-core's own established "runs against its in-memory ledger"
+	// precedent for exactly this case) without letting an accidental
+	// default become production behaviour.
+	ephemeralDev := ephemeralDevelopmentEnabled(os.Getenv("SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT"))
+	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if databaseURL == "" && !ephemeralDev {
+		slog.Error("refusing to start sandbox-manager without a durable database", "required", "DATABASE_URL", "development_override", "SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT=true")
 		os.Exit(1)
 	}
 	verifier, err := authz.NewVerifierFromEnv()
@@ -89,8 +95,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	leaseStore := lease.NewStore()
-	snapStore := snapshot.NewStore()
+	var leaseStore sbxserver.LeaseStore
+	var snapStore sbxserver.SnapshotStore
+	if databaseURL != "" {
+		pool, err := pgxpool.New(ctx, databaseURL)
+		if err != nil {
+			slog.Error("sandbox-manager database pool unavailable", "error", err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		pgLeaseStore, err := lease.NewStore(pool)
+		if err != nil {
+			slog.Error("sandbox-manager lease store unavailable", "error", err)
+			os.Exit(1)
+		}
+		pgSnapStore, err := snapshot.NewStore(pool)
+		if err != nil {
+			slog.Error("sandbox-manager snapshot store unavailable", "error", err)
+			os.Exit(1)
+		}
+		leaseStore, snapStore = pgLeaseStore, pgSnapStore
+		slog.Info("sandbox-manager using durable Postgres-backed lease/snapshot stores")
+	} else {
+		leaseStore, snapStore = sbxserver.NewMemoryLeaseStore(), sbxserver.NewMemorySnapshotStore()
+		slog.Warn("starting sandbox-manager with in-memory lease/snapshot stores (ephemeral development only); a restart discards all leases and snapshots")
+	}
 
 	server := sbxserver.NewServer(leaseStore, snapStore)
 	if capabilityVerifier != nil {

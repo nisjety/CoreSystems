@@ -9,7 +9,6 @@ import (
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
-	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -19,12 +18,14 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Server implements SandboxManagerServer backed by in-memory lease and
-// snapshot stores.
+// Server implements SandboxManagerServer over LeaseStore/SnapshotStore —
+// the real Postgres-backed implementations in production
+// (lease.Store/snapshot.Store), a fast in-memory fake in this package's own
+// tests (see server_test.go).
 type Server struct {
 	mpv1.UnimplementedSandboxManagerServer
-	leases    *lease.Store
-	snapshots *snapshot.Store
+	leases    LeaseStore
+	snapshots SnapshotStore
 	principal func(context.Context) (authctx.Principal, error)
 	// capabilityVerify verifies a Space capability decision + its unsigned
 	// claims sidecar, mirroring authz.SpaceCapabilityVerifier.Verify. A
@@ -40,7 +41,7 @@ type Server struct {
 
 // NewServer constructs a Server with the given stores. Space capability
 // verification starts disabled; call WithCapabilityVerifier to enable it.
-func NewServer(leases *lease.Store, snaps *snapshot.Store) *Server {
+func NewServer(leases LeaseStore, snaps SnapshotStore) *Server {
 	return &Server{leases: leases, snapshots: snaps, principal: authz.Principal}
 }
 
@@ -102,7 +103,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		backendID = claims.BackendID
 	}
 
-	l, err := s.leases.Create(req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, ttl)
+	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, ttl)
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -127,7 +128,7 @@ func (s *Server) ReleaseLease(ctx context.Context, req *ReleaseLeaseRequest) (*R
 	if req.GetLeaseId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
 	}
-	ok, err := s.leases.ReleaseScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	ok, err := s.leases.ReleaseScoped(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -149,13 +150,13 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 	if req.GetLabel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "label is required")
 	}
-	l, err := s.leases.BeginSnapshot(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	l, err := s.leases.BeginSnapshot(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotLeaseOutcome(err))))
 		return nil, mapErr(err)
 	}
-	defer s.leases.EndSnapshot(l.ID)
-	sn, err := s.snapshots.Create(l, req.GetLabel())
+	defer s.leases.EndSnapshot(ctx, l.ID)
+	sn, err := s.snapshots.Create(ctx, l, req.GetLabel())
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotCreateOutcome(err))))
 		return nil, mapErr(err)
@@ -181,7 +182,7 @@ func (s *Server) ActivateLease(ctx context.Context, req *ActivateLeaseRequest) (
 	if req.GetLeaseId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
 	}
-	l, err := s.leases.Activate(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	l, err := s.leases.Activate(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)

@@ -1,11 +1,14 @@
 #!/bin/sh
 # sandbox-manager container entrypoint: apply pending migrations (when a
-# database is configured) then exec the service. Lease/snapshot state is
-# still in-memory as of this migration (S3.3 step 1 — the workspace_files
-# manifest schema has no consumer yet); DATABASE_URL is therefore optional
-# here, unlike capability-core's entrypoint, which always requires one.
-# This will change once a later S3.3 step ports lease.Store/snapshot.Store
-# onto Postgres and cmd/main.go starts requiring DATABASE_URL itself.
+# database is configured) then exec the service. DATABASE_URL is optional
+# here, unlike capability-core's entrypoint (which always requires one):
+# cmd/main.go itself falls back to an in-memory lease/snapshot store when
+# both DATABASE_URL and SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT=true are
+# set (mirroring cost-core's own "runs against its in-memory ledger"
+# precedent) — a real deployment (ephemeral development not opted in) still
+# requires DATABASE_URL and fails closed without it, enforced in Go, not
+# here; this script just skips applying migrations it has nothing to run
+# them against.
 set -eu
 
 if [ -n "${DATABASE_URL:-}" ]; then

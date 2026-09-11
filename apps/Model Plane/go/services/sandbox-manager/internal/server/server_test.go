@@ -17,8 +17,6 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
-	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
-	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 )
 
 func newTestClient(t *testing.T) mpv1.SandboxManagerClient {
@@ -56,20 +54,20 @@ func newTestClient(t *testing.T) mpv1.SandboxManagerClient {
 }
 
 func newTestServer() *Server {
-	return testServerFor(lease.NewStore(), snapshot.NewStore(), authctx.Principal{
+	return testServerFor(NewMemoryLeaseStore(), NewMemorySnapshotStore(), authctx.Principal{
 		OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user",
 	})
 }
 
-func testServerFor(leases *lease.Store, snapshots *snapshot.Store, principal authctx.Principal) *Server {
+func testServerFor(leases LeaseStore, snapshots SnapshotStore, principal authctx.Principal) *Server {
 	srv := NewServer(leases, snapshots)
 	srv.principal = func(context.Context) (authctx.Principal, error) { return principal, nil }
 	return srv
 }
 
 func TestLeaseAccessIsPinnedToVerifiedOrganizationAndUser(t *testing.T) {
-	leases := lease.NewStore()
-	snapshots := snapshot.NewStore()
+	leases := NewMemoryLeaseStore()
+	snapshots := NewMemorySnapshotStore()
 	owner := testServerFor(leases, snapshots, authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"})
 	acquired, err := owner.AcquireLease(context.Background(), &AcquireLeaseRequest{
 		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
