@@ -349,21 +349,67 @@ discipline rather than one large change:**
    for an unauthenticated legacy caller — it only makes the value *reachable*
    at execution-core's own request boundary, where it cannot exist as a
    concept at all today.
-2. **Phase B — the sandbox-manager client + per-run lease lifecycle.**
-   A real `SandboxManagerClient` in execution-core (the env-var-driven
-   `lazy_channel` pattern model-gateway's own dead field already
-   demonstrates, `state.rs:510-514`, but actually called this time). On the
-   first Space-scoped step of a run with no cached lease: call
-   `capability_client::request_decision` (already built and tested, S3.2
-   step 3) to get a signed capability decision, then `AcquireLease` with it
-   (already verified and pinned server-side, S3.2 step 4), then
-   `ActivateLease` before the first tool call that needs more than the
-   scratch allowlist. This is the step where every piece of machinery built
-   across S3.2 and S3.3 steps 1-3 finally gets exercised by a real caller
-   for the first time — not a new capability of its own, a wiring step.
-   Needs a decision on where per-run lease state lives (a new in-process
-   map behind a mutex, keyed by `run_id`, unless an existing per-run state
-   mechanism already fits — not yet identified).
+2. **Phase B — the sandbox-manager client + per-run lease lifecycle. Split
+   into B.1 (done) and B.2 (blocked on a real, newly-confirmed gap) after
+   actually reading sandbox-manager's and Control's verification code
+   rather than assuming the client alone would be enough — see below.**
+
+   **Phase B.1 — the client itself, DONE (`execution-core/src/sandbox_manager_client.rs`).**
+   A real, tested `SandboxManagerClient` wrapping all four RPCs
+   (`AcquireLease`/`ActivateLease`/`SnapshotSandbox`/`ReleaseLease`) plus
+   `Health`, built the same way `capability_policy.rs`'s
+   `GrpcCapabilityPolicy` wraps `CapabilityCoreClient` — lazy channel from
+   `SANDBOX_MANAGER_URL`/`SANDBOX_MANAGER_ADDR` (mirroring
+   `grpc.rs::serve`'s session/inference/browser resolution, not
+   model-gateway's still-dead `state.rs:510-514` field), a `RPC_TIMEOUT`
+   wrapper, and fail-closed validation before any wire call (blank
+   `scope_id`/`org_id`/`lease_id`, zero `ttl`, a Space-scoped request with no
+   `capability_decision` — all rejected as `invalid_argument` locally, per
+   `server.go`'s own validation order). One deliberate design choice: it
+   takes `bearer: &str` per call rather than minting its own service token
+   the way `capability_policy.rs`'s `ServiceTokenProvider` does — see B.2
+   below for exactly why that would have been wrong, not just a style
+   preference.
+
+   **Phase B.2 — actually acquiring a Space-scoped lease from a real run —
+   BLOCKED, not started.** This is the open question two bullets below
+   ("does Phase B need to independently confirm [space_context's] trust
+   level") coming back with a concrete, code-verified answer, sharper than
+   when this doc first raised it: **yes, and worse — the identity binding
+   sandbox-manager itself enforces cannot currently be satisfied by
+   execution-core at all.**
+   `internal/authz/capability_verifier.go`'s `Verify` requires
+   `decision.SubjectID == expect.SubjectID`, and `internal/server/server.go`'s
+   `AcquireLease` sets `expect.SubjectID = principal.ActorID` — the identity
+   sandbox-manager's own auth interceptor extracted from the CALLER's bearer,
+   not anything the caller merely asserts in the request body. Control's
+   decision-issuance endpoint
+   (`user-core/internal/http/spaces.go`'s sandbox-capability-decision
+   handler) will only ever sign a decision whose `SubjectID` is an actual
+   current Space member — `ResolvePersonalThreadDecisionEvidence` returns
+   `ErrNoCurrentMembership` (mapped to 403) for anyone else, a service
+   account included. So the caller presenting the decision to `AcquireLease`
+   must authenticate AS that same member, not as execution-core's own
+   service identity. That rules out reusing `capability_policy.rs`'s
+   `ServiceTokenProvider` pattern (a service mints its own org-scoped token
+   from its own deployment credential) — Auth Core already serves
+   `POST /api/sandbox-manager/internal-token` generically
+   (`plane-token.controller.ts`'s `:audience/internal-token` route, `convex-token.service.ts`'s
+   `PlaneAudience` already lists `sandbox-manager`, no Auth Core change
+   needed), but a token minted that way authenticates execution-core itself,
+   never the acting user. What Phase B.2 actually needs is a **delegated,
+   user-bound sandbox-manager bearer** — the same shape data-plane / session
+   / inference / browser-broker bearers already arrive as on `ExecuteStepRequest`
+   today (see `auth.rs`'s `authenticate_delegated_*` family) — and no such
+   bearer exists on the wire: Phase A's `space_id` is a plain string, not a
+   credential. Minting one means deciding, likely with Auth Core and
+   whichever service resolves `ThreadSpaceContext` in the first place, how a
+   user-bound sandbox-manager-audience token gets issued and threaded down
+   to execution-core alongside `space_id` — a cross-service auth design
+   question in its own right, not a mechanical continuation of B.1. Until
+   that lands, `sandbox_manager_client.rs` remains real, tested, and
+   uninvoked — the same honestly-documented "no caller yet" position Step 3
+   was in this morning, now one level further down the stack.
 3. **Phase C — `code_interpreter.rs` uses the lease's hydrated workspace.**
    When a Space-scoped lease is `ACTIVE`, hydrate its current
    `workspace_files` manifest (needs the `GetWorkspaceManifest`-style RPC
@@ -378,17 +424,23 @@ discipline rather than one large change:**
 - ~~How far above `dispatch_tool` does the trace need to go~~ — resolved
   above: `invoke_stream_sse` itself, confirmed by reading the code, not
   inferred.
-- `req.space_context` is client/BFF-declared (per `http_routes.rs:6108`'s
-  own comment, "The V3 BFF injects this after calling Control"), not
-  re-verified by model-gateway against a durable thread record before this
-  phase's use of its `space_id` field — is that trust level acceptable for
-  pinning a sandbox lease to a Space (real compute + potential egress), or
-  does Phase B need to independently confirm it (e.g. Control's own
-  capability-decision issuance in Phase B already re-checks personal-Space
-  authority server-side per S3.2, which may make this a non-issue in
-  practice — not yet confirmed against that code path specifically)?
+- ~~`req.space_context` is client/BFF-declared... is that trust level
+  acceptable for pinning a sandbox lease to a Space?~~ — **answered, and
+  reframed, by B.2's research above: this is moot until a delegated
+  user-bound sandbox-manager bearer exists at all**, because
+  `AcquireLease`'s own server-side identity check (`expect.SubjectID ==
+  principal.ActorID`, from the CALLER's verified bearer) is strictly
+  stronger than anything `space_id` alone could assert either way — Control's
+  decision-issuance already independently re-verifies current Space
+  membership (`ResolvePersonalThreadDecisionEvidence`) for whoever that
+  bearer identifies. The real open question is now: **who mints that bearer,
+  and how does it reach execution-core?** Not yet designed.
 - Per-run lease-state storage: does execution-core have an existing
-  per-run state mechanism this can reuse, or does it need a new one?
+  per-run state mechanism this can reuse, or does it need a new one? Still
+  open — `state.rs`'s `StateStore.owners: DashMap<String, RunOwner>` is the
+  closest existing precedent (insert-once per `run_id`, read via
+  `.get(run_id)`) if a new `leases` field is added there — not yet done,
+  since B.2 has no caller to populate it yet.
 - Whether Phase A's `ExecuteStepRequest.space_id` should be trusted as-is
   (matching how `org_id`/`user_id` are already trusted, sourced from
   verified bearer claims) or needs its own verification step, given a
@@ -519,16 +571,26 @@ an existing pattern," not a second implementation of the same capability.
    below, designed the same day after implementing this one surfaced the gap.
 3.5. **Wire a real caller** (§3.5, newly designed, not in the original
    sequencing), itself phased:
-   - **3.5.A** — plumb `space_id` onto `ExecuteStepRequest` and its two real
-     call sites (`tools.rs`, `browser_run.rs`); pure data reachability, no
-     lease logic, no runtime behavior change for a non-Space call.
-   - **3.5.B** — the sandbox-manager gRPC client in execution-core plus
-     per-run lease acquire/activate lifecycle, chaining S3.2 step 3's
-     `capability_client.rs` and step 4's verification together for the
-     first time with a real caller.
+   - **3.5.A — DONE** (`aabb865d`) — plumb `space_id` onto
+     `ExecuteStepRequest` and its two real call sites (`tools.rs`,
+     `browser_run.rs`); pure data reachability, no lease logic, no runtime
+     behavior change for a non-Space call.
+   - **3.5.B.1 — DONE** (`execution-core/src/sandbox_manager_client.rs`,
+     same day) — the sandbox-manager gRPC client itself (all four RPCs +
+     `Health`), tested, uninvoked.
+   - **3.5.B.2 — BLOCKED, not started.** Per-run lease acquire/activate
+     lifecycle, chaining S3.2 step 3's `capability_client.rs` and step 4's
+     verification together with B.1's client for the first time. Blocked on
+     a real, code-confirmed gap (§3.5's B.2 writeup): sandbox-manager's own
+     `AcquireLease` requires the calling principal's verified identity to
+     equal the Space capability decision's subject, and no delegated
+     user-bound sandbox-manager bearer exists on the wire today for
+     execution-core to present. Needs a cross-service auth design decision
+     (Auth Core + whichever service resolves `ThreadSpaceContext`) before
+     this can proceed — not a mechanical continuation of B.1.
    - **3.5.C** — `code_interpreter.rs` uses the lease's hydrated workspace
      instead of its own ephemeral one when Space-scoped; `shell` explicitly
-     out of scope for this phase.
+     out of scope for this phase. Depends on B.2.
    Blocks step 4 in practice (there is no real overlay to promote without
    3.5.C existing), even though 4's own SQL/RPC design doesn't depend on it.
 4. **Merge/`PromoteWorkspace`** (§4) — depends on 3.5 existing in practice
