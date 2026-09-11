@@ -33,9 +33,13 @@ ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_REVISION \
       org.opencontainers.image.created=$BUILD_DATE
 RUN --mount=type=cache,target=/var/cache/apk \
-    apk add ca-certificates curl \
+    apk add ca-certificates curl postgresql-client \
     && addgroup -S -g 10001 modelplane \
     && adduser -S -D -H -u 10001 -G modelplane modelplane
 COPY --from=builder /service /usr/local/bin/service
+COPY services/sandbox-manager/migrations /app/migrations
+COPY services/sandbox-manager/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 USER modelplane
-ENTRYPOINT ["service"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["service"]

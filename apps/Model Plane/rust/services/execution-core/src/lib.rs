@@ -44,3 +44,4 @@ pub mod tool_bridge;
 pub mod user_core_client;
 pub mod web_tools;
 pub mod wiki_agent;
+pub mod workspace_cas;

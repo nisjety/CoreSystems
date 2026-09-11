@@ -143,12 +143,20 @@ CREATE TABLE IF NOT EXISTS workspace_files (
     content_hash  TEXT NOT NULL,     -- "sha256:<hex>", the CAS key
     base_hash     TEXT,              -- for a run row: the Space-level hash this path had when the run started (NULL = path didn't exist yet)
     size_bytes    BIGINT NOT NULL,
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (org_id, space_id, COALESCE(run_id, ''), path)
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- PRIMARY KEY cannot contain an expression (COALESCE below) -- only an
+-- index can -- so identity here is a UNIQUE INDEX, the same expression-index
+-- shape as capability-core's capability_scopes_active_grant_uq.
+CREATE UNIQUE INDEX workspace_files_identity_uq ON workspace_files (org_id, space_id, COALESCE(run_id, ''), path);
 CREATE INDEX workspace_files_space_idx ON workspace_files (org_id, space_id) WHERE run_id IS NULL;
 CREATE INDEX workspace_files_run_idx ON workspace_files (org_id, space_id, run_id) WHERE run_id IS NOT NULL;
 ```
+
+(Corrected 2026-09-11 during Step 1 implementation: a live Postgres smoke test
+of this exact migration surfaced the `PRIMARY KEY` expression error above
+before it ever reached a real deployment — the fix is reflected here and in
+the actual migration file.)
 
 Mirrors `capability-core/internal/registry/scope_store.go` field-for-field in
 spirit: soft-state via an explicit column (`run_id IS NULL` meaning "merged",
