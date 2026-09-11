@@ -733,8 +733,18 @@ an existing pattern," not a second implementation of the same capability.
      `inject_personal_thread_context` produced a `space_context` /
      `space_append_context`, forwarded as `x-sandbox-authorization` on the
      SSE, JSON, and AG-UI invoke paths; nothing minted or sent for a
-     non-Space turn); (b) model-gateway verify +
-     forward; (c) execution-core verify + `capability_client.rs` claims
+     non-Space turn); (b) model-gateway verify + forward — **DONE**
+     (`auth::VerifiedSandboxBearer` + `verify_delegated_sandbox_bearer` over
+     the shared `verify_delegated_user_bearer`, on both `require_auth` paths
+     and in the service-principal header refusal list; threaded
+     `invoke_stream_sse` → `run_tool_rounds` → `dispatch_audited_tool` →
+     `dispatch_tool` → `handle_code_interpreter`, which forwards it as gRPC
+     metadata `x-sandbox-authorization` only when present; `dispatch_tool`
+     refuses a Space-scoped `code_interpreter` call that arrived without it
+     rather than round-tripping to a refusal — execution-core remains the
+     enforcement point. Loose end (e)(1) closed in the same slice: `sse.rs`
+     now reads `space_id` from `space_context` OR `space_append_context`);
+     (c) execution-core verify + `capability_client.rs` claims
      capture + service-token provider + `AcquireLease` on the first
      Space-scoped `code_interpreter` step; (d) `StateStore.leases` + release
      on cancel/complete; (e) the two Phase A loose ends

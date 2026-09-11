@@ -224,6 +224,28 @@ impl VerifiedBrowserBearer {
     }
 }
 
+/// Independently verified `aud=sandbox-manager` user bearer. Accepted only
+/// from `x-sandbox-authorization`, bound to the ingress user and tenant, and
+/// present only on a Space-scoped turn (the V3 BFF mints it after Control has
+/// scoped the thread). Forwarded unchanged to execution-core, which presents
+/// it to sandbox-manager's `AcquireLease` — the one lease RPC whose identity
+/// check binds the Space capability decision to the CALLER's verified subject,
+/// so only a user-bound credential can pass it. See
+/// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+/// §3.5 phase B.2.
+#[derive(Clone)]
+pub struct VerifiedSandboxBearer(Arc<str>);
+
+impl VerifiedSandboxBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Independently verified, user-bound bearer for capability-core. A Model
 /// Plane token is never reused across audiences.
 #[derive(Clone)]
@@ -329,6 +351,28 @@ impl fmt::Debug for VerifiedExecutionBearer {
 impl fmt::Debug for VerifiedBrowserBearer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("VerifiedBrowserBearer([REDACTED])")
+    }
+}
+
+impl fmt::Debug for VerifiedSandboxBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedSandboxBearer([REDACTED])")
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for VerifiedSandboxBearer
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
     }
 }
 
@@ -880,6 +924,21 @@ async fn verify_delegated_browser_bearer(
     .map(|token| token.map(|token| VerifiedBrowserBearer::new(&token)))
 }
 
+async fn verify_delegated_sandbox_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedSandboxBearer>, StatusCode> {
+    verify_delegated_user_bearer(
+        headers,
+        "x-sandbox-authorization",
+        "SANDBOX_MANAGER_AUTH_AUDIENCE",
+        "sandbox-manager",
+        model_claims,
+    )
+    .await
+    .map(|token| token.map(|token| VerifiedSandboxBearer::new(&token)))
+}
+
 async fn verify_delegated_user_bearer(
     headers: &HeaderMap,
     header_name: &'static str,
@@ -1013,6 +1072,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         let execution_bearer = verify_delegated_execution_bearer(req.headers(), &claims).await?;
         let browser_bearer = verify_delegated_browser_bearer(req.headers(), &claims).await?;
         let ingestion_bearer = verify_delegated_ingestion_bearer(req.headers(), &claims).await?;
+        let sandbox_bearer = verify_delegated_sandbox_bearer(req.headers(), &claims).await?;
         req.extensions_mut().insert(claims);
         req.extensions_mut()
             .insert(VerifiedModelBearer::new(&token));
@@ -1049,6 +1109,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         }
         if let Some(ingestion_bearer) = ingestion_bearer {
             req.extensions_mut().insert(ingestion_bearer);
+        }
+        if let Some(sandbox_bearer) = sandbox_bearer {
+            req.extensions_mut().insert(sandbox_bearer);
         }
         return Ok(next.run(req).await);
     }
@@ -1132,6 +1195,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
         execution_bearer,
         browser_bearer,
         ingestion_bearer,
+        sandbox_bearer,
     ) = match principal_kind {
         PrincipalKind::User => (
             verify_delegated_data_plane_bearer(req.headers(), &token_data.claims).await?,
@@ -1142,6 +1206,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
             verify_delegated_execution_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_browser_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_ingestion_bearer(req.headers(), &token_data.claims).await?,
+            verify_delegated_sandbox_bearer(req.headers(), &token_data.claims).await?,
         ),
         PrincipalKind::Service => {
             if req.headers().contains_key("x-data-plane-authorization")
@@ -1150,6 +1215,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
                 || req.headers().contains_key("x-execution-authorization")
                 || req.headers().contains_key("x-browser-authorization")
                 || req.headers().contains_key("x-ingestion-authorization")
+                || req.headers().contains_key("x-sandbox-authorization")
                 || (req.headers().contains_key("x-session-authorization")
                     && req.headers().contains_key("x-inference-authorization"))
             {
@@ -1169,6 +1235,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
                 None,
                 session_bearer,
                 inference_bearer,
+                None,
                 None,
                 None,
                 None,
@@ -1201,6 +1268,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
     }
     if let Some(ingestion_bearer) = ingestion_bearer {
         req.extensions_mut().insert(ingestion_bearer);
+    }
+    if let Some(sandbox_bearer) = sandbox_bearer {
+        req.extensions_mut().insert(sandbox_bearer);
     }
     Ok(next.run(req).await)
 }
@@ -1317,6 +1387,7 @@ mod tests {
         std::env::remove_var("INFERENCE_CORE_AUTH_AUDIENCE");
         std::env::remove_var("EXECUTION_CORE_AUTH_AUDIENCE");
         std::env::remove_var("BROWSER_BROKER_AUTH_AUDIENCE");
+        std::env::remove_var("SANDBOX_MANAGER_AUTH_AUDIENCE");
         std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
         std::env::remove_var("ALLOW_INSECURE_DEV_DEFAULTS");
     }
@@ -1903,6 +1974,102 @@ mod tests {
                     .uri("/")
                     .header("authorization", format!("Bearer {model_token}"))
                     .header("x-browser-authorization", format!("Bearer {other_tenant}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        clear_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegated_sandbox_bearer_requires_exact_audience_and_matching_identity() {
+        async fn echo_sandbox_bearer(bearer: VerifiedSandboxBearer) -> String {
+            bearer.as_str().to_owned()
+        }
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let kid = "test-kid-sandbox-delegation";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        std::env::set_var("SANDBOX_MANAGER_AUTH_AUDIENCE", "sandbox-manager");
+
+        let model_token = sign_jwt(&base_claims(), kid);
+        let mut sandbox_claims = base_claims();
+        sandbox_claims.aud = Some("sandbox-manager".into());
+        let sandbox_token = sign_jwt(&sandbox_claims, kid);
+
+        let response = Router::new()
+            .route("/", get(echo_sandbox_bearer))
+            .layer(middleware::from_fn(require_auth))
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header("x-sandbox-authorization", format!("Bearer {sandbox_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The header is optional: a turn that is not Space-scoped carries none,
+        // and a handler that does not extract it must be unaffected.
+        let response = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(middleware::from_fn(require_auth))
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The ingress (aud=model-gateway) token is never accepted as the
+        // sandbox delegate: a Model Plane token is not reused across audiences.
+        let wrong_audience = sign_jwt(&base_claims(), kid);
+        let response = Router::new()
+            .route("/", get(echo_sandbox_bearer))
+            .layer(middleware::from_fn(require_auth))
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header(
+                        "x-sandbox-authorization",
+                        format!("Bearer {wrong_audience}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let mut other_tenant = sandbox_claims;
+        other_tenant.org_id = "org-other".into();
+        let other_tenant = sign_jwt(&other_tenant, kid);
+        let response = Router::new()
+            .route("/", get(echo_sandbox_bearer))
+            .layer(middleware::from_fn(require_auth))
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header("x-sandbox-authorization", format!("Bearer {other_tenant}"))
                     .body(Body::empty())
                     .unwrap(),
             )

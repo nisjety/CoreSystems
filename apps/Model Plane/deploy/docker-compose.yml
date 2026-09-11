@@ -257,6 +257,10 @@ services:
       SANDBOX_MANAGER_ADDR: http://model-plane-sandbox-manager-1:9094
       BROWSER_BROKER_ADDR: http://model-plane-browser-broker-1:9095
       BROWSER_BROKER_AUTH_AUDIENCE: ${BROWSER_BROKER_AUTH_AUDIENCE:-browser-broker}
+      # Audience of the delegated `x-sandbox-authorization` user bearer the V3
+      # BFF forwards for a Space-scoped turn (S3.3 §3.5 B.2); pinned to the
+      # same value sandbox-manager's own authz.go refuses to start without.
+      SANDBOX_MANAGER_AUTH_AUDIENCE: ${SANDBOX_MANAGER_AUTH_AUDIENCE:-sandbox-manager}
       MEMORY_SERVICE_URL: http://model-plane-session-core-1:9091
       # Legacy env name retained for older gateway builds; memory authority is
       # session-core, which syncs to Letta through LETTA_MEMORY_ADDR below.

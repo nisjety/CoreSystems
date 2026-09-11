@@ -29,7 +29,7 @@ use crate::{
     auth::{
         Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
-        VerifiedInferenceBearer, VerifiedIngestionBearer,
+        VerifiedInferenceBearer, VerifiedIngestionBearer, VerifiedSandboxBearer,
         VerifiedSessionBearer as VerifiedModelBearer,
     },
     gateway_metrics,
@@ -317,6 +317,7 @@ pub async fn invoke_stream_sse(
     capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
     ingestion_bearer: Option<Extension<VerifiedIngestionBearer>>,
+    sandbox_bearer: Option<Extension<VerifiedSandboxBearer>>,
     axum::Json(req): axum::Json<InvokeRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let request_id = new_ulid();
@@ -336,6 +337,7 @@ pub async fn invoke_stream_sse(
     let execution_bearer = execution_bearer.map(|Extension(bearer)| bearer);
     let cost_bearer = cost_bearer.map(|Extension(bearer)| bearer);
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
+    let sandbox_bearer = sandbox_bearer.map(|Extension(bearer)| bearer);
     let features = req.features.clone();
     // Normalize and validate BEFORE branching: an unknown tier numeric must
     // fail closed on both the durable and the persistence-free path, and the
@@ -1558,8 +1560,13 @@ pub async fn invoke_stream_sse(
                 &org_clone,
                 &user_clone,
                 &thread_scope,
+                // A scoped thread's FIRST message carries `space_context`; every
+                // later one carries `space_append_context` instead (see
+                // `InvokeRequest`'s field docs). Reading only the former left
+                // `space_id` empty from the second turn on.
                 req.space_context
                     .as_ref()
+                    .or(req.space_append_context.as_ref())
                     .map(|context| context.space_id.as_str())
                     .unwrap_or_default(),
                 data_plane_bearer.as_ref(),
@@ -1577,6 +1584,7 @@ pub async fn invoke_stream_sse(
                 tool_defs,
                 "auto".to_owned(),
                 ingestion_bearer.as_ref(),
+                sandbox_bearer.as_ref(),
                 Some(&sink),
             )
             .await;
@@ -2053,8 +2061,7 @@ pub async fn invoke_stream_sse(
                     // providers that report no logprobs (Anthropic).
                     let certainty = model_certainty(chunk.token_confidence.as_ref());
                     let answer_budget = answer_token_budget().max(0) as u32;
-                    let mut weak_retrieval =
-                        grounding.as_ref().is_some_and(|g| g.low_confidence);
+                    let mut weak_retrieval = grounding.as_ref().is_some_and(|g| g.low_confidence);
                     let mut confidence = crate::confidence::score_with_retrieval_confidence(
                         &assistant_output,
                         output_tokens,
@@ -2072,8 +2079,7 @@ pub async fn invoke_stream_sse(
                     // so a turn that was never going to verify does not consume
                     // the org's allowance.
                     if verification_decision.should_verify()
-                        && !crate::verification::VerificationBudget::global()
-                            .try_claim(&org_clone)
+                        && !crate::verification::VerificationBudget::global().try_claim(&org_clone)
                     {
                         verification_decision =
                             crate::verification::VerificationDecision::SkipBudgetExhausted;
@@ -2246,20 +2252,18 @@ pub async fn invoke_stream_sse(
                                 )
                                 .await;
                                 if verdict.is_support() {
-                                    evidence.web_citations = evidence.web_citations.saturating_add(
-                                        u32::try_from(gained).unwrap_or(u32::MAX),
+                                    evidence.web_citations = evidence
+                                        .web_citations
+                                        .saturating_add(u32::try_from(gained).unwrap_or(u32::MAX));
+                                    confidence = crate::confidence::score_with_retrieval_confidence(
+                                        &assistant_output,
+                                        output_tokens,
+                                        answer_budget,
+                                        evidence,
+                                        weak_retrieval,
+                                        certainty,
                                     );
-                                    confidence =
-                                        crate::confidence::score_with_retrieval_confidence(
-                                            &assistant_output,
-                                            output_tokens,
-                                            answer_budget,
-                                            evidence,
-                                            weak_retrieval,
-                                            certainty,
-                                        );
-                                } else if verdict
-                                    == crate::verification::SourceVerdict::Contradicts
+                                } else if verdict == crate::verification::SourceVerdict::Contradicts
                                 {
                                     confidence = confidence.map(|score| {
                                         crate::confidence::debit(
@@ -2274,10 +2278,7 @@ pub async fn invoke_stream_sse(
                         // nor the web had anything to say, so ask the model
                         // again and see whether it says the same thing.
                         if crate::verification::should_verify(confidence)
-                            && crate::verification::self_consistency_applies(
-                                output_tokens,
-                                verdict,
-                            )
+                            && crate::verification::self_consistency_applies(output_tokens, verdict)
                         {
                             let samples = resample_answer(
                                 &session_state,

@@ -23,7 +23,8 @@ use serde_json::Value;
 
 use crate::{
     auth::{
-        VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer, VerifiedIngestionBearer,
+        VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
+        VerifiedIngestionBearer, VerifiedSandboxBearer,
     },
     relevance,
     sse_events::ChatEvent,
@@ -1777,6 +1778,10 @@ pub async fn dispatch_tool(
     sovereign_required: bool,
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    // The delegated user bearer for sandbox-manager, present only on a
+    // Space-scoped turn (see `auth::VerifiedSandboxBearer`). Read by exactly
+    // one arm, `code_interpreter`, and only when `space_id` is set.
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
 ) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
@@ -1816,6 +1821,18 @@ pub async fn dispatch_tool(
                     "code_interpreter is unavailable this turn (missing a verified Execution Core or Data Plane credential)",
                 );
             };
+            // A Space-scoped run additionally needs the delegated sandbox-manager
+            // bearer: execution-core presents it to sandbox-manager's AcquireLease,
+            // whose identity check only a user-bound credential can pass (S3.3
+            // §3.5 B.2). Refusing here spares a round-trip execution-core would
+            // reject anyway; execution-core stays the enforcement point, and a
+            // Space-scoped step never silently falls back to an unscoped workspace.
+            if !space_id.is_empty() && sandbox_bearer.is_none() {
+                return err_outcome(
+                    call,
+                    "code_interpreter is unavailable this turn (a Space-scoped run needs a verified sandbox-manager credential)",
+                );
+            }
             let language = arg_str(&call.arguments_json, "language");
             let code = arg_str(&call.arguments_json, "code");
             let files_in = arg_value(&call.arguments_json, "files_in");
@@ -1823,6 +1840,7 @@ pub async fn dispatch_tool(
                 state,
                 execution_bearer,
                 data_plane_bearer,
+                sandbox_bearer,
                 inference_bearer,
                 session_bearer,
                 run_id,
@@ -2924,6 +2942,7 @@ async fn dispatch_audited_tool(
     sovereign_required: bool,
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
 ) -> Result<ToolOutcome, &'static str> {
     if session_bearer.is_empty() {
         return Err("tool audit credential unavailable");
@@ -2976,6 +2995,7 @@ async fn dispatch_audited_tool(
             sovereign_required,
             call,
             ingestion_bearer,
+            sandbox_bearer,
         )
         .await;
         let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
@@ -3081,6 +3101,9 @@ pub(crate) async fn dispatch_web_tool_audited(
         // threading a real posture in, and this line is where that shows up.
         mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
         call,
+        None,
+        // Web tools only: code_interpreter, the sole reader of the sandbox
+        // bearer, is unreachable from this path.
         None,
     )
     .await
@@ -3447,6 +3470,9 @@ pub async fn run_forced_web_search(
         mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
         &call,
         None,
+        // web_search only: code_interpreter, the sole reader of the sandbox
+        // bearer, is unreachable from a forced search.
+        None,
     )
     .await?;
     // Gate BEFORE anything is emitted: the citations are built from the surviving
@@ -3771,6 +3797,9 @@ pub async fn run_tool_rounds(
     tools: Vec<ToolDefinition>,
     tool_choice: String,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    // Delegated user bearer for sandbox-manager, present only on a Space-scoped
+    // turn; threaded to `code_interpreter` alongside `space_id` above.
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
     sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolRounds, &'static str> {
     let mut messages = base_messages;
@@ -4019,6 +4048,7 @@ pub async fn run_tool_rounds(
                     sovereign_required,
                     call,
                     ingestion_bearer,
+                    sandbox_bearer,
                 )
                 .await
             },
@@ -4313,6 +4343,7 @@ mod tests {
             false,
             &call,
             None,
+            None,
         )
         .await;
 
@@ -4481,6 +4512,7 @@ mod tests {
             false,
             &call,
             None,
+            None,
         )
         .await;
 
@@ -4529,6 +4561,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
         )
         .await;
@@ -4581,6 +4614,7 @@ mod tests {
             false,
             &call,
             None,
+            None,
         )
         .await;
 
@@ -4625,6 +4659,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
         )
         .await;
@@ -4708,6 +4743,7 @@ mod tests {
             false,
             &call,
             None,
+            None,
         )
         .await;
 
@@ -4744,6 +4780,7 @@ mod tests {
             false,
             false,
             &call,
+            None,
             None,
         )
         .await;
@@ -4785,6 +4822,7 @@ mod tests {
             false,
             &call,
             None,
+            None,
         )
         .await;
 
@@ -4821,6 +4859,7 @@ mod tests {
             false,
             &call,
             None,
+            None,
         )
         .await;
         let error = outcome.error.expect("direct MCP must be denied");
@@ -4852,6 +4891,7 @@ mod tests {
             false,
             false,
             &tool_call(crate::runtime_registries::MCP_CATALOG_TOOL_NAME, "{}"),
+            None,
             None,
         )
         .await;
@@ -5036,6 +5076,7 @@ mod tests {
                     false,
                     &call,
                     None,
+                    None,
                 );
                 let error =
                     match tokio::time::timeout(std::time::Duration::from_secs(2), dispatch).await {
@@ -5208,6 +5249,7 @@ mod tests {
             false,
             &call,
             None,
+            None,
         )
         .await;
         assert!(outcome.output.is_empty(), "a failed read returns no output");
@@ -5239,6 +5281,7 @@ mod tests {
             true,
             false,
             &call,
+            None,
             None,
         )
         .await;
@@ -6722,6 +6765,7 @@ mod tests {
             false,
             &tool_call("reattach_context", "{}"),
             None,
+            None,
         )
         .await;
         let error = outcome.error.unwrap_or_default();
@@ -6756,6 +6800,7 @@ mod tests {
             true,
             false,
             &tool_call("reattach_context", "{}"),
+            None,
             None,
         )
         .await;
@@ -6948,6 +6993,7 @@ mod tests {
             true,
             false,
             &tool_call("knowledge_search", "{}"),
+            None,
             None,
         )
         .await;

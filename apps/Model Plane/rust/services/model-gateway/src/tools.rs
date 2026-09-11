@@ -117,6 +117,10 @@ pub async fn handle_code_interpreter(
     state: &AppState,
     execution_bearer: &crate::auth::VerifiedExecutionBearer,
     data_plane_bearer: &crate::auth::VerifiedDataPlaneBearer,
+    // Present only for a Space-scoped turn. Forwarded unchanged for
+    // execution-core to verify and present to sandbox-manager's AcquireLease
+    // (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 phase B.2).
+    sandbox_bearer: Option<&crate::auth::VerifiedSandboxBearer>,
     inference_bearer: &str,
     session_bearer: &str,
     run_id: &str,
@@ -196,6 +200,17 @@ pub async fn handle_code_interpreter(
             .parse()
             .map_err(|_| "inference credential is not forwardable".to_owned())?,
     );
+    // Unlike the four above, conditional: execution-core demands it only for a
+    // Space-scoped code_interpreter step, and an empty `Bearer ` would be
+    // refused there, never treated as absent.
+    if let Some(sandbox_bearer) = sandbox_bearer {
+        request.metadata_mut().insert(
+            "x-sandbox-authorization",
+            format!("Bearer {}", sandbox_bearer.as_str())
+                .parse()
+                .map_err(|_| "sandbox credential is not forwardable".to_owned())?,
+        );
+    }
     let response = state
         .execution_client
         .clone()
