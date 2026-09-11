@@ -1889,3 +1889,86 @@ It strips comments before matching — third parser in that file to need it, aft
 `str_const` and the taxonomy generator.
 
 Matrix **29 ✅ / 3 🟡 / 4 ❌** of 37. Workspace green at 2,338.
+
+## Sandbox lease identity — a ninth delegated user bearer, not a service token or token exchange (2026-09-11) — **decided; B.1 client shipped, B.2 wiring not started**
+
+**Context.** S3.3 step 3.5 phase B needs execution-core to call sandbox-manager's
+`AcquireLease` for a Space-scoped `code_interpreter` run. Building the client
+(`execution-core/src/sandbox_manager_client.rs`, commit `218c1f68`) surfaced
+that the obvious credential — a self-minted service token, the
+`capability_policy.rs` `ServiceTokenProvider` pattern execution-core uses for
+capability-core — can never work for this call.
+
+**Why.** `sandbox-manager/internal/server/server.go::AcquireLease` runs
+`capabilityVerify(decision, claims, {SubjectID: principal.ActorID, …})`, and
+`internal/authz/capability_verifier.go::Verify` requires
+`decision.SubjectID == expect.SubjectID`. `ActorID` comes from the caller's
+verified bearer (`pkg/authctx/authctx.go:31-32`: "Request headers, query
+strings, and bodies are never used to construct it"); for a service token it is
+the service id. Control's issuer
+(`user-core/internal/http/spaces.go::issueSpaceCapabilityDecision`) only signs
+a decision whose subject is a current personal-Space member
+(`ResolvePersonalThreadDecisionEvidence` → `ErrNoCurrentMembership`, 403). A
+service principal is never that member. Deterministic PermissionDenied on every
+real request — not a configuration issue.
+
+**Decision.** Add a ninth delegated user-bound bearer, `x-sandbox-authorization`,
+following the eight that already exist end to end:
+- Minted by the **V3 BFF** from the user's Better Auth session via
+  `GET /api/sandbox-manager/token` — which **already works today**: auth-core
+  lists `sandbox-manager` in `PlaneAudience` (`convex-token.service.ts:104`,
+  config `:360-369`, TTL default 300 s), `isInteractivePlaneAudience` admits
+  it, and `plane-token-scopes.ts:55` gives it an empty scope list, matching
+  `authz.go:59-61` (user principals need no scope). The BFF's closed
+  `ModelServiceAudience` enum already carries `SandboxManager`
+  (`audience_tokens.rs:27`). **No Auth Core change.**
+- Minted **only for Space-scoped turns** — `streams.rs::stream_chat` already
+  knows, because it is the handler that calls `inject_personal_thread_context`
+  — so ~all turns pay no extra Auth Core round-trip.
+- Verified at **model-gateway** via the existing generic
+  `verify_delegated_user_bearer` (`auth.rs:883-903`) and forwarded as gRPC
+  metadata by `tools.rs::handle_code_interpreter`; verified at
+  **execution-core** by a hand-written `authenticate_delegated_sandbox_manager`
+  (same shape as `authenticate_delegated_data_plane`, `auth.rs:446-462`,
+  including the easy-to-miss `zdr` equality), demanded **only when
+  `tool_name == "code_interpreter"` and `space_id` is set** — the browser
+  bearer's conditional pattern (`grpc.rs:778-789`). Absent → fail closed.
+- Used for **`AcquireLease` only**. `ActivateLease`/`SnapshotSandbox`/`ReleaseLease`
+  never consult the capability verifier and owner-filter only user principals
+  (`lease.go:148,247`: `($3 = '' OR owner_id = $3)`; `authz.go::OwnerFilter`
+  is `""` for services), so execution-core runs the rest of the lifecycle with
+  its OWN `sandbox:write` service token from
+  `POST /api/sandbox-manager/internal-token`. Lease lifetime is thereby
+  decoupled from the user bearer's 300 s TTL.
+- The capability decision is requested by execution-core (service-authenticated,
+  as `capability_client.rs` already does) with `subject_id = req.user_id`
+  immediately before acquire — it lives 2 minutes
+  (`personal_thread_decision.go:19`). user-core already returns the `claims`
+  sidecar the request needs (`spaces.go:1229`); the Rust client currently
+  drops it.
+
+**Rejected.**
+- *Service token for `AcquireLease`* — fails the subject check, above.
+- *Token exchange / on-behalf-of in execution-core* — no such mechanism exists
+  in the Model Plane (zero hits for `on_behalf`/`obo`/`token_exchange` across
+  Rust and Go), and the 2026-08-26 dev-bypass CORRECTION above already settled
+  the rule it would violate: every delegated bearer is a user credential
+  minted at the BFF from the session; no downstream service synthesises one
+  from another token. OBO is a second identity path Auth Core does not own.
+- *model-gateway mints it* — it holds no session cookie, only forwarded
+  bearers; and the same rule forbids it.
+- *Relax sandbox-manager's binding* (accept a body `subject_id` or an
+  `on_behalf_of` claim from a service) — undoes S3.2 step 4: verification is
+  against verified identity, never a request-body assertion.
+- *Mint on every turn unconditionally* — one more sequential Auth Core call
+  per chat turn for a credential most turns never use.
+
+**Also found, adjacent, not fixed here.** `convex-token.service.ts`'s
+`isInteractivePlaneAudience` (`:732-734`) excludes only `control-policy`, while
+its `InteractivePlaneAudience` type and doc comment (`:110-126`) say
+`orchestrator-core` must be excluded too ("its StartWorkflow lets a NON-service
+caller start any run-scoped workflow"). The spec asserts only `control-policy`.
+Type/runtime divergence on an auth gate — filed separately.
+
+Full mechanism and implementation order:
+`apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md` §3.5 B.2.

@@ -372,7 +372,10 @@ discipline rather than one large change:**
    preference.
 
    **Phase B.2 — actually acquiring a Space-scoped lease from a real run —
-   BLOCKED, not started.** This is the open question two bullets below
+   DECIDED 2026-09-11 (same day as B.1), not yet implemented.** First the
+   finding that forced a decision, then the decision itself.
+
+   *The finding.* This is the open question two bullets below
    ("does Phase B need to independently confirm [space_context's] trust
    level") coming back with a concrete, code-verified answer, sharper than
    when this doc first raised it: **yes, and worse — the identity binding
@@ -406,10 +409,143 @@ discipline rather than one large change:**
    whichever service resolves `ThreadSpaceContext` in the first place, how a
    user-bound sandbox-manager-audience token gets issued and threaded down
    to execution-core alongside `space_id` — a cross-service auth design
-   question in its own right, not a mechanical continuation of B.1. Until
-   that lands, `sandbox_manager_client.rs` remains real, tested, and
+   question in its own right, not a mechanical continuation of B.1.
+
+   *The decision: a ninth delegated user-bound bearer,
+   `x-sandbox-authorization`, minted by the V3 BFF from the user's session
+   and forwarded unchanged — presented to `AcquireLease` only; every other
+   lease RPC uses execution-core's own service token.* Grounded in a full
+   trace of how the existing eight delegated bearers are minted and
+   forwarded today (2026-09-11), so nothing here is a new mechanism:
+
+   - **Minting — Auth Core, no change.** `GET /api/sandbox-manager/token`
+     already works: `convex-token.service.ts`'s `PlaneAudience` lists
+     `sandbox-manager` (`:104`; config `:360-369`; TTL
+     `PLANE_TOKEN_TTL_SANDBOX_MANAGER_SECONDS`, default 300 s), the runtime
+     gate `isInteractivePlaneAudience` (`:732-734`) admits it, and
+     `plane-token-scopes.ts:49-59` gives it an empty scope list — which is
+     exactly what sandbox-manager wants: `authz.go:59-61` returns early for
+     `principal_type == "user"` before any scope check. The minted JWT
+     (`issuePlaneToken`, `convex-token.service.ts:567-586`) carries
+     `sub == user_id`, `org_id`, `principal_type: "user"`, no `service_id`,
+     and the org's `zdr` — every field `authctx.go:160-166` demands.
+   - **Forwarding — V3 BFF (`apps/gateway`, Rust), small change.**
+     `audience_tokens.rs`'s closed `ModelServiceAudience` enum already has
+     `SandboxManager` (`:27`, claim `"sandbox-manager"`; the enum's own
+     `#[allow(dead_code)]` note says the closed contract "deliberately
+     includes audiences whose routes are not yet invoked"). Add a
+     `sandbox_token` helper beside `chat/shared.rs:145-252`'s family and
+     one more header, `x-sandbox-authorization`, in the two proxy fan-ins
+     (`upstream.rs::proxy_sse_stream_with_data_plane:1665-1721`,
+     `chat/shared.rs::proxy_model_json_with_delegations:466-524`). Mint it
+     **only when the turn is Space-scoped**: the same
+     `streams.rs::stream_chat` handler (`:18-116`) that mints the other
+     bearers (`:24-42`) also calls
+     `spaces.rs::inject_personal_thread_context` (`:76-85`), so it knows
+     whether a `space_context`/`space_append_context` was produced. A
+     non-Space turn — the overwhelming majority — pays no extra Auth Core
+     round-trip and forwards no header. Unlike the `required_*` family this
+     is therefore `Option`al at the BFF and fail-closed further down.
+   - **Verification + forwarding — model-gateway, small change.** A
+     `VerifiedSandboxBearer` newtype + extractor and a ~10-line
+     `verify_delegated_sandbox_bearer` over the existing generic
+     `verify_delegated_user_bearer` (`auth.rs:883-903`: same `sub`, same
+     `user_id`, same `org_id`, `principal_type=user`, RS256 / JWKS `kid` /
+     issuer / `exp` / `nbf`), audience `"sandbox-manager"`.
+     `tools.rs::handle_code_interpreter` forwards it as gRPC metadata
+     `x-sandbox-authorization` beside the existing four inserts
+     (`:169-198`) — only when present.
+   - **Verification — execution-core, small change, conditional.** A
+     hand-written `authenticate_delegated_sandbox_manager` (no shared helper
+     exists here — `auth.rs:393-462` is three ~16-line copies) reading
+     `x-sandbox-authorization`, audience `"sandbox-manager"`, and checking
+     `org_id` / `user_id` / **`zdr`** equality with the primary execution
+     bearer exactly as `authenticate_delegated_data_plane` does
+     (`:446-462`; the retention-posture equality is the easy one to miss).
+     Demanded in `grpc.rs::execute_step` **only when
+     `tool_name == "code_interpreter"` AND `req.space_id` is non-empty**,
+     mirroring how the browser bearer is demanded only for browser tools
+     (`:778-789`) — so no existing `ExecuteStep` caller breaks, and a
+     Space-scoped sandbox step arriving without the bearer fails closed
+     with `permission_denied` rather than silently downgrading to the
+     ephemeral path.
+   - **Use — `AcquireLease` only.** Immediately before acquiring, request
+     the capability decision through `capability_client.rs` (already
+     service-authenticated with `X-Service-Token`, which user-core's handler
+     accepts — it is the *subject*, not the *requester*, that must be a
+     member) with `subject_id = req.user_id`, `space_ref = req.space_id`,
+     `org_id = req.org_id`, this instance's `backend_id`, and
+     `idempotency_key = run_id`. The decision lives **2 minutes**
+     (`personal_thread_decision.go:19`), so it is never minted ahead of
+     time or cached. Extend `capability_client.rs`'s `DecisionResponseData`
+     to capture the `claims` sidecar user-core already returns
+     (`spaces.go:1229`: `{"data":{"decision":…,"claims":…}}`) — dropped
+     today, and it is verbatim `AcquireLeaseRequest.capability_claims_json`.
+     Then `SandboxManagerClient::acquire_lease(user_bearer, …)` with
+     `scope_type = "agent"`, `scope_id = run_id` (one lease per run is this
+     doc's per-run-overlay model, §3), `space_id`, decision, claims.
+     sandbox-manager records `owner_id = user_id`.
+   - **Lifecycle after acquire — service token, decoupled from the user
+     bearer's 300 s TTL.** `ActivateLease` / `SnapshotSandbox` /
+     `ReleaseLease` never touch the capability verifier and owner-filter
+     only user principals — `lease.go:148,247`: `($3 = '' OR owner_id =
+     $3)`, and `authz.go::OwnerFilter` returns `""` for a service. So
+     execution-core runs the rest of the lifecycle with its OWN
+     `principal_type=service` token from
+     `POST /api/sandbox-manager/internal-token` carrying `sandbox:write`
+     (a `SandboxManagerTokenProvider` mirroring `capability_policy.rs`'s
+     `ServiceTokenProvider`, `:577-735`), at any point in the run — a
+     release at run end does not depend on a user credential that expired
+     minutes earlier. Precondition to verify at implementation time: Auth
+     Core's service-principal registry (`plane-service-principal.ts`)
+     grants execution-core's service id `sandbox:write` for that audience.
+   - **Per-run lease state.** A `leases: DashMap<String, SandboxLeaseHandle>`
+     on `state.rs`'s `StateStore`, keyed by `run_id`, following its
+     `owners: DashMap<String, RunOwner>` (`:60-64`; insert-once via
+     `entry`, read via `.get`). Released on `CancelRun` and on run
+     completion with the service token; the lease `ttl` is the backstop if
+     the process dies first.
+   - **Two loose ends that belong in the same slice.** (1) Phase A reads
+     only `req.space_context`, which the BFF sets for the FIRST message of a
+     scoped thread; appended messages carry `req.space_append_context`
+     instead (`http_routes.rs:6104-6112`), so `space_id` is empty on every
+     later turn today — `sse.rs` must read either. (2) `RunAgentRequest` has
+     no `space_id` at all, and its `run_agent` handler (`grpc.rs:1087`)
+     demands only the data-plane and inference bearers, yet the governed
+     agent loop can dispatch `code_interpreter` too. Add `space_id` there
+     with the same conditional bearer demand, or explicitly leave `RunAgent`
+     on the ephemeral path — decide, don't drift.
+
+   *Rejected, and why — also recorded in
+   `apps/Model Plane/docs/decisions/ledger.md` (2026-09-11) so none is
+   re-proposed:*
+   - **execution-core mints a service token and uses it for `AcquireLease`.**
+     Fails `SubjectID == ActorID` deterministically (the finding above). Not
+     a style preference — PermissionDenied on every real request.
+   - **Token exchange / on-behalf-of at execution-core** (swap the incoming
+     user-bound execution bearer for a user-bound sandbox-manager one). No
+     such mechanism exists anywhere in the Model Plane — zero hits for
+     `on_behalf` / `obo` / `token_exchange` across Rust and Go — and the
+     ledger's 2026-08-26 dev-bypass CORRECTION already settled the rule it
+     would break: every delegated bearer is a user credential minted at the
+     BFF from the session, and no downstream service synthesises one from
+     another token ("it does not propagate trust across planes"). OBO would
+     be a second identity path Auth Core does not own.
+   - **model-gateway mints it.** It holds no session cookie, only forwarded
+     bearers, so it cannot call `GET /api/:audience/token` — and the same
+     ledger rule forbids the gateway minting delegated bearers.
+   - **Relax sandbox-manager's subject binding** (accept a service principal
+     plus a request-body `subject_id`, or an `on_behalf_of` claim). Undoes
+     S3.2 step 4's whole point — verification against the caller's
+     *verified* identity, never a body assertion (`authctx.go:31-32`).
+   - **Mint the sandbox bearer on every chat turn.** Simpler plumbing, but
+     one more sequential Auth Core round-trip per turn for a credential
+     almost no turn uses, when the BFF already knows whether the turn is
+     Space-scoped before it would mint.
+
+   Until B.2 lands, `sandbox_manager_client.rs` remains real, tested, and
    uninvoked — the same honestly-documented "no caller yet" position Step 3
-   was in this morning, now one level further down the stack.
+   was in this morning, now with the caller's exact shape decided.
 3. **Phase C — `code_interpreter.rs` uses the lease's hydrated workspace.**
    When a Space-scoped lease is `ACTIVE`, hydrate its current
    `workspace_files` manifest (needs the `GetWorkspaceManifest`-style RPC
@@ -433,14 +569,15 @@ discipline rather than one large change:**
   stronger than anything `space_id` alone could assert either way — Control's
   decision-issuance already independently re-verifies current Space
   membership (`ResolvePersonalThreadDecisionEvidence`) for whoever that
-  bearer identifies. The real open question is now: **who mints that bearer,
-  and how does it reach execution-core?** Not yet designed.
-- Per-run lease-state storage: does execution-core have an existing
-  per-run state mechanism this can reuse, or does it need a new one? Still
-  open — `state.rs`'s `StateStore.owners: DashMap<String, RunOwner>` is the
-  closest existing precedent (insert-once per `run_id`, read via
-  `.get(run_id)`) if a new `leases` field is added there — not yet done,
-  since B.2 has no caller to populate it yet.
+  bearer identifies. The follow-on question — who mints that bearer and how
+  it reaches execution-core — is **decided the same day, see B.2 above**: the
+  V3 BFF mints `GET /api/sandbox-manager/token` from the user's session only
+  for a Space-scoped turn, forwards it as `x-sandbox-authorization`, and
+  execution-core presents it to `AcquireLease` alone.
+- ~~Per-run lease-state storage~~ — decided with B.2: a new `leases` field
+  on `state.rs`'s `StateStore`, following its `owners: DashMap<String,
+  RunOwner>` (insert-once per `run_id`, read via `.get(run_id)`). Not yet
+  added; it lands with B.2's caller.
 - Whether Phase A's `ExecuteStepRequest.space_id` should be trusted as-is
   (matching how `org_id`/`user_id` are already trusted, sourced from
   verified bearer claims) or needs its own verification step, given a
@@ -578,16 +715,25 @@ an existing pattern," not a second implementation of the same capability.
    - **3.5.B.1 — DONE** (`execution-core/src/sandbox_manager_client.rs`,
      same day) — the sandbox-manager gRPC client itself (all four RPCs +
      `Health`), tested, uninvoked.
-   - **3.5.B.2 — BLOCKED, not started.** Per-run lease acquire/activate
-     lifecycle, chaining S3.2 step 3's `capability_client.rs` and step 4's
-     verification together with B.1's client for the first time. Blocked on
-     a real, code-confirmed gap (§3.5's B.2 writeup): sandbox-manager's own
-     `AcquireLease` requires the calling principal's verified identity to
-     equal the Space capability decision's subject, and no delegated
-     user-bound sandbox-manager bearer exists on the wire today for
-     execution-core to present. Needs a cross-service auth design decision
-     (Auth Core + whichever service resolves `ThreadSpaceContext`) before
-     this can proceed — not a mechanical continuation of B.1.
+   - **3.5.B.2 — DECIDED (same day), not yet implemented.** Per-run lease
+     acquire/activate lifecycle, chaining S3.2 step 3's `capability_client.rs`
+     and step 4's verification together with B.1's client for the first time.
+     The blocker found while designing it — sandbox-manager's `AcquireLease`
+     binds to the CALLER's verified identity, which must be the Space member
+     the decision names — is resolved by a ninth delegated user-bound bearer,
+     `x-sandbox-authorization`: minted by the V3 BFF from the user's session
+     via the already-working `GET /api/sandbox-manager/token`, only for
+     Space-scoped turns, verified at model-gateway and execution-core like
+     the other eight, presented to `AcquireLease` only; the rest of the
+     lifecycle uses execution-core's own `sandbox:write` service token. Full
+     mechanism, rejected alternatives, and evidence in §3.5's B.2 writeup and
+     `apps/Model Plane/docs/decisions/ledger.md` (2026-09-11). Implementation
+     slices, in order: (a) BFF mint + header; (b) model-gateway verify +
+     forward; (c) execution-core verify + `capability_client.rs` claims
+     capture + service-token provider + `AcquireLease` on the first
+     Space-scoped `code_interpreter` step; (d) `StateStore.leases` + release
+     on cancel/complete; (e) the two Phase A loose ends
+     (`space_append_context`, `RunAgentRequest.space_id`).
    - **3.5.C** — `code_interpreter.rs` uses the lease's hydrated workspace
      instead of its own ephemeral one when Space-scoped; `shell` explicitly
      out of scope for this phase. Depends on B.2.
