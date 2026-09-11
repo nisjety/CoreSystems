@@ -112,6 +112,9 @@ async fn stream_agent_ui(
     let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
     let mut body = shared::with_identity_context(body, &user.user_name, &org_name);
     shared::apply_org_zdr_posture(&state, &user, &mut body).await;
+    // After `inject_personal_thread_context`: only minted once Control has
+    // actually scoped this turn to a Space (same rule as native chat).
+    let sandbox_token = shared::sandbox_token(&state, &user, &headers, &body).await;
 
     let token = shared::model_token(&state, &user, &headers).await;
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
@@ -158,6 +161,9 @@ async fn stream_agent_ui(
     }
     if let Some(token) = ingestion_token {
         req = req.header("x-ingestion-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = sandbox_token {
+        req = req.header("x-sandbox-authorization", format!("Bearer {token}"));
     }
     if let Some(last_event_id) = headers.get("last-event-id").and_then(|v| v.to_str().ok()) {
         req = req.header("last-event-id", last_event_id);

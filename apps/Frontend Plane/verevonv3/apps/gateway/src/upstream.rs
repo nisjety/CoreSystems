@@ -1623,6 +1623,7 @@ pub(crate) async fn proxy_sse_stream(
         None,
         None,
         None,
+        None,
         last_event_id,
         actor,
         zdr,
@@ -1654,6 +1655,7 @@ pub(crate) async fn proxy_sse_stream_with_session(
         None,
         session_bearer,
         None,
+        None,
         last_event_id,
         actor,
         zdr,
@@ -1674,6 +1676,8 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
     cost_bearer: Option<&str>,
     session_bearer: Option<&str>,
     ingestion_bearer: Option<&str>,
+    // Present only for a Space-scoped turn (see `chat::shared::sandbox_token`).
+    sandbox_bearer: Option<&str>,
     last_event_id: Option<&str>,
     actor: Option<(&str, &str)>,
     zdr: bool,
@@ -1718,6 +1722,12 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
     {
         req = req.header("x-session-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = sandbox_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-sandbox-authorization", format!("Bearer {token}"));
     }
 
     if let Some((user_id, org_id)) = actor {

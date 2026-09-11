@@ -96,6 +96,9 @@ pub(super) async fn stream_chat(
         .get("zdr")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // After `inject_personal_thread_context`, not with the other bearers above:
+    // it is only minted once Control has actually scoped this turn to a Space.
+    let sandbox_token = shared::sandbox_token(&state, &user, &headers, &outbound_body).await;
     proxy_sse_stream_with_data_plane(
         &state,
         Method::POST,
@@ -108,6 +111,7 @@ pub(super) async fn stream_chat(
         Some(&cost_token),
         Some(&session_token),
         ingestion_token.as_deref(),
+        sandbox_token.as_deref(),
         None,
         Some((&user.user_id, org_id.as_str())),
         effective_zdr,

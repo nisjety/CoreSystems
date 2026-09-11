@@ -78,6 +78,9 @@ pub(super) async fn invoke_chat(
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
     let request_timeout = chat_invoke_timeout(&outbound_body);
+    // After `inject_personal_thread_context`, not with the other bearers above:
+    // it is only minted once Control has actually scoped this turn to a Space.
+    let sandbox_token = shared::sandbox_token(&state, &user, &headers, &outbound_body).await;
     // Same rule as the streaming path: mark before dispatch, so a ZDR turn that
     // fails still leaves the thread non-persistable.
     shared::proxy_model_json_with_data_plane_request_timeout(
@@ -91,6 +94,7 @@ pub(super) async fn invoke_chat(
         Some(&execution_token),
         Some(&cost_token),
         Some(&session_token),
+        sandbox_token.as_deref(),
         request_timeout,
         &user,
     )

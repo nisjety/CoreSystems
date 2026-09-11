@@ -728,7 +728,12 @@ an existing pattern," not a second implementation of the same capability.
      lifecycle uses execution-core's own `sandbox:write` service token. Full
      mechanism, rejected alternatives, and evidence in §3.5's B.2 writeup and
      `apps/Model Plane/docs/decisions/ledger.md` (2026-09-11). Implementation
-     slices, in order: (a) BFF mint + header; (b) model-gateway verify +
+     slices, in order: (a) BFF mint + header — **DONE** (V3 gateway:
+     `chat::shared::sandbox_token` mints `aud=sandbox-manager` only after
+     `inject_personal_thread_context` produced a `space_context` /
+     `space_append_context`, forwarded as `x-sandbox-authorization` on the
+     SSE, JSON, and AG-UI invoke paths; nothing minted or sent for a
+     non-Space turn); (b) model-gateway verify +
      forward; (c) execution-core verify + `capability_client.rs` claims
      capture + service-token provider + `AcquireLease` on the first
      Space-scoped `code_interpreter` step; (d) `StateStore.leases` + release
