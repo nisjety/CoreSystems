@@ -26,13 +26,18 @@ pub mod message_field {
 
 /// `RendezvousMessage` envelope field numbers (hbbs/hbbr registration and
 /// relay negotiation) — only the ones the host actually sends or receives.
-/// `REGISTER_PK`/`REGISTER_PK_RESPONSE` are deliberately NOT here yet: their
-/// exact field numbers are a documented, unresolved research gap (see the
-/// Endpoint Plane build plan's M0) — guessing them would be worse than
-/// leaving `va-net` unable to compile that specific message until M0 closes
-/// it with a citation-backed source read, the same standard every other
-/// field number in this file was held to.
+/// `REGISTER_PK`/`REGISTER_PK_RESPONSE` closed the M0 research gap via a
+/// citation-backed read of `hbb_common`'s `protos/rendezvous.proto` at commit
+/// `69cea8dafee147848ae88702029f4bf7df7224c3` (the exact submodule pin of
+/// `rustdesk-server` commit `a7736be5e40f85bfc141120dce587e836e5d4b80`, the
+/// same commit already cited elsewhere in this file and in `remote-core`'s
+/// own research). `REGISTER_PK_RESPONSE = 16` cross-checks the live wire
+/// capture already on record in `remote-core`'s `docs/rustdesk-protocol.md`
+/// ("Verified against a live hbbs"): an empty reply `82 01 00` decodes to
+/// exactly this field, wire-type 2, length 0 (proto3 default `OK`).
 pub mod rendezvous_field {
+    pub const REGISTER_PK: u32 = 15;
+    pub const REGISTER_PK_RESPONSE: u32 = 16;
     pub const REQUEST_RELAY: u32 = 18;
     pub const RELAY_RESPONSE: u32 = 19;
 }
@@ -546,6 +551,96 @@ pub fn encode_switch_display(value: &SwitchDisplay) -> Vec<u8> {
     w.finish()
 }
 
+// =====================================================================
+// RegisterPk / RegisterPkResponse — hbbs registration (UDP only; sending
+// this over TCP/WS gets an unconditional NOT_SUPPORT from a real hbbs, per
+// the same research that closed this field's numbers). `va-net` sends
+// `RegisterPk` on startup and every `REG_INTERVAL` (15s, matching the real
+// client's cadence — comfortably under hbbs's 30s offline threshold) to
+// stay registered.
+// =====================================================================
+
+/// `RegisterPk{id, uuid, pk, old_id, no_register_device}`. `pk` is the same
+/// persistent Ed25519 public key later reused to sign `SignedId` — a real
+/// client never uses a separate key for registration vs. the session
+/// handshake, confirmed against its own source. `uuid` only needs to be a
+/// stable, non-empty per-device value (a real client prefers the OS machine
+/// ID, falling back to its own `pk` bytes) — hbbs never interprets it beyond
+/// consistency-checking it against whatever was stored on a prior
+/// registration of the same `id`.
+pub struct RegisterPk {
+    pub id: String,
+    pub uuid: Vec<u8>,
+    pub pk: Vec<u8>,
+}
+
+pub fn encode_register_pk(value: &RegisterPk) -> Vec<u8> {
+    let mut w = ProtoWriter::new();
+    w.string(1, &value.id).bytes(2, &value.uuid).bytes(3, &value.pk);
+    // `old_id` (field 4) and `no_register_device` (field 5) are left at
+    // their proto3 defaults (empty string / false) — this device never
+    // renames itself and always wants to be discoverable.
+    w.finish()
+}
+
+/// `RegisterPkResponse.result`'s wire values — the nested `Result` enum from
+/// `rendezvous.proto`. `Ok` is proto3's zero default, so a real hbbs's
+/// success reply omits the field entirely (the live-captured `82 01 00` has
+/// no inner bytes at all); every other value is an explicit rejection this
+/// device should surface, not silently retry forever on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegisterPkResult {
+    Ok,
+    UuidMismatch,
+    IdExists,
+    TooFrequent,
+    InvalidIdFormat,
+    NotSupport,
+    ServerError,
+    NotDeployed,
+    /// A value this catalog doesn't recognize — forward-compatible with a
+    /// future server build adding new variants, rather than erroring.
+    Unknown(i32),
+}
+
+impl RegisterPkResult {
+    fn from_wire(value: i32) -> Self {
+        match value {
+            0 => Self::Ok,
+            2 => Self::UuidMismatch,
+            3 => Self::IdExists,
+            4 => Self::TooFrequent,
+            5 => Self::InvalidIdFormat,
+            6 => Self::NotSupport,
+            7 => Self::ServerError,
+            8 => Self::NotDeployed,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+pub struct RegisterPkResponse {
+    pub result: RegisterPkResult,
+    /// Always 0 in the reference server build this was verified against —
+    /// never populated by any reply path it constructs. Kept for
+    /// forward-compatibility, not currently acted on by `va-net`.
+    pub keep_alive: i32,
+}
+
+pub fn decode_register_pk_response(data: &[u8]) -> Result<RegisterPkResponse, WireError> {
+    let mut r = ProtoReader::new(data);
+    let mut value = RegisterPkResponse { result: RegisterPkResult::Ok, keep_alive: 0 };
+    while !r.eof() {
+        let tag = r.read_tag()?;
+        match tag.field_number {
+            1 => value.result = RegisterPkResult::from_wire(r.read_int32()?),
+            2 => value.keep_alive = r.read_int32()?,
+            _ => r.skip(tag.wire_type)?,
+        }
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -781,5 +876,55 @@ mod tests {
         assert_eq!(mr.read_int32().unwrap(), 1);
         assert_eq!(mr.read_tag().unwrap().field_number, 2);
         assert_eq!(mr.read_sint32().unwrap(), -100);
+    }
+
+    #[test]
+    fn register_pk_encodes_id_uuid_and_pk_and_omits_old_id_and_no_register_device() {
+        let encoded = encode_register_pk(&RegisterPk {
+            id: "141589119".into(),
+            uuid: vec![0xAA; 16],
+            pk: vec![0xBB; 32],
+        });
+        let mut r = ProtoReader::new(&encoded);
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 1);
+        assert_eq!(r.read_string().unwrap(), "141589119");
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 2);
+        assert_eq!(r.read_length_delimited().unwrap(), &[0xAA; 16]);
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 3);
+        assert_eq!(r.read_length_delimited().unwrap(), &[0xBB; 32]);
+        // old_id (4) and no_register_device (5) are proto3 defaults, so a
+        // correct writer never emits them.
+        assert!(r.eof());
+    }
+
+    #[test]
+    fn register_pk_response_empty_payload_decodes_to_ok() {
+        // The exact bytes independently captured from a real hbbs
+        // (remote-core's docs/rustdesk-protocol.md, "Verified against a live
+        // hbbs"): an empty RegisterPkResponse submessage means result=OK via
+        // proto3's zero default, not "unknown"/"absent".
+        let decoded = decode_register_pk_response(&[]).unwrap();
+        assert_eq!(decoded.result, RegisterPkResult::Ok);
+        assert_eq!(decoded.keep_alive, 0);
+    }
+
+    #[test]
+    fn register_pk_response_decodes_nonzero_result_and_keep_alive() {
+        let mut w = ProtoWriter::new();
+        w.int32(1, 4).int32(2, 7); // TOO_FREQUENT, keep_alive=7
+        let decoded = decode_register_pk_response(&w.finish()).unwrap();
+        assert_eq!(decoded.result, RegisterPkResult::TooFrequent);
+        assert_eq!(decoded.keep_alive, 7);
+    }
+
+    #[test]
+    fn register_pk_response_unknown_result_value_is_forward_compatible() {
+        let mut w = ProtoWriter::new();
+        w.int32(1, 99);
+        let decoded = decode_register_pk_response(&w.finish()).unwrap();
+        assert_eq!(decoded.result, RegisterPkResult::Unknown(99));
     }
 }
