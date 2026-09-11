@@ -1,0 +1,13 @@
+[package]
+name = "va-encode"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+vpx-encode = "0.4"

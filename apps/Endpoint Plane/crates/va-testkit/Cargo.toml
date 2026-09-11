@@ -1,0 +1,15 @@
+[package]
+name = "va-testkit"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+va-wire = { path = "../va-wire" }
+va-crypto = { path = "../va-crypto" }
+va-protocol = { path = "../va-protocol" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }

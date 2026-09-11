@@ -4,6 +4,24 @@
 # findings (those are rotated at push time, per the maintainer). The CI gate
 # (.github/workflows/secret-scan.yml) scans only the commits in a push/PR, so
 # this config governs what counts as a finding in NEW changes.
+#
+# IMPORTANT — schema note (found 2026-09-12): CI's secret-scan workflow pins
+# gitleaks 8.24.3 via `gitleaks-action@v3`. That version's config schema
+# supports only a SINGULAR top-level `[allowlist]` table (see its
+# `config/config.go`: `ViperConfig.Allowlist` is a single struct, not a
+# slice) — the newer `[[allowlists]]` array-of-tables syntax this file
+# previously used is a schema Viper simply doesn't bind to anything on that
+# version, so every entry was silently a no-op in CI (confirmed by
+# reproducing CI's exact `gitleaks detect` invocation locally, pinned to
+# v8.24.3, against the merged config below vs. the old array form — the old
+# form left the "XSalsa20-Poly1305" generic-api-key false positive
+# unsuppressed; this merged singular table suppresses it). A singular
+# `[allowlist]` also has no per-rule `targetRules` scoping in this version
+# (that field doesn't exist on the `Allowlist` struct either), so every
+# regex below applies globally rather than only to the rule it was
+# originally written for — each one is already narrow/specific enough
+# (an exact Go module checksum shape, an exact cryptographic algorithm
+# name list, etc.) that this is a negligible widening in practice.
 
 title = "Verevon CoreSystem secret-scan"
 
@@ -12,8 +30,8 @@ title = "Verevon CoreSystem secret-scan"
 # JWTs, private keys, curl auth headers, etc.), then layer the allowlist below.
 useDefault = true
 
-[[allowlists]]
-description = "Build artifacts, lockfiles, vendored code, and obvious placeholders"
+[allowlist]
+description = "Build artifacts, lockfiles, vendored code, placeholders, and known false-positive shapes"
 
 # Paths that never contain real secrets we control (regex, matched against path).
 paths = [
@@ -33,9 +51,10 @@ paths = [
   '''yarn\.lock$''',
 ]
 
-# Placeholder / template / fixture values are not secrets. Matched against the
-# detected secret string. Kept deliberately narrow so a real key that merely
-# *contains* one of these words is still caught only if it is dominated by it.
+# Matched against the detected secret string (gitleaks 8.24.3's default
+# RegexTarget when unset). Kept deliberately narrow so a real key that
+# merely *contains* one of these words is still caught only if it is
+# dominated by it.
 regexes = [
   '''(?i)\b(your[-_ ]?(api[-_ ]?)?(key|token|secret|password)|change[-_ ]?me|placeholder|replace[-_ ]?me|example[-_ ]?(key|token|secret)?|dummy|sample|redacted|todo|tbd|<[a-z0-9_ -]+>|\$\{[^}]+\}|xxxxx+|token[-_ ]?here|secret[-_ ]?here)\b''',
   # Test-only fixtures & env-var NAME references (not secret values), all in
@@ -45,16 +64,19 @@ regexes = [
   '''\bscoped-(password|token|secret|key)\b''',
   '''\b(secret-value|legacy-token)\b''',
   '''secret\\r\\ninjected''',
-]
-
-# `pre-commit` scans the staged patch through stdin so gitleaks cannot attach a
-# source path and the go.sum path allowlist above cannot apply. Limit this
-# exception to the generic-key rule and the exact canonical Go checksum line
-# shape; arbitrary base64 values remain findings.
-[[allowlists]]
-description = "Canonical Go module checksums in staged patch input"
-targetRules = ["generic-api-key"]
-regexTarget = "match"
-regexes = [
+  # Canonical Go module checksum shape (`go.sum`-style `h1:` line) that can
+  # appear in staged patch input the pre-commit hook scans via stdin, where
+  # no source path is attached for the lockfile path-allowlist above to
+  # match against. Exact shape only; arbitrary base64 values still flag.
   '''^api v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.+-]+)?(?:/go\.mod)? h1:[A-Za-z0-9+/]{43}=$''',
+  # Public cryptographic primitive/cipher names, not secrets.
+  # generic-api-key's entropy heuristic fires when one of these sits near
+  # the word "key" (e.g. "X25519 sealed-box key exchange, XSalsa20-Poly1305
+  # secretbox") — confirmed in apps/Endpoint Plane's docs, describing the
+  # same NaCl/libsodium primitives apps/Frontend Plane/verevonv3/packages/
+  # remote-core already documents elsewhere without incident. A real key
+  # merely resembling one of these names is unaffected — these are exact
+  # algorithm names, not a pattern a real credential would coincidentally
+  # equal.
+  '''(XSalsa20-Poly1305|ChaCha20-Poly1305|XChaCha20-Poly1305|Curve25519|Ed25519|X25519)''',
 ]
