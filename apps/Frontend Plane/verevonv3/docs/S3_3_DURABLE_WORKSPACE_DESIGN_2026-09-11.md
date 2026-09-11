@@ -265,15 +265,136 @@ call."
 - `src/sandbox.rs`'s `extra_ro_binds` extension, exactly as originally
   planned above.
 
-**Deferred, newly identified, not part of this doc's original §8
-sequencing:** wiring a real caller — execution-core actually calling
-`AcquireLease`/`ActivateLease`/`SnapshotSandbox`/`ReleaseLease` for a
-Space-scoped run, and `code_interpreter.rs` (or a new sibling execution
-path) using a lease-hydrated directory instead of its own ephemeral one when
-a run is Space-scoped. This is the actual "make it real" step and needs its
-own design pass — deciding when a run counts as Space-scoped, what happens
-to the shell tool path (no workspace today), and how a lease's backend pin
-interacts with execution-core's own instance identity.
+## 3.5. Wiring a real caller
+
+Designed 2026-09-11, grounded by tracing every real call site of
+`ExecuteStep`/`RunAgent` (execution-core's two entry points) before writing
+anything, since the size of this step depends entirely on how far upstream a
+Space's identity is actually already known.
+
+**The core finding: `space_id` is genuinely first-class on a *thread*
+record, but nowhere on the two live per-run/per-step RPCs.**
+`sessions.proto`'s `ThreadSummary` carries `space_id` (field 8) and multiple
+thread-scoped messages thread it through as caller-supplied context. But
+`ExecuteStepRequest` and `RunAgentRequest` (`execution.proto`) have **no**
+`space_id` field — confirmed against the freshest generated bindings, no
+proto/codegen drift. Only the disabled `ExecuteScheduledStepRequest` lane
+already has it. `RunDetail` (the run's own durable record, `runs.proto`) has
+neither `space_id` nor even `org_id` — a run's identity is thinner than
+expected.
+
+**Real call-site trace (three real, non-test call sites of `ExecuteStep`;
+one of `RunAgent`; none in Go or the Frontend Plane):**
+
+- `model-gateway/src/sse.rs:5969-6032` (`spawn_run_dispatch`) builds
+  `RunAgentRequest`. The enclosing SSE-invoke handler already has
+  `req.space_context: Option<ThreadSpaceContext>` in scope a few dozen lines
+  away (`sse.rs:~649-668`, client/BFF-supplied — "The V3 BFF injects this
+  after calling Control," `http_routes.rs:6108`) — genuinely a small,
+  local plumbing job to thread it into `SessionRun` and onto the request.
+  **But** `RunAgent`'s own proto comment says it's still "MVP no-tool
+  slice — a single InferenceCore.Infer round," so plumbing `space_id` onto
+  it alone would not yet make any real tool call lease-aware.
+- `model-gateway/src/tools.rs:140-166` (`handle_code_interpreter`) and
+  `model-gateway/src/browser_run.rs:419-436` (`browser_run_start`) both
+  build `ExecuteStepRequest` — this is the actual path real side-effecting
+  tool calls take (per this repo's own architecture note: model-gateway's
+  `dispatch_tool` "refuses side effects" and delegates to execution-core's
+  `execute_step_inner` for anything real). **Neither has any Space context
+  in scope today.** `browser_run.rs` explicitly passes `None, None` for
+  `ThreadSpaceContext`; `tool_loop.rs::dispatch_tool` (the caller of
+  `handle_code_interpreter`, `tool_loop.rs:1741-1773`) has `thread_id` as a
+  parameter but no space-context parameter at all, and nothing upstream of
+  it in this trace was checked further (a real "how far up does this chain
+  need to go" question, not yet answered — see Open Questions below).
+- Orchestrator-core (Go) builds bare `ExecuteStepRequest{RunId, OrgId,
+  UserId}` (`activities.go:576-582, 655`) from Temporal workflow inputs that
+  don't carry `ThreadID` either on the newer `StepInput` path
+  (`activities.go:71-76`). Never calls `RunAgent` at all.
+- No `GetThread`/single-thread-lookup RPC exists anywhere in `proto/` —
+  only owner-scoped `ListThreads`. execution-core already holds a
+  `SessionCoreClient` (`grpc.rs:161-162`, used today for run-ownership
+  checks, skills, and terminal auth) but nothing on it reads `space_id`; a
+  per-step lookup through it would also mean adding the RPC session-core
+  doesn't yet expose.
+
+**Phased plan, matching this whole design's own "smallest next slice"
+discipline rather than one large change:**
+
+1. **Phase A — proto + data plumbing only, no lease logic yet.** Add
+   `space_id` to `ExecuteStepRequest` (mirroring
+   `ExecuteScheduledStepRequest`'s already-established field). Traced one
+   hop further than the table above to answer the "how far up" open
+   question: `tool_loop.rs::dispatch_tool`'s real caller chain is
+   `dispatch_audited_tool` (`tool_loop.rs:2890`) ← `run_tool_rounds`
+   (`tool_loop.rs:3720`) ← `sse.rs:1554`, all inside `invoke_stream_sse`
+   (`sse.rs:310`) — the SAME function that already reads
+   `req.space_context: Option<ThreadSpaceContext>` earlier in its own body
+   (`sse.rs:1277`, well before the `run_tool_rounds` call at 1554).
+   `ThreadSpaceContext` (`session_flow.rs:118-133`) is actually a full
+   Space-thread-append decision bundle (`space_decision_token`,
+   `payload_digest`, `idempotency_key`, ...) — this phase uses only its
+   plain `space_id` field as an identifier, not the rest of that bundle,
+   which stays scoped to its own existing purpose. So this phase is
+   confirmed tractable: thread `space_id: &str` (empty when
+   `req.space_context` is `None`) as one new parameter through
+   `run_tool_rounds` → `dispatch_audited_tool` → `dispatch_tool` →
+   `handle_code_interpreter`/`browser_run_start` → the new
+   `ExecuteStepRequest.space_id`. Matches this file's own existing style
+   (`org_id`/`user_id`/`thread_id` are already threaded the same way; the
+   already-present `#[allow(clippy::too_many_arguments)]` on these
+   functions is a pre-existing condition this phase adds one more argument
+   to, not one it introduces). Changes no runtime behavior for a non-Space
+   call — `space_id` stays empty, exactly like `org_id`/`user_id` already do
+   for an unauthenticated legacy caller — it only makes the value *reachable*
+   at execution-core's own request boundary, where it cannot exist as a
+   concept at all today.
+2. **Phase B — the sandbox-manager client + per-run lease lifecycle.**
+   A real `SandboxManagerClient` in execution-core (the env-var-driven
+   `lazy_channel` pattern model-gateway's own dead field already
+   demonstrates, `state.rs:510-514`, but actually called this time). On the
+   first Space-scoped step of a run with no cached lease: call
+   `capability_client::request_decision` (already built and tested, S3.2
+   step 3) to get a signed capability decision, then `AcquireLease` with it
+   (already verified and pinned server-side, S3.2 step 4), then
+   `ActivateLease` before the first tool call that needs more than the
+   scratch allowlist. This is the step where every piece of machinery built
+   across S3.2 and S3.3 steps 1-3 finally gets exercised by a real caller
+   for the first time — not a new capability of its own, a wiring step.
+   Needs a decision on where per-run lease state lives (a new in-process
+   map behind a mutex, keyed by `run_id`, unless an existing per-run state
+   mechanism already fits — not yet identified).
+3. **Phase C — `code_interpreter.rs` uses the lease's hydrated workspace.**
+   When a Space-scoped lease is `ACTIVE`, hydrate its current
+   `workspace_files` manifest (needs the `GetWorkspaceManifest`-style RPC
+   this doc's §6 file list already flagged as not-yet-built) into a
+   *persistent-for-the-run* directory instead of `Workspace::create`'s
+   per-call ephemeral one, run the tool call against it, then
+   `diff_and_upload` back on `SnapshotSandbox`. The `shell` tool path (no
+   workspace concept at all today) is explicitly out of scope for this
+   phase — extending it is its own follow-up, not silently bundled in.
+
+**Open questions this design pass surfaced, not resolved:**
+- ~~How far above `dispatch_tool` does the trace need to go~~ — resolved
+  above: `invoke_stream_sse` itself, confirmed by reading the code, not
+  inferred.
+- `req.space_context` is client/BFF-declared (per `http_routes.rs:6108`'s
+  own comment, "The V3 BFF injects this after calling Control"), not
+  re-verified by model-gateway against a durable thread record before this
+  phase's use of its `space_id` field — is that trust level acceptable for
+  pinning a sandbox lease to a Space (real compute + potential egress), or
+  does Phase B need to independently confirm it (e.g. Control's own
+  capability-decision issuance in Phase B already re-checks personal-Space
+  authority server-side per S3.2, which may make this a non-issue in
+  practice — not yet confirmed against that code path specifically)?
+- Per-run lease-state storage: does execution-core have an existing
+  per-run state mechanism this can reuse, or does it need a new one?
+- Whether Phase A's `ExecuteStepRequest.space_id` should be trusted as-is
+  (matching how `org_id`/`user_id` are already trusted, sourced from
+  verified bearer claims) or needs its own verification step, given a
+  Space capability decision is a strictly more consequential grant (compute
+  + potential egress) than the read/knowledge-search scoping `org_id`
+  already gates.
 
 ## 4. Merge: run overlay → Space (this is "never last-writer-wins")
 
@@ -394,16 +515,22 @@ an existing pattern," not a second implementation of the same capability.
 3. **Hydrate/diff mechanism in execution-core** (§3) — depends on 1 (CAS)
    and 2 (manifest rows to hydrate from). Shipped as tested, standalone
    `workspace_hydrate.rs` + `sandbox.rs`'s `extra_ro_binds`; per this
-   section's own 2026-09-11 amendment, has no real caller yet — see the new
-   step 3.5 below, discovered while implementing this one.
-3.5. **Wire a real caller** (newly identified, not in the original
-   sequencing) — execution-core actually calling
-   `AcquireLease`/`ActivateLease`/`SnapshotSandbox`/`ReleaseLease` for a
-   Space-scoped run, and giving `code_interpreter.rs` (or a new sibling path)
-   a lease-hydrated directory instead of its own ephemeral one when a run is
-   Space-scoped. Blocks step 4 in practice (there is no real overlay to
-   promote without this), even though 4's SQL/RPC design doesn't itself
-   depend on it.
+   section's own 2026-09-11 amendment, has no real caller yet — see step 3.5
+   below, designed the same day after implementing this one surfaced the gap.
+3.5. **Wire a real caller** (§3.5, newly designed, not in the original
+   sequencing), itself phased:
+   - **3.5.A** — plumb `space_id` onto `ExecuteStepRequest` and its two real
+     call sites (`tools.rs`, `browser_run.rs`); pure data reachability, no
+     lease logic, no runtime behavior change for a non-Space call.
+   - **3.5.B** — the sandbox-manager gRPC client in execution-core plus
+     per-run lease acquire/activate lifecycle, chaining S3.2 step 3's
+     `capability_client.rs` and step 4's verification together for the
+     first time with a real caller.
+   - **3.5.C** — `code_interpreter.rs` uses the lease's hydrated workspace
+     instead of its own ephemeral one when Space-scoped; `shell` explicitly
+     out of scope for this phase.
+   Blocks step 4 in practice (there is no real overlay to promote without
+   3.5.C existing), even though 4's own SQL/RPC design doesn't depend on it.
 4. **Merge/`PromoteWorkspace`** (§4) — depends on 3.5 existing in practice
    (an overlay a real run actually produced), though its own SQL/RPC design
    only assumes 3's data shapes exist.
