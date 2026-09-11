@@ -52,6 +52,12 @@ pub mod message_field {
 pub mod rendezvous_field {
     pub const REGISTER_PEER: u32 = 6;
     pub const REGISTER_PEER_RESPONSE: u32 = 7;
+    /// Live-captured, not just source-cited: a real hbbs (with
+    /// `ALWAYS_USE_RELAY=Y`, Support Plane's own setting) forwarded exactly
+    /// this field number to a registered host once a controller sent
+    /// `PunchHoleRequest` for it — `4a0e0a0aa9f64a3684a5a26d84a71802` decodes
+    /// to tag `0x4a` = field 9, wire-type 2, matching `hbb_common`'s schema.
+    pub const PUNCH_HOLE: u32 = 9;
     pub const REGISTER_PK: u32 = 15;
     pub const REGISTER_PK_RESPONSE: u32 = 16;
     pub const REQUEST_RELAY: u32 = 18;
@@ -701,6 +707,103 @@ pub fn decode_register_pk_response(data: &[u8]) -> Result<RegisterPkResponse, Wi
     Ok(value)
 }
 
+// =====================================================================
+// PunchHole / RelayResponse / RequestRelay — the relay-pairing sequence
+// hbbs/hbbr use to route a controller's connection to this host once
+// `PunchHoleRequest` finds it. Field numbers and shapes are citation-backed
+// against `hbb_common`'s `protos/rendezvous.proto` at commit
+// `69cea8dafee147848ae88702029f4bf7df7224c3`; the sequence itself (which
+// message goes to which server, in which order, and that the second TCP
+// connection's stream becomes the raw peer-session channel afterward) is
+// read directly from `rustdesk`'s own `src/rendezvous_mediator.rs`
+// (`handle_punch_hole`/`create_relay`) and `src/server.rs`
+// (`create_relay_connection_`) at commit
+// `1ec1b9e7e3808b24bfc923ee1e6800ab9694e9a5`. See `docs/architecture.md`
+// for the full walkthrough and the live capture that triggered this
+// research.
+// =====================================================================
+
+/// What hbbs forwards to a registered host once a controller's
+/// `PunchHoleRequest` finds it — only the fields Verevon's own
+/// `ALWAYS_USE_RELAY=Y` deployment ever needs. `socket_addr` is an
+/// `AddrMangle`-obfuscated encoding of the controller's address; this host
+/// never decodes it, only passes it straight through into `RelayResponse`.
+pub struct PunchHole {
+    pub socket_addr: Vec<u8>,
+    /// `2` (`SYMMETRIC`) is the only value observed from a real hbbs with
+    /// `ALWAYS_USE_RELAY=Y` set — the server forces it specifically to
+    /// signal "go straight to relay, don't attempt a direct hole-punch".
+    /// Every other value is a real, distinct `NatType`, kept as the raw
+    /// wire int rather than modeled as an enum since this host only ever
+    /// acts on the relay case.
+    pub nat_type: i32,
+}
+
+pub fn decode_punch_hole(data: &[u8]) -> Result<PunchHole, WireError> {
+    let mut r = ProtoReader::new(data);
+    let mut value = PunchHole { socket_addr: Vec::new(), nat_type: 0 };
+    while !r.eof() {
+        let tag = r.read_tag()?;
+        match tag.field_number {
+            1 => value.socket_addr = r.read_length_delimited()?.to_vec(),
+            3 => value.nat_type = r.read_int32()?,
+            _ => r.skip(tag.wire_type)?,
+        }
+    }
+    Ok(value)
+}
+
+/// The wire value of `PunchHole.nat_type` that means "go straight to
+/// relay" — see [`PunchHole::nat_type`]'s doc for why this is kept as a raw
+/// int rather than a full enum.
+pub const NAT_TYPE_SYMMETRIC: i32 = 2;
+
+/// `RelayResponse{socket_addr, uuid, relay_server, id, version}` — sent to
+/// hbbs (NOT hbbr) over a fresh, short-lived TCP connection in reply to a
+/// `PunchHole` whose `nat_type` was [`NAT_TYPE_SYMMETRIC`]. The real client
+/// never reads a reply on this connection or reuses it afterward; hbbs
+/// forwards this message's contents on to the original controller.
+pub struct RelayResponse {
+    /// Passed straight through from the triggering [`PunchHole`], unchanged
+    /// — this is what lets hbbs correlate the reply back to the
+    /// controller's original request.
+    pub socket_addr: Vec<u8>,
+    pub uuid: String,
+    pub relay_server: String,
+    pub id: String,
+    pub version: String,
+}
+
+pub fn encode_relay_response(value: &RelayResponse) -> Vec<u8> {
+    let mut w = ProtoWriter::new();
+    w.bytes(1, &value.socket_addr)
+        .string(2, &value.uuid)
+        .string(3, &value.relay_server)
+        .string(4, &value.id)
+        .string(7, &value.version);
+    w.finish()
+}
+
+/// `RequestRelay{uuid, licence_key}` — sent as the FIRST message on a
+/// SEPARATE new TCP connection, this one to hbbr (not hbbs), identifying
+/// which pending relay pairing this connection continues. Every field this
+/// host doesn't set (`id`, `socket_addr`, `relay_server`, `secure`,
+/// `conn_type`, `token`) is left at its proto3 default, matching what the
+/// real client sends here (`RequestRelay{licence_key, uuid,
+/// ..Default::default()}`) — those fields matter for the CONTROLLER's own
+/// `RequestRelay` (a different call site sending the same message type),
+/// not for a host answering a `PunchHole`.
+pub struct RequestRelay {
+    pub uuid: String,
+    pub licence_key: String,
+}
+
+pub fn encode_request_relay(value: &RequestRelay) -> Vec<u8> {
+    let mut w = ProtoWriter::new();
+    w.string(2, &value.uuid).string(6, &value.licence_key);
+    w.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,5 +1115,75 @@ mod tests {
         w.int32(1, 99);
         let decoded = decode_register_pk_response(&w.finish()).unwrap();
         assert_eq!(decoded.result, RegisterPkResult::Unknown(99));
+    }
+
+    #[test]
+    fn punch_hole_decodes_the_exact_bytes_captured_live_from_a_real_hbbs() {
+        // 4a0e0a0aa9f64a3684a5a26d84a71802, minus the envelope's own
+        // `4a0e` (field 9, length 14) -- read_envelope_field's job, not
+        // this function's -- leaving just the PunchHole submessage bytes.
+        let payload = hex_decode("0a0aa9f64a3684a5a26d84a71802");
+        let decoded = decode_punch_hole(&payload).unwrap();
+        assert_eq!(decoded.socket_addr, hex_decode("a9f64a3684a5a26d84a7"));
+        assert_eq!(decoded.nat_type, NAT_TYPE_SYMMETRIC);
+    }
+
+    #[test]
+    fn envelope_around_the_live_captured_punch_hole_reads_as_field_nine() {
+        let raw = hex_decode("4a0e0a0aa9f64a3684a5a26d84a71802");
+        let (field_number, payload) = read_envelope_field(&raw).unwrap().unwrap();
+        assert_eq!(field_number, rendezvous_field::PUNCH_HOLE);
+        let decoded = decode_punch_hole(payload).unwrap();
+        assert_eq!(decoded.nat_type, NAT_TYPE_SYMMETRIC);
+    }
+
+    #[test]
+    fn relay_response_passes_socket_addr_through_unchanged() {
+        let encoded = encode_relay_response(&RelayResponse {
+            socket_addr: vec![0xaa, 0xbb, 0xcc],
+            uuid: "test-uuid".into(),
+            relay_server: "127.0.0.1:21117".into(),
+            id: "313131313".into(),
+            version: "0.1.0".into(),
+        });
+        let mut r = ProtoReader::new(&encoded);
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 1);
+        assert_eq!(r.read_length_delimited().unwrap(), &[0xaa, 0xbb, 0xcc]);
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 2);
+        assert_eq!(r.read_string().unwrap(), "test-uuid");
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 3);
+        assert_eq!(r.read_string().unwrap(), "127.0.0.1:21117");
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 4);
+        assert_eq!(r.read_string().unwrap(), "313131313");
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 7);
+        assert_eq!(r.read_string().unwrap(), "0.1.0");
+    }
+
+    #[test]
+    fn request_relay_only_sets_uuid_and_licence_key() {
+        let encoded = encode_request_relay(&RequestRelay {
+            uuid: "test-uuid".into(),
+            licence_key: "not-a-real-key-just-a-test-fixture-string".into(),
+        });
+        let mut r = ProtoReader::new(&encoded);
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 2);
+        assert_eq!(r.read_string().unwrap(), "test-uuid");
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 6);
+        assert_eq!(r.read_string().unwrap(), "not-a-real-key-just-a-test-fixture-string");
+        assert!(r.eof(), "id/socket_addr/relay_server/secure/conn_type/token must stay at proto3 defaults");
+    }
+
+    fn hex_decode(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
     }
 }

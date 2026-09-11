@@ -7,8 +7,13 @@
 //! Sequence (host's perspective): generate an ephemeral X25519 keypair, sign
 //! `IdPk{id, ephemeral_pk}` with the identity key, send `SignedId` in
 //! PLAINTEXT. Receive `PublicKey{asymmetric_value, symmetric_value}` in
-//! plaintext; unseal `symmetric_value` with the ephemeral keypair to recover
-//! the session key `K`. From here every `Message` is encrypted. Send `Hash`
+//! plaintext; `asymmetric_value` is the CONTROLLER's own ephemeral public
+//! key (needed for `va_crypto::unseal`'s X25519 DH — this is a real
+//! authenticated `crypto_box`, not an anonymous sealed box; see
+//! `va-crypto`'s docs for the live interop bug that discovered this),
+//! `symmetric_value` is the session key sealed to it, recovered via
+//! `unseal(our_ephemeral, their_ephemeral_public, symmetric_value)`. From
+//! here every `Message` is encrypted. Send `Hash`
 //! unprompted. Receive `LoginRequest`; check its password hash against the
 //! salt/challenge just sent and whichever secret(s) this device accepts.
 //! Send `LoginResponse` (success carries `PeerInfo`). Then: echo any
@@ -38,6 +43,8 @@ pub enum ProtocolError {
     EmptyEnvelope,
     #[error("message received before the session key was established")]
     NotYetEncrypted,
+    #[error("PublicKey.asymmetric_value was {0} bytes, expected exactly 32 (an X25519 public key)")]
+    MalformedPublicKey(usize),
 }
 
 /// What this device will accept as valid credentials. Real secure storage
@@ -156,7 +163,12 @@ impl HostSession {
             });
         };
         let public_key = decode_public_key(payload)?;
-        let session_key_bytes = unseal(ephemeral, &public_key.symmetric_value)?;
+        let controller_ephemeral_public: [u8; 32] = public_key
+            .asymmetric_value
+            .clone()
+            .try_into()
+            .map_err(|v: Vec<u8>| ProtocolError::MalformedPublicKey(v.len()))?;
+        let session_key_bytes = unseal(ephemeral, &controller_ephemeral_public, &public_key.symmetric_value)?;
         let mut session_key = [0u8; 32];
         session_key.copy_from_slice(&session_key_bytes[..32.min(session_key_bytes.len())]);
         let cipher = SessionCipher::new(session_key);

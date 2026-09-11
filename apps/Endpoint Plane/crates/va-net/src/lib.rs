@@ -21,12 +21,14 @@
 //! drives it forever.
 //!
 //! What a real hbbs forwards to a registered host once a controller sends
-//! `PunchHoleRequest` for it (`PunchHole`/`FetchLocalAddr`, and which
-//! channel the host is expected to reply on) is a still-open research gap —
-//! deliberately not guessed at or implemented here. See the Endpoint Plane
-//! build plan / `docs/architecture.md` for the live-capture test that closes
-//! it before that handling is added.
+//! `PunchHoleRequest` for it was live-captured (a real `PunchHole`, oneof
+//! field 9) and, for Support Plane's `ALWAYS_USE_RELAY=Y` deployment (the
+//! only branch this host needs), fully resolved by reading the real
+//! client's own relay-pairing code — see the [`relay`] module for the
+//! implementation and `docs/architecture.md` for the citation trail.
 #![allow(clippy::missing_panics_doc, clippy::missing_errors_doc)]
+
+pub mod relay;
 
 use std::net::SocketAddr;
 use std::time::Duration;

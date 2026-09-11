@@ -105,40 +105,68 @@ impl EphemeralKeyPair {
     }
 }
 
-/// Anonymous-sender sealed-box encryption (`crypto_box_seal`): used by
-/// whichever side is SENDING the session key (the controller, in the real
-/// protocol) to seal it to the other side's ephemeral public key. Exposed
-/// here so `va-testkit`'s fake controller can play that role too.
+/// Seals a message (the session key, in the real protocol) to
+/// `recipient_public` using `sender`'s own ephemeral keypair, with an
+/// all-zero nonce.
+///
+/// **Not** libsodium's anonymous `crypto_box_seal` (an earlier version of
+/// this function used that, and was wrong — see [`unseal`]'s doc for how
+/// that was caught). This is a plain authenticated `crypto_box_easy`: safe
+/// with a zero nonce here specifically because BOTH sides' keypairs are
+/// single-use, generated fresh per connection and never reused — the
+/// classic nonce-reuse hazard doesn't apply to a key that's thrown away
+/// right after. Confirmed against `@verevon/remote-core`'s own
+/// `sealSessionKey` (`crypto/SessionCrypto.ts`), which does exactly this
+/// against the same real host this crate was built to interoperate with.
 ///
 /// # Panics
 ///
 /// Never, in practice: the output buffer is always sized to exactly
-/// `message.len() + CRYPTO_BOX_SEALBYTES`, the one length `dryoc` accepts.
+/// `message.len() + CRYPTO_BOX_MACBYTES`, the one length `dryoc` accepts.
 #[must_use]
-pub fn seal(recipient_public: &[u8; 32], message: &[u8]) -> Vec<u8> {
-    let mut ciphertext = vec![0u8; message.len() + dryoc::constants::CRYPTO_BOX_SEALBYTES];
-    box_api::crypto_box_seal(&mut ciphertext, message, recipient_public)
-        .expect("crypto_box_seal: buffer length is exactly message.len() + CRYPTO_BOX_SEALBYTES");
+pub fn seal(sender: &EphemeralKeyPair, recipient_public: &[u8; 32], message: &[u8]) -> Vec<u8> {
+    let nonce = [0u8; 24];
+    let mut ciphertext = vec![0u8; message.len() + dryoc::constants::CRYPTO_BOX_MACBYTES];
+    box_api::crypto_box_easy(&mut ciphertext, message, &nonce, recipient_public, &sender.secret)
+        .expect("crypto_box_easy: buffer length is exactly message.len() + CRYPTO_BOX_MACBYTES");
     ciphertext
 }
 
-/// Opens a sealed box addressed to `recipient_public`/`recipient_secret`
-/// (the host's own ephemeral keypair). This is what the host does with
-/// `PublicKey.symmetric_value` to recover the shared session key.
+/// Opens a box `sender_public` sealed to `recipient`'s own ephemeral
+/// keypair. This is what the host does with `PublicKey.symmetric_value`
+/// (and `PublicKey.asymmetric_value` as `sender_public`) to recover the
+/// shared session key.
+///
+/// **Live-discovered bug this function used to have**: an earlier version
+/// used libsodium's anonymous `crypto_box_seal_open`, matching a
+/// same-side-only reading of the wire format — it passed every purely
+/// in-process test (`va-testkit`'s `FakeController` used the same wrong
+/// primitive on the sending side, so the two were self-consistent) but
+/// failed the instant it was tested against the REAL, independently-built
+/// `@verevon/remote-core`, which uses a plain `crypto_box_easy`/zero-nonce
+/// scheme instead (see [`seal`]'s doc). Two things using the same wrong
+/// assumption can't catch each other's bug — only an independent
+/// implementation can. Fixed to match `remote-core`'s
+/// `openSealedSessionKey`, and now needs the sender's ephemeral public key
+/// explicitly (`PublicKey.asymmetric_value` on the wire) rather than
+/// recovering it from the ciphertext itself.
 ///
 /// # Errors
 ///
 /// Returns [`CryptoError::UnsealFailed`] if `ciphertext` is too short, or if
-/// opening fails (wrong recipient keypair or corrupted ciphertext).
+/// opening fails (wrong keypair, wrong sender key, or corrupted
+/// ciphertext).
 pub fn unseal(
     recipient: &EphemeralKeyPair,
+    sender_public: &[u8; 32],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    if ciphertext.len() < dryoc::constants::CRYPTO_BOX_SEALBYTES {
+    if ciphertext.len() < dryoc::constants::CRYPTO_BOX_MACBYTES {
         return Err(CryptoError::UnsealFailed);
     }
-    let mut message = vec![0u8; ciphertext.len() - dryoc::constants::CRYPTO_BOX_SEALBYTES];
-    box_api::crypto_box_seal_open(&mut message, ciphertext, &recipient.public, &recipient.secret)
+    let nonce = [0u8; 24];
+    let mut message = vec![0u8; ciphertext.len() - dryoc::constants::CRYPTO_BOX_MACBYTES];
+    box_api::crypto_box_open_easy(&mut message, ciphertext, &nonce, sender_public, &recipient.secret)
         .map_err(|_| CryptoError::UnsealFailed)?;
     Ok(message)
 }
@@ -272,19 +300,41 @@ mod tests {
 
     #[test]
     fn seal_and_unseal_round_trips() {
+        let controller_ephemeral = EphemeralKeyPair::generate();
         let host_ephemeral = EphemeralKeyPair::generate();
         let session_key = b"0123456789abcdef0123456789abcdef".to_vec();
-        let sealed = seal(&host_ephemeral.public_key(), &session_key[..32]);
-        let opened = unseal(&host_ephemeral, &sealed).unwrap();
+        let sealed = seal(&controller_ephemeral, &host_ephemeral.public_key(), &session_key[..32]);
+        let opened = unseal(&host_ephemeral, &controller_ephemeral.public_key(), &sealed).unwrap();
         assert_eq!(opened, session_key[..32]);
     }
 
     #[test]
     fn unseal_fails_with_wrong_recipient() {
+        let controller_ephemeral = EphemeralKeyPair::generate();
         let host_ephemeral = EphemeralKeyPair::generate();
         let other_ephemeral = EphemeralKeyPair::generate();
-        let sealed = seal(&host_ephemeral.public_key(), b"secret-session-key-32-bytes-long");
-        assert!(unseal(&other_ephemeral, &sealed).is_err());
+        let sealed = seal(
+            &controller_ephemeral,
+            &host_ephemeral.public_key(),
+            b"secret-session-key-32-bytes-long",
+        );
+        assert!(unseal(&other_ephemeral, &controller_ephemeral.public_key(), &sealed).is_err());
+    }
+
+    #[test]
+    fn unseal_fails_with_wrong_sender_public_key() {
+        // The DH binding genuinely depends on BOTH keys, not just the
+        // recipient's -- claiming the wrong sender must fail too, even with
+        // the right recipient keypair.
+        let controller_ephemeral = EphemeralKeyPair::generate();
+        let impostor_ephemeral = EphemeralKeyPair::generate();
+        let host_ephemeral = EphemeralKeyPair::generate();
+        let sealed = seal(
+            &controller_ephemeral,
+            &host_ephemeral.public_key(),
+            b"secret-session-key-32-bytes-long",
+        );
+        assert!(unseal(&host_ephemeral, &impostor_ephemeral.public_key(), &sealed).is_err());
     }
 
     #[test]

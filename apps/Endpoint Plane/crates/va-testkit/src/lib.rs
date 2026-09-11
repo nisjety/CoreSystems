@@ -79,7 +79,7 @@ impl FakeController {
         self.host_ephemeral_public_key = Some(host_pk);
 
         let session_key: [u8; 32] = rand::random();
-        let sealed = seal(&host_pk, &session_key);
+        let sealed = seal(&self.my_ephemeral, &host_pk, &session_key);
 
         // Mirrors va-crypto's SessionCipher, but with send/recv swapped
         // relative to the host: what the CONTROLLER sends, the host
