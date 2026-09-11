@@ -26,16 +26,32 @@ pub mod message_field {
 
 /// `RendezvousMessage` envelope field numbers (hbbs/hbbr registration and
 /// relay negotiation) — only the ones the host actually sends or receives.
-/// `REGISTER_PK`/`REGISTER_PK_RESPONSE` closed the M0 research gap via a
-/// citation-backed read of `hbb_common`'s `protos/rendezvous.proto` at commit
+/// All four field numbers here are citation-backed against `hbb_common`'s
+/// `protos/rendezvous.proto` at commit
 /// `69cea8dafee147848ae88702029f4bf7df7224c3` (the exact submodule pin of
 /// `rustdesk-server` commit `a7736be5e40f85bfc141120dce587e836e5d4b80`, the
 /// same commit already cited elsewhere in this file and in `remote-core`'s
-/// own research). `REGISTER_PK_RESPONSE = 16` cross-checks the live wire
-/// capture already on record in `remote-core`'s `docs/rustdesk-protocol.md`
-/// ("Verified against a live hbbs"): an empty reply `82 01 00` decodes to
-/// exactly this field, wire-type 2, length 0 (proto3 default `OK`).
+/// own research). `REGISTER_PK_RESPONSE = 16` additionally cross-checks the
+/// live wire capture already on record in `remote-core`'s
+/// `docs/rustdesk-protocol.md` ("Verified against a live hbbs"): an empty
+/// reply `82 01 00` decodes to exactly this field, wire-type 2, length 0
+/// (proto3 default `OK`).
+///
+/// `REGISTER_PEER`/`REGISTER_PEER_RESPONSE` were added after a LIVE
+/// discovery, not just a source read: an M2a host that only ever sent
+/// `RegisterPk` got `OK` on every attempt, yet a real controller's
+/// `PunchHoleRequest` for it still came back "offline". Reading
+/// `rendezvous_server.rs`'s `update_addr` (only ever invoked from the
+/// `RegisterPeer` handler, never from `RegisterPk`'s) showed why: it is
+/// `RegisterPeer`, not `RegisterPk`, that refreshes a peer's `last_reg_time`
+/// — the exact value `handle_punch_hole_request` checks against its 30s
+/// offline threshold. `RegisterPk` alone establishes the id/pk association;
+/// `RegisterPeer` is the actual online keepalive a real client resends
+/// periodically, with `RegisterPeerResponse.request_pk` telling it to
+/// (re)send `RegisterPk` when the server doesn't have one on file yet.
 pub mod rendezvous_field {
+    pub const REGISTER_PEER: u32 = 6;
+    pub const REGISTER_PEER_RESPONSE: u32 = 7;
     pub const REGISTER_PK: u32 = 15;
     pub const REGISTER_PK_RESPONSE: u32 = 16;
     pub const REQUEST_RELAY: u32 = 18;
@@ -552,12 +568,56 @@ pub fn encode_switch_display(value: &SwitchDisplay) -> Vec<u8> {
 }
 
 // =====================================================================
-// RegisterPk / RegisterPkResponse — hbbs registration (UDP only; sending
-// this over TCP/WS gets an unconditional NOT_SUPPORT from a real hbbs, per
-// the same research that closed this field's numbers). `va-net` sends
-// `RegisterPk` on startup and every `REG_INTERVAL` (15s, matching the real
-// client's cadence — comfortably under hbbs's 30s offline threshold) to
-// stay registered.
+// RegisterPeer / RegisterPeerResponse — the actual online-keepalive hbbs
+// checks a peer's `last_reg_time` against (see the module doc above for how
+// this was discovered). `va-net` sends this every `REGISTRATION_INTERVAL`;
+// `RegisterPk` alone does NOT keep a peer discoverable for punch-hole
+// requests.
+// =====================================================================
+
+pub struct RegisterPeer {
+    pub id: String,
+    /// The rendezvous-server-list config version this device has already
+    /// applied. `0` (never applied any) is the correct value for a device
+    /// that ignores `ConfigUpdate` pushes entirely, which `va-net` does —
+    /// Verevon's own Support Plane config is fixed, not server-pushed.
+    pub serial: i32,
+}
+
+pub fn encode_register_peer(value: &RegisterPeer) -> Vec<u8> {
+    let mut w = ProtoWriter::new();
+    w.string(1, &value.id).int32(2, value.serial);
+    w.finish()
+}
+
+pub struct RegisterPeerResponse {
+    /// `true` means hbbs has no `pk` on file for this id yet (or this
+    /// registration's source IP changed) — the caller must send
+    /// `RegisterPk` again before this `RegisterPeer` keepalive actually
+    /// refreshes `last_reg_time` server-side.
+    pub request_pk: bool,
+}
+
+pub fn decode_register_peer_response(data: &[u8]) -> Result<RegisterPeerResponse, WireError> {
+    let mut r = ProtoReader::new(data);
+    let mut value = RegisterPeerResponse { request_pk: false };
+    while !r.eof() {
+        let tag = r.read_tag()?;
+        if tag.field_number == 2 {
+            value.request_pk = r.read_bool()?;
+        } else {
+            r.skip(tag.wire_type)?;
+        }
+    }
+    Ok(value)
+}
+
+// =====================================================================
+// RegisterPk / RegisterPkResponse — establishes the id<->pk association
+// (UDP only; sending this over TCP/WS gets an unconditional NOT_SUPPORT
+// from a real hbbs, per the same research that closed this field's
+// numbers). Does NOT by itself keep a peer online for punch-hole routing —
+// see `RegisterPeer` above.
 // =====================================================================
 
 /// `RegisterPk{id, uuid, pk, old_id, no_register_device}`. `pk` is the same
@@ -876,6 +936,32 @@ mod tests {
         assert_eq!(mr.read_int32().unwrap(), 1);
         assert_eq!(mr.read_tag().unwrap().field_number, 2);
         assert_eq!(mr.read_sint32().unwrap(), -100);
+    }
+
+    #[test]
+    fn register_peer_encodes_id_and_serial() {
+        let encoded = encode_register_peer(&RegisterPeer { id: "999888777".into(), serial: 0 });
+        let mut r = ProtoReader::new(&encoded);
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 1);
+        assert_eq!(r.read_string().unwrap(), "999888777");
+        // serial=0 is proto3's default, so a correct writer omits it.
+        assert!(r.eof());
+    }
+
+    #[test]
+    fn register_peer_response_decodes_request_pk() {
+        let mut w = ProtoWriter::new();
+        w.bool(2, true);
+        let decoded = decode_register_peer_response(&w.finish()).unwrap();
+        assert!(decoded.request_pk);
+    }
+
+    #[test]
+    fn register_peer_response_empty_payload_means_request_pk_is_false() {
+        // proto3 default: hbbs already has a pk on file, no re-send needed.
+        let decoded = decode_register_peer_response(&[]).unwrap();
+        assert!(!decoded.request_pk);
     }
 
     #[test]

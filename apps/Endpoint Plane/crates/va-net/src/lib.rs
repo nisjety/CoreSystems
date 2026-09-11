@@ -1,14 +1,24 @@
-//! UDP networking against hbbs: `RegisterPk` on startup and every
-//! [`REGISTRATION_INTERVAL`], decoding `RegisterPkResponse`. `va-protocol`
-//! owns message shapes/encoding; this crate owns the socket.
+//! UDP networking against hbbs: registration and the online keepalive.
+//! `va-protocol` owns message shapes/encoding; this crate owns the socket.
 //!
-//! `RegisterPk`'s field numbers, required fields, and the real client's
-//! re-registration cadence are protocol FACTS verified against
-//! `hbb_common`'s public `protos/rendezvous.proto` (commit
+//! Field numbers, required fields, and the real client's re-registration
+//! cadence are protocol FACTS verified against `hbb_common`'s public
+//! `protos/rendezvous.proto` (commit
 //! `69cea8dafee147848ae88702029f4bf7df7224c3`) and `rustdesk-server`'s
 //! `rendezvous_server.rs` (commit `a7736be5e40f85bfc141120dce587e836e5d4b80`)
 //! — see `va-protocol`'s `messages.rs` for the full citation. No `.proto`
 //! text or server/client code is copied here.
+//!
+//! **`RegisterPk` alone does not keep a peer online.** An early version of
+//! this crate sent only `RegisterPk`, which hbbs accepted (`OK` every time),
+//! yet a real controller's `PunchHoleRequest` for that id still came back
+//! "offline" — a real, live-observed bug, not a hypothetical. Reading
+//! `rendezvous_server.rs`'s `update_addr` (invoked only from the
+//! `RegisterPeer` handler, never from `RegisterPk`'s) explained why: hbbs
+//! checks a peer's `last_reg_time` against a 30s offline threshold, and only
+//! `RegisterPeer` ever refreshes it. [`RegistrationClient::ensure_online_once`]
+//! is the corrected per-cycle operation; [`RegistrationClient::run_keepalive`]
+//! drives it forever.
 //!
 //! What a real hbbs forwards to a registered host once a controller sends
 //! `PunchHoleRequest` for it (`PunchHole`/`FetchLocalAddr`, and which
@@ -26,8 +36,8 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 use va_protocol::{
-    decode_register_pk_response, read_envelope_field, rendezvous_field, wrap_message, RegisterPk,
-    RegisterPkResult,
+    decode_register_peer_response, decode_register_pk_response, read_envelope_field,
+    rendezvous_field, wrap_message, RegisterPeer, RegisterPk, RegisterPkResult,
 };
 
 /// The real client's steady-state re-registration cadence (`REG_INTERVAL` in
@@ -43,16 +53,21 @@ pub enum NetError {
     Io(#[from] std::io::Error),
     #[error("wire decoding failed: {0}")]
     Wire(#[from] va_wire::WireError),
-    #[error("hbbs rejected registration: {0:?}")]
+    #[error("hbbs rejected RegisterPk: {0:?}")]
     Rejected(RegisterPkResult),
-    #[error("hbbs did not reply to RegisterPk within {0:?}")]
+    #[error("hbbs did not reply within {0:?}")]
     Timeout(Duration),
     #[error("hbbs replied with an unexpected message (field {0})")]
     UnexpectedReply(u32),
+    #[error(
+        "hbbs asked for a fresh RegisterPk again immediately after we sent one \
+         -- registration is not sticking, this is not the expected steady state"
+    )]
+    PkStillRequested,
 }
 
 /// One registered UDP session against hbbs. Owns the socket; callers drive
-/// [`RegistrationClient::register_once`] on a timer, or call
+/// [`RegistrationClient::ensure_online_once`] on a timer, or call
 /// [`RegistrationClient::run_keepalive`] to do that automatically forever.
 pub struct RegistrationClient {
     socket: UdpSocket,
@@ -97,19 +112,51 @@ impl RegistrationClient {
         self.hbbs_addr
     }
 
-    /// Sends one `RegisterPk` and waits up to `RESPONSE_TIMEOUT` for
-    /// `RegisterPkResponse`. Returns `Ok(())` only for
-    /// [`RegisterPkResult::Ok`] — every other result (including one this
-    /// catalog doesn't recognize) is a [`NetError::Rejected`] the caller
-    /// should surface, not silently retry forever on.
+    /// Sends one `RegisterPeer` and waits up to `RESPONSE_TIMEOUT` for
+    /// `RegisterPeerResponse`, returning its `request_pk` flag. This — not
+    /// `RegisterPk` — is what refreshes hbbs's `last_reg_time` for this
+    /// peer (see the module docs). Prefer
+    /// [`ensure_online_once`](Self::ensure_online_once) unless you
+    /// specifically need to inspect `request_pk` yourself.
     ///
     /// # Errors
     ///
-    /// [`NetError::Timeout`] if hbbs never replies, [`NetError::Rejected`]
-    /// if it replies with a non-`OK` result, [`NetError::UnexpectedReply`]
-    /// if it replies with a different message entirely, or [`NetError::Io`]
-    /// / [`NetError::Wire`] for a transport or decode failure.
-    pub async fn register_once(&self) -> Result<(), NetError> {
+    /// [`NetError::Timeout`], [`NetError::UnexpectedReply`],
+    /// [`NetError::Io`], or [`NetError::Wire`].
+    pub async fn register_peer_once(&self) -> Result<bool, NetError> {
+        let payload = va_protocol::encode_register_peer(&RegisterPeer {
+            id: self.id.clone(),
+            // We never apply a server-pushed rendezvous-server-list config
+            // (Verevon's Support Plane config is fixed, not server-pushed),
+            // so we always report having applied revision 0.
+            serial: 0,
+        });
+        let envelope = wrap_message(rendezvous_field::REGISTER_PEER, &payload);
+        self.socket.send(&envelope).await?;
+
+        let (field_number, payload) = self.recv_envelope().await?;
+        if field_number != rendezvous_field::REGISTER_PEER_RESPONSE {
+            return Err(NetError::UnexpectedReply(field_number));
+        }
+        Ok(decode_register_peer_response(&payload)?.request_pk)
+    }
+
+    /// Sends one `RegisterPk` and waits up to `RESPONSE_TIMEOUT` for
+    /// `RegisterPkResponse`. Establishes the id<->pk association; does NOT
+    /// by itself keep this peer online for punch-hole routing — call
+    /// [`register_peer_once`](Self::register_peer_once) (or
+    /// [`ensure_online_once`](Self::ensure_online_once)) for that. Returns
+    /// `Ok(())` only for [`RegisterPkResult::Ok`] — every other result
+    /// (including one this catalog doesn't recognize) is a
+    /// [`NetError::Rejected`] the caller should surface, not silently retry
+    /// forever on.
+    ///
+    /// # Errors
+    ///
+    /// [`NetError::Timeout`], [`NetError::Rejected`],
+    /// [`NetError::UnexpectedReply`], [`NetError::Io`], or
+    /// [`NetError::Wire`].
+    pub async fn register_pk_once(&self) -> Result<(), NetError> {
         let payload = va_protocol::encode_register_pk(&RegisterPk {
             id: self.id.clone(),
             uuid: self.uuid.clone(),
@@ -118,38 +165,64 @@ impl RegistrationClient {
         let envelope = wrap_message(rendezvous_field::REGISTER_PK, &payload);
         self.socket.send(&envelope).await?;
 
-        let mut buf = [0u8; 1500];
-        let n = timeout(RESPONSE_TIMEOUT, self.socket.recv(&mut buf))
-            .await
-            .map_err(|_elapsed| NetError::Timeout(RESPONSE_TIMEOUT))??;
-
-        let (field_number, response_payload) =
-            read_envelope_field(&buf[..n])?.ok_or(NetError::UnexpectedReply(0))?;
+        let (field_number, payload) = self.recv_envelope().await?;
         if field_number != rendezvous_field::REGISTER_PK_RESPONSE {
             return Err(NetError::UnexpectedReply(field_number));
         }
-        let response = decode_register_pk_response(response_payload)?;
-        match response.result {
+        match decode_register_pk_response(&payload)?.result {
             RegisterPkResult::Ok => Ok(()),
             other => Err(NetError::Rejected(other)),
         }
     }
 
-    /// Registers once immediately, then re-registers every
-    /// [`REGISTRATION_INTERVAL`] forever — returns only on the first
-    /// [`register_once`](Self::register_once) failure, which the caller
-    /// should treat as fatal (reconnect from scratch rather than retrying
-    /// this same loop).
+    /// The real per-cycle keepalive operation: sends `RegisterPeer`, and if
+    /// hbbs asks for a fresh `pk` (no `pk` on file yet for this id, or this
+    /// registration's source IP changed since the last one), sends
+    /// `RegisterPk` and then `RegisterPeer` again so `last_reg_time` is
+    /// actually refreshed within this same call — hbbs's own handler skips
+    /// that update on any `RegisterPeer` call where `request_pk` came back
+    /// `true`.
     ///
     /// # Errors
     ///
-    /// Whatever [`register_once`](Self::register_once) returns on its first
-    /// failure.
+    /// Whatever [`register_peer_once`](Self::register_peer_once) or
+    /// [`register_pk_once`](Self::register_pk_once) return, or
+    /// [`NetError::PkStillRequested`] if hbbs asks for `RegisterPk` again
+    /// immediately after we just sent one (registration not sticking).
+    pub async fn ensure_online_once(&self) -> Result<(), NetError> {
+        if self.register_peer_once().await? {
+            self.register_pk_once().await?;
+            if self.register_peer_once().await? {
+                return Err(NetError::PkStillRequested);
+            }
+        }
+        Ok(())
+    }
+
+    /// Calls [`ensure_online_once`](Self::ensure_online_once) immediately,
+    /// then every [`REGISTRATION_INTERVAL`] forever — returns only on its
+    /// first failure, which the caller should treat as fatal (reconnect
+    /// from scratch rather than retrying this same loop).
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`ensure_online_once`](Self::ensure_online_once) returns on
+    /// its first failure.
     pub async fn run_keepalive(&self) -> Result<(), NetError> {
         loop {
-            self.register_once().await?;
-            tracing::debug!(hbbs = %self.hbbs_addr, id = %self.id, "RegisterPk accepted");
+            self.ensure_online_once().await?;
+            tracing::debug!(hbbs = %self.hbbs_addr, id = %self.id, "online with hbbs");
             tokio::time::sleep(REGISTRATION_INTERVAL).await;
         }
+    }
+
+    async fn recv_envelope(&self) -> Result<(u32, Vec<u8>), NetError> {
+        let mut buf = [0u8; 1500];
+        let n = timeout(RESPONSE_TIMEOUT, self.socket.recv(&mut buf))
+            .await
+            .map_err(|_elapsed| NetError::Timeout(RESPONSE_TIMEOUT))??;
+        let (field_number, payload) =
+            read_envelope_field(&buf[..n])?.ok_or(NetError::UnexpectedReply(0))?;
+        Ok((field_number, payload.to_vec()))
     }
 }

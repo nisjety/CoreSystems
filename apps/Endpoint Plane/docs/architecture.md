@@ -99,28 +99,78 @@ hbbs registration):**
     registration, and a real `Peer <id> uuid mismatch: <stored> vs <new>`
     warning for the rejected one — not just our own client-side
     interpretation of the response bytes.
+  - **A second, more important bug this same live-testing caught**:
+    `RegisterPk` alone does NOT keep a peer online. The very first live
+    attempt to drive a real `PunchHoleRequest` against a `RegisterPk`-only
+    "registered" host got back "the remote device is offline" from
+    `remote-core`'s own harness — a real, observed failure, not a
+    hypothetical. Reading `rendezvous_server.rs`'s `update_addr` (invoked
+    only by the `RegisterPeer` handler, never `RegisterPk`'s) showed why:
+    hbbs checks a peer's `last_reg_time` against a 30s offline threshold,
+    and only `RegisterPeer` (oneof field 6, response field 7) ever
+    refreshes it. `RegistrationClient::ensure_online_once` now does the
+    real dance (`RegisterPeer` → if `request_pk`, `RegisterPk` then
+    `RegisterPeer` again) and is live-tested end to end: byte-for-byte, a
+    fresh id gets `request_pk=true` (`3a021001`), `RegisterPk` gets `OK`
+    (`820100`), and the follow-up `RegisterPeer` gets `request_pk=false`
+    (`3a00`) — confirmed as the actual fix by then successfully triggering
+    a real `PunchHole` forward (see below), where the same host previously
+    only got "offline".
 
-**Not started, and a genuine open research question (M2b — relay pairing):**
+**M2b — relay pairing: the wire spec is now resolved, the code isn't
+written yet.**
 
-- What a real host is supposed to do when hbbs forwards a `PunchHole`/
-  `FetchLocalAddr` message once a controller sends `PunchHoleRequest` for
-  it. Three independent source reads disagree on the reply channel:
-  `rustdesk-server`'s own handlers (`handle_hole_sent`/`handle_local_addr`)
-  only accept the host's `PunchHoleSent`/`LocalAddr` reply over a TCP/WS
-  control connection (its UDP arm for those is an explicit no-op, citing
-  reflection/amplification abuse) — but the real native client's traced
-  behavior (`rendezvous_mediator.rs::handle_punch_hole`) instead opens a
-  **brand-new UDP socket** and sends `PunchHoleSent` straight to the
-  controller's decoded address, never touching a TCP/WS channel to hbbs at
-  all for this reply (with a third branch for a host-initiated relay
-  connection when NAT type is symmetric). Guessing between these would
-  repeat exactly the mistake M0 avoided. Closing it needs a live capture:
-  register a host, drive a real `PunchHoleRequest` against the same local
-  hbbs (e.g. via `remote-core`'s own `RendezvousClient`, which already
-  implements sending it with `force_relay: true`), and observe on the
-  host's UDP socket and on any TCP/WS connection whether `PunchHole`/
-  `FetchLocalAddr` actually arrives and which channel the expected reply
-  belongs on — before `va-net` grows any punch-hole/relay-pairing code.
+- **Live-captured, not guessed**: with a host properly online (via
+  `ensure_online_once`), a real `PunchHoleRequest` driven from
+  `remote-core`'s `apps/remote-dev` harness produced an actual `PunchHole`
+  forward on the host's registered UDP socket — `4a0e0a0aa9f64a3684a5a26d84a71802`,
+  decoding to oneof field **9** (`PunchHole`, cross-checking `hbb_common`'s
+  proto directly), containing `socket_addr` (field 1, the controller's
+  `AddrMangle`-obfuscated address, opaque bytes we never need to decode
+  ourselves — only pass through) and `nat_type` (field 3) `= 2`
+  (`SYMMETRIC`) — forced because Support Plane sets `ALWAYS_USE_RELAY=Y`
+  (`rendezvous_server.rs`: `if ALWAYS_USE_RELAY.load(...) { ph.nat_type =
+  NatType::SYMMETRIC.into(); // will force relay }`). This also resolves an
+  "Unknowns" entry `remote-core`'s own `docs/rustdesk-protocol.md` flagged:
+  `RendezvousClient` already implements handling a `RelayResponse` arriving
+  in place of `PunchHoleResponse` — because for a forced-relay deployment
+  like ours, that IS what happens next, not a hypothetical alternate path.
+- **What the host does on `nat_type == SYMMETRIC`** (the ONLY branch
+  Verevon's deployment ever needs — `ALWAYS_USE_RELAY=Y` means our host
+  never takes the direct-hole-punch branches at all), read directly from
+  the native client's own `handle_punch_hole`/`create_relay`
+  (`rustdesk@1ec1b9e7`, `src/rendezvous_mediator.rs:645-717,516-559`):
+  1. Generate a fresh random UUID string (the real client uses
+     `Uuid::new_v4()`; format compatibility with hbbr, not the exact RNG,
+     is what matters).
+  2. Resolve a relay server address from THIS DEVICE's own configuration
+     (Support Plane's `SUPPORT_PLANE_RELAY_ADDR`) — the live-captured
+     `PunchHole` carried an EMPTY `relay_server` field, so the host cannot
+     rely on hbbs supplying one here; the real client falls back to its own
+     configured default for exactly this reason.
+  3. Open a NEW plain TCP connection to hbbs — the SAME host:port already
+     used for UDP registration (port 21116 accepts both transports for the
+     rendezvous protocol; confirmed by `RendezvousMediator::start`'s
+     `host` string being shared verbatim between `start_udp` and this TCP
+     `connect_tcp(&*self.host, ...)` call).
+  4. Send `RelayResponse{socket_addr: <the PunchHole's socket_addr field,
+     UNCHANGED>, uuid, relay_server, id, version}` as a `RendezvousMessage`
+     (oneof field 19) framed with the SAME `BytesCodec`-style length prefix
+     `va-wire` already implements for the peer session — this is a plain,
+     short-lived TCP send, not a persistent control channel; the real
+     client never reuses this socket afterward.
+  5. Separately, open the actual relay data connection to the relay server
+     from step 2, using the SAME uuid, and run `HostSession` over it exactly
+     as `va-testkit`'s `FakeController` already exercises against a fake
+     TCP stream — this is the point M1's protocol state machine and M2b's
+     networking finally meet.
+  - `PunchHoleSent`/`LocalAddr` (the TCP/WS-only messages
+    `rendezvous_server.rs` handles) are for the DIRECT hole-punch case
+    only, which a forced-relay deployment like Verevon's never takes — the
+    earlier "disagreement" recorded here was real, but doesn't matter for
+    our actual configuration, and does not need resolving to proceed.
+  - Not yet implemented: `va-net` doesn't send `RelayResponse` or connect
+    to hbbr yet. This is the concrete next step, not a research gap.
 - Input injection, file transfer, a Verevon Control-Plane identity contract
   for the agent, cross-platform support, packaging/installer, and any UI —
   all explicitly out of scope for this pass; see the build plan for why.
@@ -129,10 +179,15 @@ hbbs registration):**
 
 ```bash
 cd "apps/Endpoint Plane"
-cargo test -p va-crypto -p va-wire -p va-protocol -p va-testkit -p va-net   # 46 unit tests, 2 live (ignored)
+cargo test -p va-crypto -p va-wire -p va-protocol -p va-testkit -p va-net   # 49 unit tests, 4 live (ignored)
 cargo clippy -p va-crypto -p va-wire -p va-protocol -p va-testkit -p va-net --all-targets  # 0 warnings
 # Live, not mocked -- needs `docker compose up -d hbbs hbbr readiness` in apps/Support Plane first:
 cargo test -p va-net --test register_live -- --ignored --nocapture
 cargo build --workspace --exclude va-encode   # everything except the pkg-config-blocked crate
 cargo build -p verevon-agent                  # the actual binary
+
+# Diagnostic tool (not a test) that produced the PunchHole live capture above:
+# registers a device id and dumps whatever hbbs forwards next. Drive a real
+# connection attempt against the same id (e.g. via apps/remote-dev) while it runs.
+cargo run -p va-net --example listen_for_punch_hole -- <device-id>
 ```
