@@ -1,0 +1,16 @@
+[package]
+name = "va-crypto"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dryoc = "1"
+sha2 = "0.11"
+thiserror = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+hex = "0.4"

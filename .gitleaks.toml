@@ -58,3 +58,19 @@ regexTarget = "match"
 regexes = [
   '''^api v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.+-]+)?(?:/go\.mod)? h1:[A-Za-z0-9+/]{43}=$''',
 ]
+
+[[allowlists]]
+# Public cryptographic primitive/cipher names, not secrets. generic-api-key's
+# entropy heuristic occasionally fires when one of these sits near the word
+# "key" (e.g. "X25519 sealed-box key exchange, XSalsa20-Poly1305 secretbox") —
+# confirmed 2026-09-11 in apps/Endpoint Plane's docs, describing the same
+# NaCl/libsodium primitives apps/Frontend Plane/verevonv3/packages/remote-core
+# already documents elsewhere without incident. Matched on the exact secret
+# string gitleaks reports, not the path, so a real key merely resembling one
+# of these names is unaffected.
+description = "Public cryptographic algorithm/cipher names"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = [
+  '''^(XSalsa20-Poly1305|ChaCha20-Poly1305|XChaCha20-Poly1305|Curve25519|Ed25519|X25519)$''',
+]

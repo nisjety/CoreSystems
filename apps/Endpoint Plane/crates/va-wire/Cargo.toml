@@ -1,0 +1,11 @@
+[package]
+name = "va-wire"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+bytes = { workspace = true }

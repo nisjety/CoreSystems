@@ -1,0 +1,18 @@
+[package]
+name = "va-protocol"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+va-wire = { path = "../va-wire" }
+va-crypto = { path = "../va-crypto" }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+va-testkit = { path = "../va-testkit" }

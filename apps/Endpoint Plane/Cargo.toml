@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/va-crypto",
+  "crates/va-wire",
+  "crates/va-protocol",
+  "crates/va-testkit",
+  "crates/va-net",
+  "crates/va-capture",
+  "crates/va-encode",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+bytes = "1"
+rand = "0.9"
+
+[package]
+name = "verevon-agent"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "verevon-agent"
+path = "src/main.rs"
+
+[dependencies]
+# va-net, va-capture, va-encode are deliberately NOT yet listed here: this
+# binary doesn't wire them up yet (that's M2/M3, see the build plan), and
+# va-encode specifically cannot build on this machine right now (its
+# vpx-encode dependency needs a system libvpx via pkg-config, which isn't
+# installed) -- known and expected, not a regression. va-capture DOES build
+# cleanly here (confirmed) but is left out until main.rs actually uses it.
+va-crypto = { path = "crates/va-crypto" }
+va-wire = { path = "crates/va-wire" }
+va-protocol = { path = "crates/va-protocol" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true
