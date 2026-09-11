@@ -100,6 +100,16 @@ pub struct LaunchOptions<'a> {
     pub cwd: Option<&'a Path>,
     /// Environment derivation. Defaults to [`SandboxEnv::Inherit`].
     pub env: SandboxEnv<'a>,
+    /// Additional `(host_path, mount_path)` pairs bound read-only, each as
+    /// its own `--ro-bind host mount` — for mounting a durable, shared
+    /// layer (e.g. an org's read-only workspace files, S3.3 durable
+    /// workspace design §3) at a distinct path from the policy's own
+    /// writable root, rather than only ever getting the whole-filesystem
+    /// `--ro-bind / /` baseline. Emitted after the writable-root binds, so
+    /// those still win where a path overlaps (same ordering rule as the
+    /// existing writable-root/read-only-root relationship below). Empty by
+    /// default — every existing caller is unaffected.
+    pub extra_ro_binds: &'a [(PathBuf, PathBuf)],
 }
 
 /// Build the bubblewrap argument vector for `policy`, wrapping `program args`.
@@ -186,6 +196,15 @@ fn assemble_argv(
         argv.push("--bind".into());
         argv.push(p.clone());
         argv.push(p);
+    }
+
+    // Extra read-only layers (e.g. a durable Space workspace's org-level
+    // files) bound at their own distinct mount paths, after the writable
+    // roots so a real writable root always wins if a path ever overlapped.
+    for (host, mount) in options.extra_ro_binds {
+        argv.push("--ro-bind".into());
+        argv.push(host.to_string_lossy().into_owned());
+        argv.push(mount.to_string_lossy().into_owned());
     }
 
     // Only an unshared net namespace fully blocks egress. `AllowDomains` keeps
@@ -443,6 +462,59 @@ mod tests {
         assert!(windowed(&argv, &["--bind", "/tmp/agent", "/tmp/agent"]));
     }
 
+    #[test]
+    fn extra_ro_binds_are_emitted_after_the_writable_roots() {
+        let p = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/work")],
+            network: MpNetworkPolicy::Disabled,
+        };
+        let extra_ro_binds = [(
+            PathBuf::from("/var/lib/execution-core/org-a/knowledge"),
+            PathBuf::from("/mnt/org"),
+        )];
+        let options = LaunchOptions {
+            extra_ro_binds: &extra_ro_binds,
+            ..LaunchOptions::default()
+        };
+        let argv = build_bwrap_argv_with(&p, "bash", &args(&["-c", "echo hi"]), options)
+            .expect("wrapped");
+        assert!(windowed(&argv, &["--bind", "/work", "/work"]));
+        assert!(windowed(
+            &argv,
+            &[
+                "--ro-bind",
+                "/var/lib/execution-core/org-a/knowledge",
+                "/mnt/org"
+            ]
+        ));
+        let bind_index = argv.iter().position(|a| a == "--bind").unwrap();
+        let last_ro_bind_index = argv.iter().rposition(|a| a == "--ro-bind").unwrap();
+        assert!(
+            last_ro_bind_index > bind_index,
+            "extra_ro_binds must be emitted after the writable-root binds: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn extra_ro_binds_defaults_to_empty_and_changes_nothing() {
+        let p = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/work")],
+            network: MpNetworkPolicy::Disabled,
+        };
+        let with_default = build_bwrap_argv(&p, "true", &[]).expect("wrapped");
+        let with_explicit_empty = build_bwrap_argv_with(
+            &p,
+            "true",
+            &[],
+            LaunchOptions {
+                extra_ro_binds: &[],
+                ..LaunchOptions::default()
+            },
+        )
+        .expect("wrapped");
+        assert_eq!(with_default, with_explicit_empty);
+    }
+
     /// The argv must NOT mount a fresh procfs. `--proc /proc` together with
     /// `--unshare-pid` requires `CAP_SYS_ADMIN`, and the service container runs
     /// with none, so bubblewrap died before exec ("Can't mount proc on
@@ -504,6 +576,7 @@ mod tests {
             LaunchOptions {
                 cwd: Some(&ws),
                 env: SandboxEnv::Only(&allowlist),
+                ..LaunchOptions::default()
             },
         )
         .expect("wrapped");

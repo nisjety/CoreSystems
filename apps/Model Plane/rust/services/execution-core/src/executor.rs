@@ -242,6 +242,7 @@ pub async fn execute_sandboxed_in_dir(
     let options = sandbox::LaunchOptions {
         cwd: Some(cwd),
         env: sandbox::SandboxEnv::Only(env),
+        ..sandbox::LaunchOptions::default()
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
     require_requested_isolation(policy, cmd.sandboxed, egress_proxy_configured())?;

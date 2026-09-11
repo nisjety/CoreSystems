@@ -222,6 +222,59 @@ today, and the bwrap plumbing is untouched:
    anything reaches CAS — closing the loop the design doc that built it
    already anticipated ("ready to call once \[a real write path\] lands").
 
+**Amendment, 2026-09-11, during step 3 implementation — a gap this
+section's original wording didn't account for.** Implementing §3 surfaced a
+real, previously undocumented gap: **no service anywhere in this repo
+currently calls sandbox-manager's lease RPCs as a client.**
+`capability-ownership-matrix.md`'s "execution-core requests lease" claim
+does not match the code, confirmed by direct search: execution-core has no
+`SandboxManagerClient` at all. `model-gateway` constructs one
+(`state.rs:122`, `state.rs:510-514`, env vars `SANDBOX_MANAGER_URL`/
+`SANDBOX_MANAGER_ADDR`) but never calls a single RPC on it anywhere in this
+repo. And execution-core's only real "workspace directory" concept —
+`code_interpreter.rs`'s `Workspace` (`code_interpreter.rs:303-346`) — is
+fully ephemeral: created per tool call and deleted on `Drop` covering every
+return path by design (its own doc comment: *"Cleanup MUST NOT hang off the
+happy path"*), with no `lease_id`/`space_id` anywhere in its construction.
+The `shell` tool path (`executor::execute_sandboxed`) has no workspace
+concept at all.
+
+This means the hydrate/diff mechanism above has no real trigger today, for
+the same reason the CAS client (step 1) and sandbox-manager's own lease RPCs
+(S3.2) shipped with no consumer: the caller-side wiring doesn't exist yet,
+and building it means redesigning `code_interpreter.rs`'s carefully-built
+ephemeral lifecycle to become lease/Space-aware — a distinct, larger change
+deserving its own design pass, not something to fold into "add a CAS client
+call."
+
+**What step 3 actually delivers, scoped to this reality:**
+- `src/workspace_hydrate.rs` (new) — `hydrate`/`diff_and_upload`, fully
+  tested against a mocked CAS backend (`wiremock`), including a UTF-8-safety
+  issue this exact port needed to get right that the Go original doesn't
+  have: `ExcludeCredentials` (`internal/snapshot/exclude.go`) works safely on
+  arbitrary bytes in Go because Go's `string` type is just an opaque byte
+  sequence — `string(content)`/`[]byte(scrubbed)` round-trips losslessly
+  even for invalid UTF-8. Rust's `String`/`&str` must be valid UTF-8, so a
+  naive port using `String::from_utf8_lossy` would silently corrupt any
+  genuinely binary file (an image, a compiled artifact) by replacing invalid
+  byte sequences with U+FFFD. `workspace_hydrate.rs`'s `redact` only scrubs
+  content that decodes as valid UTF-8, passing binary content through
+  byte-for-byte unchanged otherwise — verified by a dedicated test using
+  non-UTF-8 bytes and an exact-byte-match mock assertion, not just an "it
+  didn't panic" check.
+- `src/sandbox.rs`'s `extra_ro_binds` extension, exactly as originally
+  planned above.
+
+**Deferred, newly identified, not part of this doc's original §8
+sequencing:** wiring a real caller — execution-core actually calling
+`AcquireLease`/`ActivateLease`/`SnapshotSandbox`/`ReleaseLease` for a
+Space-scoped run, and `code_interpreter.rs` (or a new sibling execution
+path) using a lease-hydrated directory instead of its own ephemeral one when
+a run is Space-scoped. This is the actual "make it real" step and needs its
+own design pass — deciding when a run counts as Space-scoped, what happens
+to the shell tool path (no workspace today), and how a lease's backend pin
+interacts with execution-core's own instance identity.
+
 ## 4. Merge: run overlay → Space (this is "never last-writer-wins")
 
 A run's overlay is never written directly into the Space's `run_id IS NULL`
@@ -338,10 +391,22 @@ an existing pattern," not a second implementation of the same capability.
 2. **Postgres port of `lease.Store`/`snapshot.Store`** (§2) — closes S3.2's
    own named "restart" gap; existing `server_test.go` behavior must not
    change, only the storage backend underneath it.
-3. **Hydrate/diff wiring in execution-core** (§3) — depends on 1 (CAS) and 2
-   (manifest rows to hydrate from).
-4. **Merge/`PromoteWorkspace`** (§4) — depends on 3 existing (an overlay to
-   promote).
+3. **Hydrate/diff mechanism in execution-core** (§3) — depends on 1 (CAS)
+   and 2 (manifest rows to hydrate from). Shipped as tested, standalone
+   `workspace_hydrate.rs` + `sandbox.rs`'s `extra_ro_binds`; per this
+   section's own 2026-09-11 amendment, has no real caller yet — see the new
+   step 3.5 below, discovered while implementing this one.
+3.5. **Wire a real caller** (newly identified, not in the original
+   sequencing) — execution-core actually calling
+   `AcquireLease`/`ActivateLease`/`SnapshotSandbox`/`ReleaseLease` for a
+   Space-scoped run, and giving `code_interpreter.rs` (or a new sibling path)
+   a lease-hydrated directory instead of its own ephemeral one when a run is
+   Space-scoped. Blocks step 4 in practice (there is no real overlay to
+   promote without this), even though 4's SQL/RPC design doesn't itself
+   depend on it.
+4. **Merge/`PromoteWorkspace`** (§4) — depends on 3.5 existing in practice
+   (an overlay a real run actually produced), though its own SQL/RPC design
+   only assumes 3's data shapes exist.
 5. **Data Plane promotion client** (§5) — independent of 1-4 in principle
    (it only needs *some* content to promote), but sequenced last since it's
    the lowest-priority piece for "a workspace that survives a restart," which

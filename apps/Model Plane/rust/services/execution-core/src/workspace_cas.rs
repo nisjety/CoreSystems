@@ -83,7 +83,15 @@ impl CasClient {
         Self::new_with_transport(&endpoint, &bucket, &access_key, &secret_key, &region).map(Some)
     }
 
-    fn new_with_transport(
+    /// `pub(crate)` rather than private: `workspace_hydrate.rs`'s own tests
+    /// are a second, legitimate crate-internal consumer that needs to point
+    /// a real `CasClient` at a `wiremock` server directly, rather than
+    /// mutating process-global env vars through `from_env` (this crate's
+    /// own `capability_client.rs` tests already accept that pattern for
+    /// their own narrower needs, but a second consumer is exactly the
+    /// signal this repo's own stated policy uses to widen an internal seam
+    /// instead of duplicating around it).
+    pub(crate) fn new_with_transport(
         endpoint: &str,
         bucket: &str,
         access_key: &str,
