@@ -2452,6 +2452,8 @@ the first slice (`ExecuteStep`'s bearer gate is a literal
 `tool_name == "code_interpreter"`; `RunAgent` already demands the bearer for
 any Space-scoped run and is where background work belongs).
 
+**Step 1 implemented 2026-09-13** — see the entry below.
+
 **Genuinely new mechanisms, named as such:** TERM→grace→KILL for a child
 (the repo signals only itself today; mechanism for reaching the sandboxed
 command's PID is resolved on the Linux runtime image in step 4, contract
@@ -2461,3 +2463,77 @@ chain); a `--flag value` argv redaction rule (existing patterns key on
 staleness UPDATE, no claims). Sequencing: registry → RPCs/authz/lease column
 → Control → host (flag-gated, default off) → tools/capability → human read
 path. Full detail: design doc §§1-10.
+## S4.2 step 1 implemented — the durable process registry, and a bug only a real planner could find (2026-09-13)
+
+**State:** `implemented` (design doc §2, §10 step 1). No RPC reaches it yet;
+this is the primitive, in the same "ship it tested and uninvoked" shape every
+S3.3 slice used.
+
+**What landed.** Migration `0003_process_registry` (`sandbox_processes` +
+`sandbox_process_output`, plus `leases.processes_permitted` defaulting to
+FALSE so every lease acquired before Control could grant `space:processes`
+reads as not permitted rather than being grandfathered in);
+`internal/process` (the store, and sandbox-manager's first background
+goroutine); `internal/redact` (the scrub pattern set promoted out of
+`internal/snapshot`, which keeps calling it — its existing tests are the
+regression lock on the move — plus the one rule neither language had:
+`--token abc123` as SEPARATE argv elements, unreachable by every existing
+pattern because they all key on a `:` or `=` separator).
+
+**No transactions, deliberately.** This store has a concurrent-writer problem
+`lease.Store` does not: a superseded host must not append to a process a newer
+boot has taken over. Rather than introduce `Begin`/`FOR UPDATE` into a package
+family that has never used them, every host-side write carries its fence
+(`id + org + backend_id + host_epoch + a live state`) INSIDE the statement —
+the same "fold the read into the write" shape `workspace.Store.Promote`
+adopted after an adversarial review found its lost-update window. A fenced
+write by a stale host matches zero rows and lands nothing, proven against real
+Postgres rather than asserted.
+
+**Host-assigned cursors.** The precedents were weighed, not defaulted to:
+session-core's `events.step_ordinal` MAX+1 trigger names its own
+single-writer caveat and makes consumers retry on unique violations;
+`messages.sequence` is race-free but not idempotent across a retried batch;
+`mp-eventlog::Cursor` has zero consumers. The host is the single writer by
+construction (the fence says so), so it assigns `seq` and the primary key on
+`(process_id, seq)` turns an ambiguous retry into `ON CONFLICT DO NOTHING` —
+idempotency with no batch-id table.
+
+**A bug unit tests structurally could not catch.** `ttl_seconds` was bound
+once and used both as its `INTEGER` column and inside `$n::bigint * interval
+'1 second'`. Postgres deduces a parameter's type from every use and rejects
+the statement (`42P08`, "inconsistent types deduced"). The stub-based tests
+asserted the SQL text and the bound arguments — both correct — and passed;
+14 of 17 integration tests failed on the first run with one root cause. Fixed
+by binding the TTL a second time as its own parameter. Worth recording
+because it is the second time in this initiative that a cross-boundary
+contract each side tested correctly in isolation was wrong in the middle (the
+first being S3.3's `sandbox:read` scope): the lesson is not "write more unit
+tests" but "the integration test is the only thing that can see the seam."
+
+**A design error found by writing a test rather than by reviewing the
+design.** `GapBefore` originally compared the reader's cursor only against
+`retained_from_seq` — which can never fire, because protecting the head means
+a trim leaves its hole in the MIDDLE of the stream. A reader resuming from
+inside the surviving head would have received the surviving tail with no
+indication anything was dropped between them: exactly the silent
+discontinuity the field exists to prevent. It now also reports a gap whenever
+the first returned chunk is not `cursor + 1`.
+
+**Deliberately not built yet, with reasons:** no `MemoryProcessStore` (its
+two consumers — `server_test.go` and the ephemeral-development fallback —
+arrive with step 2's handlers, and a registry that exists to survive restarts
+has nothing to offer in a mode that discards it); no `ProcessDecisionsTotal`
+counter (emitted by handlers that do not exist; an unread counter is not
+evidence); `internal/lease` and `internal/workspace`'s integration migration
+lists unchanged (neither reads `processes_permitted` until step 2).
+
+Verification: 25 unit tests, 17 real-Postgres integration tests via
+testcontainers covering every word of the plan's own list — reattach, cursor
+resume, worker restart, TTL/heartbeat staleness, secret redaction, concurrent
+readers (20 goroutines paging one stream, each asserting contiguity and
+assembling the identical output) — plus `go build`, `go vet`, and `gofmt`
+clean on every new file. The pre-existing CRLF `gofmt` noise on untouched
+files is unchanged and was verified as line-endings-only, not content drift.
+
+Full detail: design doc §2 and §10 step 1.

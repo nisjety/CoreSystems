@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	sbxserver "github.com/triodelab/model-plane/services/sandbox-manager/internal/server"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
@@ -123,6 +124,28 @@ func main() {
 		}
 		leaseStore, snapStore, workspaceStore = pgLeaseStore, pgSnapStore, pgWorkspaceStore
 		slog.Info("sandbox-manager using durable Postgres-backed lease/snapshot/workspace stores")
+
+		// S4.2 step 1: the background-process registry and its staleness
+		// sweeper. No RPC reaches the registry yet, so the sweeper has
+		// nothing to find — it is started here because it is the piece that
+		// keeps the registry from lying once rows exist, and running it
+		// from the start means a host that dies between steps never leaves
+		// a row claiming to be RUNNING. Postgres-only by construction:
+		// there is no in-memory process store, since a registry whose whole
+		// purpose is surviving a restart has nothing to offer if it does not.
+		processStore, err := process.NewStore(pool)
+		if err != nil {
+			slog.Error("sandbox-manager process store unavailable", "error", err)
+			os.Exit(1)
+		}
+		if process.EnvSweeperEnabled() {
+			interval, staleAfter := process.TimingFromEnv(os.Getenv)
+			go process.NewSweeper(processStore).WithTiming(interval, staleAfter).Start(ctx)
+			slog.Info("process staleness sweeper started",
+				"interval", interval.String(), "stale_after", staleAfter.String())
+		} else {
+			slog.Warn("process staleness sweeper disabled; a lost host's processes will keep reading as running")
+		}
 	} else {
 		leaseStore, snapStore, workspaceStore = sbxserver.NewMemoryLeaseStore(), sbxserver.NewMemorySnapshotStore(), sbxserver.NewMemoryWorkspaceStore()
 		slog.Warn("starting sandbox-manager with in-memory lease/snapshot/workspace stores (ephemeral development only); a restart discards all leases, snapshots, and workspace overlays")

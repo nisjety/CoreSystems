@@ -790,8 +790,38 @@ the step that needs it — the S3.2/S3.3 precedent.
 0. **Scope bug fix** — `SandboxManagerTokenProvider` requests both scopes.
    **DONE 2026-09-13**, committed separately ahead of this doc.
 1. **Registry primitive** (§2): migration `0003`, `internal/redact`,
-   `internal/process/store.go` + memory store + tests, sweeper. No proto, no
-   server wiring; nothing calls it yet.
+   `internal/process/store.go` + tests, sweeper. No proto, no server wiring;
+   nothing calls it yet. **DONE 2026-09-13.** What differed from this list,
+   and why:
+   - **No `MemoryProcessStore`.** The in-memory lease/snapshot/workspace
+     stores exist for `server_test.go`'s fast path and the
+     ephemeral-development fallback; neither has a consumer until step 2
+     adds the RPCs, and a registry whose entire purpose is surviving a
+     restart has nothing to offer in a mode that discards it. It lands with
+     the handlers that need it, or not at all.
+   - **No `ProcessDecisionsTotal` counter.** It is emitted by handlers,
+     which do not exist yet; an unread counter is not evidence.
+   - **The other two integration tests' migration lists are unchanged.**
+     `internal/lease` and `internal/workspace` do not read
+     `processes_permitted` until step 2 teaches `lease.go` about it, so
+     adding `0003` to their setup now would be unused scaffolding. It goes
+     in when the code under test needs it.
+   - **A real bug the integration tests caught**, recorded because it is the
+     kind that unit tests structurally cannot: `ttl_seconds` was bound once
+     and used both as its `INTEGER` column and inside `$n::bigint * interval
+     '1 second'`. Postgres deduces a parameter's type from every use and
+     refuses the statement (`42P08`). The stub-based tests asserted the SQL
+     text and the bound args — both correct — and passed; only a real
+     planner rejects it. Fixed by binding the TTL a second time as its own
+     parameter.
+   - **A design error found while writing the retention test**, fixed in
+     §2.3's contract: `GapBefore` originally compared the cursor only
+     against `retained_from_seq`, which can never detect anything, because
+     protecting the head means a trim leaves its hole in the MIDDLE of the
+     stream. A reader resuming from inside the surviving head would have
+     been handed the surviving tail with no indication that anything was
+     dropped between them. It now also reports a gap whenever the first
+     returned chunk is not `cursor + 1`.
 2. **RPCs + authz + lease column** (§4 sandbox-manager half, §5): proto,
    handlers, seven authz cases + interceptor rows, `Verify` returns
    permissions, `AcquireLease` persists `processes_permitted`. Rust client
