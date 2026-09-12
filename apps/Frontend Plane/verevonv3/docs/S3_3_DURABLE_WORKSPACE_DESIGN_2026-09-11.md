@@ -865,9 +865,176 @@ an existing pattern," not a second implementation of the same capability.
      for `AcquireLease`/`ReleaseLease`; only `ActivateLease`/`SnapshotSandbox`
      stay uninvoked, deliberately, since no capability here needs more than
      the credential-free `SCRATCH` allowlist yet.
-   - **3.5.C** — `code_interpreter.rs` uses the lease's hydrated workspace
-     instead of its own ephemeral one when Space-scoped; `shell` explicitly
-     out of scope for this phase. Depends on B.2 (now done).
+   - **3.5.C — designed 2026-09-12, not yet implemented.**
+     `code_interpreter.rs` uses the lease's hydrated workspace instead of
+     its own ephemeral one when Space-scoped; `shell` explicitly out of
+     scope for this phase. Depends on B.2 (done) for `AcquireLease`/lease
+     caching and on step 3's already-shipped `workspace_hydrate.rs` (§3) for
+     `hydrate`/`diff_and_upload`.
+
+     **A confirmed pre-existing bug this research surfaced, not previously
+     load-bearing because nothing called it this way**:
+     `sandbox-manager/internal/authz/authz.go`'s `Authorize()` switch has
+     explicit cases only for `AcquireLease`/`ReleaseLease`/`SnapshotSandbox`
+     (→ `ScopeWrite`) and `Health` (→ falls through to the `ScopeRead`
+     default); every other method name — confirmed directly against
+     `authz_test.go:35`'s own `.../FutureMethod` case — hits `default:
+     return errors.New("unknown sandbox-manager method")`.
+     `ActivateLease`'s real gRPC method name
+     (`SandboxManager_ActivateLease_FullMethodName`,
+     `sandboxes_grpc.pb.go:25`) is **not** in either case, so any call to it
+     through the real interceptor (`authz.UnaryInterceptor`, wired at
+     `cmd/main.go:128`) is refused today, for any principal, valid token or
+     not. This has never surfaced as an incident only because nothing has
+     ever called it that way: every existing `ActivateLease` test
+     (`server_test.go`) invokes `s.ActivateLease(...)` directly on the
+     struct, bypassing the interceptor entirely, and
+     `SandboxManagerClient::activate_lease` (Rust, built in B.1) has zero
+     real callers today — B.2 deliberately never calls it (`sandbox_lease
+     .rs`'s own comment: `code_interpreter` stays SCRATCH, hermetic, no
+     capability needs more). 3.5.C is the first phase to give it one, and
+     per `lease.go`'s own `BeginSnapshot` gate (`ErrLeaseNotActivated` when
+     `SpaceID != "" && State == SCRATCH`), every Space-scoped
+     `SnapshotSandbox` call would fail closed with `FailedPrecondition`
+     today — not a design gap but a one-line interceptor fix, made now
+     because this is the first phase load-bearing on it. Fix: add
+     `"/model_plane.v1.SandboxManager/ActivateLease"` to the `ScopeWrite`
+     case alongside the existing three.
+
+     **New RPC — `GetWorkspaceManifest(lease_id, backend_id) returns
+     (repeated WorkspaceManifestEntry{path, content_hash})`.** Mirrors
+     `ActivateLease`'s request shape exactly (org_id from the verified
+     principal via `s.principal(ctx)`, never caller-supplied, matching
+     every other RPC on this service); needs its own `ScopeRead` case in
+     `authz.go` (same treatment as `Health`) or it hits the identical
+     unreachable-by-default failure just fixed above. Resolves `space_id`
+     from `lease_id` via `lease.Store.GetScoped` (`lease.go:170-172` —
+     real, tested, but per `internal/server/store.go:11-13`'s own comment
+     "unused by `Server` today"; this is exactly the seam that comment
+     flagged). Returns an empty list for a non-Space lease (`SpaceID ==
+     ""`), the same exemption `BeginSnapshot` already grants. The manifest
+     itself is the two-layer view — Space (`run_id IS NULL`) shadowed by
+     this run's own overlay (`run_id = <lease_id>`) — via a `DISTINCT ON`
+     query with no existing precedent in this Go codebase (checked: zero
+     `DISTINCT ON`/`UNION` hits repo-wide today):
+     ```sql
+     SELECT DISTINCT ON (path) path, content_hash
+     FROM workspace_files
+     WHERE org_id = $1 AND space_id = $2 AND (run_id IS NULL OR run_id = $3)
+     ORDER BY path, run_id IS NULL ASC  -- FALSE (the overlay row) sorts
+                                        -- first, so DISTINCT ON keeps it
+                                        -- over the Space row on a tie
+     ```
+
+     **`SnapshotRequest` gains `repeated WorkspaceChangedFile
+     changed_files`** (a new message: `path`, `content_hash`, `size_bytes`,
+     `base_hash` — the Space-level hash this path had when the run's
+     hydrate observed it, empty if the path didn't exist yet). Empty for
+     every non-Space snapshot — existing behavior, existing tests,
+     unchanged. `base_hash` must be captured at hydrate time in
+     execution-core (the only place that ever has the run's true
+     hydrate-time baseline in hand) and carried through, not re-derived at
+     snapshot time from whatever the Space row says then — step 4's
+     compare-and-swap merge (§4) depends on this being what the run
+     actually observed, not a value that could have drifted if another run
+     promoted first. `workspace_hydrate.rs`'s existing `ChangedFile`
+     (`path`, `content_hash`, `size_bytes`) gains a fourth field,
+     `base_hash: Option<String>`, populated from the `baseline: &HashMap<
+     String, String>` already in scope inside `diff_and_upload`'s loop — no
+     new plumbing, the value is already there.
+
+     **New Go file `internal/workspace/store.go`**, mirroring
+     `capability-core/internal/registry/scope_store.go`'s exact template
+     (confirmed via full read: narrow `workspaceDatabase` interface over
+     `Exec`/`Query`, `NewStore(pool *pgxpool.Pool) (*Store, error)`
+     validating `pool != nil`, inline SQL, `fmt.Errorf`-wrapped errors) —
+     the same template `lease.go`/`scope_store.go` already both follow:
+     - `GetManifest(ctx, orgID, spaceID, runID string) ([]ManifestEntry,
+       error)` — the `DISTINCT ON` query above.
+     - `UpsertOverlay(ctx, orgID, spaceID, runID string, files
+       []ChangedFile) error` — one `INSERT ... ON CONFLICT (org_id,
+       space_id, COALESCE(run_id, ''), path) DO UPDATE SET content_hash =
+       EXCLUDED.content_hash, size_bytes = EXCLUDED.size_bytes, base_hash =
+       EXCLUDED.base_hash, updated_at = now()` per file, using the existing
+       `workspace_files_identity_uq` index — no new index needed, the
+       migration already anticipated this.
+
+     **`server.go` wiring**: `Server` gains a `workspace WorkspaceStore`
+     field (new interface in `store.go`, injected the same way
+     `LeaseStore`/`SnapshotStore` are — `NewServer`'s real, single caller in
+     `cmd/main.go` updates alongside it; unlike execution-core's dead
+     constructors earlier this initiative, this one has a real production
+     call site to update, not delete). `GetWorkspaceManifest` handler:
+     resolve + validate the lease via `leases.GetScoped`, return no entries
+     for a non-Space lease, else `workspace.GetManifest`. `SnapshotSandbox`
+     extended: after `BeginSnapshot` succeeds, if the lease is Space-scoped
+     and `changed_files` is non-empty, call `workspace.UpsertOverlay`
+     *before* `snapshots.Create` — fail closed (no snapshot record
+     referencing content whose overlay row was never durably written)
+     rather than risk an orphaned snapshot; if `snapshots.Create` itself
+     later fails, the overlay upsert already landed and is safe to leave
+     (idempotent, re-upserted identically on retry). `cmd/main.go` gains a
+     `WorkspaceStore` wired the same Postgres-required /
+     in-memory-fallback-for-dev split as `LeaseStore`/`SnapshotStore`
+     already are.
+
+     **Rust side**: `SandboxManagerClient` gains `get_workspace_manifest`
+     (mirrors `activate_lease`'s shape) and `snapshot_sandbox` gains a
+     `changed_files` parameter. execution-core needs its own `CasClient`
+     constructed at startup — confirmed nothing does this today outside
+     tests (`CasClient::from_env()` exists, §1, but has zero non-test
+     callers) — stored alongside `SandboxManagerClient` on whatever shared
+     state `grpc.rs`'s handlers already reach (mirrors how
+     `SandboxManagerClient`/`CapabilityClient` themselves got threaded in
+     B.2). A new per-run cache slot is needed on `StateStore` — hydrate
+     baseline (`HashMap<String, String>`) and the persistent workspace
+     `PathBuf` — reusing the exact "insert-once, read-many" idiom
+     `sandbox_lease`/`owners` already established, not a new pattern.
+
+     **`code_interpreter.rs` rewrite, Space-scoped path only** (the
+     non-Space path — no `SandboxLeaseContext`, or one with an empty
+     `space_id` — keeps today's `Workspace::create`/`Drop` ephemeral
+     lifecycle byte-for-byte unchanged; this is the hard invariant the
+     rewrite must not disturb):
+     1. First Space-scoped `code_interpreter` call in a run: call
+        `ActivateLease` (this lease's first — SCRATCH → ACTIVE), then
+        `GetWorkspaceManifest`, then `workspace_hydrate::hydrate` into a
+        persistent directory (`.../spaces/<space_id>/runs/<lease_id>/
+        workspace/`, per §3's original plan) instead of `Workspace::
+        create`'s fresh temp dir; cache the directory + hydrate baseline on
+        `StateStore` keyed by `run_id`.
+     2. Every later Space-scoped call in the same run reuses that cached
+        directory instead of creating a new one — the one deliberate
+        exception to `Workspace::create`'s own "never adopt an existing
+        directory" doc-commented invariant, which stays true for every
+        non-Space call.
+     3. At the two existing observable "run ended" points
+        (`grpc.rs::cancel_run`, `RunAgent`'s `finalize()`, per B.2 slice
+        (d)) — before releasing the lease, if this run hydrated a
+        workspace: `diff_and_upload`, then `SnapshotSandbox` with the
+        resulting `changed_files`, then remove the persistent directory
+        (mirrors `Workspace`'s own `Drop`, just keyed to lease release
+        instead of per-call). Best-effort, same as the existing release
+        call it now precedes — a snapshot/upload failure must not block the
+        lease release or fail the RPC it rides with.
+
+     **Sub-phases, in dependency order** (mirrors B.2's (a)-(d) cadence —
+     smallest, most self-contained, most mechanically-verifiable first):
+     - C.1 — Go: `internal/workspace/store.go` + unit/integration tests,
+       `LeaseStore` gains `GetScoped`. No RPC wiring yet, fully testable in
+       isolation like step 1's CAS client was.
+     - C.2 — proto: `GetWorkspaceManifest` RPC + messages,
+       `SnapshotRequest.changed_files`; regenerate Go/Rust/TS/Python
+       bindings.
+     - C.3 — Go: `server.go` handler + `SnapshotSandbox` extension +
+       `authz.go`'s two fixes (the `ActivateLease` bug,
+       `GetWorkspaceManifest`'s new case); `cmd/main.go` wiring.
+     - C.4 — Rust: `SandboxManagerClient::get_workspace_manifest` +
+       `snapshot_sandbox` signature change; `ChangedFile.base_hash`;
+       `CasClient` construction in execution-core startup.
+     - C.5 — Rust: `code_interpreter.rs`'s Space-scoped rewrite (the
+       persistent-directory path above), the new `StateStore` cache slot,
+       the two release-point wiring points.
    Blocks step 4 in practice (there is no real overlay to promote without
    3.5.C existing), even though 4's own SQL/RPC design doesn't depend on it.
 4. **Merge/`PromoteWorkspace`** (§4) — depends on 3.5 existing in practice

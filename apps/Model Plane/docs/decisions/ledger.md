@@ -2082,3 +2082,53 @@ slice changed: `grpc.rs`, `runtime_loop/agent.rs`, `sandbox_lease.rs`,
 `state.rs`). fmt/clippy clean.
 
 Full detail: design doc §8 item 3.5.B.2's slice (d) paragraph.
+
+## S3.3 step 3.5.C designed, plus a confirmed pre-existing authz bug found along the way (2026-09-12) — **decided; not yet implemented**
+
+Designing `code_interpreter.rs`'s Space-scoped rewrite (3.5.C: use the
+lease's hydrated workspace instead of an ephemeral one) surfaced a bug that
+predates this initiative and was never caught, because nothing had ever
+exercised the code path it lives in: `sandbox-manager/internal/authz/
+authz.go`'s `Authorize()` method-name switch has explicit cases only for
+`AcquireLease`/`ReleaseLease`/`SnapshotSandbox` (`ScopeWrite`) and `Health`
+(falls through to the `ScopeRead` default) — every other method name hits
+`default: return errors.New("unknown sandbox-manager method")`, confirmed by
+`authz_test.go:35`'s own `.../FutureMethod` case demonstrating exactly this.
+`ActivateLease`'s real gRPC method name is not in either case, so a call to
+it through the real interceptor (`authz.UnaryInterceptor`, wired at
+`cmd/main.go:128`) is refused today for any principal. Every existing
+`ActivateLease` test bypasses the interceptor by calling the method directly
+on the `*Server` struct, and `SandboxManagerClient::activate_lease` (Rust,
+built in B.1) has zero real callers today — B.2 deliberately never calls it,
+since `code_interpreter` stays SCRATCH (hermetic, no capability needs more).
+3.5.C is the first phase that gives `ActivateLease` a real caller, and per
+`lease.go`'s `BeginSnapshot` gate, every Space-scoped `SnapshotSandbox` call
+would fail closed with `FailedPrecondition` without it. Fix (part of 3.5.C's
+own sub-slice C.3, not a separate patch): add `ActivateLease`'s method name
+to the `ScopeWrite` case.
+
+**3.5.C's own design, in brief** (full detail in the design doc, §8 item
+3.5.C): a new `GetWorkspaceManifest(lease_id, backend_id)` RPC returning the
+two-layer manifest view (Space rows shadowed by this run's overlay, via a
+`DISTINCT ON (path) ... ORDER BY path, run_id IS NULL ASC` query — no
+existing precedent for this shape in the Go codebase, written from scratch);
+`SnapshotRequest` gains `repeated WorkspaceChangedFile changed_files`
+(`path`, `content_hash`, `size_bytes`, `base_hash` — captured at hydrate
+time in execution-core, not re-derived at snapshot time, since step 4's
+compare-and-swap merge depends on what the run actually observed); a new
+`internal/workspace/store.go` mirroring `scope_store.go`'s template exactly;
+`lease.Store.GetScoped` (real, tested, previously uncalled by `Server`) gets
+added to the `LeaseStore` interface to resolve `space_id` from `lease_id`;
+execution-core gains its first `CasClient` constructed outside a test; and
+`code_interpreter.rs` gets a Space-scoped-only persistent-per-lease-run
+workspace directory, hydrated once and diffed/uploaded at the same two
+release points B.2 slice (d) already wired (`cancel_run`, `finalize()`) —
+the non-Space ephemeral `Workspace::create`/`Drop` path is explicitly
+untouched.
+
+Sub-phases: C.1 (Go store + `GetScoped` on the interface, self-contained) →
+C.2 (proto regen) → C.3 (server.go wiring + both authz.go fixes) → C.4
+(Rust client + `CasClient` startup wiring) → C.5 (`code_interpreter.rs`
+rewrite). Not yet implemented as of this entry.
+
+Full detail: design doc §8 item 3.5.C.
