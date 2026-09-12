@@ -14,5 +14,7 @@ type GetWorkspaceManifestRequest = mpv1.GetWorkspaceManifestRequest
 type GetWorkspaceManifestResponse = mpv1.GetWorkspaceManifestResponse
 type WorkspaceManifestEntry = mpv1.WorkspaceManifestEntry
 type WorkspaceChangedFile = mpv1.WorkspaceChangedFile
+type PromoteWorkspaceRequest = mpv1.PromoteWorkspaceRequest
+type PromoteWorkspaceResponse = mpv1.PromoteWorkspaceResponse
 type SandboxHealthRequest = mpv1.SandboxHealthRequest
 type SandboxHealthResponse = mpv1.SandboxHealthResponse

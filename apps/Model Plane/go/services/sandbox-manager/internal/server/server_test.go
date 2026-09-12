@@ -577,6 +577,229 @@ func TestGetWorkspaceManifestAndSnapshotSandboxLayerTheOverlayOverTheSpace(t *te
 	if byPath["run-only.txt"] != "sha256:run-only" {
 		t.Fatalf("run-only.txt = %q, want the new overlay row", byPath["run-only.txt"])
 	}
+
+	// PromoteWorkspace (S3.3 step 4) now merges that same overlay into the
+	// Space's own durable rows. shared.txt's base_hash (sha256:space-shared)
+	// matches what the Space had, so it merges cleanly; run-only.txt had no
+	// prior Space row at all, so it merges as a brand-new one.
+	promoted, err := s.PromoteWorkspace(context.Background(), &PromoteWorkspaceRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	})
+	if err != nil {
+		t.Fatalf("PromoteWorkspace: unexpected error: %v", err)
+	}
+	if len(promoted.GetConflictingPaths()) != 0 {
+		t.Fatalf("conflicting_paths = %v, want none", promoted.GetConflictingPaths())
+	}
+	spaceEntries, err := workspaceStore.GetManifest(context.Background(), "org-1", "space-1", "")
+	if err != nil {
+		t.Fatalf("GetManifest (Space-only view): %v", err)
+	}
+	spaceByPath := make(map[string]string, len(spaceEntries))
+	for _, e := range spaceEntries {
+		spaceByPath[e.Path] = e.ContentHash
+	}
+	if spaceByPath["shared.txt"] != "sha256:run-shared" {
+		t.Fatalf("Space row shared.txt = %q, want the merged run content", spaceByPath["shared.txt"])
+	}
+	if spaceByPath["run-only.txt"] != "sha256:run-only" {
+		t.Fatalf("Space row run-only.txt = %q, want the newly-merged content", spaceByPath["run-only.txt"])
+	}
+}
+
+// TestPromoteWorkspaceReportsConflictWithoutOverwriting and
+// TestPromoteWorkspaceMergesNonConflictingPathsIndependently are the design
+// doc's own named scenarios (§4, §7), exercised at the handler level.
+func TestPromoteWorkspaceReportsConflictWithoutOverwriting(t *testing.T) {
+	leases := NewMemoryLeaseStore()
+	snapshots := NewMemorySnapshotStore()
+	workspaceStore := NewMemoryWorkspaceStore()
+	s := NewServer(leases, snapshots, workspaceStore)
+	s.principal = func(context.Context) (authctx.Principal, error) {
+		return authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"}, nil
+	}
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if err := workspaceStore.UpsertOverlay(context.Background(), "org-1", "space-1", "", []workspace.ChangedFile{
+		{Path: "contested.txt", ContentHash: "sha256:winner", SizeBytes: 6},
+	}); err != nil {
+		t.Fatalf("seed space row: %v", err)
+	}
+	if err := workspaceStore.UpsertOverlay(context.Background(), "org-1", "space-1", acquired.GetLeaseId(), []workspace.ChangedFile{
+		{Path: "contested.txt", ContentHash: "sha256:loser", SizeBytes: 9, BaseHash: "sha256:original"},
+	}); err != nil {
+		t.Fatalf("seed overlay row: %v", err)
+	}
+
+	resp, err := s.PromoteWorkspace(context.Background(), &PromoteWorkspaceRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	})
+	if err != nil {
+		t.Fatalf("PromoteWorkspace: unexpected error: %v", err)
+	}
+	if got := resp.GetConflictingPaths(); len(got) != 1 || got[0] != "contested.txt" {
+		t.Fatalf("conflicting_paths = %v, want [contested.txt]", got)
+	}
+	spaceEntries, err := workspaceStore.GetManifest(context.Background(), "org-1", "space-1", "")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if len(spaceEntries) != 1 || spaceEntries[0].ContentHash != "sha256:winner" {
+		t.Fatalf("Space row = %+v, want the original content untouched by the conflicting attempt", spaceEntries)
+	}
+}
+
+func TestPromoteWorkspaceMergesNonConflictingPathsIndependently(t *testing.T) {
+	leases := NewMemoryLeaseStore()
+	snapshots := NewMemorySnapshotStore()
+	workspaceStore := NewMemoryWorkspaceStore()
+	s := NewServer(leases, snapshots, workspaceStore)
+	s.principal = func(context.Context) (authctx.Principal, error) {
+		return authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"}, nil
+	}
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if err := workspaceStore.UpsertOverlay(context.Background(), "org-1", "space-1", "", []workspace.ChangedFile{
+		{Path: "stale.txt", ContentHash: "sha256:current", SizeBytes: 4},
+	}); err != nil {
+		t.Fatalf("seed space row: %v", err)
+	}
+	if err := workspaceStore.UpsertOverlay(context.Background(), "org-1", "space-1", acquired.GetLeaseId(), []workspace.ChangedFile{
+		{Path: "new.txt", ContentHash: "sha256:brand-new", SizeBytes: 3},
+		{Path: "stale.txt", ContentHash: "sha256:attempt", SizeBytes: 8, BaseHash: "sha256:stale-base"},
+	}); err != nil {
+		t.Fatalf("seed overlay rows: %v", err)
+	}
+
+	resp, err := s.PromoteWorkspace(context.Background(), &PromoteWorkspaceRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	})
+	if err != nil {
+		t.Fatalf("PromoteWorkspace: unexpected error: %v", err)
+	}
+	if got := resp.GetConflictingPaths(); len(got) != 1 || got[0] != "stale.txt" {
+		t.Fatalf("conflicting_paths = %v, want [stale.txt]", got)
+	}
+	spaceEntries, err := workspaceStore.GetManifest(context.Background(), "org-1", "space-1", "")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	byPath := make(map[string]string, len(spaceEntries))
+	for _, e := range spaceEntries {
+		byPath[e.Path] = e.ContentHash
+	}
+	if byPath["new.txt"] != "sha256:brand-new" {
+		t.Fatalf("new.txt = %q, want the merged content -- a conflict elsewhere in the overlay must not block it", byPath["new.txt"])
+	}
+	if byPath["stale.txt"] != "sha256:current" {
+		t.Fatalf("stale.txt = %q, want the original content untouched", byPath["stale.txt"])
+	}
+}
+
+// TestPromoteWorkspaceStillWorksAfterReleaseLease is the whole reason
+// PromoteWorkspace resolves its lease via GetAny rather than GetScoped:
+// merging a run's overlay is deliberately never tied to (or blocked by) the
+// lease's own release, and ReleaseLease only ever touches the leases row,
+// never workspace_files.
+func TestPromoteWorkspaceStillWorksAfterReleaseLease(t *testing.T) {
+	leases := NewMemoryLeaseStore()
+	snapshots := NewMemorySnapshotStore()
+	workspaceStore := NewMemoryWorkspaceStore()
+	s := NewServer(leases, snapshots, workspaceStore)
+	s.principal = func(context.Context) (authctx.Principal, error) {
+		return authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"}, nil
+	}
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if err := workspaceStore.UpsertOverlay(context.Background(), "org-1", "space-1", acquired.GetLeaseId(), []workspace.ChangedFile{
+		{Path: "new.txt", ContentHash: "sha256:brand-new", SizeBytes: 3},
+	}); err != nil {
+		t.Fatalf("seed overlay row: %v", err)
+	}
+	if _, err := s.ReleaseLease(context.Background(), &ReleaseLeaseRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	}); err != nil {
+		t.Fatalf("ReleaseLease: unexpected error: %v", err)
+	}
+
+	// GetWorkspaceManifest uses GetScoped and must now fail closed -- the
+	// exact gap GetAny exists to work around, confirmed here so a future
+	// change to PromoteWorkspace can't silently regress onto GetScoped
+	// without a test noticing the two now behave differently.
+	if _, err := s.GetWorkspaceManifest(context.Background(), &GetWorkspaceManifestRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	}); status.Code(err) != codes.NotFound {
+		t.Fatalf("GetWorkspaceManifest after release: code = %v, want NotFound", status.Code(err))
+	}
+
+	resp, err := s.PromoteWorkspace(context.Background(), &PromoteWorkspaceRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	})
+	if err != nil {
+		t.Fatalf("PromoteWorkspace after release: unexpected error: %v", err)
+	}
+	if len(resp.GetConflictingPaths()) != 0 {
+		t.Fatalf("conflicting_paths = %v, want none", resp.GetConflictingPaths())
+	}
+	spaceEntries, err := workspaceStore.GetManifest(context.Background(), "org-1", "space-1", "")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if len(spaceEntries) != 1 || spaceEntries[0].ContentHash != "sha256:brand-new" {
+		t.Fatalf("Space row = %+v, want the overlay merged even after release", spaceEntries)
+	}
+}
+
+func TestPromoteWorkspaceRequiresLeaseID(t *testing.T) {
+	s := newTestServer()
+	if _, err := s.PromoteWorkspace(context.Background(), &PromoteWorkspaceRequest{}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("code = %v, want InvalidArgument", status.Code(err))
+	}
+}
+
+func TestPromoteWorkspaceRejectsANonSpaceLease(t *testing.T) {
+	s := newTestServer()
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if _, err := s.PromoteWorkspace(context.Background(), &PromoteWorkspaceRequest{
+		LeaseId: acquired.GetLeaseId(),
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
+	}
 }
 
 func TestSnapshotSandboxSkipsTheOverlayWriteForANonSpaceLease(t *testing.T) {
@@ -609,6 +832,11 @@ func (failingWorkspaceStore) GetManifest(context.Context, string, string, string
 func (f failingWorkspaceStore) UpsertOverlay(context.Context, string, string, string, []workspace.ChangedFile) error {
 	f.t.Fatal("UpsertOverlay must not be called for a non-Space lease")
 	return nil
+}
+
+func (f failingWorkspaceStore) Promote(context.Context, string, string, string) ([]string, error) {
+	f.t.Fatal("Promote must not be called by this test")
+	return nil, nil
 }
 
 // TestReleaseLeaseTransitionsStateToDestroyed and

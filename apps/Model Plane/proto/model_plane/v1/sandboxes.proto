@@ -32,6 +32,17 @@ service SandboxManager {
   // §8 item 3.5.C.
   rpc GetWorkspaceManifest(GetWorkspaceManifestRequest) returns (GetWorkspaceManifestResponse);
 
+  // Merges a Space-scoped lease's own workspace_files overlay into the
+  // Space's durable rows, one path at a time via compare-and-swap on
+  // base_hash — never one all-or-nothing transaction across the whole
+  // overlay, so a conflict on one path never blocks any other path in the
+  // same run's overlay from merging. Deliberately its own explicit step,
+  // never an automatic side effect of SnapshotSandbox or lease release —
+  // see apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+  // §4 and §8 item 4. Safe to call more than once for the same overlay: an
+  // already-merged path is a no-op, not a false conflict.
+  rpc PromoteWorkspace(PromoteWorkspaceRequest) returns (PromoteWorkspaceResponse);
+
   // Health check.
   rpc Health(SandboxHealthRequest) returns (SandboxHealthResponse);
 }
@@ -186,6 +197,25 @@ message WorkspaceChangedFile {
   // PromoteWorkspace compare-and-swap merge, not by SnapshotSandbox
   // itself.
   string base_hash = 4;
+}
+
+message PromoteWorkspaceRequest {
+  // Lease whose own workspace_files overlay to merge into its Space.
+  string lease_id = 1;
+
+  // Caller's asserted backend id; must match the lease's pinned backend.
+  string backend_id = 2;
+}
+
+message PromoteWorkspaceResponse {
+  // Paths that could not be merged because the Space's current content no
+  // longer matches what this run saw when it hydrated (and differs from
+  // what this run is trying to write) — someone else's change landed
+  // first. Every other path in the same overlay still merged. What a
+  // caller does with this list (retry with a fresh hydrate, surface to a
+  // human, drop the change) is an open product question, not resolved by
+  // this contract.
+  repeated string conflicting_paths = 1;
 }
 
 message SandboxHealthRequest {}

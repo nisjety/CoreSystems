@@ -234,13 +234,15 @@ func (s *Store) EndSnapshot(ctx context.Context, id string) {
 	`, id, int32(mpv1.SandboxLifecycleState_ACTIVE), int32(mpv1.SandboxLifecycleState_SNAPSHOTTING))
 }
 
-// ReleaseScoped marks a lease DESTROYED rather than deleting it outright.
-// Keeping the row — instead of removing it — means a second release of the
-// same lease, or one racing a concurrent release, sees a clean idempotent
-// success instead of a confusing ErrLeaseNotFound. Deliberately does not
-// use lookup: unlike every other operation, a lease already DESTROYED must
-// still be found here, not treated as absent.
-func (s *Store) ReleaseScoped(ctx context.Context, id, orgID, ownerID, backendID string) (bool, error) {
+// lookupIgnoringDestroyedState resolves id within (orgID, ownerID) WITHOUT
+// excluding an already-DESTROYED lease — unlike lookup, which every
+// operational grant (Activate, BeginSnapshot, GetScoped) needs to exclude.
+// Shared by ReleaseScoped (a lease already DESTROYED must still be found,
+// not treated as absent, so a second release is a clean idempotent success)
+// and GetAny (resolving which Space a run's now-durable workspace_files
+// overlay belongs to is a purely descriptive lookup that must keep working
+// after the lease itself has been released).
+func (s *Store) lookupIgnoringDestroyedState(ctx context.Context, id, orgID, ownerID string) (*Lease, error) {
 	row := s.pool.QueryRow(ctx, `
 		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, state, expires_at, created_at
 		FROM leases
@@ -248,10 +250,22 @@ func (s *Store) ReleaseScoped(ctx context.Context, id, orgID, ownerID, backendID
 	`, id, orgID, ownerID)
 	l, err := scanLease(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, ErrLeaseNotFound
+		return nil, ErrLeaseNotFound
 	}
 	if err != nil {
-		return false, fmt.Errorf("release lease: %w", err)
+		return nil, fmt.Errorf("lookup lease (ignoring destroyed state): %w", err)
+	}
+	return l, nil
+}
+
+// ReleaseScoped marks a lease DESTROYED rather than deleting it outright.
+// Keeping the row — instead of removing it — means a second release of the
+// same lease, or one racing a concurrent release, sees a clean idempotent
+// success instead of a confusing ErrLeaseNotFound.
+func (s *Store) ReleaseScoped(ctx context.Context, id, orgID, ownerID, backendID string) (bool, error) {
+	l, err := s.lookupIgnoringDestroyedState(ctx, id, orgID, ownerID)
+	if err != nil {
+		return false, err
 	}
 	if l.BackendID != backendID {
 		return false, ErrLeaseBackendMismatch
@@ -261,6 +275,24 @@ func (s *Store) ReleaseScoped(ctx context.Context, id, orgID, ownerID, backendID
 		return false, fmt.Errorf("release lease: %w", err)
 	}
 	return true, nil
+}
+
+// GetAny resolves id within (orgID, ownerID, backendID) without excluding a
+// DESTROYED lease or rejecting an expired one — unlike GetScoped, which is
+// an operational grant. GetAny's only consumer, PromoteWorkspace, needs to
+// resolve which Space a run's overlay belongs to even after ReleaseLease
+// has already marked the lease DESTROYED: merging is deliberately its own
+// explicit step, never tied to (or blocked by) the lease's own release, and
+// ReleaseLease only ever touches the leases row, never workspace_files.
+func (s *Store) GetAny(ctx context.Context, id, orgID, ownerID, backendID string) (*Lease, error) {
+	l, err := s.lookupIgnoringDestroyedState(ctx, id, orgID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	if l.BackendID != backendID {
+		return nil, ErrLeaseBackendMismatch
+	}
+	return l, nil
 }
 
 func scanLease(row pgx.Row) (*Lease, error) {

@@ -60,7 +60,8 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 	case "/model_plane.v1.SandboxManager/AcquireLease",
 		"/model_plane.v1.SandboxManager/ReleaseLease",
 		"/model_plane.v1.SandboxManager/SnapshotSandbox",
-		"/model_plane.v1.SandboxManager/ActivateLease":
+		"/model_plane.v1.SandboxManager/ActivateLease",
+		"/model_plane.v1.SandboxManager/PromoteWorkspace":
 		required = ScopeWrite
 	case "/model_plane.v1.SandboxManager/Health",
 		"/model_plane.v1.SandboxManager/GetWorkspaceManifest":

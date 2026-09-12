@@ -245,6 +245,36 @@ func (s *Server) GetWorkspaceManifest(ctx context.Context, req *GetWorkspaceMani
 	return &GetWorkspaceManifestResponse{Entries: out}, nil
 }
 
+// PromoteWorkspace merges a Space-scoped lease's own workspace_files
+// overlay into the Space's durable rows — S3.3 step 4 (design doc §4, §8
+// item 4). Deliberately its own explicit step: not called from
+// SnapshotSandbox or ReleaseLease, and resolves the lease via GetAny (not
+// GetScoped) precisely so it keeps working after ReleaseLease has already
+// marked the lease DESTROYED — merging must not race losing against, or
+// depend on ordering before, the lease's own automatic release.
+func (s *Server) PromoteWorkspace(ctx context.Context, req *PromoteWorkspaceRequest) (*PromoteWorkspaceResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "PromoteWorkspace")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetLeaseId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	l, err := s.leases.GetAny(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if l.SpaceID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "lease is not Space-scoped; nothing to promote")
+	}
+	conflicts, err := s.workspace.Promote(ctx, principal.OrganizationID, l.SpaceID, l.ID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "promote workspace: %v", err)
+	}
+	return &PromoteWorkspaceResponse{ConflictingPaths: conflicts}, nil
+}
+
 // Health reports serving status.
 func (s *Server) Health(ctx context.Context, _ *SandboxHealthRequest) (*SandboxHealthResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "Health")))

@@ -1,6 +1,6 @@
 //! gRPC client for sandbox-manager's `SandboxManager` service —
 //! `AcquireLease`, `ActivateLease`, `SnapshotSandbox`, `ReleaseLease`,
-//! `GetWorkspaceManifest`, `Health`.
+//! `GetWorkspaceManifest`, `PromoteWorkspace`, `Health`.
 //!
 //! Real and independently callable, but **not yet wired into a production
 //! caller** — see
@@ -36,8 +36,9 @@ use std::time::Duration;
 use mp_contracts::model_plane::v1::{
     sandbox_manager_client::SandboxManagerClient as GeneratedClient, AcquireLeaseRequest,
     AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, GetWorkspaceManifestRequest,
-    GetWorkspaceManifestResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest,
-    SandboxHealthResponse, SnapshotRequest, SnapshotResponse, WorkspaceChangedFile,
+    GetWorkspaceManifestResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse,
+    ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse,
+    SnapshotRequest, SnapshotResponse, WorkspaceChangedFile,
 };
 use tonic::{transport::Channel, Request, Status};
 
@@ -229,6 +230,40 @@ impl SandboxManagerClient {
         Ok(outcome?.into_inner())
     }
 
+    /// Merges a Space-scoped lease's own workspace_files overlay into the
+    /// Space's durable rows — S3.3 step 4, deliberately its own explicit
+    /// step (see `sandboxes.proto`'s own doc comment on this RPC): never
+    /// called automatically by `snapshot_sandbox` or `release_lease`, and
+    /// no caller is wired here yet — this method exists so a future one
+    /// (a Space UI action, or some other deliberate trigger) has a real
+    /// primitive to call, the same "ship the primitive, wire the caller
+    /// later" position every other method on this client was in before its
+    /// own first real caller landed. Safe to call more than once for the
+    /// same overlay.
+    ///
+    /// # Errors
+    /// `invalid_argument` when `lease_id` is blank; `deadline_exceeded` past
+    /// [`RPC_TIMEOUT`]; otherwise sandbox-manager's own status.
+    pub async fn promote_workspace(
+        &self,
+        bearer: &str,
+        lease_id: &str,
+        backend_id: &str,
+    ) -> Result<PromoteWorkspaceResponse, Status> {
+        if lease_id.trim().is_empty() {
+            return Err(Status::invalid_argument("lease_id is required"));
+        }
+        let message = PromoteWorkspaceRequest {
+            lease_id: lease_id.to_owned(),
+            backend_id: backend_id.to_owned(),
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().promote_workspace(wire))
+            .await
+            .map_err(|_| Status::deadline_exceeded("sandbox-manager PromoteWorkspace timed out"))?;
+        Ok(outcome?.into_inner())
+    }
+
     /// # Errors
     /// `invalid_argument` when `lease_id` is blank; `deadline_exceeded` past
     /// [`RPC_TIMEOUT`]; otherwise sandbox-manager's own status.
@@ -336,7 +371,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_snapshot_release_manifest_reject_blank_lease_id() {
+    async fn activate_snapshot_release_manifest_promote_reject_blank_lease_id() {
         let client = test_client();
         assert_eq!(
             client
@@ -373,6 +408,14 @@ mod tests {
         assert_eq!(
             client
                 .get_workspace_manifest("bearer", "", "backend-1")
+                .await
+                .expect_err("blank lease_id must fail closed")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            client
+                .promote_workspace("bearer", "", "backend-1")
                 .await
                 .expect_err("blank lease_id must fail closed")
                 .code(),

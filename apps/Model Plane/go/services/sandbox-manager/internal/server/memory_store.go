@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -140,6 +141,23 @@ func (s *MemoryLeaseStore) ReleaseScoped(_ context.Context, id, orgID, ownerID, 
 	}
 	l.State = mpv1.SandboxLifecycleState_DESTROYED
 	return true, nil
+}
+
+// GetAny mirrors lease.Store's own GetAny: resolves id within (orgID,
+// ownerID, backendID) without excluding a DESTROYED lease or rejecting an
+// expired one — PromoteWorkspace's own consumer, resolving which Space a
+// run's overlay belongs to even after the lease itself has been released.
+func (s *MemoryLeaseStore) GetAny(_ context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	l, ok := s.byID[id]
+	if !ok || l.OrgID != orgID || (ownerID != "" && l.OwnerID != ownerID) {
+		return nil, lease.ErrLeaseNotFound
+	}
+	if l.BackendID != backendID {
+		return nil, lease.ErrLeaseBackendMismatch
+	}
+	return cloneLease(l), nil
 }
 
 func cloneLease(value *lease.Lease) *lease.Lease {
@@ -279,4 +297,47 @@ func (s *MemoryWorkspaceStore) UpsertOverlay(_ context.Context, orgID, spaceID, 
 		s.rows[workspaceRowKey(orgID, spaceID, runID, f.Path)] = f
 	}
 	return nil
+}
+
+// Promote mirrors workspace.Store.Promote's own compare-and-swap semantics:
+// a path merges into the Space row (run_id == "") when that row doesn't
+// exist yet, its content matches the overlay row's base_hash (first-time
+// merge), or already matches the overlay row's own content_hash (an
+// already-merged path — a second Promote call is a safe no-op, not a false
+// conflict). Every other path still merges independently of a conflict
+// elsewhere in the same overlay.
+func (s *MemoryWorkspaceStore) Promote(_ context.Context, orgID, spaceID, runID string) ([]string, error) {
+	if orgID == "" || spaceID == "" || runID == "" {
+		return nil, fmt.Errorf("org_id, space_id, and run_id are required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	overlayPrefix := orgID + "/" + spaceID + "/" + runID + "/"
+	type overlayEntry struct {
+		path string
+		file workspace.ChangedFile
+	}
+	var overlay []overlayEntry
+	for key, row := range s.rows {
+		if path, ok := strings.CutPrefix(key, overlayPrefix); ok {
+			overlay = append(overlay, overlayEntry{path: path, file: row})
+		}
+	}
+	sort.Slice(overlay, func(i, j int) bool { return overlay[i].path < overlay[j].path })
+
+	var conflicts []string
+	for _, entry := range overlay {
+		spaceKey := workspaceRowKey(orgID, spaceID, "", entry.path)
+		existing, hasExisting := s.rows[spaceKey]
+		mergeable := !hasExisting ||
+			existing.ContentHash == entry.file.BaseHash ||
+			existing.ContentHash == entry.file.ContentHash
+		if mergeable {
+			s.rows[spaceKey] = entry.file
+		} else {
+			conflicts = append(conflicts, entry.path)
+		}
+	}
+	return conflicts, nil
 }

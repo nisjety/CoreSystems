@@ -24,6 +24,7 @@ const (
 	SandboxManager_SnapshotSandbox_FullMethodName      = "/model_plane.v1.SandboxManager/SnapshotSandbox"
 	SandboxManager_ActivateLease_FullMethodName        = "/model_plane.v1.SandboxManager/ActivateLease"
 	SandboxManager_GetWorkspaceManifest_FullMethodName = "/model_plane.v1.SandboxManager/GetWorkspaceManifest"
+	SandboxManager_PromoteWorkspace_FullMethodName     = "/model_plane.v1.SandboxManager/PromoteWorkspace"
 	SandboxManager_Health_FullMethodName               = "/model_plane.v1.SandboxManager/Health"
 )
 
@@ -51,6 +52,16 @@ type SandboxManagerClient interface {
 	// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
 	// §8 item 3.5.C.
 	GetWorkspaceManifest(ctx context.Context, in *GetWorkspaceManifestRequest, opts ...grpc.CallOption) (*GetWorkspaceManifestResponse, error)
+	// Merges a Space-scoped lease's own workspace_files overlay into the
+	// Space's durable rows, one path at a time via compare-and-swap on
+	// base_hash — never one all-or-nothing transaction across the whole
+	// overlay, so a conflict on one path never blocks any other path in the
+	// same run's overlay from merging. Deliberately its own explicit step,
+	// never an automatic side effect of SnapshotSandbox or lease release —
+	// see apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §4 and §8 item 4. Safe to call more than once for the same overlay: an
+	// already-merged path is a no-op, not a false conflict.
+	PromoteWorkspace(ctx context.Context, in *PromoteWorkspaceRequest, opts ...grpc.CallOption) (*PromoteWorkspaceResponse, error)
 	// Health check.
 	Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error)
 }
@@ -113,6 +124,16 @@ func (c *sandboxManagerClient) GetWorkspaceManifest(ctx context.Context, in *Get
 	return out, nil
 }
 
+func (c *sandboxManagerClient) PromoteWorkspace(ctx context.Context, in *PromoteWorkspaceRequest, opts ...grpc.CallOption) (*PromoteWorkspaceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PromoteWorkspaceResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_PromoteWorkspace_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxManagerClient) Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SandboxHealthResponse)
@@ -147,6 +168,16 @@ type SandboxManagerServer interface {
 	// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
 	// §8 item 3.5.C.
 	GetWorkspaceManifest(context.Context, *GetWorkspaceManifestRequest) (*GetWorkspaceManifestResponse, error)
+	// Merges a Space-scoped lease's own workspace_files overlay into the
+	// Space's durable rows, one path at a time via compare-and-swap on
+	// base_hash — never one all-or-nothing transaction across the whole
+	// overlay, so a conflict on one path never blocks any other path in the
+	// same run's overlay from merging. Deliberately its own explicit step,
+	// never an automatic side effect of SnapshotSandbox or lease release —
+	// see apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §4 and §8 item 4. Safe to call more than once for the same overlay: an
+	// already-merged path is a no-op, not a false conflict.
+	PromoteWorkspace(context.Context, *PromoteWorkspaceRequest) (*PromoteWorkspaceResponse, error)
 	// Health check.
 	Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error)
 	mustEmbedUnimplementedSandboxManagerServer()
@@ -173,6 +204,9 @@ func (UnimplementedSandboxManagerServer) ActivateLease(context.Context, *Activat
 }
 func (UnimplementedSandboxManagerServer) GetWorkspaceManifest(context.Context, *GetWorkspaceManifestRequest) (*GetWorkspaceManifestResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetWorkspaceManifest not implemented")
+}
+func (UnimplementedSandboxManagerServer) PromoteWorkspace(context.Context, *PromoteWorkspaceRequest) (*PromoteWorkspaceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PromoteWorkspace not implemented")
 }
 func (UnimplementedSandboxManagerServer) Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
@@ -288,6 +322,24 @@ func _SandboxManager_GetWorkspaceManifest_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxManager_PromoteWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PromoteWorkspaceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).PromoteWorkspace(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_PromoteWorkspace_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).PromoteWorkspace(ctx, req.(*PromoteWorkspaceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxManager_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SandboxHealthRequest)
 	if err := dec(in); err != nil {
@@ -332,6 +384,10 @@ var SandboxManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetWorkspaceManifest",
 			Handler:    _SandboxManager_GetWorkspaceManifest_Handler,
+		},
+		{
+			MethodName: "PromoteWorkspace",
+			Handler:    _SandboxManager_PromoteWorkspace_Handler,
 		},
 		{
 			MethodName: "Health",

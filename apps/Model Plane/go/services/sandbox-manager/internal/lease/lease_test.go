@@ -184,6 +184,55 @@ func TestGetScopedTreatsDestroyedAsNotFound(t *testing.T) {
 	}
 }
 
+func TestGetAnyReportsNotFoundOnNoRows(t *testing.T) {
+	store, _ := newTestStore(notFoundRow())
+	if _, err := store.GetAny(context.Background(), "lease-1", "org-a", "user-a", "backend-a"); !errors.Is(err, ErrLeaseNotFound) {
+		t.Fatalf("error = %v, want ErrLeaseNotFound", err)
+	}
+}
+
+func TestGetAnyRejectsBackendMismatch(t *testing.T) {
+	active := testLease(mpv1.SandboxLifecycleState_ACTIVE, "space-a", "backend-a", time.Now().Add(time.Minute))
+	store, _ := newTestStore(rowFor(active))
+	if _, err := store.GetAny(context.Background(), active.ID, active.OrgID, active.OwnerID, "backend-b"); !errors.Is(err, ErrLeaseBackendMismatch) {
+		t.Fatalf("error = %v, want ErrLeaseBackendMismatch", err)
+	}
+}
+
+// TestGetAnyDoesNotExcludeDestroyedLeases is GetAny's whole reason to exist,
+// distinct from GetScoped: PromoteWorkspace must still resolve a lease's
+// Space after ReleaseLease has already marked it DESTROYED, since merging a
+// run's overlay is deliberately never tied to the lease's own release.
+// Proven here by asserting the underlying query does NOT filter on state at
+// all -- the opposite of TestGetScopedTreatsDestroyedAsNotFound's own
+// "state <> $4" assertion for GetScoped.
+func TestGetAnyDoesNotExcludeDestroyedLeases(t *testing.T) {
+	destroyed := testLease(mpv1.SandboxLifecycleState_DESTROYED, "space-a", "backend-a", time.Now().Add(time.Minute))
+	store, database := newTestStore(rowFor(destroyed))
+	l, err := store.GetAny(context.Background(), destroyed.ID, destroyed.OrgID, destroyed.OwnerID, destroyed.BackendID)
+	if err != nil {
+		t.Fatalf("GetAny on a DESTROYED lease: %v", err)
+	}
+	if l.State != mpv1.SandboxLifecycleState_DESTROYED {
+		t.Fatalf("State = %v, want DESTROYED (unmodified)", l.State)
+	}
+	if strings.Contains(database.lastQueryRowQuery, "state <>") {
+		t.Fatalf("query = %q, GetAny must not filter on state at all", database.lastQueryRowQuery)
+	}
+}
+
+// TestGetAnyDoesNotRejectExpiredLeases mirrors the DESTROYED case: an
+// expired lease's overlay data is still a valid, durable thing to resolve
+// the Space for -- GetAny is a purely descriptive lookup, not a fresh
+// operational grant like GetScoped.
+func TestGetAnyDoesNotRejectExpiredLeases(t *testing.T) {
+	expired := testLease(mpv1.SandboxLifecycleState_ACTIVE, "space-a", "backend-a", time.Now().Add(-time.Minute))
+	store, _ := newTestStore(rowFor(expired))
+	if _, err := store.GetAny(context.Background(), expired.ID, expired.OrgID, expired.OwnerID, expired.BackendID); err != nil {
+		t.Fatalf("GetAny on an expired lease: %v", err)
+	}
+}
+
 func TestActivatePromotesScratchToActive(t *testing.T) {
 	scratch := testLease(mpv1.SandboxLifecycleState_SCRATCH, "space-a", "backend-a", time.Now().Add(time.Minute))
 	store, database := newTestStore(rowFor(scratch))

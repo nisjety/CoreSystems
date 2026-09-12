@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/sandboxes.proto.
  */
 export const file_model_plane_v1_sandboxes: GenFile = /*@__PURE__*/
-  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9zYW5kYm94ZXMucHJvdG8SDm1vZGVsX3BsYW5lLnYxIsIBChNBY3F1aXJlTGVhc2VSZXF1ZXN0EhAKCHNjb3BlX2lkGAEgASgJEhIKCnNjb3BlX3R5cGUYAiABKAkSJgoDdHRsGAMgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEg4KBm9yZ19pZBgEIAEoCRIQCghzcGFjZV9pZBgFIAEoCRIbChNjYXBhYmlsaXR5X2RlY2lzaW9uGAYgASgJEh4KFmNhcGFiaWxpdHlfY2xhaW1zX2pzb24YByABKAkitAEKFEFjcXVpcmVMZWFzZVJlc3BvbnNlEhAKCGxlYXNlX2lkGAEgASgJEhAKCGVuZHBvaW50GAIgASgJEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhIKCmJhY2tlbmRfaWQYBCABKAkSNAoFc3RhdGUYBSABKA4yJS5tb2RlbF9wbGFuZS52MS5TYW5kYm94TGlmZWN5Y2xlU3RhdGUiOwoTUmVsZWFzZUxlYXNlUmVxdWVzdBIQCghsZWFzZV9pZBgBIAEoCRISCgpiYWNrZW5kX2lkGAIgASgJIigKFFJlbGVhc2VMZWFzZVJlc3BvbnNlEhAKCHJlbGVhc2VkGAEgASgIIoMBCg9TbmFwc2hvdFJlcXVlc3QSEAoIbGVhc2VfaWQYASABKAkSDQoFbGFiZWwYAiABKAkSEgoKYmFja2VuZF9pZBgDIAEoCRI7Cg1jaGFuZ2VkX2ZpbGVzGAQgAygLMiQubW9kZWxfcGxhbmUudjEuV29ya3NwYWNlQ2hhbmdlZEZpbGUiOwoQU25hcHNob3RSZXNwb25zZRITCgtzbmFwc2hvdF9pZBgBIAEoCRISCgpvYmplY3Rfa2V5GAIgASgJIjwKFEFjdGl2YXRlTGVhc2VSZXF1ZXN0EhAKCGxlYXNlX2lkGAEgASgJEhIKCmJhY2tlbmRfaWQYAiABKAkiTQoVQWN0aXZhdGVMZWFzZVJlc3BvbnNlEjQKBXN0YXRlGAEgASgOMiUubW9kZWxfcGxhbmUudjEuU2FuZGJveExpZmVjeWNsZVN0YXRlIkMKG0dldFdvcmtzcGFjZU1hbmlmZXN0UmVxdWVzdBIQCghsZWFzZV9pZBgBIAEoCRISCgpiYWNrZW5kX2lkGAIgASgJIjwKFldvcmtzcGFjZU1hbmlmZXN0RW50cnkSDAoEcGF0aBgBIAEoCRIUCgxjb250ZW50X2hhc2gYAiABKAkiVwocR2V0V29ya3NwYWNlTWFuaWZlc3RSZXNwb25zZRI3CgdlbnRyaWVzGAEgAygLMiYubW9kZWxfcGxhbmUudjEuV29ya3NwYWNlTWFuaWZlc3RFbnRyeSJhChRXb3Jrc3BhY2VDaGFuZ2VkRmlsZRIMCgRwYXRoGAEgASgJEhQKDGNvbnRlbnRfaGFzaBgCIAEoCRISCgpzaXplX2J5dGVzGAMgASgDEhEKCWJhc2VfaGFzaBgEIAEoCSIWChRTYW5kYm94SGVhbHRoUmVxdWVzdCInChVTYW5kYm94SGVhbHRoUmVzcG9uc2USDgoGc3RhdHVzGAEgASgJKmwKFVNhbmRib3hMaWZlY3ljbGVTdGF0ZRIZChVMSUZFQ1lDTEVfVU5TUEVDSUZJRUQQABILCgdTQ1JBVENIEAESCgoGQUNUSVZFEAISEAoMU05BUFNIT1RUSU5HEAMSDQoJREVTVFJPWUVEEAQyxAQKDlNhbmRib3hNYW5hZ2VyElkKDEFjcXVpcmVMZWFzZRIjLm1vZGVsX3BsYW5lLnYxLkFjcXVpcmVMZWFzZVJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5BY3F1aXJlTGVhc2VSZXNwb25zZRJZCgxSZWxlYXNlTGVhc2USIy5tb2RlbF9wbGFuZS52MS5SZWxlYXNlTGVhc2VSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuUmVsZWFzZUxlYXNlUmVzcG9uc2USVAoPU25hcHNob3RTYW5kYm94Eh8ubW9kZWxfcGxhbmUudjEuU25hcHNob3RSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuU25hcHNob3RSZXNwb25zZRJcCg1BY3RpdmF0ZUxlYXNlEiQubW9kZWxfcGxhbmUudjEuQWN0aXZhdGVMZWFzZVJlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5BY3RpdmF0ZUxlYXNlUmVzcG9uc2UScQoUR2V0V29ya3NwYWNlTWFuaWZlc3QSKy5tb2RlbF9wbGFuZS52MS5HZXRXb3Jrc3BhY2VNYW5pZmVzdFJlcXVlc3QaLC5tb2RlbF9wbGFuZS52MS5HZXRXb3Jrc3BhY2VNYW5pZmVzdFJlc3BvbnNlElUKBkhlYWx0aBIkLm1vZGVsX3BsYW5lLnYxLlNhbmRib3hIZWFsdGhSZXF1ZXN0GiUubW9kZWxfcGxhbmUudjEuU2FuZGJveEhlYWx0aFJlc3BvbnNlQrYBChJjb20ubW9kZWxfcGxhbmUudjFCDlNhbmRib3hlc1Byb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp, file_google_protobuf_duration]);
+  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9zYW5kYm94ZXMucHJvdG8SDm1vZGVsX3BsYW5lLnYxIsIBChNBY3F1aXJlTGVhc2VSZXF1ZXN0EhAKCHNjb3BlX2lkGAEgASgJEhIKCnNjb3BlX3R5cGUYAiABKAkSJgoDdHRsGAMgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEg4KBm9yZ19pZBgEIAEoCRIQCghzcGFjZV9pZBgFIAEoCRIbChNjYXBhYmlsaXR5X2RlY2lzaW9uGAYgASgJEh4KFmNhcGFiaWxpdHlfY2xhaW1zX2pzb24YByABKAkitAEKFEFjcXVpcmVMZWFzZVJlc3BvbnNlEhAKCGxlYXNlX2lkGAEgASgJEhAKCGVuZHBvaW50GAIgASgJEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhIKCmJhY2tlbmRfaWQYBCABKAkSNAoFc3RhdGUYBSABKA4yJS5tb2RlbF9wbGFuZS52MS5TYW5kYm94TGlmZWN5Y2xlU3RhdGUiOwoTUmVsZWFzZUxlYXNlUmVxdWVzdBIQCghsZWFzZV9pZBgBIAEoCRISCgpiYWNrZW5kX2lkGAIgASgJIigKFFJlbGVhc2VMZWFzZVJlc3BvbnNlEhAKCHJlbGVhc2VkGAEgASgIIoMBCg9TbmFwc2hvdFJlcXVlc3QSEAoIbGVhc2VfaWQYASABKAkSDQoFbGFiZWwYAiABKAkSEgoKYmFja2VuZF9pZBgDIAEoCRI7Cg1jaGFuZ2VkX2ZpbGVzGAQgAygLMiQubW9kZWxfcGxhbmUudjEuV29ya3NwYWNlQ2hhbmdlZEZpbGUiOwoQU25hcHNob3RSZXNwb25zZRITCgtzbmFwc2hvdF9pZBgBIAEoCRISCgpvYmplY3Rfa2V5GAIgASgJIjwKFEFjdGl2YXRlTGVhc2VSZXF1ZXN0EhAKCGxlYXNlX2lkGAEgASgJEhIKCmJhY2tlbmRfaWQYAiABKAkiTQoVQWN0aXZhdGVMZWFzZVJlc3BvbnNlEjQKBXN0YXRlGAEgASgOMiUubW9kZWxfcGxhbmUudjEuU2FuZGJveExpZmVjeWNsZVN0YXRlIkMKG0dldFdvcmtzcGFjZU1hbmlmZXN0UmVxdWVzdBIQCghsZWFzZV9pZBgBIAEoCRISCgpiYWNrZW5kX2lkGAIgASgJIjwKFldvcmtzcGFjZU1hbmlmZXN0RW50cnkSDAoEcGF0aBgBIAEoCRIUCgxjb250ZW50X2hhc2gYAiABKAkiVwocR2V0V29ya3NwYWNlTWFuaWZlc3RSZXNwb25zZRI3CgdlbnRyaWVzGAEgAygLMiYubW9kZWxfcGxhbmUudjEuV29ya3NwYWNlTWFuaWZlc3RFbnRyeSJhChRXb3Jrc3BhY2VDaGFuZ2VkRmlsZRIMCgRwYXRoGAEgASgJEhQKDGNvbnRlbnRfaGFzaBgCIAEoCRISCgpzaXplX2J5dGVzGAMgASgDEhEKCWJhc2VfaGFzaBgEIAEoCSI/ChdQcm9tb3RlV29ya3NwYWNlUmVxdWVzdBIQCghsZWFzZV9pZBgBIAEoCRISCgpiYWNrZW5kX2lkGAIgASgJIjUKGFByb21vdGVXb3Jrc3BhY2VSZXNwb25zZRIZChFjb25mbGljdGluZ19wYXRocxgBIAMoCSIWChRTYW5kYm94SGVhbHRoUmVxdWVzdCInChVTYW5kYm94SGVhbHRoUmVzcG9uc2USDgoGc3RhdHVzGAEgASgJKmwKFVNhbmRib3hMaWZlY3ljbGVTdGF0ZRIZChVMSUZFQ1lDTEVfVU5TUEVDSUZJRUQQABILCgdTQ1JBVENIEAESCgoGQUNUSVZFEAISEAoMU05BUFNIT1RUSU5HEAMSDQoJREVTVFJPWUVEEAQyqwUKDlNhbmRib3hNYW5hZ2VyElkKDEFjcXVpcmVMZWFzZRIjLm1vZGVsX3BsYW5lLnYxLkFjcXVpcmVMZWFzZVJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5BY3F1aXJlTGVhc2VSZXNwb25zZRJZCgxSZWxlYXNlTGVhc2USIy5tb2RlbF9wbGFuZS52MS5SZWxlYXNlTGVhc2VSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuUmVsZWFzZUxlYXNlUmVzcG9uc2USVAoPU25hcHNob3RTYW5kYm94Eh8ubW9kZWxfcGxhbmUudjEuU25hcHNob3RSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuU25hcHNob3RSZXNwb25zZRJcCg1BY3RpdmF0ZUxlYXNlEiQubW9kZWxfcGxhbmUudjEuQWN0aXZhdGVMZWFzZVJlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5BY3RpdmF0ZUxlYXNlUmVzcG9uc2UScQoUR2V0V29ya3NwYWNlTWFuaWZlc3QSKy5tb2RlbF9wbGFuZS52MS5HZXRXb3Jrc3BhY2VNYW5pZmVzdFJlcXVlc3QaLC5tb2RlbF9wbGFuZS52MS5HZXRXb3Jrc3BhY2VNYW5pZmVzdFJlc3BvbnNlEmUKEFByb21vdGVXb3Jrc3BhY2USJy5tb2RlbF9wbGFuZS52MS5Qcm9tb3RlV29ya3NwYWNlUmVxdWVzdBooLm1vZGVsX3BsYW5lLnYxLlByb21vdGVXb3Jrc3BhY2VSZXNwb25zZRJVCgZIZWFsdGgSJC5tb2RlbF9wbGFuZS52MS5TYW5kYm94SGVhbHRoUmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLlNhbmRib3hIZWFsdGhSZXNwb25zZUK2AQoSY29tLm1vZGVsX3BsYW5lLnYxQg5TYW5kYm94ZXNQcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp, file_google_protobuf_duration]);
 
 /**
  * @generated from message model_plane.v1.AcquireLeaseRequest
@@ -407,6 +407,57 @@ export const WorkspaceChangedFileSchema: GenMessage<WorkspaceChangedFile> = /*@_
   messageDesc(file_model_plane_v1_sandboxes, 11);
 
 /**
+ * @generated from message model_plane.v1.PromoteWorkspaceRequest
+ */
+export type PromoteWorkspaceRequest = Message<"model_plane.v1.PromoteWorkspaceRequest"> & {
+  /**
+   * Lease whose own workspace_files overlay to merge into its Space.
+   *
+   * @generated from field: string lease_id = 1;
+   */
+  leaseId: string;
+
+  /**
+   * Caller's asserted backend id; must match the lease's pinned backend.
+   *
+   * @generated from field: string backend_id = 2;
+   */
+  backendId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.PromoteWorkspaceRequest.
+ * Use `create(PromoteWorkspaceRequestSchema)` to create a new message.
+ */
+export const PromoteWorkspaceRequestSchema: GenMessage<PromoteWorkspaceRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_sandboxes, 12);
+
+/**
+ * @generated from message model_plane.v1.PromoteWorkspaceResponse
+ */
+export type PromoteWorkspaceResponse = Message<"model_plane.v1.PromoteWorkspaceResponse"> & {
+  /**
+   * Paths that could not be merged because the Space's current content no
+   * longer matches what this run saw when it hydrated (and differs from
+   * what this run is trying to write) — someone else's change landed
+   * first. Every other path in the same overlay still merged. What a
+   * caller does with this list (retry with a fresh hydrate, surface to a
+   * human, drop the change) is an open product question, not resolved by
+   * this contract.
+   *
+   * @generated from field: repeated string conflicting_paths = 1;
+   */
+  conflictingPaths: string[];
+};
+
+/**
+ * Describes the message model_plane.v1.PromoteWorkspaceResponse.
+ * Use `create(PromoteWorkspaceResponseSchema)` to create a new message.
+ */
+export const PromoteWorkspaceResponseSchema: GenMessage<PromoteWorkspaceResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_sandboxes, 13);
+
+/**
  * @generated from message model_plane.v1.SandboxHealthRequest
  */
 export type SandboxHealthRequest = Message<"model_plane.v1.SandboxHealthRequest"> & {
@@ -417,7 +468,7 @@ export type SandboxHealthRequest = Message<"model_plane.v1.SandboxHealthRequest"
  * Use `create(SandboxHealthRequestSchema)` to create a new message.
  */
 export const SandboxHealthRequestSchema: GenMessage<SandboxHealthRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sandboxes, 12);
+  messageDesc(file_model_plane_v1_sandboxes, 14);
 
 /**
  * @generated from message model_plane.v1.SandboxHealthResponse
@@ -436,7 +487,7 @@ export type SandboxHealthResponse = Message<"model_plane.v1.SandboxHealthRespons
  * Use `create(SandboxHealthResponseSchema)` to create a new message.
  */
 export const SandboxHealthResponseSchema: GenMessage<SandboxHealthResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_sandboxes, 13);
+  messageDesc(file_model_plane_v1_sandboxes, 15);
 
 /**
  * Lifecycle of one sandbox lease. SCRATCH is the only state in which no
@@ -542,6 +593,24 @@ export const SandboxManager: GenService<{
     methodKind: "unary";
     input: typeof GetWorkspaceManifestRequestSchema;
     output: typeof GetWorkspaceManifestResponseSchema;
+  },
+  /**
+   * Merges a Space-scoped lease's own workspace_files overlay into the
+   * Space's durable rows, one path at a time via compare-and-swap on
+   * base_hash — never one all-or-nothing transaction across the whole
+   * overlay, so a conflict on one path never blocks any other path in the
+   * same run's overlay from merging. Deliberately its own explicit step,
+   * never an automatic side effect of SnapshotSandbox or lease release —
+   * see apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+   * §4 and §8 item 4. Safe to call more than once for the same overlay: an
+   * already-merged path is a no-op, not a false conflict.
+   *
+   * @generated from rpc model_plane.v1.SandboxManager.PromoteWorkspace
+   */
+  promoteWorkspace: {
+    methodKind: "unary";
+    input: typeof PromoteWorkspaceRequestSchema;
+    output: typeof PromoteWorkspaceResponseSchema;
   },
   /**
    * Health check.

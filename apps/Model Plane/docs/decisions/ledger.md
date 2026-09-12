@@ -2232,3 +2232,90 @@ Space-scoped calls. Steps 4 (`PromoteWorkspace` merge) and 5 (Data Plane v2
 promotion) are the only work left in this initiative.
 
 Full detail: design doc §8 item 3.5.C.
+
+## S3.3 step 4 implemented — PromoteWorkspace merges a run's overlay into its Space (2026-09-12)
+
+Research before implementing (parallel fan-out, not sequential) confirmed
+three things worth recording: (1) `PromoteWorkspace` was genuinely
+greenfield — 15 hits repo-wide, all doc-comments in three languages
+forward-referencing it, zero implementation or caller anywhere; (2) no Space
+UI, files/workspace tab, or frontend conflict-data shape exists at all
+(`SpaceCockpit.tsx`'s six tabs have no `files`/`workspace` entry) — the
+design doc's own "needs product input, not resolved here" framing for
+conflict UX is confirmed still accurate, not stale; (3) the closest existing
+compare-and-swap precedent in this codebase,
+`billing-core/internal/billing/repository.go`'s `RecordUsage`, already
+separates "same request replayed" from "genuine conflict" via a hash
+comparison after an `INSERT ... ON CONFLICT DO NOTHING` — the same shape
+this RPC's own merge needed, not invented from nothing.
+
+**A correctness bug caught before shipping, not after**: a first-draft
+compare-and-swap (`UPDATE ... WHERE content_hash = base_hash`, exactly this
+section's own original SQL sketch) is not idempotent — after a successful
+merge, the Space's hash equals the run's OWN new content, not `base_hash`
+anymore, so a second `PromoteWorkspace` call for the same unchanged overlay
+would report every already-merged path as a false conflict. Fixed by folding
+the whole compare-and-swap into one `INSERT ... ON CONFLICT ... DO UPDATE
+... WHERE content_hash = base_hash OR content_hash = EXCLUDED.content_hash`
+per path, letting Postgres's own WHERE-suppressed-upsert semantics report
+"applied" vs. "conflict" via `RowsAffected()`. A dedicated integration test
+(`TestWorkspaceStore_PromoteIsIdempotentForAnAlreadyMergedPath`) written
+specifically to catch a regression of this exact bug passes against real
+Postgres.
+
+**A second design gap resolved along the way**: `PromoteWorkspace` must
+resolve which Space a lease's overlay belongs to even after `ReleaseLease`
+has already marked the lease DESTROYED (`GetScoped`, every other RPC's
+lookup, explicitly excludes DESTROYED). `lease.Store` gained `GetAny` — a
+destroyed-tolerant, expiry-tolerant lookup whose only consumer is this RPC —
+sharing its query with `ReleaseScoped`'s own already-existing precedent for
+exactly this shape (extracted into one `lookupIgnoringDestroyedState`
+helper rather than kept as two copies). Proven end to end against real
+Postgres and at the handler level: a lease released BEFORE promotion is
+attempted still promotes correctly.
+
+Deliberately no execution-core caller wired for `PromoteWorkspace` — the
+design doc's own "merging is its own explicit step, not an automatic side
+effect" framing, and this initiative's established "ship the primitive,
+wire the caller once a concrete consumer exists" precedent. The Rust client
+method (`SandboxManagerClient::promote_workspace`) exists and is
+independently callable.
+
+Tests: sandbox-manager `go test ./...` and `-tags=integration` both green
+across every package (new: `workspace.Store.Promote` unit + integration,
+`lease.Store.GetAny` unit + integration, handler-level `PromoteWorkspace`
+tests including the design doc's own two named scenarios —
+`TestPromoteWorkspaceReportsConflictWithoutOverwriting`,
+`TestPromoteWorkspaceMergesNonConflictingPathsIndependently` — plus the
+after-release case). `execution-core` compiles clean with the new
+`promote_workspace` client method and its own blank-lease-id test.
+
+**Follow-up, same day: a real lost-update race found by an adversarial-review
+workflow pass, fixed before this ever shipped.** Three independent Explore
+agents reviewed the freshly-written code (SQL/race correctness, authz/tenant
+isolation, test-coverage gaps) against the actual files, not a description of
+them. The SQL-correctness lens found a genuine bug: `Promote`'s first draft
+read the whole overlay in one query, then looped over Go-captured values to
+issue one `Exec` per path — a concurrent `SnapshotSandbox` call landing
+between that read and a given path's write would have its newer content
+silently discarded (Promote would write the stale value, report success, and
+leave the Space matching neither write, false-conflicting a later, perfectly
+mergeable call). Fixed by folding the per-path read into the SAME statement
+as the compare-and-swap write (a one-row CTE), so a write always reflects
+whatever the overlay holds at THAT statement's execution — closing the
+window structurally, not by trying to detect the race after the fact. The
+test-coverage lens separately found the successful UPDATE branch (a
+pre-existing, differing Space row merged via a matching base_hash) had zero
+real-Postgres coverage — every prior test's "success" case was either a
+brand-new INSERT or an idempotent re-merge. Both are now covered by one new
+test exercising both branches together in a single `Promote` call. The
+authz/tenancy lens found no cross-tenant bug (org_id always from the verified
+principal, lease lookups always filter on it, ID collision blocked by both
+128-bit randomness and the same org_id filter) but flagged a real, pre-existing,
+shared characteristic worth recording: no write RPC on this service except
+`AcquireLease` re-verifies a fresh capability decision per call — see the
+design doc's own Open Questions entry for the full reasoning; not a
+regression this step introduced, not fixed here, flagged for a future,
+broader design pass.
+
+Full detail: design doc §4 and §8 item 4.

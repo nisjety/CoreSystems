@@ -30,6 +30,11 @@ type LeaseStore interface {
 	EndSnapshot(ctx context.Context, id string)
 	ReleaseScoped(ctx context.Context, id, orgID, ownerID, backendID string) (bool, error)
 	GetScoped(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
+	// GetAny joined this interface for step 4's PromoteWorkspace handler
+	// (design doc §8 item 4) — unlike GetScoped, it must still resolve a
+	// lease already marked DESTROYED, since merging a run's overlay is
+	// deliberately never tied to (or blocked by) the lease's own release.
+	GetAny(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
 }
 
 // SnapshotStore is the narrow surface Server actually calls.
@@ -38,10 +43,15 @@ type SnapshotStore interface {
 }
 
 // WorkspaceStore is the narrow surface Server actually calls — exactly
-// *workspace.Store's two methods, the same seam-at-the-consumer shape as
+// *workspace.Store's methods, the same seam-at-the-consumer shape as
 // LeaseStore/SnapshotStore above. Backs GetWorkspaceManifest and
-// SnapshotSandbox's overlay upsert (design doc §8 item 3.5.C).
+// SnapshotSandbox's overlay upsert (design doc §8 item 3.5.C) and
+// PromoteWorkspace's merge (§8 item 4).
 type WorkspaceStore interface {
 	GetManifest(ctx context.Context, orgID, spaceID, runID string) ([]workspace.ManifestEntry, error)
 	UpsertOverlay(ctx context.Context, orgID, spaceID, runID string, files []workspace.ChangedFile) error
+	// Promote merges runID's own overlay into the Space's durable rows,
+	// per path, and returns the paths that conflicted (every other path
+	// still merged).
+	Promote(ctx context.Context, orgID, spaceID, runID string) ([]string, error)
 }

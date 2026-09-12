@@ -76,9 +76,15 @@ func TestActivateLeaseAndGetWorkspaceManifestAreKnownMethods(t *testing.T) {
 	if err := Authorize(writeOnly, "/model_plane.v1.SandboxManager/ActivateLease", nil); err != nil {
 		t.Fatalf("ActivateLease with sandbox:write unexpectedly refused: %v", err)
 	}
+	if err := Authorize(writeOnly, "/model_plane.v1.SandboxManager/PromoteWorkspace", nil); err != nil {
+		t.Fatalf("PromoteWorkspace with sandbox:write unexpectedly refused: %v", err)
+	}
 	readOnly := authctx.Principal{OrganizationID: "org-a", ActorID: "service:execution-core", PrincipalType: "service", Scopes: []string{ScopeRead}}
 	if err := Authorize(readOnly, "/model_plane.v1.SandboxManager/ActivateLease", nil); err == nil {
 		t.Fatal("ActivateLease with only sandbox:read unexpectedly authorized")
+	}
+	if err := Authorize(readOnly, "/model_plane.v1.SandboxManager/PromoteWorkspace", nil); err == nil {
+		t.Fatal("PromoteWorkspace with only sandbox:read unexpectedly authorized")
 	}
 	if err := Authorize(readOnly, "/model_plane.v1.SandboxManager/GetWorkspaceManifest", nil); err != nil {
 		t.Fatalf("GetWorkspaceManifest with sandbox:read unexpectedly refused: %v", err)
@@ -143,6 +149,8 @@ func TestInterceptorFailsClosedAndEnforcesServiceScopes(t *testing.T) {
 		{name: "ActivateLease valid service", method: "/model_plane.v1.SandboxManager/ActivateLease", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
 		{name: "GetWorkspaceManifest valid service with read scope", method: "/model_plane.v1.SandboxManager/GetWorkspaceManifest", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.OK},
 		{name: "GetWorkspaceManifest missing read scope", method: "/model_plane.v1.SandboxManager/GetWorkspaceManifest", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
+		{name: "PromoteWorkspace missing scope", method: "/model_plane.v1.SandboxManager/PromoteWorkspace", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.PermissionDenied},
+		{name: "PromoteWorkspace valid service", method: "/model_plane.v1.SandboxManager/PromoteWorkspace", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
 		{name: "custom health is protected", method: "/model_plane.v1.SandboxManager/Health", want: codes.Unauthenticated},
 		{name: "standard health is public", method: "/grpc.health.v1.Health/Check", want: codes.OK},
 	}

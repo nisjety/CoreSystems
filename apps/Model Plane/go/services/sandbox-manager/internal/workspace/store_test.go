@@ -21,6 +21,13 @@ type workspaceDatabaseStub struct {
 	rows     pgx.Rows
 	queryErr error
 
+	// execTags, when non-empty, supplies one tag per successive Exec call
+	// (in order) instead of the single execTag above — Promote's own tests
+	// need each per-path upsert to report a DIFFERENT outcome (merged vs.
+	// conflicting) within one call.
+	execTags  []pgconn.CommandTag
+	execCalls int
+
 	queries []string
 	args    [][]any
 }
@@ -28,6 +35,11 @@ type workspaceDatabaseStub struct {
 func (d *workspaceDatabaseStub) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 	d.queries = append(d.queries, query)
 	d.args = append(d.args, append([]any(nil), args...))
+	index := d.execCalls
+	d.execCalls++
+	if index < len(d.execTags) {
+		return d.execTags[index], d.execErr
+	}
 	return d.execTag, d.execErr
 }
 
@@ -204,5 +216,94 @@ func TestUpsertOverlaySurfacesAWriteFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "a.txt") {
 		t.Fatalf("error does not name the failing file: %v", err)
+	}
+}
+
+func TestPromoteRejectsMissingIdentifiers(t *testing.T) {
+	t.Parallel()
+	database := &workspaceDatabaseStub{}
+	store := &Store{pool: database}
+
+	if _, err := store.Promote(context.Background(), "", "space-1", "lease-1"); err == nil {
+		t.Fatal("missing org_id unexpectedly accepted")
+	}
+	if _, err := store.Promote(context.Background(), "org-a", "", "lease-1"); err == nil {
+		t.Fatal("missing space_id unexpectedly accepted")
+	}
+	if _, err := store.Promote(context.Background(), "org-a", "space-1", ""); err == nil {
+		t.Fatal("missing run_id unexpectedly accepted")
+	}
+	if len(database.queries) != 0 {
+		t.Fatalf("no query should run for a rejected call, got %d", len(database.queries))
+	}
+}
+
+// TestPromoteUpsertsOnePerOverlayPathAndReportsOnlyTheConflictingOne proves
+// the Go-side wiring: listing N overlay paths produces N per-path upserts,
+// each re-reading its own row fresh inside the same statement (see
+// Promote's own doc comment for why), and a RowsAffected()==0 outcome on
+// any one of them is reported as a conflict for that path ALONE — the
+// other path is never held back by it. The compare-and-swap SQL itself
+// (idempotent re-merge, real conflict detection, and the fresh-read
+// property that closes the lost-update race an adversarial review found in
+// an earlier draft) is proven separately, against real Postgres, in
+// store_integration_test.go — a stub cannot evaluate ON CONFLICT semantics.
+func TestPromoteUpsertsOnePerOverlayPathAndReportsOnlyTheConflictingOne(t *testing.T) {
+	t.Parallel()
+	database := &workspaceDatabaseStub{
+		rows: &manifestRows{index: -1, values: [][]any{
+			{"clean.txt"},
+			{"stale.txt"},
+		}},
+		execTags: []pgconn.CommandTag{
+			pgconn.NewCommandTag("INSERT 0 1"), // clean.txt merges
+			pgconn.NewCommandTag("UPDATE 0"),   // stale.txt conflicts
+		},
+	}
+	store := &Store{pool: database}
+
+	conflicts, err := store.Promote(context.Background(), "org-a", "space-1", "lease-1")
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if !reflect.DeepEqual(conflicts, []string{"stale.txt"}) {
+		t.Fatalf("conflicts = %v, want [stale.txt]", conflicts)
+	}
+
+	if len(database.queries) != 3 { // 1 listing + 2 upserts
+		t.Fatalf("expected 1 listing + 2 upserts, got %d queries", len(database.queries))
+	}
+	for _, q := range database.queries[1:] {
+		if !strings.Contains(q, "ON CONFLICT (org_id, space_id, COALESCE(run_id, ''), path)") {
+			t.Fatalf("upsert does not target the migration's own identity index: %s", q)
+		}
+		if !strings.Contains(q, "WITH overlay AS") {
+			t.Fatalf("upsert does not re-read its own overlay row fresh inside the statement: %s", q)
+		}
+	}
+	wantFirstArgs := []any{"org-a", "space-1", "lease-1", "clean.txt"}
+	if !reflect.DeepEqual(database.args[1], wantFirstArgs) {
+		t.Fatalf("clean.txt upsert args = %#v, want %#v", database.args[1], wantFirstArgs)
+	}
+	wantSecondArgs := []any{"org-a", "space-1", "lease-1", "stale.txt"}
+	if !reflect.DeepEqual(database.args[2], wantSecondArgs) {
+		t.Fatalf("stale.txt upsert args = %#v, want %#v", database.args[2], wantSecondArgs)
+	}
+}
+
+func TestPromoteReturnsNoConflictsWhenOverlayIsEmpty(t *testing.T) {
+	t.Parallel()
+	database := &workspaceDatabaseStub{rows: &manifestRows{index: -1}}
+	store := &Store{pool: database}
+
+	conflicts, err := store.Promote(context.Background(), "org-a", "space-1", "lease-1")
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %v, want none", conflicts)
+	}
+	if len(database.queries) != 1 {
+		t.Fatalf("an empty overlay must not attempt any upsert, got %d queries", len(database.queries))
 	}
 }

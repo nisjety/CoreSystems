@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
+import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -75,6 +75,25 @@ export const SandboxManager = {
       name: "GetWorkspaceManifest",
       I: GetWorkspaceManifestRequest,
       O: GetWorkspaceManifestResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Merges a Space-scoped lease's own workspace_files overlay into the
+     * Space's durable rows, one path at a time via compare-and-swap on
+     * base_hash — never one all-or-nothing transaction across the whole
+     * overlay, so a conflict on one path never blocks any other path in the
+     * same run's overlay from merging. Deliberately its own explicit step,
+     * never an automatic side effect of SnapshotSandbox or lease release —
+     * see apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+     * §4 and §8 item 4. Safe to call more than once for the same overlay: an
+     * already-merged path is a no-op, not a false conflict.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.PromoteWorkspace
+     */
+    promoteWorkspace: {
+      name: "PromoteWorkspace",
+      I: PromoteWorkspaceRequest,
+      O: PromoteWorkspaceResponse,
       kind: MethodKind.Unary,
     },
     /**

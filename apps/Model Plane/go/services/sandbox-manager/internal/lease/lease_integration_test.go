@@ -131,6 +131,41 @@ func TestLeaseStore_FullLifecycle(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_GetAnyResolvesALeaseAfterItIsReleased is PromoteWorkspace's
+// own real-Postgres proof: ReleaseLease only ever marks the leases row
+// DESTROYED (it never touches workspace_files), and GetAny must still
+// resolve that lease's SpaceID afterward — unlike GetScoped, which the
+// FullLifecycle test above already confirmed returns ErrLeaseNotFound for
+// the exact same destroyed lease.
+func TestLeaseStore_GetAnyResolvesALeaseAfterItIsReleased(t *testing.T) {
+	dsn := setupLeaseDB(t)
+	store := newPoolStore(t, dsn)
+	ctx := context.Background()
+
+	l, err := store.Create(ctx, "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if ok, err := store.ReleaseScoped(ctx, l.ID, "org-a", "user-a", "backend-a"); err != nil || !ok {
+		t.Fatalf("ReleaseScoped: ok = %v, err = %v", ok, err)
+	}
+
+	if _, err := store.GetScoped(ctx, l.ID, "org-a", "user-a", "backend-a"); err != ErrLeaseNotFound {
+		t.Fatalf("GetScoped after release: error = %v, want ErrLeaseNotFound (the gap GetAny exists to work around)", err)
+	}
+
+	resolved, err := store.GetAny(ctx, l.ID, "org-a", "user-a", "backend-a")
+	if err != nil {
+		t.Fatalf("GetAny after release: unexpected error: %v", err)
+	}
+	if resolved.SpaceID != "space-a" {
+		t.Fatalf("SpaceID = %q, want space-a", resolved.SpaceID)
+	}
+	if resolved.State != mpv1.SandboxLifecycleState_DESTROYED {
+		t.Fatalf("State = %v, want DESTROYED (GetAny does not hide it, just doesn't exclude it)", resolved.State)
+	}
+}
+
 // TestLeaseStore_SurvivesAFreshPoolAgainstTheSameDatabase is the S3.2 close-out
 // design's own named "restart" gap, now actually closed: a lease created
 // through one pool/Store instance must still be visible through a

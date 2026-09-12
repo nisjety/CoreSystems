@@ -828,6 +828,111 @@ func (x *WorkspaceChangedFile) GetBaseHash() string {
 	return ""
 }
 
+type PromoteWorkspaceRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Lease whose own workspace_files overlay to merge into its Space.
+	LeaseId string `protobuf:"bytes,1,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	// Caller's asserted backend id; must match the lease's pinned backend.
+	BackendId     string `protobuf:"bytes,2,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PromoteWorkspaceRequest) Reset() {
+	*x = PromoteWorkspaceRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromoteWorkspaceRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromoteWorkspaceRequest) ProtoMessage() {}
+
+func (x *PromoteWorkspaceRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromoteWorkspaceRequest.ProtoReflect.Descriptor instead.
+func (*PromoteWorkspaceRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *PromoteWorkspaceRequest) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *PromoteWorkspaceRequest) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
+	}
+	return ""
+}
+
+type PromoteWorkspaceResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Paths that could not be merged because the Space's current content no
+	// longer matches what this run saw when it hydrated (and differs from
+	// what this run is trying to write) — someone else's change landed
+	// first. Every other path in the same overlay still merged. What a
+	// caller does with this list (retry with a fresh hydrate, surface to a
+	// human, drop the change) is an open product question, not resolved by
+	// this contract.
+	ConflictingPaths []string `protobuf:"bytes,1,rep,name=conflicting_paths,json=conflictingPaths,proto3" json:"conflicting_paths,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *PromoteWorkspaceResponse) Reset() {
+	*x = PromoteWorkspaceResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PromoteWorkspaceResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PromoteWorkspaceResponse) ProtoMessage() {}
+
+func (x *PromoteWorkspaceResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PromoteWorkspaceResponse.ProtoReflect.Descriptor instead.
+func (*PromoteWorkspaceResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *PromoteWorkspaceResponse) GetConflictingPaths() []string {
+	if x != nil {
+		return x.ConflictingPaths
+	}
+	return nil
+}
+
 type SandboxHealthRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -836,7 +941,7 @@ type SandboxHealthRequest struct {
 
 func (x *SandboxHealthRequest) Reset() {
 	*x = SandboxHealthRequest{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[12]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -848,7 +953,7 @@ func (x *SandboxHealthRequest) String() string {
 func (*SandboxHealthRequest) ProtoMessage() {}
 
 func (x *SandboxHealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[12]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -861,7 +966,7 @@ func (x *SandboxHealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SandboxHealthRequest.ProtoReflect.Descriptor instead.
 func (*SandboxHealthRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{12}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{14}
 }
 
 type SandboxHealthResponse struct {
@@ -874,7 +979,7 @@ type SandboxHealthResponse struct {
 
 func (x *SandboxHealthResponse) Reset() {
 	*x = SandboxHealthResponse{}
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[13]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -886,7 +991,7 @@ func (x *SandboxHealthResponse) String() string {
 func (*SandboxHealthResponse) ProtoMessage() {}
 
 func (x *SandboxHealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[13]
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -899,7 +1004,7 @@ func (x *SandboxHealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SandboxHealthResponse.ProtoReflect.Descriptor instead.
 func (*SandboxHealthResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{13}
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *SandboxHealthResponse) GetStatus() string {
@@ -968,7 +1073,13 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\fcontent_hash\x18\x02 \x01(\tR\vcontentHash\x12\x1d\n" +
 	"\n" +
 	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\x12\x1b\n" +
-	"\tbase_hash\x18\x04 \x01(\tR\bbaseHash\"\x16\n" +
+	"\tbase_hash\x18\x04 \x01(\tR\bbaseHash\"S\n" +
+	"\x17PromoteWorkspaceRequest\x12\x19\n" +
+	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x02 \x01(\tR\tbackendId\"G\n" +
+	"\x18PromoteWorkspaceResponse\x12+\n" +
+	"\x11conflicting_paths\x18\x01 \x03(\tR\x10conflictingPaths\"\x16\n" +
 	"\x14SandboxHealthRequest\"/\n" +
 	"\x15SandboxHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status*l\n" +
@@ -978,13 +1089,14 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\n" +
 	"\x06ACTIVE\x10\x02\x12\x10\n" +
 	"\fSNAPSHOTTING\x10\x03\x12\r\n" +
-	"\tDESTROYED\x10\x042\xc4\x04\n" +
+	"\tDESTROYED\x10\x042\xab\x05\n" +
 	"\x0eSandboxManager\x12Y\n" +
 	"\fAcquireLease\x12#.model_plane.v1.AcquireLeaseRequest\x1a$.model_plane.v1.AcquireLeaseResponse\x12Y\n" +
 	"\fReleaseLease\x12#.model_plane.v1.ReleaseLeaseRequest\x1a$.model_plane.v1.ReleaseLeaseResponse\x12T\n" +
 	"\x0fSnapshotSandbox\x12\x1f.model_plane.v1.SnapshotRequest\x1a .model_plane.v1.SnapshotResponse\x12\\\n" +
 	"\rActivateLease\x12$.model_plane.v1.ActivateLeaseRequest\x1a%.model_plane.v1.ActivateLeaseResponse\x12q\n" +
-	"\x14GetWorkspaceManifest\x12+.model_plane.v1.GetWorkspaceManifestRequest\x1a,.model_plane.v1.GetWorkspaceManifestResponse\x12U\n" +
+	"\x14GetWorkspaceManifest\x12+.model_plane.v1.GetWorkspaceManifestRequest\x1a,.model_plane.v1.GetWorkspaceManifestResponse\x12e\n" +
+	"\x10PromoteWorkspace\x12'.model_plane.v1.PromoteWorkspaceRequest\x1a(.model_plane.v1.PromoteWorkspaceResponse\x12U\n" +
 	"\x06Health\x12$.model_plane.v1.SandboxHealthRequest\x1a%.model_plane.v1.SandboxHealthResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eSandboxesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
@@ -1001,7 +1113,7 @@ func file_model_plane_v1_sandboxes_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_sandboxes_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_model_plane_v1_sandboxes_proto_goTypes = []any{
 	(SandboxLifecycleState)(0),           // 0: model_plane.v1.SandboxLifecycleState
 	(*AcquireLeaseRequest)(nil),          // 1: model_plane.v1.AcquireLeaseRequest
@@ -1016,14 +1128,16 @@ var file_model_plane_v1_sandboxes_proto_goTypes = []any{
 	(*WorkspaceManifestEntry)(nil),       // 10: model_plane.v1.WorkspaceManifestEntry
 	(*GetWorkspaceManifestResponse)(nil), // 11: model_plane.v1.GetWorkspaceManifestResponse
 	(*WorkspaceChangedFile)(nil),         // 12: model_plane.v1.WorkspaceChangedFile
-	(*SandboxHealthRequest)(nil),         // 13: model_plane.v1.SandboxHealthRequest
-	(*SandboxHealthResponse)(nil),        // 14: model_plane.v1.SandboxHealthResponse
-	(*durationpb.Duration)(nil),          // 15: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),        // 16: google.protobuf.Timestamp
+	(*PromoteWorkspaceRequest)(nil),      // 13: model_plane.v1.PromoteWorkspaceRequest
+	(*PromoteWorkspaceResponse)(nil),     // 14: model_plane.v1.PromoteWorkspaceResponse
+	(*SandboxHealthRequest)(nil),         // 15: model_plane.v1.SandboxHealthRequest
+	(*SandboxHealthResponse)(nil),        // 16: model_plane.v1.SandboxHealthResponse
+	(*durationpb.Duration)(nil),          // 17: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),        // 18: google.protobuf.Timestamp
 }
 var file_model_plane_v1_sandboxes_proto_depIdxs = []int32{
-	15, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
-	16, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
+	17, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
+	18, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: model_plane.v1.AcquireLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
 	12, // 3: model_plane.v1.SnapshotRequest.changed_files:type_name -> model_plane.v1.WorkspaceChangedFile
 	0,  // 4: model_plane.v1.ActivateLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
@@ -1033,15 +1147,17 @@ var file_model_plane_v1_sandboxes_proto_depIdxs = []int32{
 	5,  // 8: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
 	7,  // 9: model_plane.v1.SandboxManager.ActivateLease:input_type -> model_plane.v1.ActivateLeaseRequest
 	9,  // 10: model_plane.v1.SandboxManager.GetWorkspaceManifest:input_type -> model_plane.v1.GetWorkspaceManifestRequest
-	13, // 11: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
-	2,  // 12: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
-	4,  // 13: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
-	6,  // 14: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
-	8,  // 15: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
-	11, // 16: model_plane.v1.SandboxManager.GetWorkspaceManifest:output_type -> model_plane.v1.GetWorkspaceManifestResponse
-	14, // 17: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
-	12, // [12:18] is the sub-list for method output_type
-	6,  // [6:12] is the sub-list for method input_type
+	13, // 11: model_plane.v1.SandboxManager.PromoteWorkspace:input_type -> model_plane.v1.PromoteWorkspaceRequest
+	15, // 12: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
+	2,  // 13: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
+	4,  // 14: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
+	6,  // 15: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
+	8,  // 16: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
+	11, // 17: model_plane.v1.SandboxManager.GetWorkspaceManifest:output_type -> model_plane.v1.GetWorkspaceManifestResponse
+	14, // 18: model_plane.v1.SandboxManager.PromoteWorkspace:output_type -> model_plane.v1.PromoteWorkspaceResponse
+	16, // 19: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
+	13, // [13:20] is the sub-list for method output_type
+	6,  // [6:13] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
 	6,  // [6:6] is the sub-list for extension extendee
 	0,  // [0:6] is the sub-list for field type_name
@@ -1058,7 +1174,7 @@ func file_model_plane_v1_sandboxes_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sandboxes_proto_rawDesc), len(file_model_plane_v1_sandboxes_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -121,3 +121,97 @@ func (s *Store) UpsertOverlay(ctx context.Context, orgID, spaceID, runID string,
 	}
 	return nil
 }
+
+// Promote merges runID's own workspace_files overlay into the Space's
+// durable rows (run_id IS NULL) — S3.3 step 4 (design doc §4, §8 item 4).
+// One compare-and-swap upsert per path, never one all-or-nothing
+// transaction across the whole overlay: a conflict on one path never
+// blocks any other path in the same run's overlay from merging.
+//
+// A path merges when the Space's current row either doesn't exist yet, or
+// its content_hash matches the overlay row's base_hash (the hash this run
+// saw when it hydrated) — first-time merge — or already matches the
+// overlay row's OWN content_hash — an already-merged path, so a second
+// Promote call for the same overlay is a safe no-op, not a false conflict
+// (this is the one subtlety a naive base_hash-only check gets wrong: after
+// a successful merge the Space's hash no longer equals base_hash, since it
+// now equals what THIS run itself just wrote, not a stranger's change).
+// Anything else — the Space's current content differs from both — is
+// reported in the returned slice; every other path still merges.
+//
+// Deliberately re-reads each path's overlay row FRESH inside the same
+// statement that performs its compare-and-swap merge, rather than reading
+// the whole overlay once up front and reusing those Go-side values across
+// the per-path loop. An adversarial review of the first draft (which did
+// the latter) found a real lost-update: PromoteWorkspace and SnapshotSandbox
+// are independent RPCs with no lock between them, so a caller's
+// SnapshotSandbox call landing between this method's initial read and its
+// later per-path write would have its newer overlay content silently
+// discarded in favor of the stale value this method captured earlier — and
+// the Space row would then mismatch BOTH the stale write and the overlay's
+// actual current content, false-conflicting a future, perfectly mergeable
+// Promote call. Folding the read into each path's own INSERT ... SELECT ...
+// FROM (a one-row CTE) closes the window entirely: Postgres evaluates the
+// CTE and the conflict-checking WHERE clause within the SAME atomic
+// statement, so whatever this call writes is always whatever the overlay
+// held at the moment of that specific write, never an earlier snapshot.
+func (s *Store) Promote(ctx context.Context, orgID, spaceID, runID string) ([]string, error) {
+	if orgID == "" || spaceID == "" || runID == "" {
+		return nil, fmt.Errorf("org_id, space_id, and run_id are required")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT path
+		FROM workspace_files
+		WHERE org_id = $1 AND space_id = $2 AND run_id = $3
+	`, orgID, spaceID, runID)
+	if err != nil {
+		return nil, fmt.Errorf("promote workspace: list overlay paths: %w", err)
+	}
+	var paths []string
+	for rows.Next() {
+		var path string
+		if scanErr := rows.Scan(&path); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("promote workspace: scan overlay path: %w", scanErr)
+		}
+		paths = append(paths, path)
+	}
+	rowsErr := rows.Err()
+	rows.Close()
+	if rowsErr != nil {
+		return nil, fmt.Errorf("promote workspace: list overlay paths: %w", rowsErr)
+	}
+
+	var conflicts []string
+	for _, path := range paths {
+		// The `overlay` CTE re-reads this ONE path's current row as part of
+		// this same statement — see the doc comment above for why that
+		// matters. If the overlay row somehow vanished between the listing
+		// query above and this statement (nothing in this codebase deletes
+		// an overlay row today, so this is not a reachable case in
+		// practice), the CTE returns no rows, the INSERT ... SELECT inserts
+		// nothing, and RowsAffected() is 0 — reported as a conflict, which
+		// is a harmless mislabel for a case that cannot currently occur.
+		tag, execErr := s.pool.Exec(ctx, `
+			WITH overlay AS (
+				SELECT content_hash, size_bytes, COALESCE(base_hash, '') AS base_hash
+				FROM workspace_files
+				WHERE org_id = $1 AND space_id = $2 AND run_id = $3 AND path = $4
+			)
+			INSERT INTO workspace_files (org_id, space_id, run_id, path, content_hash, size_bytes, updated_at)
+			SELECT $1, $2, NULL, $4, overlay.content_hash, overlay.size_bytes, now()
+			FROM overlay
+			ON CONFLICT (org_id, space_id, COALESCE(run_id, ''), path)
+			DO UPDATE SET content_hash = EXCLUDED.content_hash, size_bytes = EXCLUDED.size_bytes, updated_at = now()
+			WHERE workspace_files.content_hash = (SELECT base_hash FROM overlay)
+			   OR workspace_files.content_hash = EXCLUDED.content_hash
+		`, orgID, spaceID, runID, path)
+		if execErr != nil {
+			return nil, fmt.Errorf("promote workspace path %q: %w", path, execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			conflicts = append(conflicts, path)
+		}
+	}
+	return conflicts, nil
+}

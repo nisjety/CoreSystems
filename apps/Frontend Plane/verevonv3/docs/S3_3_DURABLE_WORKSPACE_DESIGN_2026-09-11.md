@@ -586,35 +586,114 @@ discipline rather than one large change:**
   + potential egress) than the read/knowledge-search scoping `org_id`
   already gates.
 
-## 4. Merge: run overlay → Space (this is "never last-writer-wins")
+## 4. Merge: run overlay → Space (this is "never last-writer-wins") — IMPLEMENTED 2026-09-12
 
 A run's overlay is never written directly into the Space's `run_id IS NULL`
 rows as a side effect of the run itself — that would BE last-writer-wins,
 just deferred to snapshot time instead of write time. Merging is its own
-explicit step (a new RPC, `PromoteWorkspace(lease_id, backend_id)`, mirroring
-`ActivateLease`'s shape), and each path is a **compare-and-swap on
-`base_hash`**:
+explicit step (`PromoteWorkspace(lease_id, backend_id)`, mirroring
+`ActivateLease`'s request shape), and each path is a **compare-and-swap on
+`base_hash`**, implemented as one `INSERT ... ON CONFLICT ... DO UPDATE ...
+WHERE` per path rather than the plain `UPDATE` this section originally
+sketched — the actual implementation needed two real subtleties a naive
+compare-and-swap gets wrong, both caught before shipping (one by a dedicated
+idempotency test, the other by an adversarial-review pass):
 
 ```sql
--- one path, inside a transaction, per row in the run's overlay:
-UPDATE workspace_files
-SET content_hash = $new_hash, size_bytes = $new_size, updated_at = now()
-WHERE org_id = $org_id AND space_id = $space_id AND run_id IS NULL AND path = $path
-  AND content_hash = $base_hash;  -- the hash this run saw when it hydrated
--- 0 rows affected + the row exists with a DIFFERENT hash now = CONFLICT
--- 0 rows affected + the row doesn't exist and base_hash was NULL = fine, INSERT instead
+-- one path, per row in the run's overlay, no shared transaction across
+-- paths (see below for why). The `overlay` CTE re-reads THIS path's
+-- current row as part of THIS SAME statement -- see below for why that
+-- matters too:
+WITH overlay AS (
+  SELECT content_hash, size_bytes, COALESCE(base_hash, '') AS base_hash
+  FROM workspace_files
+  WHERE org_id = $org_id AND space_id = $space_id AND run_id = $run_id AND path = $path
+)
+INSERT INTO workspace_files (org_id, space_id, run_id, path, content_hash, size_bytes, updated_at)
+SELECT $org_id, $space_id, NULL, $path, overlay.content_hash, overlay.size_bytes, now()
+FROM overlay
+ON CONFLICT (org_id, space_id, COALESCE(run_id, ''), path)
+DO UPDATE SET content_hash = EXCLUDED.content_hash, size_bytes = EXCLUDED.size_bytes, updated_at = now()
+WHERE workspace_files.content_hash = (SELECT base_hash FROM overlay)  -- first-time merge
+   OR workspace_files.content_hash = EXCLUDED.content_hash;           -- already-merged, safe no-op
+-- RowsAffected() == 0 = CONFLICT: the Space's current content differs from
+-- both base_hash and what this run is trying to write -- someone else's
+-- change landed first.
 ```
+
+**Subtlety one — idempotency.** After a successful merge, the Space's
+`content_hash` no longer equals `base_hash` (it now equals what THIS run
+itself just wrote), so a naive `content_hash = $base_hash`-only check would
+treat every already-merged path as a false conflict on any repeat
+`PromoteWorkspace` call. The second `WHERE` disjunct
+(`= EXCLUDED.content_hash`) fixes this — proven by a dedicated integration
+test (`TestWorkspaceStore_PromoteIsIdempotentForAnAlreadyMergedPath`)
+against real Postgres before this was trusted.
+
+**Subtlety two — a real lost-update race, found by an adversarial-review
+workflow pass, not by writing tests first.** An earlier draft read the
+whole overlay in one query, then looped over the Go-side captured values to
+issue one `Exec` per path using those values as bound parameters. Between
+that read and a given path's later `Exec`, a concurrent `SnapshotSandbox`
+call (a completely independent RPC, no lock between the two) updating the
+SAME overlay row would have its newer content silently discarded — Promote
+would still write the STALE value it read earlier, report success, and
+leave the Space holding content that matches neither the stale write nor
+the overlay's actual current state, false-conflicting a future, perfectly
+mergeable `Promote` call. The fix above folds the overlay read into the
+SAME statement as the compare-and-swap write (the `overlay` CTE) so
+whatever gets written is always whatever the overlay held at THAT
+statement's execution, never an earlier snapshot — closing the window
+structurally rather than trying to detect the race after the fact. Proven
+by `TestWorkspaceStore_PromoteMergesAChangedPathViaUpdateAlongsideABrandNewOne`,
+which also closed a real coverage gap the same review found: no prior test
+exercised the successful UPDATE branch (a pre-existing, differing Space
+row, changed via a matching base_hash) against real Postgres at all.
 
 A conflicting path is never silently resolved by whichever run's promotion
 happened to run second — both versions remain fully recoverable (content is
 immutable and hash-addressed in CAS; nothing is ever overwritten or deleted
-there), and the conflict is surfaced rather than auto-picked. **What exactly
-"surfaced" means — return an error listing conflicting paths for the caller
-to retry/reconcile, or something richer — is an open product question, not
-resolved here; see Open Questions.** Non-conflicting paths in the same
-promotion always merge, independent of any conflicting path elsewhere in the
-same run's overlay (per-path CAS, not one all-or-nothing check across the
-whole overlay).
+there), and the conflict is surfaced (`conflicting_paths` in the response)
+rather than auto-picked. **What exactly a caller does with that list — retry
+with a fresh hydrate, surface to a human, drop the change — is still an open
+product question, deliberately NOT resolved here** (confirmed during
+implementation: no Space UI, no frontend conflict-data shape, and no other
+consumer of `conflicting_paths` exists anywhere in the repo today). Every
+non-conflicting path in the same promotion still merges, independent of any
+conflicting path elsewhere in the same run's overlay — proven by a dedicated
+test (`TestWorkspaceStore_PromoteMergesNonConflictingPathsIndependently`,
+this section's own named scenario) — which is also why there is
+**deliberately no shared transaction across paths**: wrapping the whole
+overlay in one transaction that rolls back on any single path's conflict
+would silently undo every OTHER path's successful merge, contradicting this
+guarantee. Each path's own INSERT/UPDATE commits independently.
+
+**Resolving which Space a lease's overlay belongs to must work even after
+the lease itself has been released** — a design question this section's
+original sketch didn't anticipate. `ReleaseLease` marks the `leases` row
+DESTROYED (never touching `workspace_files`), and `GetScoped` (the lookup
+every other RPC on this service uses) explicitly excludes a DESTROYED lease.
+Since merging is deliberately its own explicit step, never tied to (or
+ordered before) the lease's own automatic release, `PromoteWorkspace`
+resolves its lease via a new `LeaseStore.GetAny` instead — a
+destroyed-tolerant, expiry-tolerant lookup whose only consumer is this RPC,
+proven end to end (`TestPromoteWorkspaceStillWorksAfterReleaseLease`,
+`TestLeaseStore_GetAnyResolvesALeaseAfterItIsReleased`) against a lease that
+was ALREADY released before promotion was attempted. `internal/server/
+server.go`'s existing `ReleaseScoped` already had its own precedent for
+exactly this shape (a destroyed-tolerant lookup, with its own doc comment
+explaining why) — `GetAny` and `ReleaseScoped` now share that lookup via a
+single `lookupIgnoringDestroyedState` helper rather than two copies of the
+same query.
+
+**Deliberately no execution-core caller wired.** `PromoteWorkspace` and its
+Rust client method (`SandboxManagerClient::promote_workspace`) exist and are
+independently callable, but nothing in execution-core calls it automatically
+— matching this paragraph's own "merging is its own explicit step, not an
+automatic side effect" framing, and this initiative's established "ship the
+primitive, wire the caller once a concrete consumer exists" precedent (the
+CAS client, the lease RPCs themselves, and `GetWorkspaceManifest` were all
+in this exact position before their own first real caller landed).
 
 ## 5. Output promotion through Data APIs
 
@@ -1131,9 +1210,13 @@ an existing pattern," not a second implementation of the same capability.
    CAS-backed workspace for Space-scoped calls instead of an ephemeral one.
    Steps 4 (`PromoteWorkspace` merge) and 5 (Data Plane v2 promotion) are
    the only work remaining in this document.
-4. **Merge/`PromoteWorkspace`** (§4) — depends on 3.5 existing in practice
-   (an overlay a real run actually produced), though its own SQL/RPC design
-   only assumes 3's data shapes exist.
+4. **Merge/`PromoteWorkspace` — DONE, 2026-09-12.** (§4) Proto RPC + Go store
+   (`workspace.Store.Promote`, `LeaseStore.GetAny`) + server handler + authz
+   case + Rust client method (`SandboxManagerClient::promote_workspace`, no
+   caller wired — see §4's own closing note). Tests: unit (Go-side wiring,
+   stubbed) + integration (real Postgres: new-path merge, conflict-without-
+   overwrite, idempotent re-promote, independent-per-path, and resolving a
+   lease's Space after `ReleaseLease` already destroyed it) all passing.
 5. **Data Plane promotion client** (§5) — independent of 1-4 in principle
    (it only needs *some* content to promote), but sequenced last since it's
    the lowest-priority piece for "a workspace that survives a restart," which
@@ -1169,3 +1252,22 @@ an existing pattern," not a second implementation of the same capability.
   (build outputs, browser artifacts), but wasn't independently re-litigated
   against alternatives here; flagged as an assumption carried from the
   existing (unused) compose wiring, not a fresh evaluation.
+- **No fresh capability re-check on `PromoteWorkspace` (or any other write
+  RPC besides `AcquireLease`)** — found by an adversarial-review pass while
+  implementing step 4, not a regression it introduced. Any authenticated
+  user principal can call `ActivateLease`/`SnapshotSandbox`/
+  `PromoteWorkspace`/`ReleaseLease` on a lease they own indefinitely after
+  its underlying capability grant would have naturally expired or the lease
+  itself was destroyed (`GetAny` deliberately ignores both, and none of
+  these RPCs re-verifies a fresh signed capability decision the way
+  `AcquireLease` does). Confirmed NOT a cross-tenant bug — `org_id` always
+  comes from the verified principal, never the request, at every one of
+  these RPCs — so the exposure is bounded to a caller acting on their own
+  already-acquired lease past its capability's intended lifetime, not
+  acting on anyone else's. This is an existing, shared characteristic of
+  the whole lease-lifecycle RPC family (not unique to `PromoteWorkspace`),
+  flagged here because `PromoteWorkspace`'s blast radius — durably mutating
+  a Space's shared workspace state — is larger than the lease bookkeeping
+  the other RPCs in this family perform. Whether every write RPC on this
+  service should re-verify a fresh capability decision per call is a
+  broader design question, out of scope for step 4 specifically.
