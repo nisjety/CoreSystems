@@ -8,6 +8,7 @@ members = [
   "crates/va-net",
   "crates/va-capture",
   "crates/va-encode",
+  "crates/va-input",
 ]
 
 [workspace.package]
@@ -49,6 +50,7 @@ va-protocol = { path = "crates/va-protocol" }
 va-net = { path = "crates/va-net" }
 va-capture = { path = "crates/va-capture" }
 va-encode = { path = "crates/va-encode" }
+va-input = { path = "crates/va-input" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

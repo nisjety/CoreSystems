@@ -223,3 +223,65 @@ fn test_delay_probe_from_client_is_echoed_verbatim_once_connected() {
     let echoed = va_protocol::decode_test_delay(payload).unwrap();
     assert_eq!(echoed, probe, "the exact same TestDelay must come back unchanged");
 }
+
+#[test]
+fn mouse_and_key_events_decode_into_input_events_once_connected() {
+    let (mut host, signed_id_envelope, host_public_key) = make_host("141589119", "correct-horse");
+    let mut controller = FakeController::new(host_public_key);
+
+    let public_key_envelope = controller.on_signed_id(&signed_id_envelope).unwrap();
+    let hash_ciphertext = host.on_plaintext_message(&public_key_envelope).unwrap();
+    let hash_plaintext = controller.decrypt(&hash_ciphertext).unwrap();
+    let (_, hash_payload) = va_protocol::read_envelope_field(&hash_plaintext).unwrap().unwrap();
+    let (salt, challenge) = {
+        let mut r = va_wire::ProtoReader::new(hash_payload);
+        let mut salt = String::new();
+        let mut challenge = String::new();
+        while !r.eof() {
+            let tag = r.read_tag().unwrap();
+            match tag.field_number {
+                1 => salt = r.read_string().unwrap(),
+                2 => challenge = r.read_string().unwrap(),
+                _ => r.skip(tag.wire_type).unwrap(),
+            }
+        }
+        (salt, challenge)
+    };
+    let login_ciphertext = controller
+        .build_login_request("141589119", "correct-horse", &salt, &challenge)
+        .unwrap();
+    let Event::LoggedIn { response: response_ciphertext } = host.on_encrypted_message(&login_ciphertext).unwrap()
+    else {
+        panic!("expected LoggedIn");
+    };
+    controller.parse_login_response(&response_ciphertext).unwrap();
+
+    // A left-button-down MouseEvent at (100, 200) -- mask = (0x01 << 3) | 1.
+    let mut mouse_writer = va_wire::ProtoWriter::new();
+    mouse_writer.int32(1, 9).sint32(2, 100).sint32(3, 200);
+    let mouse_envelope = va_protocol::wrap_message(va_protocol::message_field::MOUSE_EVENT, &mouse_writer.finish());
+    let mouse_ciphertext = controller.encrypt(&mouse_envelope).unwrap();
+    match host.on_encrypted_message(&mouse_ciphertext).unwrap() {
+        Event::MouseInput(mouse) => {
+            assert_eq!(mouse.kind, va_protocol::MouseEventKind::Down);
+            assert!(mouse.button_flags.contains(va_protocol::MouseButtonFlags::LEFT));
+            assert_eq!(mouse.x, 100);
+            assert_eq!(mouse.y, 200);
+        }
+        _ => panic!("expected MouseInput"),
+    }
+
+    // A Return key-down (KeyEvent.mode omitted -- proto3 default Legacy).
+    let mut key_writer = va_wire::ProtoWriter::new();
+    key_writer.bool(1, true).int32(3, 27);
+    let key_envelope = va_protocol::wrap_message(va_protocol::message_field::KEY_EVENT, &key_writer.finish());
+    let key_ciphertext = controller.encrypt(&key_envelope).unwrap();
+    match host.on_encrypted_message(&key_ciphertext).unwrap() {
+        Event::KeyInput(key) => {
+            assert!(key.down);
+            assert_eq!(key.identification, va_protocol::KeyIdentification::ControlKey(27));
+            assert_eq!(key.mode, va_protocol::KeyboardMode::Legacy);
+        }
+        _ => panic!("expected KeyInput"),
+    }
+}
