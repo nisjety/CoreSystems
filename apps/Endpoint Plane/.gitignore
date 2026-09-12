@@ -1,0 +1,5 @@
+# Local dev identity persisted by verevon-agent (see src/main.rs's
+# load_or_create_identity). A raw Ed25519 secret key -- never commit one,
+# even a locally-generated dev one; each machine should have its own.
+verevon-agent-identity.key
+*.key

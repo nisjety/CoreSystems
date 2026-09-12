@@ -43,19 +43,17 @@ name = "verevon-agent"
 path = "src/main.rs"
 
 [dependencies]
-# va-net, va-capture, va-encode are deliberately NOT yet listed here: this
-# binary doesn't wire them up yet (that's M2/M3, see the build plan), and
-# va-encode specifically cannot build on this machine right now (its
-# vpx-encode dependency needs a system libvpx via pkg-config, which isn't
-# installed) -- known and expected, not a regression. va-capture DOES build
-# cleanly here (confirmed) but is left out until main.rs actually uses it.
 va-crypto = { path = "crates/va-crypto" }
 va-wire = { path = "crates/va-wire" }
 va-protocol = { path = "crates/va-protocol" }
+va-net = { path = "crates/va-net" }
+va-capture = { path = "crates/va-capture" }
+va-encode = { path = "crates/va-encode" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true
