@@ -245,7 +245,14 @@ fn workspace_dir(space_id: &str, lease_id: &str) -> PathBuf {
 const MAX_TOKEN_TTL_SECONDS: u64 = 3_600;
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(30);
 const SANDBOX_MANAGER_AUDIENCE: &str = "sandbox-manager";
-const RELEASE_SCOPE: &str = "sandbox:write";
+/// Both scopes, not just `sandbox:write`: sandbox-manager's `authz.go`
+/// gates `GetWorkspaceManifest` on `sandbox:read` with an exact
+/// `slices.Contains` check (no write-implies-read hierarchy), and Auth Core
+/// issues exactly the scopes requested (`plane-service-principal.ts`
+/// returns `scopes: requestedScopes`, narrowed from the registry allowlist).
+/// A write-only request therefore produced a token the hydrate path's
+/// manifest read was refused with — found 2026-09-13 while designing S4.2.
+const SERVICE_SCOPES: [&str; 2] = ["sandbox:read", "sandbox:write"];
 
 struct CachedToken {
     value: String,
@@ -265,9 +272,11 @@ struct CachedToken {
 /// matches established convention rather than introducing a premature
 /// abstraction two crates would have to share.
 ///
-/// Used ONLY for `ActivateLease`/`SnapshotSandbox`/`ReleaseLease` — never
-/// `AcquireLease`, which requires the delegated user-bound bearer instead
-/// (see `SandboxLeaseContext`'s own doc for why).
+/// Used ONLY for `ActivateLease`/`GetWorkspaceManifest`/`SnapshotSandbox`/
+/// `ReleaseLease` — never `AcquireLease`, which requires the delegated
+/// user-bound bearer instead (see `SandboxLeaseContext`'s own doc for why).
+/// Minted with [`SERVICE_SCOPES`] (read AND write) because that set of RPCs
+/// spans both of sandbox-manager's scopes.
 pub struct SandboxManagerTokenProvider {
     auth_core_url: String,
     service_id: String,
@@ -374,8 +383,8 @@ impl SandboxManagerTokenProvider {
             .header("x-service-api-key", credential)
             .json(&serde_json::json!({
                 "orgId": org_id,
-                "scopes": [RELEASE_SCOPE],
-                "reason": "release a Space-scoped sandbox lease at run end",
+                "scopes": SERVICE_SCOPES,
+                "reason": "operate a Space-scoped sandbox lease lifecycle after acquire",
             }))
             .send()
             .await?;
@@ -776,19 +785,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_token_is_scoped_to_sandbox_write_and_cached() {
+    async fn service_token_requests_both_sandbox_scopes_and_is_cached() {
         use wiremock::matchers::{body_json, header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let auth = MockServer::start().await;
+        // `sandbox:read` is load-bearing, not decorative: `GetWorkspaceManifest`
+        // is gated on it in sandbox-manager's `authz.go`, and Auth Core issues
+        // exactly the scopes requested here — a write-only request would leave
+        // the hydrate path's manifest read refused (`authz_test.go`'s own
+        // "GetWorkspaceManifest missing read scope" case).
         Mock::given(method("POST"))
             .and(path("/api/sandbox-manager/internal-token"))
             .and(header("x-service-id", "execution-core"))
             .and(header("x-service-api-key", "service-secret"))
             .and(body_json(serde_json::json!({
                 "orgId": "org-a",
-                "scopes": ["sandbox:write"],
-                "reason": "release a Space-scoped sandbox lease at run end"
+                "scopes": ["sandbox:read", "sandbox:write"],
+                "reason": "operate a Space-scoped sandbox lease lifecycle after acquire"
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "token": "sandbox-manager-token",
