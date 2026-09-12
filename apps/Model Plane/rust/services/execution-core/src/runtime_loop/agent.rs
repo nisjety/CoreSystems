@@ -361,6 +361,8 @@ struct LoopContext<'a> {
     capability_client: Option<&'a crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &'a crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &'a str,
+    cas_client: Option<&'a crate::workspace_cas::CasClient>,
+    sandbox_tokens: &'a crate::sandbox_lease::SandboxManagerTokenProvider,
     agent_model: String,
     permission_wire: &'static str,
     /// Nesting depth: 0 is the user-facing run, 1 a delegated subagent. Bounds
@@ -439,6 +441,7 @@ pub(crate) async fn run_agent(
     capability_client: Option<&crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &str,
+    cas_client: Option<&crate::workspace_cas::CasClient>,
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let tools = merged_tool_defs(
@@ -464,6 +467,7 @@ pub(crate) async fn run_agent(
         capability_client,
         sandbox_manager_client,
         backend_id,
+        cas_client,
         sandbox_tokens,
     )
     .await
@@ -583,6 +587,7 @@ async fn run_agent_with_tools(
     capability_client: Option<&crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &str,
+    cas_client: Option<&crate::workspace_cas::CasClient>,
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
@@ -649,6 +654,8 @@ async fn run_agent_with_tools(
         capability_client,
         sandbox_manager_client,
         backend_id,
+        cas_client,
+        sandbox_tokens,
         agent_model,
         permission_wire,
         depth: 0,
@@ -697,6 +704,7 @@ async fn run_agent_with_tools(
         state,
         sandbox_manager_client,
         sandbox_tokens,
+        cas_client,
         &req.run_id,
         &req.org_id,
     )
@@ -1387,6 +1395,8 @@ async fn run_rounds(
                                 capability_client: ctx.capability_client,
                                 sandbox_manager_client: ctx.sandbox_manager_client,
                                 backend_id: ctx.backend_id,
+                                cas_client: ctx.cas_client,
+                                sandbox_tokens: ctx.sandbox_tokens,
                             }
                         })
                     } else {
@@ -2096,6 +2106,8 @@ async fn run_subagent(
         capability_client: parent.capability_client,
         sandbox_manager_client: parent.sandbox_manager_client,
         backend_id: parent.backend_id,
+        cas_client: parent.cas_client,
+        sandbox_tokens: parent.sandbox_tokens,
         agent_model: parent.agent_model.clone(),
         permission_wire: parent.permission_wire,
         depth: parent.depth + 1,
@@ -5533,6 +5545,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -5619,6 +5632,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -5690,6 +5704,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -5726,6 +5741,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -5795,6 +5811,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -5863,6 +5880,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -5956,6 +5974,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6021,6 +6040,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6090,6 +6110,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6170,6 +6191,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6299,6 +6321,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6380,6 +6403,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6443,6 +6467,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6520,6 +6545,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6753,6 +6779,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6899,6 +6926,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -6980,6 +7008,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7061,6 +7090,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7139,6 +7169,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7217,6 +7248,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7280,6 +7312,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7351,6 +7384,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7443,6 +7477,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7522,6 +7557,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7586,6 +7622,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7656,6 +7693,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7735,6 +7773,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7822,6 +7861,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await
@@ -7896,6 +7936,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            None,
             &test_sandbox_tokens(),
         )
         .await

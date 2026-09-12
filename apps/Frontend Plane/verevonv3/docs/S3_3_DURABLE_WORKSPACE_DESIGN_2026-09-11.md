@@ -1060,11 +1060,77 @@ an existing pattern," not a second implementation of the same capability.
        passed, the same 2 pre-existing unrelated failures as every prior
        slice (`executor.rs`'s Windows path assertion, `grpc.rs`'s
        timing-sensitive HITL test), no new failures.
-     - C.5 — Rust: `code_interpreter.rs`'s Space-scoped rewrite (the
-       persistent-directory path above), the new `StateStore` cache slot,
-       the two release-point wiring points.
+     - **C.5 — DONE, 2026-09-12.** Rust: `code_interpreter.rs`'s Space-scoped
+       rewrite. `state.rs` gains `HydratedWorkspace{path, baseline}` +
+       `StateStore.workspaces` (insert-once/read-many/take, mirroring
+       `sandbox_lease`'s existing trio exactly). `sandbox_lease.rs` gains
+       `ensure_hydrated_workspace` (cache hit on `StateStore`, else
+       `ActivateLease` — this module's first real caller of it —→
+       `GetWorkspaceManifest` → `hydrate` into
+       `.../verevon-space-workspaces/<space_id>/<lease_id>/`, reusing
+       `code_interpreter::path_slug`, made `pub(crate)` rather than
+       duplicated) and extends `release_sandbox_lease_if_any` to
+       `diff_and_upload` + `SnapshotSandbox` + remove the directory BEFORE
+       releasing the lease, best-effort throughout (an upload/snapshot
+       failure loses this run's uncommitted edits but never blocks the
+       release or fails the RPC it rides with). `SandboxLeaseContext` gained
+       `cas_client`/`sandbox_tokens`, threaded through both its construction
+       sites (`grpc.rs`'s `execute_step`, `agent.rs`'s `run_rounds`) and
+       `LoopContext` (`run_agent`/`run_agent_with_tools`/the subagent
+       inheritance) — the same trio-threading shape `capability_client`/
+       `sandbox_manager_client`/`backend_id` already established in B.2,
+       just two more fields through the identical seams. ~25 test call
+       sites in `agent.rs` fixed via `replace_all` on an identical trailing-
+       argument pattern (`"test-backend",\n &test_sandbox_tokens(),` →
+       insert `None,` between them), the same mechanical, compile-error-
+       driven approach every prior slice this initiative used.
+
+       `code_interpreter.rs` itself: `run`/`run_with_timeout` gained a
+       `workspace_root: Option<&Path>` parameter — `None` (every non-Space
+       call) is BYTE-FOR-BYTE the original ephemeral `Workspace::create`/
+       `Drop` path, unchanged; `Some(root)` skips `Workspace` entirely and
+       runs against the caller-owned persistent directory. Both paths share
+       one new `run_in_root` helper (staging + `execute_sandboxed_in_dir` +
+       output collection), parameterized by a `persistent: bool` that
+       controls exactly two things: scratch-directory creation tolerates
+       `AlreadyExists` (`create_dir_all`) instead of failing, since a
+       reused directory's SECOND call finds `.tmp`/`.mplconfig` already
+       there; and `collect_output_files` excludes a file that already
+       existed, byte-for-byte unchanged, before THIS call started (a new
+       `pre_call_baseline: HashMap<path, hash>`, always empty on the
+       ephemeral path, computed via `snapshot_file_hashes` — a plain
+       content hash, not CAS-related, purely a same-process "did this file
+       change since the call started" check) — without this, every call in
+       a run would re-report every file any earlier call, or hydrate, ever
+       produced. A file that WAS pre-existing but got modified is still
+       reported, since the hash comparison catches the change; only a
+       byte-identical re-existing file is suppressed.
+
+       Tests: `cargo test -p execution-core --lib` — same count as C.4 plus
+       the new coverage below, only the same 2 pre-existing unrelated
+       failures, no new ones. New: `state.rs`'s three `HydratedWorkspace`
+       cache tests (absent/cached/taken, mirroring `sandbox_lease`'s own
+       trio); `sandbox_lease.rs`'s cache-hit test, a CAS-not-configured
+       fail-closed test, and a release test proving the directory is
+       removed even when CAS is unconfigured (using a real `wiremock`
+       Auth-Core stub so `release_lease` itself is actually reached);
+       `code_interpreter.rs`'s two persistent-workspace tests — a second
+       call reading what the first call wrote (the entire point of a
+       durable workspace) without the directory being deleted between
+       calls, and a three-call sequence proving an unchanged file is never
+       re-reported while a genuinely changed one is. `gofmt`/`rustfmt`
+       diffs on every touched file confirmed clean (none had pre-existing
+       drift, unlike several files touched in earlier B.2/C slices).
    Blocks step 4 in practice (there is no real overlay to promote without
    3.5.C existing), even though 4's own SQL/RPC design doesn't depend on it.
+
+   **With C.1-C.5 all done, step 3.5 (wiring a real caller) is now FULLY
+   implemented.** Every RPC this design named (`AcquireLease`,
+   `ActivateLease`, `SnapshotSandbox`, `ReleaseLease`, `GetWorkspaceManifest`)
+   now has a real caller; `code_interpreter.rs` genuinely uses a durable,
+   CAS-backed workspace for Space-scoped calls instead of an ephemeral one.
+   Steps 4 (`PromoteWorkspace` merge) and 5 (Data Plane v2 promotion) are
+   the only work remaining in this document.
 4. **Merge/`PromoteWorkspace`** (§4) — depends on 3.5 existing in practice
    (an overlay a real run actually produced), though its own SQL/RPC design
    only assumes 3's data shapes exist.

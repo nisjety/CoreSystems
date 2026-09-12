@@ -1,5 +1,7 @@
 //! In-memory run state store for execution-core.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::{mapref::entry::Entry, DashMap};
@@ -71,11 +73,24 @@ pub struct SandboxLease {
     pub backend_id: String,
 }
 
+/// A run's Space-scoped `code_interpreter` workspace, hydrated once onto
+/// local disk and reused across every call in the run. `baseline` is
+/// `hydrate`'s own `path -> content_hash` return value, captured at hydrate
+/// time — kept here so the run's eventual `diff_and_upload` (at release
+/// time) compares against what THIS run actually observed, not whatever
+/// the Space's rows say by then. See `sandbox_lease::ensure_hydrated_workspace`.
+#[derive(Debug, Clone)]
+pub struct HydratedWorkspace {
+    pub path: PathBuf,
+    pub baseline: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StateStore {
     runs: Arc<DashMap<String, RunSnapshot>>,
     owners: Arc<DashMap<String, RunOwner>>,
     leases: Arc<DashMap<String, SandboxLease>>,
+    workspaces: Arc<DashMap<String, HydratedWorkspace>>,
 }
 
 impl StateStore {
@@ -207,6 +222,31 @@ impl StateStore {
     pub fn take_sandbox_lease(&self, run_id: &str) -> Option<SandboxLease> {
         self.leases.remove(run_id).map(|(_, lease)| lease)
     }
+
+    /// Read this run's already-hydrated Space workspace, if any.
+    #[must_use]
+    pub fn hydrated_workspace(&self, run_id: &str) -> Option<HydratedWorkspace> {
+        self.workspaces.get(run_id).map(|entry| entry.clone())
+    }
+
+    /// Cache the workspace this run hydrated for its first Space-scoped
+    /// `code_interpreter` call. Unconditional insert-or-replace, mirroring
+    /// `cache_sandbox_lease`: only a caller that already checked
+    /// `hydrated_workspace` and found nothing reaches here.
+    pub fn cache_hydrated_workspace(&self, run_id: &str, workspace: HydratedWorkspace) {
+        self.workspaces.insert(run_id.to_owned(), workspace);
+    }
+
+    /// Remove and return this run's hydrated workspace, if it ever created
+    /// one. Used only at a run's actual end, alongside `take_sandbox_lease` —
+    /// removing rather than reading means a second release attempt finds
+    /// nothing and does not try to re-upload or re-delete the directory.
+    #[must_use]
+    pub fn take_hydrated_workspace(&self, run_id: &str) -> Option<HydratedWorkspace> {
+        self.workspaces
+            .remove(run_id)
+            .map(|(_, workspace)| workspace)
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +372,39 @@ mod tests {
         assert_eq!(store.take_sandbox_lease("run-1"), Some(lease));
         assert_eq!(store.take_sandbox_lease("run-1"), None);
         assert_eq!(store.sandbox_lease("run-1"), None);
+    }
+
+    #[test]
+    fn a_run_with_no_hydrated_workspace_yet_reads_as_absent() {
+        let store = StateStore::new();
+        assert!(store.hydrated_workspace("run-1").is_none());
+    }
+
+    #[test]
+    fn a_cached_hydrated_workspace_is_reused_by_later_reads_for_the_same_run() {
+        let store = StateStore::new();
+        let workspace = HydratedWorkspace {
+            path: PathBuf::from("/tmp/ws-1"),
+            baseline: HashMap::from([("a.txt".to_owned(), "sha256:aaa".to_owned())]),
+        };
+        store.cache_hydrated_workspace("run-1", workspace.clone());
+        let read = store.hydrated_workspace("run-1").expect("cached workspace");
+        assert_eq!(read.path, workspace.path);
+        assert_eq!(read.baseline, workspace.baseline);
+        assert!(store.hydrated_workspace("run-2").is_none());
+    }
+
+    #[test]
+    fn taking_a_hydrated_workspace_removes_it_so_a_second_release_is_a_no_op() {
+        let store = StateStore::new();
+        let workspace = HydratedWorkspace {
+            path: PathBuf::from("/tmp/ws-1"),
+            baseline: HashMap::new(),
+        };
+        store.cache_hydrated_workspace("run-1", workspace);
+        assert!(store.take_hydrated_workspace("run-1").is_some());
+        assert!(store.take_hydrated_workspace("run-1").is_none());
+        assert!(store.hydrated_workspace("run-1").is_none());
     }
 
     #[test]

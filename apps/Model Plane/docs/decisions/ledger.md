@@ -2169,3 +2169,66 @@ endings only, verified via `gofmt -d`), not real content changes; nothing
 new introduced.
 
 Full detail: design doc §8 item 3.5.C.
+
+## S3.3 step 3.5.C.5 implemented — code_interpreter.rs now uses a durable, hydrated workspace when Space-scoped (2026-09-12)
+
+The final sub-slice. `code_interpreter.rs`'s `run`/`run_with_timeout` gained
+an `Option<&Path>` workspace-root parameter: `None` keeps the exact original
+ephemeral `Workspace::create`/`Drop` lifecycle (ordinary, non-Space calls are
+byte-for-byte unchanged); `Some(root)` runs against a persistent directory
+`sandbox_lease::ensure_hydrated_workspace` already hydrated and owns the
+lifetime of. Both paths share one new `run_in_root` helper, distinguished by
+a `persistent: bool` that controls exactly two things: scratch-directory
+creation tolerates `AlreadyExists` (a reused directory's second call finds
+`.tmp`/`.mplconfig` already present), and output collection excludes a file
+that already existed, byte-for-byte unchanged, before THIS call started —
+without that, every call in a run would re-report every file any earlier
+call (or hydrate) ever produced. A file that existed before but was modified
+this call is still reported; only an identical re-existing one is
+suppressed.
+
+`ensure_hydrated_workspace` (new, `sandbox_lease.rs`) is this codebase's
+first real caller of both `ActivateLease` (SCRATCH → ACTIVE — the lease
+promotion the 2026-09-12 authz.go fix above exists for) and
+`GetWorkspaceManifest`. `release_sandbox_lease_if_any` is now also the first
+real caller of `SnapshotSandbox`: before releasing the lease, it
+`diff_and_upload`s the workspace and reports the result via
+`SnapshotSandbox`'s `changed_files`, then removes the local directory either
+way. Everything here is best-effort by the same rule the rest of this
+release path already follows: an upload or snapshot failure must never fail
+the `CancelRun`/`RunAgent` response it rides with.
+
+**A known, pre-existing gap this phase did not introduce, restated
+accurately rather than left to rot in a stale comment**: the inline
+`ExecuteStep` chat path (`code_interpreter` outside `RunAgent`) has no
+observable "run ended" signal at all (documented at B.2's own release
+slice). Such a run's hydrated workspace, if it ever creates one, is now
+never uploaded OR deleted by this module — its edits are lost and its local
+directory persists until the container restarts. This is the same root
+cause as the already-documented lease-TTL gap, not a new one; the module's
+own doc comment says so explicitly rather than implying a safety net that
+does not exist.
+
+`SandboxLeaseContext` gained `cas_client`/`sandbox_tokens` fields, threaded
+through the same seams B.2 already established for `capability_client`/
+`sandbox_manager_client`/`backend_id` (both construction sites, `LoopContext`,
+the subagent inheritance). ~25 mechanical test-call-site fixes in `agent.rs`
+via one `replace_all` on an identical trailing-argument pattern — the same
+compile-error-driven approach every slice this initiative has used.
+
+Tests: new coverage in all three touched modules (`state.rs`'s
+`HydratedWorkspace` cache trio; `sandbox_lease.rs`'s cache-hit, CAS-not-
+configured-fails-closed, and release-still-cleans-up-without-CAS cases;
+`code_interpreter.rs`'s cross-call persistence and no-stale-re-report
+tests) plus the full existing suite, unchanged pass count aside from the
+new tests and the same 2 pre-existing unrelated failures as every prior
+slice. `rustfmt --check` clean on every touched file (none had pre-existing
+drift, unlike several files in earlier slices).
+
+**With C.1-C.5 done, S3.3 step 3.5 (wiring a real caller) is fully
+implemented** — every RPC the design named now has a real caller, and
+`code_interpreter.rs` genuinely uses a durable CAS-backed workspace for
+Space-scoped calls. Steps 4 (`PromoteWorkspace` merge) and 5 (Data Plane v2
+promotion) are the only work left in this initiative.
+
+Full detail: design doc §8 item 3.5.C.

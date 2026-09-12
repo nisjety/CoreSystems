@@ -1,37 +1,46 @@
-//! Acquires and releases a sandbox-manager lease for a run's Space-scoped
-//! `code_interpreter` calls — the first real caller of
-//! `sandbox_manager_client.rs` (S3.3 §3.5 phase B.2). Acquiring does not yet
-//! change how `code_interpreter.rs` executes: the lease is acquired and
-//! cached so the machinery is proven end to end, but wiring it into the
-//! tool's own workspace is phase 3.5.C's job, not this one's.
+//! Acquires, hydrates, and releases a sandbox-manager lease + workspace for a
+//! run's Space-scoped `code_interpreter` calls (S3.3 §3.5 phases B.2 and C).
 //!
-//! `ActivateLease` is deliberately never called from here: `code_interpreter`
-//! is governed as `cap.command.sandbox` precisely because it is hermetic
-//! (read-only rootfs, no network, `egress: "disabled_by_default"`), so its
-//! lease never needs more than the credential-free `SCRATCH` allowlist
-//! `AcquireLease` already grants. A future capability that genuinely needs
-//! network/egress would call `ActivateLease` itself; this module does not
-//! speculatively wire a transition nothing here uses. `SnapshotSandbox` is
-//! likewise out of scope: phase 3.5.C is what would give a lease anything
-//! meaningful to snapshot, and it has not landed yet.
+//! [`ensure_sandbox_lease`] acquires (or reuses) the lease itself, credential-
+//! free (`SCRATCH`) by default — `code_interpreter` is governed as
+//! `cap.command.sandbox` precisely because it is hermetic (read-only rootfs,
+//! no network, `egress: "disabled_by_default"`), so nothing here needs more
+//! than that allowlist for the lease grant alone. [`ensure_hydrated_workspace`]
+//! is the first real caller of `ActivateLease` (SCRATCH → ACTIVE) and
+//! `GetWorkspaceManifest`: a Space-scoped call needs its DURABLE workspace
+//! content, not just a hermetic execution grant, so the lease is promoted and
+//! its manifest hydrated onto local disk the first time a run actually uses
+//! one. [`release_sandbox_lease_if_any`] is the first real caller of
+//! `SnapshotSandbox`, uploading whatever the run's own hydrated workspace
+//! accumulated before releasing the lease.
 //!
-//! Release is only reachable from the two points execution-core can observe
-//! a run's actual end: `CancelRun`, and a governed `RunAgent`'s own
-//! `finalize()`. A run driven purely by repeated direct `ExecuteStep` calls
-//! (the inline chat `code_interpreter` path) has no such signal at all —
-//! confirmed by tracing the call graph, not assumed — so that lease's only
-//! backstop is [`LEASE_TTL`] expiring server-side. This is a known, bounded
-//! gap (a released-late lease, not an unbounded leak), not an oversight.
+//! Release (and, with it, the workspace upload) is only reachable from the
+//! two points execution-core can observe a run's actual end: `CancelRun`,
+//! and a governed `RunAgent`'s own `finalize()`. A run driven purely by
+//! repeated direct `ExecuteStep` calls (the inline chat `code_interpreter`
+//! path) has no such signal at all — confirmed by tracing the call graph,
+//! not assumed — so that lease's only backstop is [`LEASE_TTL`] expiring
+//! server-side, and any hydrated workspace such a run creates is never
+//! uploaded OR deleted by this module at all — its edits are lost, and its
+//! local directory persists until the container itself restarts. This is a
+//! known gap, sharing the same root cause and same existing "inline
+//! ExecuteStep chat path has no run-ended signal" limitation the B.2 release
+//! design already documented — not a new one this phase introduced, and not
+//! an oversight.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use mp_contracts::model_plane::v1::WorkspaceChangedFile;
 use tonic::Status;
 use tracing::warn;
 
 use crate::capability_client::{CapabilityClient, CapabilityDecisionRequest};
 use crate::sandbox_manager_client::{LeaseRequest, SandboxManagerClient};
-use crate::state::{SandboxLease, StateStore};
+use crate::state::{HydratedWorkspace, SandboxLease, StateStore};
+use crate::workspace_cas::CasClient;
+use crate::workspace_hydrate::WorkspaceFileEntry;
 
 /// One hour: generous for a single agent run's `code_interpreter` calls,
 /// bounded so a lease neither `CancelRun` nor `RunAgent`'s own `finalize()`
@@ -63,6 +72,17 @@ pub struct SandboxLeaseContext<'a> {
     /// presents to Control, so the decision this function requests and the
     /// backend a lease pins to are always the same instance's own identity.
     pub backend_id: &'a str,
+    /// Absent exactly when `CasClient::from_env` found no MinIO
+    /// configuration — a valid disabled state. A Space-scoped
+    /// `code_interpreter` step fails closed without it (see
+    /// `ensure_hydrated_workspace`), since there is nowhere to fetch or
+    /// upload workspace content.
+    pub cas_client: Option<&'a CasClient>,
+    /// Mints execution-core's own `sandbox:write`/`sandbox:read` service
+    /// credential for `ActivateLease`/`GetWorkspaceManifest` here and
+    /// `SnapshotSandbox`/`ReleaseLease` at run end — never `AcquireLease`,
+    /// which needs the delegated user-bound bearer instead.
+    pub sandbox_tokens: &'a SandboxManagerTokenProvider,
 }
 
 /// Returns this run's sandbox lease, acquiring one from sandbox-manager if
@@ -134,6 +154,92 @@ pub async fn ensure_sandbox_lease(
     };
     state.cache_sandbox_lease(run_id, lease.clone());
     Ok(lease)
+}
+
+/// Ensures this run's Space-scoped `code_interpreter` workspace is hydrated
+/// onto local disk, reusing it across every later call in the same run — the
+/// one deliberate exception to `code_interpreter::Workspace::create`'s own
+/// "never adopt an existing directory" invariant, which stays true for every
+/// non-Space call (this function is never on that path at all).
+///
+/// The FIRST Space-scoped call in a run: activates `lease` (SCRATCH →
+/// ACTIVE — this module's own first real caller of `ActivateLease`, since
+/// nothing durable existed for this lease to read before now), fetches its
+/// current workspace manifest, and hydrates it. Every later call reuses the
+/// cached directory without any further sandbox-manager round trip.
+///
+/// # Errors
+/// Fails closed — never runs `code_interpreter` against an unhydrated or
+/// partially-hydrated directory — when CAS is not configured, the service
+/// credential is unavailable, or `ActivateLease`/`GetWorkspaceManifest`/
+/// `hydrate` itself fails.
+pub async fn ensure_hydrated_workspace(
+    ctx: &SandboxLeaseContext<'_>,
+    state: &StateStore,
+    run_id: &str,
+    org_id: &str,
+    lease: &SandboxLease,
+) -> Result<PathBuf, Status> {
+    if let Some(existing) = state.hydrated_workspace(run_id) {
+        return Ok(existing.path);
+    }
+
+    let cas = ctx.cas_client.ok_or_else(|| {
+        Status::failed_precondition("CAS is not configured; Space workspace unavailable")
+    })?;
+    let token = ctx.sandbox_tokens.token(org_id).await.map_err(|error| {
+        warn!(%error, "sandbox-manager service credential unavailable for workspace hydrate");
+        Status::unavailable("sandbox-manager service credential unavailable")
+    })?;
+
+    ctx.sandbox_manager_client
+        .activate_lease(&token, &lease.lease_id, &lease.backend_id)
+        .await
+        .inspect_err(|status| {
+            warn!(code = ?status.code(), "sandbox-manager ActivateLease failed");
+        })?;
+    let manifest = ctx
+        .sandbox_manager_client
+        .get_workspace_manifest(&token, &lease.lease_id, &lease.backend_id)
+        .await
+        .inspect_err(|status| {
+            warn!(code = ?status.code(), "sandbox-manager GetWorkspaceManifest failed");
+        })?;
+    let entries: Vec<WorkspaceFileEntry> = manifest
+        .entries
+        .into_iter()
+        .map(|entry| WorkspaceFileEntry {
+            path: entry.path,
+            content_hash: entry.content_hash,
+        })
+        .collect();
+
+    let path = workspace_dir(ctx.space_id, &lease.lease_id);
+    std::fs::create_dir_all(&path).map_err(|error| {
+        Status::internal(format!(
+            "could not create Space workspace directory: {error}"
+        ))
+    })?;
+    let baseline = crate::workspace_hydrate::hydrate(cas, &entries, &path)
+        .await
+        .map_err(|error| Status::internal(format!("Space workspace hydrate failed: {error}")))?;
+
+    let workspace = HydratedWorkspace {
+        path: path.clone(),
+        baseline,
+    };
+    state.cache_hydrated_workspace(run_id, workspace);
+    Ok(path)
+}
+
+/// The persistent directory a Space-scoped lease's workspace hydrates into —
+/// distinct per Space AND per lease, so two concurrent runs against the same
+/// Space (each with its own lease) never share a directory.
+fn workspace_dir(space_id: &str, lease_id: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("verevon-space-workspaces")
+        .join(crate::code_interpreter::path_slug(space_id))
+        .join(crate::code_interpreter::path_slug(lease_id))
 }
 
 const MAX_TOKEN_TTL_SECONDS: u64 = 3_600;
@@ -297,16 +403,25 @@ impl SandboxManagerTokenProvider {
     }
 }
 
-/// Releases this run's sandbox lease, if it ever acquired one — the ONLY
-/// counterpart to [`ensure_sandbox_lease`] this phase wires in. Best-effort:
-/// never returns an error, because a release failure must never fail the
-/// `CancelRun`/`RunAgent` response it rides along with — sandbox-manager's
-/// own TTL is the backstop either way, so a lost release delays cleanup, it
-/// does not leak anything unboundedly.
+/// Releases this run's sandbox lease, if it ever acquired one — the
+/// counterpart to [`ensure_sandbox_lease`]/[`ensure_hydrated_workspace`].
+/// Best-effort throughout: never returns an error, because a release or
+/// upload failure must never fail the `CancelRun`/`RunAgent` response it
+/// rides along with — sandbox-manager's own TTL is the backstop either way,
+/// so a lost step here delays cleanup or loses this run's own uncommitted
+/// workspace edits, it does not leak a lease unboundedly.
+///
+/// If this run ever hydrated a workspace, its changes are diffed and
+/// uploaded (`workspace_hydrate::diff_and_upload` + `SnapshotSandbox`)
+/// *before* the lease itself is released, and the local directory is removed
+/// either way — this is the only place a Space-scoped workspace directory is
+/// ever deleted, mirroring `code_interpreter::Workspace`'s own `Drop`, just
+/// keyed to lease release instead of per-call.
 pub async fn release_sandbox_lease_if_any(
     state: &StateStore,
     sandbox_manager_client: &SandboxManagerClient,
     tokens: &SandboxManagerTokenProvider,
+    cas_client: Option<&CasClient>,
     run_id: &str,
     org_id: &str,
 ) {
@@ -320,6 +435,18 @@ pub async fn release_sandbox_lease_if_any(
             return;
         }
     };
+
+    if let Some(workspace) = state.take_hydrated_workspace(run_id) {
+        upload_and_discard_workspace(
+            sandbox_manager_client,
+            cas_client,
+            &token,
+            &lease,
+            &workspace,
+        )
+        .await;
+    }
+
     if let Err(status) = sandbox_manager_client
         .release_lease(&token, &lease.lease_id, &lease.backend_id)
         .await
@@ -333,6 +460,76 @@ pub async fn release_sandbox_lease_if_any(
     }
 }
 
+/// Diffs and uploads `workspace`'s changes (if CAS is configured), records
+/// them via `SnapshotSandbox`, and removes the local directory regardless of
+/// whether either step succeeded — a lost upload means this run's edits
+/// never reach the Space, but must never leave a directory behind forever or
+/// block the lease release that follows.
+async fn upload_and_discard_workspace(
+    sandbox_manager_client: &SandboxManagerClient,
+    cas_client: Option<&CasClient>,
+    token: &str,
+    lease: &SandboxLease,
+    workspace: &HydratedWorkspace,
+) {
+    if let Some(cas) = cas_client {
+        match crate::workspace_hydrate::diff_and_upload(cas, &workspace.path, &workspace.baseline)
+            .await
+        {
+            Ok(changed) if !changed.is_empty() => {
+                let changed_files: Vec<WorkspaceChangedFile> = changed
+                    .into_iter()
+                    .map(|file| WorkspaceChangedFile {
+                        path: file.path,
+                        content_hash: file.content_hash,
+                        size_bytes: i64::try_from(file.size_bytes).unwrap_or(i64::MAX),
+                        base_hash: file.base_hash.unwrap_or_default(),
+                    })
+                    .collect();
+                if let Err(status) = sandbox_manager_client
+                    .snapshot_sandbox(
+                        token,
+                        &lease.lease_id,
+                        "code_interpreter run end",
+                        &lease.backend_id,
+                        changed_files,
+                    )
+                    .await
+                {
+                    warn!(
+                        lease_id = %lease.lease_id,
+                        code = ?status.code(),
+                        "sandbox-manager SnapshotSandbox failed; this run's workspace changes are lost"
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(
+                    lease_id = %lease.lease_id,
+                    %error,
+                    "Space workspace diff/upload failed; this run's workspace changes are lost"
+                );
+            }
+        }
+    } else {
+        warn!(
+            lease_id = %lease.lease_id,
+            "CAS is not configured; this run's workspace changes cannot be uploaded and are lost"
+        );
+    }
+
+    cleanup_workspace_dir(&workspace.path);
+}
+
+fn cleanup_workspace_dir(path: &Path) {
+    if let Err(error) = std::fs::remove_dir_all(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            warn!(%error, workspace = %path.display(), "Space workspace cleanup failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +539,14 @@ mod tests {
             tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
                 .expect("valid endpoint")
                 .connect_lazy(),
+        )
+    }
+
+    fn unroutable_token_provider() -> SandboxManagerTokenProvider {
+        SandboxManagerTokenProvider::new_for_test(
+            "http://127.0.0.1:1",
+            "execution-core",
+            "test-service-secret-at-least-32-bytes",
         )
     }
 
@@ -359,12 +564,15 @@ mod tests {
         // address) still succeeds here — proof the cache hit never reaches
         // the network.
         let sandbox_manager_client = unroutable_sandbox_manager_client();
+        let tokens = unroutable_token_provider();
         let ctx = SandboxLeaseContext {
             space_id: "space-1",
             sandbox_bearer: "bearer",
             capability_client: None,
             sandbox_manager_client: &sandbox_manager_client,
             backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
         };
 
         let lease = ensure_sandbox_lease(&ctx, &state, "run-1", "org-a", "user-a")
@@ -379,12 +587,15 @@ mod tests {
     async fn acquiring_a_new_lease_without_a_capability_client_fails_closed() {
         let state = StateStore::new();
         let sandbox_manager_client = unroutable_sandbox_manager_client();
+        let tokens = unroutable_token_provider();
         let ctx = SandboxLeaseContext {
             space_id: "space-1",
             sandbox_bearer: "bearer",
             capability_client: None,
             sandbox_manager_client: &sandbox_manager_client,
             backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
         };
 
         let error = ensure_sandbox_lease(&ctx, &state, "run-1", "org-a", "user-a")
@@ -407,8 +618,15 @@ mod tests {
 
         // A run that never acquired a lease releases silently: no token
         // request, no ReleaseLease call, and above all, no panic.
-        release_sandbox_lease_if_any(&state, &sandbox_manager_client, &tokens, "run-1", "org-a")
-            .await;
+        release_sandbox_lease_if_any(
+            &state,
+            &sandbox_manager_client,
+            &tokens,
+            None,
+            "run-1",
+            "org-a",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -429,13 +647,132 @@ mod tests {
             "service-secret-at-least-32-bytes",
         );
 
-        release_sandbox_lease_if_any(&state, &sandbox_manager_client, &tokens, "run-1", "org-a")
-            .await;
+        release_sandbox_lease_if_any(
+            &state,
+            &sandbox_manager_client,
+            &tokens,
+            None,
+            "run-1",
+            "org-a",
+        )
+        .await;
 
         // `take_sandbox_lease` already removed it before the credential
         // request was even attempted — a retried release call finds nothing
         // to release rather than trying (and failing) again forever.
         assert_eq!(state.sandbox_lease("run-1"), None);
+    }
+
+    #[tokio::test]
+    async fn a_hydrated_workspace_is_reused_by_a_second_call_without_touching_the_network() {
+        let state = StateStore::new();
+        let workspace = HydratedWorkspace {
+            path: PathBuf::from("/tmp/space-workspace-1"),
+            baseline: HashMap::from([("a.txt".to_owned(), "sha256:aaa".to_owned())]),
+        };
+        state.cache_hydrated_workspace("run-1", workspace.clone());
+        let sandbox_manager_client = unroutable_sandbox_manager_client();
+        let tokens = unroutable_token_provider();
+        let ctx = SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &sandbox_manager_client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+        };
+        let lease = SandboxLease {
+            lease_id: "lease-1".to_owned(),
+            backend_id: "backend-1".to_owned(),
+        };
+
+        let path = ensure_hydrated_workspace(&ctx, &state, "run-1", "org-a", &lease)
+            .await
+            .expect("cached workspace is returned without any client call");
+
+        assert_eq!(path, workspace.path);
+    }
+
+    #[tokio::test]
+    async fn hydrating_a_new_workspace_without_cas_configured_fails_closed() {
+        let state = StateStore::new();
+        let sandbox_manager_client = unroutable_sandbox_manager_client();
+        let tokens = unroutable_token_provider();
+        let ctx = SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &sandbox_manager_client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+        };
+        let lease = SandboxLease {
+            lease_id: "lease-1".to_owned(),
+            backend_id: "backend-1".to_owned(),
+        };
+
+        let error = ensure_hydrated_workspace(&ctx, &state, "run-1", "org-a", &lease)
+            .await
+            .expect_err("no CAS client configured must fail closed");
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(state.hydrated_workspace("run-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn releasing_a_lease_with_no_cas_configured_still_releases_and_cleans_up() {
+        let state = StateStore::new();
+        state.cache_sandbox_lease(
+            "run-1",
+            SandboxLease {
+                lease_id: "lease-1".to_owned(),
+                backend_id: "backend-1".to_owned(),
+            },
+        );
+        let dir = std::env::temp_dir().join("verevon-sandbox-lease-test-no-cas");
+        std::fs::create_dir_all(&dir).expect("create test workspace dir");
+        std::fs::write(dir.join("a.txt"), b"data").expect("write into test workspace");
+        state.cache_hydrated_workspace(
+            "run-1",
+            HydratedWorkspace {
+                path: dir.clone(),
+                baseline: HashMap::new(),
+            },
+        );
+        let sandbox_manager_client = unroutable_sandbox_manager_client();
+        // No Auth Core listening, but the token check happens before the
+        // workspace step here — use a real mock so release_lease itself is
+        // reached and this test proves the DIRECTORY cleanup specifically.
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let auth = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "sandbox-manager-token",
+                "expiresInSeconds": 300,
+                "audience": "sandbox-manager"
+            })))
+            .mount(&auth)
+            .await;
+        let tokens =
+            SandboxManagerTokenProvider::new_for_test(&auth.uri(), "execution-core", "secret");
+
+        release_sandbox_lease_if_any(
+            &state,
+            &sandbox_manager_client,
+            &tokens,
+            None,
+            "run-1",
+            "org-a",
+        )
+        .await;
+
+        assert!(
+            !dir.exists(),
+            "the workspace directory must be removed even when CAS is not configured"
+        );
+        assert!(state.hydrated_workspace("run-1").is_none());
     }
 
     #[tokio::test]

@@ -835,6 +835,8 @@ impl ExecutionCore for ExecutionService {
                 capability_client: self.capability_client.as_ref(),
                 sandbox_manager_client: &self.sandbox_manager_client,
                 backend_id: &self.backend_id,
+                cas_client: self.cas_client.as_ref(),
+                sandbox_tokens: &self.sandbox_tokens,
             }
         });
 
@@ -1070,6 +1072,7 @@ impl ExecutionCore for ExecutionService {
             &self.state,
             &self.sandbox_manager_client,
             &self.sandbox_tokens,
+            self.cas_client.as_ref(),
             &req.run_id,
             &caller.org_id,
         )
@@ -1175,6 +1178,7 @@ impl ExecutionCore for ExecutionService {
             self.capability_client.as_ref(),
             &self.sandbox_manager_client,
             &self.backend_id,
+            self.cas_client.as_ref(),
             &self.sandbox_tokens,
         )
         .await?;

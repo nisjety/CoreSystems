@@ -33,6 +33,7 @@
 //! where an over-cap file is still listed, with `"truncated":true` and an empty
 //! `content_b64`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -41,6 +42,7 @@ use base64::alphabet;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
 use base64::engine::DecodePaddingMode;
 use base64::Engine;
+use sha2::{Digest, Sha256};
 
 use crate::executor;
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
@@ -368,7 +370,11 @@ fn workspace_name(run_id: &str, step_id: &str) -> String {
 /// arrive from the run context rather than from model input, but they are still
 /// never spliced into a path unfiltered — a single `../` would move the
 /// workspace, and with it the sandbox's writable root.
-fn path_slug(raw: &str) -> String {
+///
+/// `pub(crate)` so `sandbox_lease.rs` can build the SAME kind of safe
+/// directory name for a Space-scoped lease's persistent workspace, rather
+/// than duplicating this exact logic a second time.
+pub(crate) fn path_slug(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .take(48)
@@ -452,13 +458,32 @@ fn inherited_or(var: &str, fallback: &str) -> String {
 /// Run a `code_interpreter` call: stage a workspace, execute the program in it,
 /// return its output plus the files it produced, and delete the workspace.
 ///
+/// `workspace_root` is `Some` only for a Space-scoped lease whose workspace
+/// `sandbox_lease::ensure_hydrated_workspace` already hydrated — that
+/// directory is REUSED across every call in the run rather than created and
+/// dropped here; this function neither creates nor deletes it. `None` (every
+/// non-Space call, unchanged from before this parameter existed) keeps the
+/// original ephemeral `Workspace::create`/`Drop` lifecycle exactly as is.
+///
 /// # Errors
 /// Returns a caller-facing message when the input is invalid (see
 /// [`parse_request`]), the workspace or its files cannot be staged, or the
 /// process cannot be spawned / exceeds its timeout. A non-zero exit is NOT an
 /// error: it is reported as data in the result JSON.
-pub async fn run(tool_input: &str, run_id: &str, step_id: &str) -> Result<String, String> {
-    run_with_timeout(tool_input, run_id, step_id, executor::code_exec_timeout()).await
+pub async fn run(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+) -> Result<String, String> {
+    run_with_timeout(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        executor::code_exec_timeout(),
+    )
+    .await
 }
 
 /// [`run`] with an injected deadline — the testable seam (env mutation is
@@ -467,13 +492,42 @@ async fn run_with_timeout(
     tool_input: &str,
     run_id: &str,
     step_id: &str,
+    workspace_root: Option<&Path>,
     timeout: Duration,
 ) -> Result<String, String> {
     let request = parse_request(tool_input)?;
 
+    if let Some(root) = workspace_root {
+        return run_in_root(&request, root, timeout, true).await;
+    }
+
     let workspace = Workspace::create(run_id, step_id)
         .map_err(|error| format!("code_interpreter could not create its workspace: {error}"))?;
-    let root = workspace.path();
+    run_in_root(&request, workspace.path(), timeout, false).await
+    // `workspace` drops here — and on every `?` above — removing the directory.
+}
+
+/// Stage `request` into `root`, execute it sandboxed, and collect its output.
+/// Shared by both the ephemeral (`persistent = false`, a fresh empty `root`
+/// every call) and the Space-scoped persistent (`persistent = true`, `root`
+/// may already hold files hydrated or left by an earlier call in the same
+/// run) paths — `persistent` selects the two places that distinction
+/// actually matters: scratch-directory creation tolerates `AlreadyExists`
+/// instead of failing, and the returned `files` excludes anything that
+/// already existed, byte-for-byte unchanged, before THIS call started (not
+/// just this call's own staged inputs) — otherwise every call in a run would
+/// re-report every file any earlier call, or hydrate, ever produced.
+async fn run_in_root(
+    request: &CodeRequest,
+    root: &Path,
+    timeout: Duration,
+    persistent: bool,
+) -> Result<String, String> {
+    let pre_call_baseline = if persistent {
+        snapshot_file_hashes(root)
+    } else {
+        HashMap::new()
+    };
 
     // The program is staged as a FILE rather than passed with `-c`: a file gives
     // real filenames and line numbers in tracebacks (which is what lets the
@@ -486,9 +540,16 @@ async fn run_with_timeout(
         .map_err(|error| format!("code_interpreter could not stage the program: {error}"))?;
     // Scratch directories the runtime needs writable (see `child_env`). They are
     // directories, and output collection only returns top-level regular files, so
-    // whatever lands in them stays out of the tool result.
+    // whatever lands in them stays out of the tool result. `create_dir_all`
+    // (persistent) rather than `create_dir` (ephemeral) because a persistent
+    // root's SECOND call finds these already present from the first.
     for scratch in [TEMP_SUBDIR, MPL_CONFIG_SUBDIR] {
-        std::fs::create_dir(root.join(scratch)).map_err(|error| {
+        let created = if persistent {
+            std::fs::create_dir_all(root.join(scratch))
+        } else {
+            std::fs::create_dir(root.join(scratch))
+        };
+        created.map_err(|error| {
             format!("code_interpreter could not create its '{scratch}' directory: {error}")
         })?;
     }
@@ -523,7 +584,7 @@ async fn run_with_timeout(
     let mut staged: Vec<&str> = Vec::with_capacity(request.files_in.len() + 1);
     staged.push(program_file);
     staged.extend(request.files_in.iter().map(|file| file.name.as_str()));
-    let files = collect_output_files(root, &staged);
+    let files = collect_output_files(root, &staged, &pre_call_baseline);
 
     serde_json::to_string(&CodeResult {
         stdout: outcome.stdout,
@@ -532,12 +593,47 @@ async fn run_with_timeout(
         files,
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
-    // `workspace` drops here — and on every `?` above — removing the directory.
+}
+
+fn content_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Hashes every top-level regular file currently in `root`, for
+/// [`run_in_root`]'s own "what already existed before this call" baseline in
+/// the persistent-workspace path. Never errors: an unreadable entry is
+/// simply absent from the baseline, which only makes `collect_output_files`
+/// more likely to (correctly) report it as new/changed — the safe direction.
+fn snapshot_file_hashes(root: &Path) -> HashMap<String, String> {
+    let mut baseline = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return baseline;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Ok(bytes) = std::fs::read(entry.path()) {
+            baseline.insert(name, content_hash(&bytes));
+        }
+    }
+    baseline
 }
 
 /// Collect the files the program produced: every top-level regular file that was
-/// not staged by us, in name order, capped per file and in total.
-fn collect_output_files(workspace: &Path, staged: &[&str]) -> Vec<OutputFile> {
+/// not staged by us, in name order, capped per file and in total. A file already
+/// present in `pre_call_baseline` with the SAME content is excluded too — the
+/// persistent-workspace path's "already reported in an earlier call" case;
+/// `pre_call_baseline` is always empty for the ephemeral path, so this is a
+/// no-op there.
+fn collect_output_files(
+    workspace: &Path,
+    staged: &[&str],
+    pre_call_baseline: &HashMap<String, String>,
+) -> Vec<OutputFile> {
     let Ok(entries) = std::fs::read_dir(workspace) else {
         return Vec::new();
     };
@@ -556,6 +652,11 @@ fn collect_output_files(workspace: &Path, staged: &[&str]) -> Vec<OutputFile> {
         };
         if staged.contains(&name.as_str()) {
             continue;
+        }
+        if let Some(prior_hash) = pre_call_baseline.get(&name) {
+            if std::fs::read(entry.path()).is_ok_and(|bytes| &content_hash(&bytes) == prior_hash) {
+                continue;
+            }
         }
         let size = entry.metadata().map_or(0, |meta| meta.len());
         found.push((name, size));
@@ -634,9 +735,15 @@ mod tests {
             "files_in": files_in,
         })
         .to_string();
-        let output = run_with_timeout(&input, "run-test", "step-test", Duration::from_secs(60))
-            .await
-            .expect("code_interpreter call");
+        let output = run_with_timeout(
+            &input,
+            "run-test",
+            "step-test",
+            None,
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("code_interpreter call");
         serde_json::from_str(&output).expect("result is JSON")
     }
 
@@ -1064,7 +1171,7 @@ mod tests {
         })
         .to_string();
         let started = std::time::Instant::now();
-        let error = run_with_timeout(&input, "hungrun", "hungstep", Duration::from_secs(1))
+        let error = run_with_timeout(&input, "hungrun", "hungstep", None, Duration::from_secs(1))
             .await
             .expect_err("an endless loop must not outlive its timeout");
         assert!(error.contains("exceeded"), "error: {error}");
@@ -1095,7 +1202,7 @@ mod tests {
             "code": "printf 'shell ok'; printf 'x' > made.txt",
         })
         .to_string();
-        let output = run_with_timeout(&input, "sh-run", "sh-step", Duration::from_secs(30))
+        let output = run_with_timeout(&input, "sh-run", "sh-step", None, Duration::from_secs(30))
             .await
             .expect("sh call");
         let result: serde_json::Value = serde_json::from_str(&output).expect("result is JSON");
@@ -1105,5 +1212,126 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0]["name"], "made.txt");
         assert_eq!(files[0]["mime"], "text/plain");
+    }
+
+    /// A tempdir this test owns end to end — mirrors how `sandbox_lease`'s
+    /// own persistent workspace directory is created and removed OUTSIDE
+    /// `run_with_timeout`, which never creates or deletes it.
+    struct PersistentTestDir(PathBuf);
+    impl PersistentTestDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("verevon-code-persistent-test-{label}"));
+            std::fs::create_dir_all(&path).expect("create persistent test dir");
+            Self(path)
+        }
+    }
+    impl Drop for PersistentTestDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_persistent_workspace_is_reused_and_not_deleted_between_calls() {
+        if !python3_available() {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let dir = PersistentTestDir::new("reuse");
+        let input = serde_json::json!({
+            "code": "open('kept.txt','w').write('first call')",
+        })
+        .to_string();
+        run_with_timeout(
+            &input,
+            "run-a",
+            "step-1",
+            Some(&dir.0),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first call");
+        assert!(
+            dir.0.is_dir(),
+            "a persistent workspace must survive the call"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("kept.txt")).expect("file from call 1"),
+            "first call"
+        );
+
+        // A SECOND call in the same directory must be able to read what the
+        // first call wrote — that is the entire point of a durable workspace.
+        let input = serde_json::json!({
+            "code": "print(open('kept.txt').read())",
+        })
+        .to_string();
+        let result = run_with_timeout(
+            &input,
+            "run-a",
+            "step-2",
+            Some(&dir.0),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("second call");
+        let result: serde_json::Value = serde_json::from_str(&result).expect("result is JSON");
+        assert_eq!(result["stdout"].as_str(), Some("first call\n"));
+    }
+
+    #[tokio::test]
+    async fn a_persistent_workspace_does_not_re_report_an_earlier_calls_unchanged_output() {
+        if !python3_available() {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let dir = PersistentTestDir::new("no-rereport");
+        run_with_timeout(
+            &serde_json::json!({"code": "open('out.csv','w').write('a,b')"}).to_string(),
+            "run-b",
+            "step-1",
+            Some(&dir.0),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("first call");
+
+        // A second call that does not touch out.csv must not see it reported
+        // again — the model already received it once.
+        let result = run_with_timeout(
+            &serde_json::json!({"code": "print('noop')"}).to_string(),
+            "run-b",
+            "step-2",
+            Some(&dir.0),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("second call");
+        let result: serde_json::Value = serde_json::from_str(&result).expect("result is JSON");
+        assert_eq!(
+            result["files"].as_array().map(Vec::len),
+            Some(0),
+            "an unchanged file from an earlier call must not be re-reported: {result}"
+        );
+
+        // But a THIRD call that overwrites it with different content must be
+        // reported — a genuine change, not just re-existing.
+        let result = run_with_timeout(
+            &serde_json::json!({"code": "open('out.csv','w').write('a,b,c')"}).to_string(),
+            "run-b",
+            "step-3",
+            Some(&dir.0),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("third call");
+        let result: serde_json::Value = serde_json::from_str(&result).expect("result is JSON");
+        let files = result["files"].as_array().expect("files array");
+        assert_eq!(
+            files.len(),
+            1,
+            "a genuinely changed file must be reported: {files:?}"
+        );
+        assert_eq!(files[0]["name"], "out.csv");
     }
 }

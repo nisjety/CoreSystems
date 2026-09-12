@@ -5,6 +5,8 @@ pub mod retry;
 pub(crate) mod skill_budget;
 pub mod subagent_results;
 
+use std::path::Path;
+
 use mp_contracts::model_plane::v1::{
     self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
 };
@@ -560,20 +562,32 @@ async fn execute_step_inner(
     } else if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
-        if let Some(sandbox) = sandbox {
+        let workspace_root = if let Some(sandbox) = sandbox {
             let Some(state) = state else {
                 return StepOutcome::failed(
                     "Space-scoped code_interpreter requires run state tracking",
                 );
             };
-            if let Err(status) =
-                crate::sandbox_lease::ensure_sandbox_lease(sandbox, state, run_id, org_id, user_id)
-                    .await
+            let lease = match crate::sandbox_lease::ensure_sandbox_lease(
+                sandbox, state, run_id, org_id, user_id,
+            )
+            .await
             {
-                return StepOutcome::failed(status.message());
+                Ok(lease) => lease,
+                Err(status) => return StepOutcome::failed(status.message()),
+            };
+            match crate::sandbox_lease::ensure_hydrated_workspace(
+                sandbox, state, run_id, org_id, &lease,
+            )
+            .await
+            {
+                Ok(path) => Some(path),
+                Err(status) => return StepOutcome::failed(status.message()),
             }
-        }
-        execute_code_interpreter(tool_input, run_id, step_id).await
+        } else {
+            None
+        };
+        execute_code_interpreter(tool_input, run_id, step_id, workspace_root.as_deref()).await
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
         execute_web_search(tool_input, org_id).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
@@ -828,8 +842,9 @@ async fn execute_code_interpreter(
     tool_input: &str,
     run_id: &str,
     step_id: &str,
+    workspace_root: Option<&Path>,
 ) -> tool_bridge::ToolExecution {
-    match crate::code_interpreter::run(tool_input, run_id, step_id).await {
+    match crate::code_interpreter::run(tool_input, run_id, step_id, workspace_root).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
