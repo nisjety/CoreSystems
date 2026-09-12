@@ -18,25 +18,30 @@
 //! salt/challenge just sent and whichever secret(s) this device accepts.
 //! Send `LoginResponse` (success carries `PeerInfo`). Then: echo any
 //! `TestDelay{from_client: true}` verbatim, allow the caller to push video
-//! frames, and decode any `MouseEvent`/`KeyEvent` the controller sends into
-//! `Event::MouseInput`/`Event::KeyInput` for the caller to act on (this
-//! state machine has no I/O and no permission model of its own — it just
-//! decodes and hands the typed event upward; whether to actually inject it
-//! is entirely the caller's call). Permissions start and stay at
-//! `screen.view` only in this phase (no `PermissionInfo` push), matching
-//! what a real stock `RustDesk` host was observed doing for a
-//! one-time-password connection — a real product would want an explicit
-//! permission/consent model gating `MouseInput`/`KeyInput` before ever
-//! reaching `va-input`, which this pass does not build.
+//! frames, and decode any `MouseEvent`/`KeyEvent` the controller sends —
+//! but ONLY into `Event::MouseInput`/`Event::KeyInput` once input control
+//! has actually been granted; otherwise into `Event::InputDenied`. `screen.
+//! view` is implicit from the moment login succeeds (video always flows);
+//! input control is not, and is never implied by login success alone —
+//! see `Event::LoggedIn::requires_consent` and `grant_input_permission`/
+//! `deny_input_permission` for the actual model. This state machine still
+//! has no I/O of its own: it hands `requires_consent` upward and waits to
+//! be told the answer, rather than showing any prompt itself. A permanent
+//! password means `requires_consent: false` (pre-authorized, unattended
+//! access — the caller may grant immediately); a temporary one means
+//! `requires_consent: true` (real local operator consent is needed first) —
+//! this distinction is this crate's own design, not something verified
+//! against a live stock `RustDesk` host (unlike most of this file, whose
+//! wire-level facts ARE independently confirmed).
 
 use thiserror::Error;
 use va_crypto::{unseal, CryptoError, EphemeralKeyPair, IdentityKeyPair, SessionCipher};
 
 use crate::messages::{
     decode_key_event, decode_login_request, decode_mouse_event, decode_public_key,
-    decode_test_delay, encode_hash, encode_login_response, encode_signed_id, encode_test_delay,
-    message_field, read_envelope_field, wrap_message, DisplayInfo, Hash, KeyEvent, LoginResponse,
-    MouseEvent, PeerInfo, TestDelay,
+    decode_test_delay, encode_hash, encode_login_response, encode_permission_info,
+    encode_signed_id, encode_test_delay, message_field, read_envelope_field, wrap_message,
+    DisplayInfo, Hash, KeyEvent, LoginResponse, MouseEvent, PeerInfo, Permission, TestDelay,
 };
 
 #[derive(Debug, Error)]
@@ -64,18 +69,33 @@ pub struct Credentials {
     pub temporary_password: Option<String>,
 }
 
+/// Which of the two secrets a successful login actually matched — this is
+/// what decides whether the new session needs local operator consent
+/// before input control is granted (see `Event::LoggedIn::requires_consent`
+/// and this module's own docs). A permanent password models pre-authorized,
+/// unattended access (the operator configured it in advance, specifically
+/// to skip a prompt); a temporary password models one-time, attended
+/// access, where nobody agreed to anything in advance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialKind {
+    Permanent,
+    Temporary,
+}
+
 impl Credentials {
     #[must_use]
-    fn accepts(&self, salt: &str, challenge: &str, candidate_hash: &[u8]) -> bool {
-        for secret in [&self.permanent_password, &self.temporary_password]
-            .into_iter()
-            .flatten()
-        {
+    fn accepts(&self, salt: &str, challenge: &str, candidate_hash: &[u8]) -> Option<CredentialKind> {
+        if let Some(secret) = &self.permanent_password {
             if va_crypto::hash_password(secret, salt, challenge) == candidate_hash {
-                return true;
+                return Some(CredentialKind::Permanent);
             }
         }
-        false
+        if let Some(secret) = &self.temporary_password {
+            if va_crypto::hash_password(secret, salt, challenge) == candidate_hash {
+                return Some(CredentialKind::Temporary);
+            }
+        }
+        None
     }
 }
 
@@ -101,20 +121,33 @@ pub enum Event {
     SendEncrypted(Vec<u8>),
     /// Login succeeded; `response` is the `LoginResponse::Success` envelope
     /// to send, and the session is now in its steady-state pump.
-    LoggedIn { response: Vec<u8> },
+    /// `requires_consent` tells the caller whether this login used the
+    /// TEMPORARY password (`true` — a real local operator must explicitly
+    /// approve input control before `grant_input_permission` is called) or
+    /// the PERMANENT one (`false` — pre-authorized, unattended access; the
+    /// caller may call `grant_input_permission` immediately with no
+    /// prompt). This state machine never shows a prompt itself — it has no
+    /// I/O — see `grant_input_permission`/`deny_input_permission`.
+    LoggedIn { response: Vec<u8>, requires_consent: bool },
     /// Login failed with the given wire error string (e.g. "Wrong
     /// Password") — still a normal, non-fatal outcome. `response` is the
     /// `LoginResponse::Error` envelope to send; the client may retry on the
     /// same connection.
     LoginFailed { reason: String, response: Vec<u8> },
-    /// A pointer action the controller sent (move/click/scroll). The
-    /// caller decides whether to actually inject it (e.g. via `va-input`)
-    /// — this state machine has no permission model of its own to gate on;
-    /// see this module's docs for why that's still an open gap.
+    /// A pointer action the controller sent, ALREADY checked against this
+    /// session's own granted-permission state — this only ever fires once
+    /// `grant_input_permission` has been called. The caller still decides
+    /// whether to actually inject it (e.g. via `va-input`); this state
+    /// machine just won't hand it up at all otherwise (see `InputDenied`).
     MouseInput(MouseEvent),
-    /// A keyboard action the controller sent. Same permission caveat as
-    /// `MouseInput`.
+    /// A keyboard action the controller sent. Same gating as `MouseInput`.
     KeyInput(KeyEvent),
+    /// A `MouseEvent`/`KeyEvent` arrived but input control isn't granted
+    /// (no consent given yet, denied, or revoked) — surfaced as its own
+    /// variant rather than folded into `None` so a caller can distinguish
+    /// "nothing happened" from "the controller tried to do something it
+    /// isn't allowed to do" for logging/telemetry.
+    InputDenied,
     /// Nothing to send back for this message (e.g. the echo of our own
     /// outbound `TestDelay` probe, which needs no further reply).
     None,
@@ -132,6 +165,13 @@ pub struct HostSession {
     credentials: Credentials,
     cipher: Option<SessionCipher>,
     state: State,
+    /// Whether the controller may currently send `MouseEvent`/`KeyEvent`.
+    /// Always starts `false` on a fresh login, regardless of which
+    /// credential was used — `grant_input_permission` is a separate,
+    /// explicit step the caller takes (immediately for a permanent
+    /// password, after real operator consent for a temporary one), never
+    /// implied by login success alone.
+    input_granted: bool,
 }
 
 impl HostSession {
@@ -155,6 +195,7 @@ impl HostSession {
             credentials,
             cipher: None,
             state: State::AwaitingPublicKey { ephemeral },
+            input_granted: false,
         };
         (session, envelope)
     }
@@ -225,7 +266,7 @@ impl HostSession {
                     });
                 }
                 let request = decode_login_request(payload)?;
-                if self.credentials.accepts(salt, challenge, &request.password) {
+                if let Some(kind) = self.credentials.accepts(salt, challenge, &request.password) {
                     let response = encode_login_response(&LoginResponse::Success(PeerInfo {
                         username: self.identity.device_id.clone(),
                         hostname: self.info.hostname.clone(),
@@ -236,8 +277,12 @@ impl HostSession {
                         version: self.info.version.clone(),
                     }));
                     self.state = State::Connected;
+                    self.input_granted = false;
                     let envelope = wrap_message(message_field::LOGIN_RESPONSE, &response);
-                    Ok(Event::LoggedIn { response: self.encrypt(&envelope)? })
+                    Ok(Event::LoggedIn {
+                        response: self.encrypt(&envelope)?,
+                        requires_consent: kind == CredentialKind::Temporary,
+                    })
                 } else {
                     let response = encode_login_response(&LoginResponse::Error("Wrong Password".into()));
                     let envelope = wrap_message(message_field::LOGIN_RESPONSE, &response);
@@ -268,14 +313,57 @@ impl HostSession {
             return Ok(Event::None);
         }
         if field_number == message_field::MOUSE_EVENT {
+            if !self.input_granted {
+                return Ok(Event::InputDenied);
+            }
             return Ok(Event::MouseInput(decode_mouse_event(payload)?));
         }
         if field_number == message_field::KEY_EVENT {
+            if !self.input_granted {
+                return Ok(Event::InputDenied);
+            }
             return Ok(Event::KeyInput(decode_key_event(payload)?));
         }
         // Unknown/unhandled field for this phase — ignored rather than
         // erroring, matching proto3's forward-compatibility contract.
         Ok(Event::None)
+    }
+
+    /// Grants input control: the caller decides WHEN to call this (see
+    /// `Event::LoggedIn::requires_consent`) — immediately for a permanent
+    /// password, or after real local operator consent for a temporary one.
+    /// Returns the encrypted `PermissionInfo{Keyboard, true}` envelope to
+    /// send, so the controller's own permission UI reflects reality (both
+    /// sides already had this wire message; nothing sent it until now).
+    ///
+    /// # Errors
+    ///
+    /// [`ProtocolError::NotYetEncrypted`] if called before the session
+    /// cipher is established (shouldn't happen: this is only meaningful
+    /// once `Event::LoggedIn` has already fired, which implies it is).
+    pub fn grant_input_permission(&mut self) -> Result<Vec<u8>, ProtocolError> {
+        self.input_granted = true;
+        self.encode_permission_info(true)
+    }
+
+    /// Explicitly denies input control (consent refused, or a timeout with
+    /// no answer) — distinct from simply never calling
+    /// `grant_input_permission`, because this ALSO tells the controller so
+    /// its UI can show "access denied" rather than sitting in an
+    /// indefinite, unexplained "waiting" state. Idempotent: safe to call
+    /// even though `input_granted` already defaults to `false`.
+    ///
+    /// # Errors
+    ///
+    /// Same as `grant_input_permission`.
+    pub fn deny_input_permission(&mut self) -> Result<Vec<u8>, ProtocolError> {
+        self.input_granted = false;
+        self.encode_permission_info(false)
+    }
+
+    fn encode_permission_info(&mut self, enabled: bool) -> Result<Vec<u8>, ProtocolError> {
+        let envelope = wrap_message(message_field::MISC, &encode_permission_info(Permission::Keyboard, enabled));
+        self.encrypt(&envelope)
     }
 
     /// Builds a host-initiated probe to send periodically (roughly once a

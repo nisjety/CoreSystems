@@ -414,25 +414,92 @@ mouse/keyboard input, and a resolved performance gap):**
   a synthetic pattern's output would be far more uniform) — this is the
   first time in this initiative's history that what the controller sees is
   the actual host desktop, not a stand-in.
-- **Genuinely still not built**: audio, file transfer, and anything for a
-  second concurrent connection (the current registration socket design
-  assumes one in-flight punch-hole exchange at a time). A real
-  permission/consent model gating `MouseInput`/`KeyInput` before they ever
-  reach `va-input` is still missing — this pass injects whatever the
-  authenticated controller sends, unconditionally, which is fine for this
-  development milestone but not for a real product. `DxgiDuplicationSource`
-  only ever captures the OS-designated PRIMARY monitor
-  (`Monitor::primary()`) — multi-monitor selection is unbuilt. The mouse
-  wheel's scroll-delta scaling (`enigo::scroll`'s own `WHEEL_DELTA=120`
-  multiplier vs `remote-core`'s raw, unscaled deltas) is unverified against
-  a real trackpad/mouse. `va-encode`'s VP9 path (`encode_vp9_video_frame`)
-  is tested but unused; `main.rs` sends AV1 only.
+- `DxgiDuplicationSource` only ever captures the OS-designated PRIMARY
+  monitor (`Monitor::primary()`) — multi-monitor selection is unbuilt. The
+  mouse wheel's scroll-delta scaling (`enigo::scroll`'s own
+  `WHEEL_DELTA=120` multiplier vs `remote-core`'s raw, unscaled deltas) is
+  unverified against a real trackpad/mouse. `va-encode`'s VP9 path
+  (`encode_vp9_video_frame`) is tested but unused; `main.rs` sends AV1 only.
+
+**Implemented and live-verified end to end (M5 — a real permission/consent
+model, closing M4's biggest known gap):**
+
+- **A real host-side permission model, not just a wire message.**
+  `Credentials::accepts` now reports WHICH secret matched
+  (`CredentialKind::Permanent` or `::Temporary`) instead of a bare `bool` —
+  this is what `Event::LoggedIn::requires_consent` is built from. A
+  temporary password (attended, one-time access) means `true`: the caller
+  MUST get real local consent before input control exists. A permanent
+  password (pre-authorized, unattended access — the operator configured it
+  in advance specifically to skip a prompt) means `false`: the caller may
+  grant immediately. This distinction is this crate's OWN design, not a
+  verified stock-RustDesk behavior (unlike most of this file's other wire
+  facts) — a real product might want a configurable policy here instead of
+  a hardcoded credential-kind rule.
+- `HostSession` gained `input_granted: bool` (always starts `false`,
+  regardless of credential — login success never implies input access on
+  its own), `grant_input_permission`/`deny_input_permission` (encode+encrypt
+  a real `Misc.permission_info{Keyboard, enabled}` envelope — a wire
+  message that has existed since M1 but that NOTHING ever sent until now),
+  and gates `MOUSE_EVENT`/`KEY_EVENT` decoding on that flag directly inside
+  `handle_session_message` — an ungranted event decodes into a new
+  `Event::InputDenied` instead of `MouseInput`/`KeyInput`, deliberately
+  distinct from `Event::None` so a caller can log/telemetry a denied
+  attempt rather than have it look identical to "nothing happened". This
+  is real defense-in-depth: `remote-core`'s OWN client-side
+  `PermissionManager` already refuses to send `MouseEvent`/`KeyEvent`
+  without a locally-granted permission (confirmed live: a raw
+  `actions.execute` call threw `PermissionDeniedError: Permission denied:
+  input.pointer` before any grant), but the host never trusts the client
+  to self-police — decoding is gated independently on the host's own state.
+- **A real native consent prompt, not a stub.** `src/consent.rs`
+  (`verevon-agent`, not a new crate — this is a host-binary-local UI
+  concern, not something any other crate needs) shows a real Yes/No
+  message box via `rfd` (its public API confirmed 100% safe from its
+  actual source, not docs.rs — on Windows, absent the `common-controls-v6`
+  feature this binary doesn't enable, it calls the classic `MessageBoxW`;
+  every `unsafe` block is internal to `rfd`'s own crate, the same
+  precedent `windows-capture`/`enigo` already established for this
+  workspace's `unsafe_code = "forbid"` lint). A 30s timeout defaults to
+  DENY (fail-closed) if nobody answers — `rfd`'s `AsyncMessageDialog`
+  already spawns its own OS thread internally, so this awaits directly
+  from a tokio task with no `spawn_blocking` needed, unlike
+  `DxgiDuplicationSource`'s setup.
+- **Live-verified for real, end to end, including the native dialog
+  itself** — not just via unit tests, and not by manually granting
+  permission client-side this time (unlike some of M4's live tests):
+  logging in with a TEMPORARY password produced a REAL native dialog on
+  the real desktop (confirmed via Windows UI Automation: `"m5-consent-
+  test" is requesting to control this computer's mouse and keyboard.
+  Allow?"`, with real localized "Ja"/"Nei" buttons — the OS's own locale,
+  not something this code controls); a scripted UI Automation click on
+  "Ja" produced a real `grant_input_permission` call, a real
+  `PermissionInfo{Keyboard, true}` sent over the wire, and — confirmed via
+  `remote-core`'s OWN `session.permissions.list()`, populated ENTIRELY from
+  the incoming wire message, no manual override this time —
+  `["screen.view", "input.keyboard", "input.pointer"]`, after which a real
+  `pointer.move` action succeeded with no `PermissionDeniedError`. Logging
+  in with the PERMANENT password produced NO dialog at all (confirmed:
+  a UI Automation watcher found nothing within a real wait window) and the
+  exact same fully-granted permission state, near-instantly. **A genuine
+  timing finding from this same live testing, not a bug**: the FIRST
+  attempt to click the dialog took long enough (multiple separate
+  tool round-trips to explore the dialog's UI Automation tree) that the
+  30s timeout fired first, correctly producing `granted=false` sent to the
+  controller — the fail-closed default working exactly as designed under
+  real-world latency, not a false pass from a lucky race.
+- **Genuinely still not built**: a CONFIGURABLE consent policy (today the
+  credential-kind rule is hardcoded, not a setting); revoking a
+  MID-SESSION grant (there's no wire trigger or local UI for the operator
+  to take back control once given); audio, file transfer, multi-monitor
+  selection, and multi-session support all remain exactly as unbuilt as
+  M4 left them.
 
 ## Verification
 
 ```bash
 cd "apps/Endpoint Plane"
-cargo test --workspace   # 86 unit/integration tests, 5 live (ignored)
+cargo test --workspace   # 90 unit/integration tests, 5 live (ignored)
 cargo clippy --workspace --all-targets  # 0 warnings
 cargo build --workspace  # everything -- no exclusions needed
 cargo build -p verevon-agent
@@ -443,13 +510,18 @@ cargo test -p va-net --test register_live -- --ignored --nocapture
 # The real agent, running for real: registers a device, waits for a real
 # connection attempt, pairs via the relay, logs in, captures and streams
 # the REAL primary monitor, and injects real mouse/keyboard input the
-# controller sends. Needs VEREVON_LICENCE_KEY (hbbs's own logged `Key:`
-# value) and a real controller (e.g. apps/Frontend Plane/verevonv3/
+# controller sends -- gated by a real native consent prompt unless a
+# permanent password is set. Needs VEREVON_LICENCE_KEY (hbbs's own logged
+# `Key:` value) and a real controller (e.g. apps/Frontend Plane/verevonv3/
 # apps/remote-dev, pointed at ws://localhost:21118 with
 # VITE_REMOTE_SERVER_PUBLIC_KEY set to that same key) driving a connection
 # attempt against the same device id + password while it runs.
+# VEREVON_AGENT_PERMANENT_PASSWORD is optional -- omit it (the default) to
+# require a real consent prompt on every login; set it to test the
+# pre-authorized, unattended-access path with no prompt at all.
 # --release is not optional -- see the M3 performance finding above.
 VEREVON_AGENT_ID=<id> VEREVON_AGENT_PASSWORD=<password> VEREVON_LICENCE_KEY=<key> \
+  [VEREVON_AGENT_PERMANENT_PASSWORD=<permanent-password>] \
   cargo run --release -p verevon-agent
 
 # Re-run after any encoder tuning change to confirm a real improvement:

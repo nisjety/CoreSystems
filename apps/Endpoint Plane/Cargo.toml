@@ -56,6 +56,14 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 bytes = { workspace = true }
+# The native input-control consent prompt (src/consent.rs). Its public API
+# is fully safe -- confirmed via its actual source, not docs.rs -- so this
+# is compatible with `unsafe_code = "forbid"`, the same precedent
+# `windows-capture`/`enigo` already established. `default-features = false`
+# drops `xdg-portal`/`wayland` (Linux-only) and `common-controls-v6`
+# (only needed for custom button labels, which this binary never uses --
+# a plain Yes/No dialog uses the classic MessageBoxW path either way).
+rfd = { version = "0.17", default-features = false }
 
 [lints]
 workspace = true

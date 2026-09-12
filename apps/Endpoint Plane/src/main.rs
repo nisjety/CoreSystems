@@ -7,10 +7,14 @@
 //! real primary monitor via [`va_capture::DxgiDuplicationSource`], resized
 //! by `va-encode` down to this binary's fixed, measured-real-time encode
 //! resolution (see `WIDTH`/`HEIGHT` below) -- never the display's own
-//! native size. Mouse/keyboard input is real too (`va-input`, gated by
-//! nothing but the encrypted session itself -- see `va_protocol::
-//! handshake`'s docs on the still-missing permission model). File transfer
-//! and multi-session support remain explicitly out of scope for this pass.
+//! native size. Mouse/keyboard input is real (`va-input`), and now gated
+//! by a real permission model: a temporary-password login shows a native
+//! Yes/No consent prompt (`consent::ask_for_input_control`) before any
+//! input is granted; a permanent-password login is pre-authorized,
+//! unattended access and grants immediately with no prompt -- see
+//! `va_protocol::handshake`'s docs for the underlying state machine. File
+//! transfer and multi-session support remain explicitly out of scope for
+//! this pass.
 //!
 //! **The device identity IS persisted to a local file across restarts** —
 //! not a nicety, a correctness requirement discovered live: hbbs rejects a
@@ -25,6 +29,8 @@
 //! contract is still deferred — this is a local file, not that — but a
 //! stable identity across restarts is not optional even for this pass.
 #![allow(clippy::cast_possible_wrap)]
+
+mod consent;
 
 use std::env;
 use std::net::SocketAddr;
@@ -76,6 +82,13 @@ async fn main() -> anyhow::Result<()> {
 
     let device_id = env::var("VEREVON_AGENT_ID").unwrap_or_else(|_| "verevon-agent-dev".to_string());
     let password = env::var("VEREVON_AGENT_PASSWORD").unwrap_or_else(|_| "changeme".to_string());
+    // Optional and unset by default: a permanent password models
+    // pre-authorized, unattended access (see va_protocol::handshake's
+    // docs) -- skipping it entirely, as most deployments should, means
+    // every login is temporary-password/attended and always needs real
+    // local consent before input control is granted.
+    let permanent_password = env::var("VEREVON_AGENT_PERMANENT_PASSWORD").ok();
+    let credentials = Credentials { permanent_password, temporary_password: Some(password) };
     let hbbs_addr: SocketAddr = env::var("VEREVON_RENDEZVOUS_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:21116".to_string())
         .parse()
@@ -96,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     loop {
-        let outcome = run_one_cycle(identity, &device_id, &password, hbbs_addr, relay_addr, &licence_key).await;
+        let outcome = run_one_cycle(identity, &device_id, &credentials, hbbs_addr, relay_addr, &licence_key).await;
         if let Err(err) = outcome {
             tracing::error!(error = %err, "session cycle ended with an error -- re-registering from scratch");
         }
@@ -128,7 +141,7 @@ fn load_or_create_identity(path: &PathBuf) -> anyhow::Result<IdentityKeyPair> {
 async fn run_one_cycle(
     identity: IdentityKeyPair,
     device_id: &str,
-    password: &str,
+    credentials: &Credentials,
     hbbs_addr: SocketAddr,
     relay_addr: SocketAddr,
     licence_key: &str,
@@ -176,14 +189,19 @@ async fn run_one_cycle(
             .await?;
     tracing::info!("paired via the relay -- running the host session");
 
-    run_host_session(relay_sock, device_id, identity, password).await
+    run_host_session(relay_sock, device_id, identity, credentials).await
 }
 
+// A single cohesive protocol-dispatch loop (login states, encrypted
+// echoes, video/permission task spawn, input events) -- already trimmed
+// via `start_session_tasks`/`inject_input_event`; further fragmenting it
+// for a couple more lines would split control flow for no real benefit.
+#[allow(clippy::too_many_lines)]
 async fn run_host_session(
     stream: tokio::net::TcpStream,
     device_id: &str,
     identity: IdentityKeyPair,
-    password: &str,
+    credentials: &Credentials,
 ) -> anyhow::Result<()> {
     let (mut read_half, write_half) = stream.into_split();
     let write_half = Arc::new(AsyncMutex::new(write_half));
@@ -206,7 +224,10 @@ async fn run_host_session(
             }],
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
-        Credentials { permanent_password: None, temporary_password: Some(password.to_string()) },
+        Credentials {
+            permanent_password: credentials.permanent_password.clone(),
+            temporary_password: credentials.temporary_password.clone(),
+        },
     );
     let session = Arc::new(AsyncMutex::new(session));
     send_frame(&write_half, &first_envelope).await?;
@@ -238,15 +259,14 @@ async fn run_host_session(
                         continue;
                     }
                     match session_guard.on_encrypted_message(&payload) {
-                        Ok(Event::LoggedIn { response }) => {
+                        Ok(Event::LoggedIn { response, requires_consent }) => {
                             drop(session_guard);
                             if let Err(err) = send_frame(&write_half, &response).await {
                                 break 'session Err(err.into());
                             }
                             tracing::info!("logged in -- starting the video pump");
-                            let stop = Arc::new(AtomicBool::new(false));
-                            let task = tokio::spawn(pump_video(session.clone(), write_half.clone(), stop.clone()));
-                            video_task = Some((task, stop));
+                            video_task =
+                                Some(start_session_tasks(&session, &write_half, device_id, requires_consent));
                         }
                         Ok(Event::LoginFailed { reason, response }) => {
                             drop(session_guard);
@@ -264,6 +284,10 @@ async fn run_host_session(
                         Ok(event @ (Event::MouseInput(_) | Event::KeyInput(_))) => {
                             drop(session_guard);
                             inject_input_event(&mut injector, &event);
+                        }
+                        Ok(Event::InputDenied) => {
+                            drop(session_guard);
+                            tracing::debug!("controller sent input while input control isn't granted -- ignored");
                         }
                         Ok(Event::None) => {}
                         Err(err) => break 'session Err(err.into()),
@@ -288,6 +312,29 @@ async fn run_host_session(
         stop_video_pump(&mut task, &stop).await;
     }
     result
+}
+
+/// Spawns the two tasks a fresh login kicks off: the video pump, and the
+/// input-permission decision (see `decide_input_permission`). Returns the
+/// video pump's handle+stop-flag for the caller to track and eventually
+/// tear down; the permission-decision task is fire-and-forget -- nothing
+/// needs to wait on or cancel it, it always finishes on its own (granted,
+/// denied, or the connection just closes out from under it).
+fn start_session_tasks(
+    session: &Arc<AsyncMutex<HostSession>>,
+    write_half: &Arc<AsyncMutex<OwnedWriteHalf>>,
+    device_id: &str,
+    requires_consent: bool,
+) -> (tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let video_task = tokio::spawn(pump_video(session.clone(), write_half.clone(), stop.clone()));
+    tokio::spawn(decide_input_permission(
+        session.clone(),
+        write_half.clone(),
+        device_id.to_string(),
+        requires_consent,
+    ));
+    (video_task, stop)
 }
 
 /// Signals `pump_video` to stop and waits briefly for it to exit on its
@@ -316,11 +363,43 @@ async fn stop_video_pump(task: &mut tokio::task::JoinHandle<()>, stop: &Arc<Atom
     }
 }
 
+/// Decides whether to grant input control for one login and tells the
+/// controller: immediately for a permanent-password login (`!requires_consent`),
+/// or after a real native consent prompt for a temporary-password one (see
+/// `consent::ask_for_input_control`). Runs as its own task (spawned
+/// alongside the video pump on `Event::LoggedIn`) so a slow-to-answer -- or
+/// never-answered -- prompt can't block the main dispatch loop, which still
+/// needs to keep processing `TestDelay` echoes and the like while someone
+/// decides.
+async fn decide_input_permission(
+    session: Arc<AsyncMutex<HostSession>>,
+    write_half: Arc<AsyncMutex<OwnedWriteHalf>>,
+    device_id: String,
+    requires_consent: bool,
+) {
+    let granted = if requires_consent { consent::ask_for_input_control(&device_id).await } else { true };
+
+    let result = {
+        let mut session_guard = session.lock().await;
+        if granted { session_guard.grant_input_permission() } else { session_guard.deny_input_permission() }
+    };
+    match result {
+        Ok(envelope) => {
+            if send_frame(&write_half, &envelope).await.is_err() {
+                tracing::info!("write side closed before permission_info could be sent");
+            } else {
+                tracing::info!(granted, "input permission decided and sent to the controller");
+            }
+        }
+        Err(err) => tracing::error!(error = %err, "failed to encode permission_info"),
+    }
+}
+
 /// `None` (rather than failing the whole session) if `enigo` can't
-/// initialize -- e.g. no interactive desktop session is available. A real
-/// permission/consent gate belongs somewhere in this path too (see
-/// `va_protocol::handshake`'s own docs on why this pass doesn't build one);
-/// this injects whatever the controller sends, unconditionally.
+/// initialize -- e.g. no interactive desktop session is available. Input
+/// permission is checked upstream, in `va_protocol::HostSession` itself
+/// (see `decide_input_permission`) -- by the time an event reaches this
+/// injector, the controller was already allowed to send it.
 fn init_injector() -> Option<va_input::EnigoInjector> {
     match va_input::EnigoInjector::new(WIDTH, HEIGHT) {
         Ok(injector) => Some(injector),
