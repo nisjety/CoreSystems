@@ -52,6 +52,11 @@ pub(crate) struct ExecutionService {
     /// `http_health::resolve_backend_id`'s doc for why the SAME value must be
     /// presented on every request from this process.
     backend_id: String,
+    /// Mints execution-core's own `sandbox:write` service credential for
+    /// `ReleaseLease` at a run's actual end (`cancel_run`, `run_agent`'s own
+    /// `finalize()`) — never for `AcquireLease`, which needs the delegated
+    /// user-bound bearer instead. See `sandbox_lease`'s module doc.
+    sandbox_tokens: crate::sandbox_lease::SandboxManagerTokenProvider,
 }
 
 #[tonic::async_trait]
@@ -112,6 +117,7 @@ impl ExecutionService {
         capability_client: Option<CapabilityClient>,
         sandbox_manager_client: SandboxManagerClient,
         backend_id: String,
+        sandbox_tokens: crate::sandbox_lease::SandboxManagerTokenProvider,
     ) -> Self {
         let ownership = Arc::new(SessionCoreRunOwnershipResolver {
             channel: session_channel.clone(),
@@ -130,6 +136,7 @@ impl ExecutionService {
             capability_client,
             sandbox_manager_client,
             backend_id,
+            sandbox_tokens,
         }
     }
 
@@ -1047,6 +1054,18 @@ impl ExecutionCore for ExecutionService {
             .await?;
         let cancelled = self.state.cancel(&req.run_id, Some(req.reason));
 
+        // Best-effort: a cancelled run whose lease fails to release is not a
+        // failed cancellation — sandbox-manager's own TTL is the backstop.
+        // No-op when this run never acquired a lease at all.
+        crate::sandbox_lease::release_sandbox_lease_if_any(
+            &self.state,
+            &self.sandbox_manager_client,
+            &self.sandbox_tokens,
+            &req.run_id,
+            &caller.org_id,
+        )
+        .await;
+
         // Execution Core owns only the in-memory cancellation latch. Session
         // Core is the receipt authority, so this service deliberately returns
         // an empty receipt id; model-gateway calls the durable RunService after
@@ -1147,6 +1166,7 @@ impl ExecutionCore for ExecutionService {
             self.capability_client.as_ref(),
             &self.sandbox_manager_client,
             &self.backend_id,
+            &self.sandbox_tokens,
         )
         .await?;
         Ok(Response::new(response))
@@ -1248,6 +1268,16 @@ pub async fn serve(
     let sandbox_manager_client = SandboxManagerClient::from_env()
         .map_err(|error| anyhow::anyhow!("sandbox-manager client configuration: {error}"))?;
     let backend_id = crate::http_health::resolve_backend_id();
+    // Same deployment service principal capability_policy's own
+    // ServiceTokenProvider already requires (EXECUTION_CORE_SERVICE_ID/
+    // EXECUTION_CORE_SERVICE_API_KEY/AUTH_CORE_URL) — construction above
+    // already fails startup closed without them, so requiring them again
+    // here for a different audience changes nothing about what a deployment
+    // must configure.
+    let sandbox_tokens =
+        crate::sandbox_lease::SandboxManagerTokenProvider::from_env().map_err(|error| {
+            anyhow::anyhow!("sandbox-manager service token provider configuration: {error}")
+        })?;
 
     serve_with_listener(
         state,
@@ -1264,6 +1294,7 @@ pub async fn serve(
         capability_client,
         sandbox_manager_client,
         backend_id,
+        sandbox_tokens,
     )
     .await
 }
@@ -1284,6 +1315,7 @@ async fn serve_with_listener(
     capability_client: Option<CapabilityClient>,
     sandbox_manager_client: SandboxManagerClient,
     backend_id: String,
+    sandbox_tokens: crate::sandbox_lease::SandboxManagerTokenProvider,
 ) -> anyhow::Result<()> {
     let session_channel = tonic::transport::Endpoint::from_shared(session_url)?.connect_lazy();
     let inference_channel = tonic::transport::Endpoint::from_shared(inference_url)?.connect_lazy();
@@ -1308,6 +1340,7 @@ async fn serve_with_listener(
                 capability_client,
                 sandbox_manager_client,
                 backend_id,
+                sandbox_tokens,
             ),
         ))
         .serve_with_incoming(TcpListenerStream::new(listener))
@@ -1752,6 +1785,11 @@ mod auth_tests {
             None,
             SandboxManagerClient::from_env().expect("valid default sandbox-manager endpoint"),
             "test-backend".to_owned(),
+            crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                "http://127.0.0.1:1",
+                "execution-core",
+                "test-service-secret-at-least-32-bytes",
+            ),
         ));
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {

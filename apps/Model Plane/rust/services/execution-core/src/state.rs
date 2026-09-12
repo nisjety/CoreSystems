@@ -197,6 +197,16 @@ impl StateStore {
     pub fn cache_sandbox_lease(&self, run_id: &str, lease: SandboxLease) {
         self.leases.insert(run_id.to_owned(), lease);
     }
+
+    /// Remove and return this run's sandbox lease, if it ever acquired one.
+    /// Used only at a run's actual end (cancel or terminal completion) —
+    /// removing rather than merely reading means a second release attempt for
+    /// the same `run_id` sees `None` and is a no-op, and the map does not grow
+    /// forever for runs that ever used `code_interpreter` in a Space.
+    #[must_use]
+    pub fn take_sandbox_lease(&self, run_id: &str) -> Option<SandboxLease> {
+        self.leases.remove(run_id).map(|(_, lease)| lease)
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +319,19 @@ mod tests {
         store.cache_sandbox_lease("run-1", lease.clone());
         assert_eq!(store.sandbox_lease("run-1"), Some(lease));
         assert_eq!(store.sandbox_lease("run-2"), None);
+    }
+
+    #[test]
+    fn taking_a_lease_removes_it_so_a_second_release_is_a_no_op() {
+        let store = StateStore::new();
+        let lease = SandboxLease {
+            lease_id: "lease-1".to_owned(),
+            backend_id: "backend-1".to_owned(),
+        };
+        store.cache_sandbox_lease("run-1", lease.clone());
+        assert_eq!(store.take_sandbox_lease("run-1"), Some(lease));
+        assert_eq!(store.take_sandbox_lease("run-1"), None);
+        assert_eq!(store.sandbox_lease("run-1"), None);
     }
 
     #[test]

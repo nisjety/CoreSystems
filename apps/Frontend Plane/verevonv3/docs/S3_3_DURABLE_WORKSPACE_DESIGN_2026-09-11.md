@@ -372,7 +372,8 @@ discipline rather than one large change:**
    preference.
 
    **Phase B.2 — actually acquiring a Space-scoped lease from a real run —
-   DECIDED 2026-09-11 (same day as B.1), not yet implemented.** First the
+   DECIDED and fully IMPLEMENTED 2026-09-11 (same day as B.1; see §8's own
+   item 3.5.B.2 for the slice-by-slice implementation record).** First the
    finding that forced a decision, then the decision itself.
 
    *The finding.* This is the open question two bullets below
@@ -715,7 +716,7 @@ an existing pattern," not a second implementation of the same capability.
    - **3.5.B.1 — DONE** (`execution-core/src/sandbox_manager_client.rs`,
      same day) — the sandbox-manager gRPC client itself (all four RPCs +
      `Health`), tested, uninvoked.
-   - **3.5.B.2 — slices (a)-(c) DONE, (d)-(e) remain.** Per-run lease
+   - **3.5.B.2 — DONE.** Per-run lease
      acquire/activate lifecycle, chaining S3.2 step 3's `capability_client.rs`
      and step 4's verification together with B.1's client for the first time.
      The blocker found while designing it — sandbox-manager's `AcquireLease`
@@ -823,13 +824,50 @@ an existing pattern," not a second implementation of the same capability.
      failure in `inference-core`'s bin target and a pre-existing
      `SessionMessage` fixture gap in `e2e_invoke_chain_test.rs` (tracked since
      `97b25766`), neither related to this change.
-     Next: (d) `StateStore.leases`' release-on-cancel/complete lifecycle using
-     execution-core's own `sandbox:write` service token, plus the
-     `SandboxManagerTokenProvider` that mints it; (e) the one remaining Phase A
-     loose end this slice didn't already close.
+     Both (e)(1) (`space_append_context`, slice (b)) and (e)(2)
+     (`RunAgentRequest.space_id`, this slice) are now closed — no Phase A
+     loose end remains.
+
+     (d) `StateStore.leases`' release-on-cancel/complete lifecycle, plus the
+     `SandboxManagerTokenProvider` that mints execution-core's own
+     `sandbox:write` service token for it — **DONE**, same day. New
+     `StateStore::take_sandbox_lease` (remove-and-return, so a retried release
+     is a no-op rather than a second attempt) backs a new
+     `sandbox_lease::release_sandbox_lease_if_any` (best-effort: a release
+     failure never fails the RPC it rides with — `LEASE_TTL` is the backstop
+     either way). `SandboxManagerTokenProvider` is a deliberate independent
+     copy of `capability_policy.rs`'s `ServiceTokenProvider` shape (same
+     `EXECUTION_CORE_SERVICE_ID`/`EXECUTION_CORE_SERVICE_API_KEY`, different
+     audience/scope) rather than a generalized one — matches this codebase's
+     own established convention of one token provider per audience (six
+     independent copies already exist on the model-gateway side alone).
+     Wired at the two points execution-core can actually observe a run's end,
+     confirmed by tracing the call graph rather than assumed:
+     `grpc.rs::cancel_run` (any run, however its lease was acquired) and
+     `RunAgent`'s own `finalize()` (after it makes the run terminal — never
+     before, since `finalize` returns `Err` without mutating `StateStore`
+     when the durable receipt itself fails). One release per `RunAgent`
+     invocation covers every delegated subagent too: a subagent's
+     `LoopContext.req` is `parent.req` verbatim, so it never has a `run_id`
+     of its own to key a second lease under. The inline `ExecuteStep` chat
+     path (`code_interpreter` dispatched directly, not through `RunAgent`)
+     has no observable "run ended" signal at all — confirmed, not assumed —
+     so a lease acquired there relies on `LEASE_TTL` alone unless the same
+     run is explicitly cancelled; a known, bounded gap (delayed cleanup, not
+     an unbounded leak), stated in `sandbox_lease.rs`'s own module doc rather
+     than left implicit.
+     Tests: `cargo test -p execution-core` across all 8 targets — 561 passed
+     (the same pre-existing failures as slice (c), none touching the files
+     this slice changed). fmt/clippy clean on every file actually touched.
+
+     With (a)-(d) done, phase B.2 is fully implemented: B.1's client (built,
+     tested, uninvoked at the time) is exercised end to end by a real caller
+     for `AcquireLease`/`ReleaseLease`; only `ActivateLease`/`SnapshotSandbox`
+     stay uninvoked, deliberately, since no capability here needs more than
+     the credential-free `SCRATCH` allowlist yet.
    - **3.5.C** — `code_interpreter.rs` uses the lease's hydrated workspace
      instead of its own ephemeral one when Space-scoped; `shell` explicitly
-     out of scope for this phase. Depends on B.2.
+     out of scope for this phase. Depends on B.2 (now done).
    Blocks step 4 in practice (there is no real overlay to promote without
    3.5.C existing), even though 4's own SQL/RPC design doesn't depend on it.
 4. **Merge/`PromoteWorkspace`** (§4) — depends on 3.5 existing in practice

@@ -2030,3 +2030,55 @@ data" rather than trusting that adding a proto field plus a consumer was
 sufficient.
 
 Full detail: design doc §3.5's B.2 sub-bullets and §8 item 3.5.B.2.
+
+## S3.3 step 3.5 slice (d) — release the lease at the two points execution-core can actually see a run end (2026-09-11)
+
+Closed out phase B.2 the same day as (a)-(c). `sandbox_lease.rs` could acquire
+a lease but never released one — every lease from a real run would sit until
+its own TTL (`LEASE_TTL`, 1 hour) expired server-side, correct as a backstop
+but not as the only mechanism.
+
+**New `SandboxManagerTokenProvider`, deliberately not shared with
+`capability_policy.rs`'s `ServiceTokenProvider`.** `ActivateLease`/
+`SnapshotSandbox`/`ReleaseLease` owner-filter only user principals
+(`lease.go`: `$3 = '' OR owner_id = $3`; a service principal's filter is
+always `""`), so — unlike `AcquireLease` — execution-core's own service
+credential works fine for release. Rather than generalize the existing
+provider to take an audience parameter, wrote an independent copy: this
+matches the codebase's own established convention (six independent
+per-audience token providers already exist on the model-gateway side alone,
+per the 2026-09-11 B.2 decision entry above), not an oversight or duplicated
+effort. Same `EXECUTION_CORE_SERVICE_ID`/`EXECUTION_CORE_SERVICE_API_KEY`
+env vars `ServiceTokenProvider` already requires — no new deployment
+configuration.
+
+**Release is wired at exactly the two points execution-core can observe a
+run's actual end, found by tracing the call graph rather than assumed:**
+`grpc.rs::cancel_run` (any run, regardless of how its lease was acquired —
+`state.take_sandbox_lease` removes-and-returns, so a second cancel or a
+retried release finds nothing and is a no-op) and `RunAgent`'s own
+`finalize()`, called only AFTER it has made the run terminal — `finalize`
+returns `Err` without touching `StateStore` at all when the durable receipt
+write itself fails, so a lease is never released for a run that is not
+actually over. One release call per `RunAgent` invocation covers every
+delegated subagent it spawned too: a subagent's `LoopContext.req` is
+`parent.req` verbatim (never a fresh value), so it shares the parent's exact
+`run_id` and therefore the same cached lease — there is no second lease to
+separately release.
+
+**A real, bounded gap, stated rather than hidden.** The inline `ExecuteStep`
+chat path — `code_interpreter` dispatched directly by model-gateway's
+`tools.rs`, never through `RunAgent` — has no observable "this run is over"
+signal inside execution-core at all; a run driven that way simply stops being
+called. A lease acquired on that path relies entirely on `LEASE_TTL` unless
+the same run_id is explicitly cancelled. This is a delayed-cleanup gap (up to
+one hour), not an unbounded leak, and it is recorded in `sandbox_lease.rs`'s
+own module doc so a future reader finds the reason instead of re-deriving it
+or mistaking the TTL for an oversight.
+
+Tests: `cargo test -p execution-core` across all 8 targets — 561 passed, same
+pre-existing unrelated failures as slice (c) (none touch the 4 files this
+slice changed: `grpc.rs`, `runtime_loop/agent.rs`, `sandbox_lease.rs`,
+`state.rs`). fmt/clippy clean.
+
+Full detail: design doc §8 item 3.5.B.2's slice (d) paragraph.

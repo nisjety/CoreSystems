@@ -439,6 +439,7 @@ pub(crate) async fn run_agent(
     capability_client: Option<&crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &str,
+    sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let tools = merged_tool_defs(
         &req.run_id,
@@ -463,6 +464,7 @@ pub(crate) async fn run_agent(
         capability_client,
         sandbox_manager_client,
         backend_id,
+        sandbox_tokens,
     )
     .await
 }
@@ -581,6 +583,7 @@ async fn run_agent_with_tools(
     capability_client: Option<&crate::capability_client::CapabilityClient>,
     sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
     backend_id: &str,
+    sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
@@ -667,7 +670,7 @@ async fn run_agent_with_tools(
         }
     };
 
-    finalize(
+    let response = finalize(
         state,
         &session_channel,
         &plan_id,
@@ -680,7 +683,26 @@ async fn run_agent_with_tools(
         session_bearer.as_deref(),
         terminal_tokens,
     )
-    .await
+    .await?;
+
+    // Only reached once `finalize` actually made the run terminal (it
+    // returns `Err` — never mutating `StateStore` — when the durable receipt
+    // itself failed, per its own doc). One release call here covers every
+    // Space-scoped `code_interpreter` call this run made, including all of
+    // its delegated subagents': they share this SAME `req.run_id` (a
+    // subagent's `LoopContext.req` is `parent.req` verbatim, never its own),
+    // so `state.sandbox_lease` was cached under the one key this run has
+    // ever used.
+    crate::sandbox_lease::release_sandbox_lease_if_any(
+        state,
+        sandbox_manager_client,
+        sandbox_tokens,
+        &req.run_id,
+        &req.org_id,
+    )
+    .await;
+
+    Ok(response)
 }
 
 /// How many matched skills to inject per run — mirrors model-gateway's own
@@ -4163,6 +4185,18 @@ mod tests {
         )
     }
 
+    /// Same reasoning as `test_sandbox_manager_client` above: every test
+    /// below is non-Space, so no run ever acquires a lease for `finalize`'s
+    /// own release-on-completion call to find, meaning this credential
+    /// provider is never actually asked to mint anything.
+    fn test_sandbox_tokens() -> crate::sandbox_lease::SandboxManagerTokenProvider {
+        crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+            "http://127.0.0.1:1",
+            "execution-core",
+            "test-service-secret-at-least-32-bytes",
+        )
+    }
+
     /// One scripted inference outcome the mock returns per round.
     #[derive(Clone)]
     enum Scripted {
@@ -5499,6 +5533,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("ordinary agent run should succeed");
@@ -5584,6 +5619,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("ZDR agent run should succeed");
@@ -5654,6 +5690,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("tier-constrained agent run should succeed");
@@ -5689,6 +5726,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("inference failure should be finalized as a response");
@@ -5757,6 +5795,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect_err("a missing durable terminal receipt must fail the agent run");
@@ -5824,6 +5863,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("multi-tool agent run should succeed");
@@ -5916,6 +5956,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("duplicate retrieval run should succeed");
@@ -5980,6 +6021,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("durable approval should pause the run");
@@ -6048,6 +6090,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect_err("an unpersisted approval must fail the agent HITL path");
@@ -6127,6 +6170,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("provider write run should succeed");
@@ -6255,6 +6299,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -6335,6 +6380,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a ZDR delegation still runs");
@@ -6397,6 +6443,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -6473,6 +6520,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a delegating agent run should succeed");
@@ -6705,6 +6753,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a refused nested delegation must not fail the run");
@@ -6850,6 +6899,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a refused record read inside a subagent must not fail the run");
@@ -6930,6 +6980,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a refused rung must not fail the run");
@@ -7010,6 +7061,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a refused risky tool inside a subagent must not fail the run");
@@ -7087,6 +7139,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a truncated round must not fail the run");
@@ -7164,6 +7217,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a refused plan-mode tool call must not fail the run");
@@ -7226,6 +7280,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a failed delegation must not fail the parent run");
@@ -7296,6 +7351,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -7387,6 +7443,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a resumed delegation completes the run");
@@ -7465,6 +7522,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a refused replay must not fail the run");
@@ -7528,6 +7586,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("an in-flight replay must not fail the run");
@@ -7597,6 +7656,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("a refused delegation must not fail the run");
@@ -7675,6 +7735,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -7761,6 +7822,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("durable approval should pause the run");
@@ -7834,6 +7896,7 @@ mod tests {
             None,
             &test_sandbox_manager_client(),
             "test-backend",
+            &test_sandbox_tokens(),
         )
         .await
         .expect("durable approval should pause the run");
