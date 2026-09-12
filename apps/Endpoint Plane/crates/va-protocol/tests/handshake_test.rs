@@ -81,7 +81,7 @@ fn full_handshake_and_login_succeeds_with_the_right_password() {
     //    with LoginResponse::Success — reaching Connected.
     let event = host.on_encrypted_message(&login_request_ciphertext).unwrap();
     let response_ciphertext = match event {
-        Event::LoggedIn { response } => response,
+        Event::LoggedIn { response, .. } => response,
         Event::LoginFailed { reason, .. } => panic!("expected LoggedIn, got LoginFailed({reason})"),
         _ => panic!("expected LoggedIn"),
     };
@@ -191,7 +191,7 @@ fn test_delay_probe_from_client_is_echoed_verbatim_once_connected() {
         .build_login_request("141589119", "correct-horse", &salt, &challenge)
         .unwrap();
     let event = host.on_encrypted_message(&login_ciphertext).unwrap();
-    let Event::LoggedIn { response: response_ciphertext } = event else {
+    let Event::LoggedIn { response: response_ciphertext, .. } = event else {
         panic!("expected LoggedIn");
     };
     // The controller MUST decrypt this (even though the test doesn't care
@@ -224,8 +224,13 @@ fn test_delay_probe_from_client_is_echoed_verbatim_once_connected() {
     assert_eq!(echoed, probe, "the exact same TestDelay must come back unchanged");
 }
 
-#[test]
-fn mouse_and_key_events_decode_into_input_events_once_connected() {
+/// Drives a full handshake+login (always with `make_host`'s temporary-only
+/// password, so `requires_consent` is always `true`) and returns the
+/// connected `(host, controller)` pair, ready for session-message tests.
+/// Does NOT grant input permission -- callers that need it granted call
+/// `host.grant_input_permission()` themselves, since whether/when that
+/// happens is exactly what most of these tests are about.
+fn make_connected_pair() -> (HostSession, FakeController) {
     let (mut host, signed_id_envelope, host_public_key) = make_host("141589119", "correct-horse");
     let mut controller = FakeController::new(host_public_key);
 
@@ -250,38 +255,163 @@ fn mouse_and_key_events_decode_into_input_events_once_connected() {
     let login_ciphertext = controller
         .build_login_request("141589119", "correct-horse", &salt, &challenge)
         .unwrap();
-    let Event::LoggedIn { response: response_ciphertext } = host.on_encrypted_message(&login_ciphertext).unwrap()
+    let Event::LoggedIn { response: response_ciphertext, requires_consent } =
+        host.on_encrypted_message(&login_ciphertext).unwrap()
     else {
         panic!("expected LoggedIn");
     };
+    assert!(requires_consent, "make_host only ever sets a temporary password");
     controller.parse_login_response(&response_ciphertext).unwrap();
+    (host, controller)
+}
 
+fn send_mouse_down_event(host: &mut HostSession, controller: &mut FakeController) -> Event {
     // A left-button-down MouseEvent at (100, 200) -- mask = (0x01 << 3) | 1.
     let mut mouse_writer = va_wire::ProtoWriter::new();
     mouse_writer.int32(1, 9).sint32(2, 100).sint32(3, 200);
     let mouse_envelope = va_protocol::wrap_message(va_protocol::message_field::MOUSE_EVENT, &mouse_writer.finish());
     let mouse_ciphertext = controller.encrypt(&mouse_envelope).unwrap();
-    match host.on_encrypted_message(&mouse_ciphertext).unwrap() {
+    host.on_encrypted_message(&mouse_ciphertext).unwrap()
+}
+
+fn send_return_key_down_event(host: &mut HostSession, controller: &mut FakeController) -> Event {
+    // A Return key-down (KeyEvent.mode omitted -- proto3 default Legacy).
+    let mut key_writer = va_wire::ProtoWriter::new();
+    key_writer.bool(1, true).int32(3, 27);
+    let key_envelope = va_protocol::wrap_message(va_protocol::message_field::KEY_EVENT, &key_writer.finish());
+    let key_ciphertext = controller.encrypt(&key_envelope).unwrap();
+    host.on_encrypted_message(&key_ciphertext).unwrap()
+}
+
+/// Decodes a `Misc.permission_info` envelope (as returned by
+/// `grant_input_permission`/`deny_input_permission`, decrypted by the
+/// controller) into `(permission, enabled)` -- mirrors `remote-core`'s own
+/// `decodeMisc` on the browser side, hand-rolled here since `va-testkit`
+/// has no dedicated decoder for it (this crate never needed to DECODE its
+/// own `PermissionInfo` output before now; only encode it).
+fn decode_permission_info_envelope(plaintext: &[u8]) -> (i32, bool) {
+    let (field_number, misc_payload) = va_protocol::read_envelope_field(plaintext).unwrap().unwrap();
+    assert_eq!(field_number, va_protocol::message_field::MISC);
+    let mut r = va_wire::ProtoReader::new(misc_payload);
+    let tag = r.read_tag().unwrap();
+    assert_eq!(tag.field_number, 6, "Misc.permission_info");
+    let info_payload = r.read_length_delimited().unwrap();
+    let mut ir = va_wire::ProtoReader::new(info_payload);
+    let mut permission = 0;
+    let mut enabled = false;
+    while !ir.eof() {
+        let tag = ir.read_tag().unwrap();
+        match tag.field_number {
+            1 => permission = ir.read_int32().unwrap(),
+            2 => enabled = ir.read_bool().unwrap(),
+            _ => ir.skip(tag.wire_type).unwrap(),
+        }
+    }
+    (permission, enabled)
+}
+
+#[test]
+fn mouse_and_key_events_are_denied_until_input_permission_is_granted() {
+    let (mut host, mut controller) = make_connected_pair();
+
+    match send_mouse_down_event(&mut host, &mut controller) {
+        Event::InputDenied => {}
+        _ => panic!("expected InputDenied before any grant"),
+    }
+    match send_return_key_down_event(&mut host, &mut controller) {
+        Event::InputDenied => {}
+        _ => panic!("expected InputDenied before any grant"),
+    }
+
+    let grant_ciphertext = host.grant_input_permission().unwrap();
+    controller.decrypt(&grant_ciphertext).unwrap(); // keep nonce counters in lockstep
+
+    match send_mouse_down_event(&mut host, &mut controller) {
         Event::MouseInput(mouse) => {
             assert_eq!(mouse.kind, va_protocol::MouseEventKind::Down);
             assert!(mouse.button_flags.contains(va_protocol::MouseButtonFlags::LEFT));
             assert_eq!(mouse.x, 100);
             assert_eq!(mouse.y, 200);
         }
-        _ => panic!("expected MouseInput"),
+        _ => panic!("expected MouseInput once granted"),
     }
-
-    // A Return key-down (KeyEvent.mode omitted -- proto3 default Legacy).
-    let mut key_writer = va_wire::ProtoWriter::new();
-    key_writer.bool(1, true).int32(3, 27);
-    let key_envelope = va_protocol::wrap_message(va_protocol::message_field::KEY_EVENT, &key_writer.finish());
-    let key_ciphertext = controller.encrypt(&key_envelope).unwrap();
-    match host.on_encrypted_message(&key_ciphertext).unwrap() {
+    match send_return_key_down_event(&mut host, &mut controller) {
         Event::KeyInput(key) => {
             assert!(key.down);
             assert_eq!(key.identification, va_protocol::KeyIdentification::ControlKey(27));
             assert_eq!(key.mode, va_protocol::KeyboardMode::Legacy);
         }
-        _ => panic!("expected KeyInput"),
+        _ => panic!("expected KeyInput once granted"),
     }
+}
+
+#[test]
+fn grant_input_permission_sends_a_real_decodable_permission_info() {
+    let (mut host, mut controller) = make_connected_pair();
+    let grant_ciphertext = host.grant_input_permission().unwrap();
+    let plaintext = controller.decrypt(&grant_ciphertext).unwrap();
+    let (permission, enabled) = decode_permission_info_envelope(&plaintext);
+    assert_eq!(permission, 0, "Permission::Keyboard's wire value");
+    assert!(enabled);
+}
+
+#[test]
+fn deny_input_permission_sends_permission_info_and_input_stays_denied() {
+    let (mut host, mut controller) = make_connected_pair();
+    let deny_ciphertext = host.deny_input_permission().unwrap();
+    let plaintext = controller.decrypt(&deny_ciphertext).unwrap();
+    let (permission, enabled) = decode_permission_info_envelope(&plaintext);
+    assert_eq!(permission, 0, "Permission::Keyboard's wire value");
+    assert!(!enabled);
+
+    match send_mouse_down_event(&mut host, &mut controller) {
+        Event::InputDenied => {}
+        _ => panic!("expected InputDenied after an explicit deny"),
+    }
+}
+
+#[test]
+fn a_permanent_password_login_does_not_require_consent() {
+    let identity = IdentityKeyPair::generate();
+    let public_key = identity.public_key();
+    let (mut host, signed_id_envelope) = HostSession::start(
+        HostIdentity { keypair: identity, device_id: "141589119".to_string() },
+        HostInfo {
+            hostname: "TEST-DESKTOP".to_string(),
+            platform: "Windows".to_string(),
+            displays: vec![],
+            version: "0.1.0-test".to_string(),
+        },
+        Credentials {
+            permanent_password: Some("pre-authorized-secret".to_string()),
+            temporary_password: None,
+        },
+    );
+    let mut controller = FakeController::new(public_key);
+
+    let public_key_envelope = controller.on_signed_id(&signed_id_envelope).unwrap();
+    let hash_ciphertext = host.on_plaintext_message(&public_key_envelope).unwrap();
+    let hash_plaintext = controller.decrypt(&hash_ciphertext).unwrap();
+    let (_, hash_payload) = va_protocol::read_envelope_field(&hash_plaintext).unwrap().unwrap();
+    let (salt, challenge) = {
+        let mut r = va_wire::ProtoReader::new(hash_payload);
+        let mut salt = String::new();
+        let mut challenge = String::new();
+        while !r.eof() {
+            let tag = r.read_tag().unwrap();
+            match tag.field_number {
+                1 => salt = r.read_string().unwrap(),
+                2 => challenge = r.read_string().unwrap(),
+                _ => r.skip(tag.wire_type).unwrap(),
+            }
+        }
+        (salt, challenge)
+    };
+    let login_ciphertext = controller
+        .build_login_request("141589119", "pre-authorized-secret", &salt, &challenge)
+        .unwrap();
+    let Event::LoggedIn { requires_consent, .. } = host.on_encrypted_message(&login_ciphertext).unwrap() else {
+        panic!("expected LoggedIn");
+    };
+    assert!(!requires_consent, "a permanent password models pre-authorized, unattended access");
 }

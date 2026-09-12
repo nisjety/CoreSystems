@@ -197,7 +197,7 @@ async fn run_host_session(
                         continue;
                     }
                     match session.on_encrypted_message(&payload) {
-                        Ok(Event::LoggedIn { response }) => {
+                        Ok(Event::LoggedIn { response, .. }) => {
                             if let Err(err) = send_frame(relay_sock, &response).await {
                                 println!("failed to send LoginResponse: {err}");
                             }
@@ -219,9 +219,9 @@ async fn run_host_session(
                         }
                         // This diagnostic tool only proves the
                         // registration/relay/handshake/login sequence;
-                        // input injection is `verevon-agent`'s job, not
-                        // this example's.
-                        Ok(Event::MouseInput(_) | Event::KeyInput(_) | Event::None) => {}
+                        // input injection and its permission model are
+                        // `verevon-agent`'s job, not this example's.
+                        Ok(Event::MouseInput(_) | Event::KeyInput(_) | Event::InputDenied | Event::None) => {}
                         Err(err) => {
                             println!("on_encrypted_message failed: {err}");
                             return;
