@@ -2376,3 +2376,88 @@ decisions and cross-cutting design questions this initiative was never
 scoped to resolve unilaterally — not unfinished implementation work.
 
 Full detail: design doc §5 and §8 item 5.
+
+## S4.2 durable process registry designed, plus a confirmed S3.3 scope bug found and fixed along the way (2026-09-13) — **decided; not yet implemented**
+
+**State:** `proposed` (design doc `apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md`); the bug fix below is `implemented`.
+
+**The bug, first.** `execution-core/src/sandbox_lease.rs`'s
+`SandboxManagerTokenProvider` requested `scopes: ["sandbox:write"]` only.
+sandbox-manager's `authz.go` gates `GetWorkspaceManifest` on `sandbox:read`
+with an exact `slices.Contains` (no write-implies-read), and Auth Core
+issues exactly the requested scopes (`plane-service-principal.ts:359`,
+`scopes: requestedScopes` — the registry allowlist lists both, the request
+narrowed to one). So S3.3 step 3.5.C.5's hydrate path
+(`ensure_hydrated_workspace` → `get_workspace_manifest`) was refused at the
+real interceptor in any deployment, invisible to every Rust test because
+none crosses the Go boundary — while `authz_test.go:151` ("GetWorkspaceManifest
+missing read scope") had already pinned exactly that refusal on the Go side.
+Same shape as the `ActivateLease` switch bug found while designing 3.5.C: a
+cross-service contract each side tests correctly in isolation and nothing
+tests across. Fixed: the provider now requests `["sandbox:read",
+"sandbox:write"]`; `service_token_requests_both_sandbox_scopes_and_is_cached`
+pins the request body. Left open, deliberately: a cross-language contract
+test (the `health_attest.rs`-reads-`availability.go` shape) asserting the
+provider's scope set covers every method it is used for — worth doing when
+S4.2 adds seven more methods to the same token.
+
+**The ownership decision** (`docs/capability-ownership-matrix.md`'s
+2026-06-03 ruling made concrete for a capability that sits across its line):
+sandbox-manager (Go) owns the **rows** — durable process metadata, the output
+log with host-assigned cursors, retention, the state machine, cleanup state,
+and the human read path; execution-core (Rust) owns the **OS process** —
+spawn under the existing bwrap argv, stdio pipes, signals, TTL timer,
+boot-time reconcile. Neither side grows the other's job: sandbox-manager
+still spawns nothing; execution-core persists nothing itself.
+
+**"Durable" means the registry, not the processes.** Children run under
+`--die-with-parent` by design and die with execution-core; a restart makes
+the rows truthful (`LOST`, output readable to the last committed chunk,
+`cleanup_state = done`), never a `RUNNING` row for a dead process. Process
+survival across restarts is the trigger for the deferred `SandboxBackend`
+trait (2026-08-22 entry), recorded as a non-goal, not built. No trait is
+introduced: one backend, new lifecycle.
+
+**Authority reuses the `egress` template rather than inventing one.**
+Control's `IssueSpaceCapabilityDecision` grants `space:processes` when the
+backend claims `processes: "background_registry"` AND the Space's new
+`process_registry_entitled` policy column (migration `028`, default FALSE)
+is set — and unlike `egress`, does **not** refuse the decision otherwise,
+because a process-capable backend is still a valid one-shot substrate.
+sandbox-manager persists the derived `processes_permitted` on the lease at
+`AcquireLease` (the `leases` table discards every claim today; only
+`backend_id` survives) and gates `RegisterProcess` on it. `processes` gets
+its first enum validation (`bounded_oneshot | background_registry`), closing
+for one dimension the S3.2 doc's never-implemented policy allowlist.
+
+**Credentials follow the 2026-09-11 ruling exactly.** A background process
+outlives the 300 s user bearer, and that bearer exists only inside a
+Control-injected chat turn (`is_space_scoped_turn`), so every host↔registry
+RPC rides execution-core's service token; the user-bound decision enters at
+`AcquireLease` alone, as today. Human reads reuse the Work tab's existing
+`model.thread.read` decision with a second `service_audience`
+(sandbox-manager), verified by the owner — the `ListRuns` pattern — and the
+V3 gateway mints `aud=sandbox-manager` per `/work` request as it already
+mints `aud=capability-core` for `/v1/cron`.
+
+**Rejected / not proposed:** sandbox-manager spawning (`exec.Command` in a
+container without bwrap or the interpreter stack); a `MAX+1` trigger for the
+cursor (session-core's own `0002` names the single-writer caveat; the host
+IS the single writer, so it assigns `seq` and `ON CONFLICT DO NOTHING` makes
+retries idempotent); `mp-eventlog::Cursor` (zero consumers); refusing the
+lease when processes are claimed but not entitled; naming the stdin tool
+`process_write` (`permission::is_risky_tool`'s substring list would route it
+to `ask` on the name alone — it is `process_stdin`); a chat-loop offering in
+the first slice (`ExecuteStep`'s bearer gate is a literal
+`tool_name == "code_interpreter"`; `RunAgent` already demands the bearer for
+any Space-scoped run and is where background work belongs).
+
+**Genuinely new mechanisms, named as such:** TERM→grace→KILL for a child
+(the repo signals only itself today; mechanism for reaching the sandboxed
+command's PID is resolved on the Linux runtime image in step 4, contract
+fixed regardless — KILL is guaranteed via `--die-with-parent`'s PDEATHSIG
+chain); a `--flag value` argv redaction rule (existing patterns key on
+`[:=]`); sandbox-manager's first background goroutine (a single idempotent
+staleness UPDATE, no claims). Sequencing: registry → RPCs/authz/lease column
+→ Control → host (flag-gated, default off) → tools/capability → human read
+path. Full detail: design doc §§1-10.
