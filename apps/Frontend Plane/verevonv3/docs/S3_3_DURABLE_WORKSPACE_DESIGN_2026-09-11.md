@@ -695,7 +695,7 @@ primitive, wire the caller once a concrete consumer exists" precedent (the
 CAS client, the lease RPCs themselves, and `GetWorkspaceManifest` were all
 in this exact position before their own first real caller landed).
 
-## 5. Output promotion through Data APIs
+## 5. Output promotion through Data APIs — IMPLEMENTED 2026-09-12
 
 Distinct from the merge in §4, and only for content that should become
 durable, RAG-searchable **knowledge** — not every workspace file (a build's
@@ -704,23 +704,73 @@ run in that Space can see it; it does not belong in Data Plane v2 as a
 document). This is an explicit, separate action a run or its caller takes for
 specific paths, not an automatic side effect of `PromoteWorkspace`.
 
-**Already-shipped precedent to follow directly**, found by this research, not
-invented here: `apps/Model Plane/rust/services/model-gateway/src/dataplane.rs`'s
-`create_document`/`bulk_ingest` (lines 415-446, 484-531) already call
-`documents-api-go`'s gRPC `DocumentService.CreateDocument`/`BulkIngest`
-(`apps/Data Plane v2/proto/documents_v2.proto:122-130`) directly — gated by
-`reject_zdr_durable_mutation` and a `VerifiedDataPlaneBearer`. Confirmed
+**Already-shipped precedent, followed directly rather than invented from
+scratch**: `apps/Model Plane/rust/services/model-gateway/src/dataplane.rs`'s
+`create_document`/`bulk_ingest` already calls `documents-api-go`'s gRPC
+`DocumentService.CreateDocument`/`BulkIngest`
+(`apps/Data Plane v2/proto/documents_v2.proto`) directly — gated by
+`reject_zdr_durable_mutation` and a verified Data Plane bearer. Confirmed
 against `apps/CODEBASE_INFORMATION_SYSTEM.md:109` ("No direct database
 crossing. Model, Frontend, Application, and Ingestion consume Data Plane APIs
 only") that Model Plane calling Data Plane v2's API directly is the
 sanctioned path — Ingestion Plane is not a required intermediary for a run's
 own output, only for *externally-fetched evidence* (that's what
 `execution-core/src/promote_on_use.rs::promote`'s Quarry-v2 route is for, a
-different case). **execution-core should replicate `dataplane.rs`'s client
-pattern** (same `CreateDocumentRequest{org_id, source, type, title, content,
-metadata, zdr_classification}` shape, same ZDR gate, same bearer
-verification) rather than inventing a new one — this is a "second consumer of
-an existing pattern," not a second implementation of the same capability.
+different case — confirmed by reading it: it promotes via Quarry's HTTP
+`/v1/scrape?ingest=true` primitive for repeatedly-fetched WEB pages, a
+completely separate mechanism from a direct `DocumentService` gRPC call).
+
+**What was actually built**: new `execution-core/src/workspace_promote.rs`,
+mirroring `dataplane.rs`'s client shape field-for-field
+(`CreateDocumentRequest{org_id, source, type, title, content, metadata,
+zdr_classification, ingest_policy}`) — zero proto/build changes needed,
+since `mp-contracts` (the crate execution-core already depends on for every
+other gRPC contract this initiative touched) already generates
+`dataplane::documents_v2` bindings; model-gateway already proved this same
+generated code compiles and works. Connects via `DATAPLANE_RETRIEVAL_URL`/
+`_ADDR` — confirmed already wired in `docker-compose.yml`'s own
+`execution-core` service block (`DATAPLANE_RETRIEVAL_URL_EXEC`, defaulting to
+`http://retrieval-engine:50052`), the same physical multiplexed gRPC endpoint
+model-gateway's own `document_client` already reads for the identical reason
+— no new deployment configuration needed either. Forwards execution-core's
+existing `DelegatedDataPlaneBearer` (from `auth::authenticate_delegated_data_plane`,
+already used elsewhere in this crate) rather than inventing a new bearer type.
+
+The ZDR gate (`document_zdr_requested`/`reject_zdr_durable_mutation`) is its
+own independent copy of `dataplane.rs`'s logic, not a shared cross-service
+helper and not a reuse of execution-core's own `grpc.rs::
+enforce_persistence_free_execution` (a different signature, taking a whole
+`AuthenticatedUser` this module doesn't have) — matching this codebase's
+own established convention of small, independent per-context copies over a
+premature shared abstraction (the same reasoning behind six independent
+token providers on the model-gateway side, and `SandboxManagerTokenProvider`
+as its own copy rather than a generalized `ServiceTokenProvider`). Checked
+BEFORE any network call, for a single document and for a whole
+`bulk_ingest` batch (one ZDR-flagged document rejects the entire batch,
+never partially forwarded) — proven by dedicated tests, per this section's
+own test-plan row.
+
+**Deliberately no execution-core caller wired**, matching the same
+"ship the primitive, wire the caller once a concrete consumer exists"
+position every other primitive this initiative built was in before its own
+first real caller landed (the CAS client, the sandbox lease RPCs,
+`GetWorkspaceManifest`, `PromoteWorkspace`). "A run or its caller" deciding
+WHICH specific paths deserve promotion, and when, is a product/agent-design
+question this step does not answer.
+
+Tests: 9 tests in `workspace_promote.rs` — the ZDR-gate's own logic
+(document-side and caller-side, independently and combined); `create_document`/
+`bulk_ingest` reject a ZDR-flagged call before any network call reaches an
+unroutable address (mirroring `dataplane.rs`'s own
+`reject_zdr_durable_mutation` test coverage, per this section's test-plan
+row); blank-title/content and empty-batch validation; and one real-server
+round-trip test (a `tonic` server backed by a recording `DocumentService`
+fake, mirroring `dataplane.rs`'s own `issuer_zdr_document_delete_is_rejected_before_data_plane_forwarding`
+test's real-server shape) proving a genuinely non-ZDR call actually reaches
+the server, forwards the bearer as an `authorization` header, and returns
+its response — not just that validation short-circuits before ever trying.
+`cargo test -p execution-core --lib`: full suite green, same 2 pre-existing
+unrelated failures as every prior slice this initiative, no new ones.
 
 ## 6. File-by-file change list
 
@@ -1217,10 +1267,26 @@ an existing pattern," not a second implementation of the same capability.
    stubbed) + integration (real Postgres: new-path merge, conflict-without-
    overwrite, idempotent re-promote, independent-per-path, and resolving a
    lease's Space after `ReleaseLease` already destroyed it) all passing.
-5. **Data Plane promotion client** (§5) — independent of 1-4 in principle
-   (it only needs *some* content to promote), but sequenced last since it's
-   the lowest-priority piece for "a workspace that survives a restart," which
-   is this doc's actual title.
+5. **Data Plane promotion client — DONE, 2026-09-12.** (§5) New
+   `execution-core/src/workspace_promote.rs`, mirroring `dataplane.rs`'s
+   `create_document`/`bulk_ingest` shape exactly; zero proto/build changes
+   (mp-contracts already generates `dataplane::documents_v2` bindings);
+   `DATAPLANE_RETRIEVAL_URL`/`_ADDR` already wired for execution-core in
+   `docker-compose.yml`. Deliberately no caller wired — matching every
+   other primitive this initiative built. 9 tests, including a real-server
+   round-trip proving the non-ZDR success path actually reaches
+   `DocumentService` and forwards the bearer, not just that ZDR validation
+   short-circuits before ever trying.
+
+**With steps 1-5 all done, this document's own initiative — a durable
+workspace that survives a restart, from CAS storage through a real
+hydrate/diff-driven caller to a compute-state merge and a knowledge-durable
+promotion path — is fully implemented.** Everything this design named now
+exists in code, tested. What's left is exactly what the Open Questions
+below already say it is: product decisions (conflict UX, the org read-only
+layer's actual scope) and cross-cutting design questions (capability
+re-verification on every write RPC) that were always out of this
+initiative's own scope to resolve unilaterally.
 
 ## Open questions (flagged, not resolved)
 

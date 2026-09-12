@@ -2319,3 +2319,60 @@ regression this step introduced, not fixed here, flagged for a future,
 broader design pass.
 
 Full detail: design doc §4 and §8 item 4.
+
+## S3.3 step 5 implemented — Data Plane v2 promotion client, and S3.3 is now complete (2026-09-12)
+
+The final step of this initiative. `execution-core/src/workspace_promote.rs`
+mirrors `model-gateway/src/dataplane.rs`'s already-shipped `create_document`/
+`bulk_ingest` client shape directly, per the design doc's own long-standing
+instruction to do so rather than invent a new pattern. Two things confirmed
+before writing any code, not assumed: `mp-contracts` (the shared proto crate
+execution-core already depends on for every other RPC this initiative
+touched) already generates `dataplane::documents_v2` bindings — model-gateway
+itself proves the same generated code compiles and works, so this needed
+zero proto/build changes; and `docker-compose.yml`'s own `execution-core`
+service block already sets `DATAPLANE_RETRIEVAL_URL_EXEC` (defaulting to
+`http://retrieval-engine:50052`), the exact address model-gateway's own
+`document_client` reads for the identical multiplexed-gRPC-endpoint reason —
+so this needed zero deployment configuration either. `promote_on_use.rs`,
+this crate's only other "promote" concept, was read in full and confirmed to
+be a completely different mechanism (Quarry's HTTP `/v1/scrape?ingest=true`
+for repeatedly-fetched web pages) — not something to reuse or reconcile with.
+
+The ZDR gate is its own independent copy of `dataplane.rs`'s logic (not a
+shared cross-service helper, and not execution-core's own
+`enforce_persistence_free_execution` either, which takes a whole
+`AuthenticatedUser` this module never has) — matching this codebase's
+established convention of small per-context copies over a premature shared
+abstraction. `DelegatedDataPlaneBearer` (execution-core's own existing
+delegated bearer type) gained a `for_test()` constructor, mirroring its
+sibling bearer types' identical pattern, since it had none before this.
+
+Deliberately no execution-core caller wired, matching the "ship the
+primitive, wire the caller once a concrete consumer exists" position every
+other primitive this initiative built was in before its own first caller
+landed.
+
+Tests: 9 in `workspace_promote.rs` — the ZDR gate's own logic; blank-field
+and empty-batch validation; ZDR-before-any-network-call for both single and
+batch calls (batch: one flagged document rejects the whole batch); and one
+genuine real-server round-trip test (a `tonic` server backed by a recording
+`DocumentService` fake, mirroring `dataplane.rs`'s own real-server test
+shape) proving a non-ZDR call actually reaches the server, forwards the
+bearer as an `authorization` header, and returns its response — confirming
+the success path works, not just that rejection short-circuits before ever
+trying it. `cargo test -p execution-core --lib`: full suite green, same 2
+pre-existing unrelated failures as every prior slice this initiative, no
+new ones.
+
+**With steps 1-5 all done, S3.3 (durable workspace) is complete.** Every
+primitive the design named exists in code and is tested: the CAS client,
+the Postgres-backed manifest/lease/snapshot stores, the hydrate/diff
+mechanism, all five sandbox-manager lease RPCs with real callers,
+`code_interpreter.rs`'s actual Space-scoped rewrite, the compute-state
+merge, and the knowledge-durable promotion client. What remains is exactly
+what the design doc's own Open Questions section says it is — product
+decisions and cross-cutting design questions this initiative was never
+scoped to resolve unilaterally — not unfinished implementation work.
+
+Full detail: design doc §5 and §8 item 5.

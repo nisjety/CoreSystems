@@ -48,3 +48,4 @@ pub mod web_tools;
 pub mod wiki_agent;
 pub mod workspace_cas;
 pub mod workspace_hydrate;
+pub mod workspace_promote;

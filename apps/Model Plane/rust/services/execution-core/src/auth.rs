@@ -137,6 +137,11 @@ impl DelegatedDataPlaneBearer {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self(Arc::from("data-plane-test-bearer"))
+    }
 }
 
 /// Opaque delegated session-core credential. Execution Core never treats it
