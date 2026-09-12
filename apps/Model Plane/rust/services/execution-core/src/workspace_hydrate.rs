@@ -1,21 +1,17 @@
 //! Hydrate a Space's durable workspace onto local disk before a run starts,
 //! and diff + upload what changed back to CAS afterward. See
 //! apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
-//! §3.
+//! §3 and §8 item 3.5.C.
 //!
-//! **Deliberately standalone, not yet wired into a real caller.** Neither a
-//! real trigger nor a real consumer exists yet for this: execution-core has
-//! no sandbox-manager gRPC client at all today (confirmed by direct search;
-//! `model-gateway`'s own `SandboxManagerClient` field is constructed but no
-//! RPC on it is ever called anywhere in this repo), and `code_interpreter.rs`'s
-//! existing workspace is fully ephemeral — created and `Drop`-cleaned up
-//! within one tool call, with no lease or Space association whatsoever. This
-//! module is the tested mechanism a later step wires a real caller onto,
-//! matching this whole design's own precedent: the CAS client itself (S3.3
-//! step 1) and sandbox-manager's lease RPCs (S3.2) both shipped with "no
-//! consumer yet" and were wired to a caller in a separate, later step.
-//! Redesigning `code_interpreter.rs`'s carefully-built ephemeral lifecycle to
-//! call this is exactly that separate step, not this one.
+//! **Deliberately standalone, still not wired into a real caller as of this
+//! module's own code.** `code_interpreter.rs`'s existing workspace is fully
+//! ephemeral — created and `Drop`-cleaned up within one tool call, with no
+//! lease or Space association whatsoever; 3.5.C's own sub-slice C.5 is where
+//! that gets rewritten to call `hydrate`/`diff_and_upload`. Everything this
+//! module needs from sandbox-manager now exists (the `GetWorkspaceManifest`
+//! RPC feeding `hydrate`, `SnapshotSandbox`'s `changed_files` field consuming
+//! `diff_and_upload`'s output) — this module itself just hasn't been called
+//! from that rewrite yet.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -26,9 +22,10 @@ use crate::scrub;
 use crate::workspace_cas::CasClient;
 
 /// One file a caller wants hydrated — this run's baseline view of a Space's
-/// durable workspace, as sandbox-manager's `workspace_files` table would
-/// report it once a manifest-read RPC exists to fetch it (not built yet;
-/// see the module doc comment).
+/// durable workspace, as sandbox-manager's `GetWorkspaceManifest` RPC
+/// reports it (`WorkspaceManifestEntry` on the wire; this is `hydrate`'s own
+/// caller-facing shape, kept distinct from the generated proto type the same
+/// way every other module in this crate wraps its wire types).
 #[derive(Debug, Clone)]
 pub struct WorkspaceFileEntry {
     pub path: String,
@@ -36,13 +33,22 @@ pub struct WorkspaceFileEntry {
 }
 
 /// One file [`diff_and_upload`] found changed or newly created, ready to
-/// report back to sandbox-manager's `PromoteWorkspace` RPC (not built yet)
-/// as this run's overlay.
+/// report to `SnapshotSandbox`'s `changed_files` field as this run's overlay
+/// (and, eventually, to sandbox-manager's `PromoteWorkspace` RPC — S3.3 step
+/// 4, not built yet — which is what actually merges it into the Space).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
     pub path: String,
     pub content_hash: String,
     pub size_bytes: u64,
+    /// The Space-level hash this path had when `hydrate` observed it —
+    /// `baseline`'s own value for this path, carried through rather than
+    /// re-read at upload time. `None` means the path did not exist yet when
+    /// this run hydrated. Step 4's `PromoteWorkspace` compare-and-swap merge
+    /// needs what this run actually saw, not whatever the Space row says by
+    /// the time of upload (which could have changed if another run promoted
+    /// first).
+    pub base_hash: Option<String>,
 }
 
 /// Fetches every entry in `manifest` from CAS and writes it under
@@ -110,7 +116,8 @@ pub async fn diff_and_upload(
         let redacted = redact(&raw);
         let content_hash = sha256_digest(&redacted);
 
-        if baseline.get(&path_str) == Some(&content_hash) {
+        let base_hash = baseline.get(&path_str).cloned();
+        if base_hash.as_ref() == Some(&content_hash) {
             continue;
         }
         let uploaded_hash = cas.put(&redacted).await?;
@@ -118,6 +125,7 @@ pub async fn diff_and_upload(
             path: path_str,
             size_bytes: redacted.len() as u64,
             content_hash: uploaded_hash,
+            base_hash,
         });
     }
     Ok(changed)
@@ -297,8 +305,10 @@ mod tests {
         assert_eq!(changed.len(), 2);
         assert_eq!(changed[0].path, "changed.txt");
         assert_eq!(changed[0].content_hash, sha256_digest(b"new value"));
+        assert_eq!(changed[0].base_hash, Some(sha256_digest(b"old value")), "a changed path carries the baseline hash it was compared against");
         assert_eq!(changed[1].path, "nested/new.txt");
         assert_eq!(changed[1].content_hash, sha256_digest(b"brand new"));
+        assert_eq!(changed[1].base_hash, None, "a path absent from the baseline did not exist at hydrate time");
 
         std::fs::remove_dir_all(&target_dir).ok();
     }

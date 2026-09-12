@@ -1020,18 +1020,46 @@ an existing pattern," not a second implementation of the same capability.
 
      **Sub-phases, in dependency order** (mirrors B.2's (a)-(d) cadence —
      smallest, most self-contained, most mechanically-verifiable first):
-     - C.1 — Go: `internal/workspace/store.go` + unit/integration tests,
-       `LeaseStore` gains `GetScoped`. No RPC wiring yet, fully testable in
-       isolation like step 1's CAS client was.
-     - C.2 — proto: `GetWorkspaceManifest` RPC + messages,
-       `SnapshotRequest.changed_files`; regenerate Go/Rust/TS/Python
-       bindings.
-     - C.3 — Go: `server.go` handler + `SnapshotSandbox` extension +
-       `authz.go`'s two fixes (the `ActivateLease` bug,
-       `GetWorkspaceManifest`'s new case); `cmd/main.go` wiring.
-     - C.4 — Rust: `SandboxManagerClient::get_workspace_manifest` +
-       `snapshot_sandbox` signature change; `ChangedFile.base_hash`;
-       `CasClient` construction in execution-core startup.
+     - **C.1 — DONE, 2026-09-12.** Go: `internal/workspace/store.go` +
+       unit/integration tests, `LeaseStore` gains `GetScoped`. No RPC wiring
+       yet, fully testable in isolation like step 1's CAS client was.
+     - **C.2 — DONE, same day.** proto: `GetWorkspaceManifest` RPC +
+       messages, `SnapshotRequest.changed_files`; regenerated Go/TS/Python
+       bindings (isolated to the 6 `sandboxes`-named files via
+       `git status`/`checkout --`, same `buf generate`-touches-~90-unrelated-files
+       issue as every prior proto change this initiative).
+     - **C.3 — DONE, same day.** Go: `server.go`'s new
+       `GetWorkspaceManifest` handler (resolves the lease via
+       `leases.GetScoped`, empty entries for a non-Space lease) +
+       `SnapshotSandbox` extension (upserts the overlay via
+       `workspace.UpsertOverlay` before `snapshots.Create`, fail-closed) +
+       `authz.go`'s two fixes (the `ActivateLease` bug — regression-locked
+       by a new direct `Authorize()` test plus two new interceptor-level
+       table cases — and `GetWorkspaceManifest`'s own new `ScopeRead` case);
+       `cmd/main.go` wiring (`workspace.NewStore`/`NewMemoryWorkspaceStore`,
+       same Postgres-required/in-memory-fallback split as
+       `LeaseStore`/`SnapshotStore`). New `MemoryWorkspaceStore` in
+       `memory_store.go` mirrors `MemoryLeaseStore`'s existing shape. Tests:
+       `go build`/`go vet` clean; new tests cover the empty-for-non-Space
+       case, the overlay-shadows-Space case end to end through
+       `SnapshotSandbox` → `GetWorkspaceManifest`, and a stub-store proof
+       that a non-Space snapshot never attempts an overlay write at all.
+     - **C.4 — DONE, same day.** Rust: `SandboxManagerClient::
+       get_workspace_manifest` + `snapshot_sandbox` gains a `changed_files`
+       parameter; `workspace_hydrate.rs`'s `ChangedFile` gains `base_hash:
+       Option<String>`, populated from `diff_and_upload`'s existing
+       `baseline` map (no new plumbing — the value was already in scope);
+       execution-core's `ExecutionService` gains its first non-test
+       `CasClient` (`Option`, same "absent is a valid disabled state"
+       convention as `capability_client`), constructed in `serve()` and
+       threaded through `serve_with_listener` — unread until C.5 wires it
+       to `code_interpreter.rs` (an expected, temporary `dead_code`
+       warning, the same "shipped with no consumer yet" position `capability_client`
+       and `sandbox_manager_client` were each in for one commit at their
+       own introduction). Tests: `cargo test -p execution-core --lib` — 541
+       passed, the same 2 pre-existing unrelated failures as every prior
+       slice (`executor.rs`'s Windows path assertion, `grpc.rs`'s
+       timing-sensitive HITL test), no new failures.
      - C.5 — Rust: `code_interpreter.rs`'s Space-scoped rewrite (the
        persistent-directory path above), the new `StateStore` cache slot,
        the two release-point wiring points.

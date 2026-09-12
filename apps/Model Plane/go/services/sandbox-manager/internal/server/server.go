@@ -10,6 +10,7 @@ import (
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
@@ -18,14 +19,15 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Server implements SandboxManagerServer over LeaseStore/SnapshotStore —
-// the real Postgres-backed implementations in production
-// (lease.Store/snapshot.Store), a fast in-memory fake in this package's own
-// tests (see server_test.go).
+// Server implements SandboxManagerServer over LeaseStore/SnapshotStore/
+// WorkspaceStore — the real Postgres-backed implementations in production
+// (lease.Store/snapshot.Store/workspace.Store), a fast in-memory fake in
+// this package's own tests (see server_test.go).
 type Server struct {
 	mpv1.UnimplementedSandboxManagerServer
 	leases    LeaseStore
 	snapshots SnapshotStore
+	workspace WorkspaceStore
 	principal func(context.Context) (authctx.Principal, error)
 	// capabilityVerify verifies a Space capability decision + its unsigned
 	// claims sidecar, mirroring authz.SpaceCapabilityVerifier.Verify. A
@@ -41,8 +43,8 @@ type Server struct {
 
 // NewServer constructs a Server with the given stores. Space capability
 // verification starts disabled; call WithCapabilityVerifier to enable it.
-func NewServer(leases LeaseStore, snaps SnapshotStore) *Server {
-	return &Server{leases: leases, snapshots: snaps, principal: authz.Principal}
+func NewServer(leases LeaseStore, snaps SnapshotStore, workspace WorkspaceStore) *Server {
+	return &Server{leases: leases, snapshots: snaps, workspace: workspace, principal: authz.Principal}
 }
 
 // WithCapabilityVerifier wires Space capability-decision verification and
@@ -156,6 +158,26 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 		return nil, mapErr(err)
 	}
 	defer s.leases.EndSnapshot(ctx, l.ID)
+	// Record this run's overlay BEFORE creating the snapshot record — fail
+	// closed rather than risk a snapshot referencing content whose overlay
+	// row was never durably written. Upserting is idempotent, so if
+	// snapshots.Create itself fails next, leaving these rows in place is
+	// safe (design doc §8 item 3.5.C).
+	if l.SpaceID != "" && len(req.GetChangedFiles()) > 0 {
+		files := make([]workspace.ChangedFile, 0, len(req.GetChangedFiles()))
+		for _, f := range req.GetChangedFiles() {
+			files = append(files, workspace.ChangedFile{
+				Path:        f.GetPath(),
+				ContentHash: f.GetContentHash(),
+				SizeBytes:   f.GetSizeBytes(),
+				BaseHash:    f.GetBaseHash(),
+			})
+		}
+		if err := s.workspace.UpsertOverlay(ctx, principal.OrganizationID, l.SpaceID, l.ID, files); err != nil {
+			telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "workspace_overlay_failed")))
+			return nil, status.Errorf(codes.Internal, "record workspace overlay: %v", err)
+		}
+	}
 	sn, err := s.snapshots.Create(ctx, l, req.GetLabel())
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotCreateOutcome(err))))
@@ -189,6 +211,38 @@ func (s *Server) ActivateLease(ctx context.Context, req *ActivateLeaseRequest) (
 	}
 	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "activated")))
 	return &ActivateLeaseResponse{State: l.State}, nil
+}
+
+// GetWorkspaceManifest resolves the layered workspace manifest a
+// Space-scoped lease sees: the Space's own durable files shadowed
+// path-for-path by this lease's own not-yet-merged overlay. Returns an
+// empty entries list for a non-Space lease — the same exemption
+// BeginSnapshot already grants that case.
+func (s *Server) GetWorkspaceManifest(ctx context.Context, req *GetWorkspaceManifestRequest) (*GetWorkspaceManifestResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetWorkspaceManifest")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetLeaseId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	l, err := s.leases.GetScoped(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if l.SpaceID == "" {
+		return &GetWorkspaceManifestResponse{}, nil
+	}
+	entries, err := s.workspace.GetManifest(ctx, principal.OrganizationID, l.SpaceID, l.ID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get workspace manifest: %v", err)
+	}
+	out := make([]*WorkspaceManifestEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, &WorkspaceManifestEntry{Path: e.Path, ContentHash: e.ContentHash})
+	}
+	return &GetWorkspaceManifestResponse{Entries: out}, nil
 }
 
 // Health reports serving status.

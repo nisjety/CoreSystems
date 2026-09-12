@@ -17,6 +17,7 @@ import (
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	sbxserver "github.com/triodelab/model-plane/services/sandbox-manager/internal/server"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
@@ -97,6 +98,7 @@ func main() {
 
 	var leaseStore sbxserver.LeaseStore
 	var snapStore sbxserver.SnapshotStore
+	var workspaceStore sbxserver.WorkspaceStore
 	if databaseURL != "" {
 		pool, err := pgxpool.New(ctx, databaseURL)
 		if err != nil {
@@ -114,14 +116,19 @@ func main() {
 			slog.Error("sandbox-manager snapshot store unavailable", "error", err)
 			os.Exit(1)
 		}
-		leaseStore, snapStore = pgLeaseStore, pgSnapStore
-		slog.Info("sandbox-manager using durable Postgres-backed lease/snapshot stores")
+		pgWorkspaceStore, err := workspace.NewStore(pool)
+		if err != nil {
+			slog.Error("sandbox-manager workspace store unavailable", "error", err)
+			os.Exit(1)
+		}
+		leaseStore, snapStore, workspaceStore = pgLeaseStore, pgSnapStore, pgWorkspaceStore
+		slog.Info("sandbox-manager using durable Postgres-backed lease/snapshot/workspace stores")
 	} else {
-		leaseStore, snapStore = sbxserver.NewMemoryLeaseStore(), sbxserver.NewMemorySnapshotStore()
-		slog.Warn("starting sandbox-manager with in-memory lease/snapshot stores (ephemeral development only); a restart discards all leases and snapshots")
+		leaseStore, snapStore, workspaceStore = sbxserver.NewMemoryLeaseStore(), sbxserver.NewMemorySnapshotStore(), sbxserver.NewMemoryWorkspaceStore()
+		slog.Warn("starting sandbox-manager with in-memory lease/snapshot/workspace stores (ephemeral development only); a restart discards all leases, snapshots, and workspace overlays")
 	}
 
-	server := sbxserver.NewServer(leaseStore, snapStore)
+	server := sbxserver.NewServer(leaseStore, snapStore, workspaceStore)
 	if capabilityVerifier != nil {
 		server = server.WithCapabilityVerifier(capabilityVerifier.Verify, backendID)
 	}

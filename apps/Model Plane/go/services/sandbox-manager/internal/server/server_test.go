@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 )
 
 func newTestClient(t *testing.T) mpv1.SandboxManagerClient {
@@ -60,7 +61,7 @@ func newTestServer() *Server {
 }
 
 func testServerFor(leases LeaseStore, snapshots SnapshotStore, principal authctx.Principal) *Server {
-	srv := NewServer(leases, snapshots)
+	srv := NewServer(leases, snapshots, NewMemoryWorkspaceStore())
 	srv.principal = func(context.Context) (authctx.Principal, error) { return principal, nil }
 	return srv
 }
@@ -470,6 +471,144 @@ func TestActivateLeaseRequiresLeaseID(t *testing.T) {
 	if got := status.Code(err); got != codes.InvalidArgument {
 		t.Fatalf("code = %v, want InvalidArgument", got)
 	}
+}
+
+// TestGetWorkspaceManifestIsEmptyForANonSpaceLease and
+// TestGetWorkspaceManifestAndSnapshotSandboxLayerTheOverlayOverTheSpace are
+// 3.5.C's own named scenarios (design doc §8 item 3.5.C): a non-Space lease
+// has no manifest concept at all, and a Space-scoped lease's SnapshotSandbox
+// call durably records its changed files as an overlay that
+// GetWorkspaceManifest then reports shadowing the Space's own rows.
+func TestGetWorkspaceManifestIsEmptyForANonSpaceLease(t *testing.T) {
+	s := newTestServer()
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	resp, err := s.GetWorkspaceManifest(context.Background(), &GetWorkspaceManifestRequest{
+		LeaseId: acquired.GetLeaseId(),
+	})
+	if err != nil {
+		t.Fatalf("GetWorkspaceManifest: unexpected error: %v", err)
+	}
+	if len(resp.GetEntries()) != 0 {
+		t.Fatalf("entries = %+v, want none for a non-Space lease", resp.GetEntries())
+	}
+}
+
+func TestGetWorkspaceManifestAndSnapshotSandboxLayerTheOverlayOverTheSpace(t *testing.T) {
+	leases := NewMemoryLeaseStore()
+	snapshots := NewMemorySnapshotStore()
+	workspaceStore := NewMemoryWorkspaceStore()
+	s := NewServer(leases, snapshots, workspaceStore)
+	s.principal = func(context.Context) (authctx.Principal, error) {
+		return authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"}, nil
+	}
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	}
+	s.backendID = "backend-1"
+
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", SpaceId: "space-1",
+		CapabilityDecision: "token", CapabilityClaimsJson: "{}", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if _, err := s.ActivateLease(context.Background(), &ActivateLeaseRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	}); err != nil {
+		t.Fatalf("ActivateLease: unexpected error: %v", err)
+	}
+
+	// Seed a Space-level row directly, as an earlier run's already-merged
+	// state would appear (this test only exercises the read/write surface
+	// this handler owns, not step 4's PromoteWorkspace merge).
+	if err := workspaceStore.UpsertOverlay(context.Background(), "org-1", "space-1", "", []workspace.ChangedFile{
+		{Path: "shared.txt", ContentHash: "sha256:space-shared", SizeBytes: 5},
+		{Path: "space-only.txt", ContentHash: "sha256:space-only", SizeBytes: 7},
+	}); err != nil {
+		t.Fatalf("seed space row: %v", err)
+	}
+
+	// Before any snapshot, the manifest is just the Space's own rows.
+	before, err := s.GetWorkspaceManifest(context.Background(), &GetWorkspaceManifestRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	})
+	if err != nil {
+		t.Fatalf("GetWorkspaceManifest (before snapshot): %v", err)
+	}
+	if len(before.GetEntries()) != 2 {
+		t.Fatalf("entries (before) = %+v, want the 2 seeded Space rows", before.GetEntries())
+	}
+
+	if _, err := s.SnapshotSandbox(context.Background(), &SnapshotRequest{
+		LeaseId: acquired.GetLeaseId(), Label: "x", BackendId: "backend-1",
+		ChangedFiles: []*WorkspaceChangedFile{
+			{Path: "shared.txt", ContentHash: "sha256:run-shared", SizeBytes: 9, BaseHash: "sha256:space-shared"},
+			{Path: "run-only.txt", ContentHash: "sha256:run-only", SizeBytes: 3},
+		},
+	}); err != nil {
+		t.Fatalf("SnapshotSandbox: unexpected error: %v", err)
+	}
+
+	after, err := s.GetWorkspaceManifest(context.Background(), &GetWorkspaceManifestRequest{
+		LeaseId: acquired.GetLeaseId(), BackendId: "backend-1",
+	})
+	if err != nil {
+		t.Fatalf("GetWorkspaceManifest (after snapshot): %v", err)
+	}
+	byPath := make(map[string]string, len(after.GetEntries()))
+	for _, e := range after.GetEntries() {
+		byPath[e.GetPath()] = e.GetContentHash()
+	}
+	if len(byPath) != 3 {
+		t.Fatalf("entries (after) = %+v, want exactly 3 distinct paths", after.GetEntries())
+	}
+	if byPath["shared.txt"] != "sha256:run-shared" {
+		t.Fatalf("shared.txt = %q, want the run overlay's hash to shadow the Space row", byPath["shared.txt"])
+	}
+	if byPath["space-only.txt"] != "sha256:space-only" {
+		t.Fatalf("space-only.txt = %q, want the untouched Space row", byPath["space-only.txt"])
+	}
+	if byPath["run-only.txt"] != "sha256:run-only" {
+		t.Fatalf("run-only.txt = %q, want the new overlay row", byPath["run-only.txt"])
+	}
+}
+
+func TestSnapshotSandboxSkipsTheOverlayWriteForANonSpaceLease(t *testing.T) {
+	// A non-Space snapshot with changed_files set (which no real caller
+	// sends today, but the field is technically settable) must not attempt
+	// to record an overlay a non-Space lease has no SpaceID to key it under
+	// -- proven here via a workspace store stub that fails any write.
+	s := newTestServer()
+	s.workspace = failingWorkspaceStore{t: t}
+	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
+		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("AcquireLease: unexpected error: %v", err)
+	}
+	if _, err := s.SnapshotSandbox(context.Background(), &SnapshotRequest{
+		LeaseId: acquired.GetLeaseId(), Label: "x",
+		ChangedFiles: []*WorkspaceChangedFile{{Path: "x.txt", ContentHash: "sha256:x", SizeBytes: 1}},
+	}); err != nil {
+		t.Fatalf("SnapshotSandbox: unexpected error: %v", err)
+	}
+}
+
+type failingWorkspaceStore struct{ t *testing.T }
+
+func (failingWorkspaceStore) GetManifest(context.Context, string, string, string) ([]workspace.ManifestEntry, error) {
+	return nil, nil
+}
+
+func (f failingWorkspaceStore) UpsertOverlay(context.Context, string, string, string, []workspace.ChangedFile) error {
+	f.t.Fatal("UpsertOverlay must not be called for a non-Space lease")
+	return nil
 }
 
 // TestReleaseLeaseTransitionsStateToDestroyed and

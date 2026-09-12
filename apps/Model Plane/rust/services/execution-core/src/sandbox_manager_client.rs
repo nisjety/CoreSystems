@@ -1,5 +1,6 @@
-//! gRPC client for sandbox-manager's `SandboxManager` service — `AcquireLease`,
-//! `ActivateLease`, `SnapshotSandbox`, `ReleaseLease`, `Health`.
+//! gRPC client for sandbox-manager's `SandboxManager` service —
+//! `AcquireLease`, `ActivateLease`, `SnapshotSandbox`, `ReleaseLease`,
+//! `GetWorkspaceManifest`, `Health`.
 //!
 //! Real and independently callable, but **not yet wired into a production
 //! caller** — see
@@ -34,9 +35,9 @@ use std::time::Duration;
 
 use mp_contracts::model_plane::v1::{
     sandbox_manager_client::SandboxManagerClient as GeneratedClient, AcquireLeaseRequest,
-    AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, ReleaseLeaseRequest,
-    ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest,
-    SnapshotResponse,
+    AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, GetWorkspaceManifestRequest,
+    GetWorkspaceManifestResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest,
+    SandboxHealthResponse, SnapshotRequest, SnapshotResponse, WorkspaceChangedFile,
 };
 use tonic::{transport::Channel, Request, Status};
 
@@ -181,6 +182,7 @@ impl SandboxManagerClient {
         lease_id: &str,
         label: &str,
         backend_id: &str,
+        changed_files: Vec<WorkspaceChangedFile>,
     ) -> Result<SnapshotResponse, Status> {
         if lease_id.trim().is_empty() || label.trim().is_empty() {
             return Err(Status::invalid_argument("lease_id and label are required"));
@@ -189,11 +191,41 @@ impl SandboxManagerClient {
             lease_id: lease_id.to_owned(),
             label: label.to_owned(),
             backend_id: backend_id.to_owned(),
+            changed_files,
         };
         let wire = Self::authorize(bearer, message)?;
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().snapshot_sandbox(wire))
             .await
             .map_err(|_| Status::deadline_exceeded("sandbox-manager SnapshotSandbox timed out"))?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Resolves the layered workspace manifest a Space-scoped lease sees —
+    /// the Space's own durable files shadowed path-for-path by this lease's
+    /// own not-yet-merged overlay. Empty `entries` for a non-Space lease.
+    ///
+    /// # Errors
+    /// `invalid_argument` when `lease_id` is blank; `deadline_exceeded` past
+    /// [`RPC_TIMEOUT`]; otherwise sandbox-manager's own status.
+    pub async fn get_workspace_manifest(
+        &self,
+        bearer: &str,
+        lease_id: &str,
+        backend_id: &str,
+    ) -> Result<GetWorkspaceManifestResponse, Status> {
+        if lease_id.trim().is_empty() {
+            return Err(Status::invalid_argument("lease_id is required"));
+        }
+        let message = GetWorkspaceManifestRequest {
+            lease_id: lease_id.to_owned(),
+            backend_id: backend_id.to_owned(),
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().get_workspace_manifest(wire))
+            .await
+            .map_err(|_| {
+                Status::deadline_exceeded("sandbox-manager GetWorkspaceManifest timed out")
+            })?;
         Ok(outcome?.into_inner())
     }
 
@@ -304,7 +336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activate_snapshot_release_reject_blank_lease_id() {
+    async fn activate_snapshot_release_manifest_reject_blank_lease_id() {
         let client = test_client();
         assert_eq!(
             client
@@ -316,7 +348,7 @@ mod tests {
         );
         assert_eq!(
             client
-                .snapshot_sandbox("bearer", "", "label", "backend-1")
+                .snapshot_sandbox("bearer", "", "label", "backend-1", vec![])
                 .await
                 .expect_err("blank lease_id must fail closed")
                 .code(),
@@ -324,7 +356,7 @@ mod tests {
         );
         assert_eq!(
             client
-                .snapshot_sandbox("bearer", "lease-1", "", "backend-1")
+                .snapshot_sandbox("bearer", "lease-1", "", "backend-1", vec![])
                 .await
                 .expect_err("blank label must fail closed")
                 .code(),
@@ -333,6 +365,14 @@ mod tests {
         assert_eq!(
             client
                 .release_lease("bearer", "", "backend-1")
+                .await
+                .expect_err("blank lease_id must fail closed")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            client
+                .get_workspace_manifest("bearer", "", "backend-1")
                 .await
                 .expect_err("blank lease_id must fail closed")
                 .code(),

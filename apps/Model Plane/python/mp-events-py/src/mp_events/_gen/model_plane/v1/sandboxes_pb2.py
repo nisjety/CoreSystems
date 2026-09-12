@@ -26,7 +26,7 @@ from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__
 from google.protobuf import duration_pb2 as google_dot_protobuf_dot_duration__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1emodel_plane/v1/sandboxes.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1egoogle/protobuf/duration.proto\"\x95\x02\n\x13\x41\x63quireLeaseRequest\x12\x19\n\x08scope_id\x18\x01 \x01(\tR\x07scopeId\x12\x1d\n\nscope_type\x18\x02 \x01(\tR\tscopeType\x12+\n\x03ttl\x18\x03 \x01(\x0b\x32\x19.google.protobuf.DurationR\x03ttl\x12\x15\n\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x19\n\x08space_id\x18\x05 \x01(\tR\x07spaceId\x12/\n\x13\x63\x61pability_decision\x18\x06 \x01(\tR\x12\x63\x61pabilityDecision\x12\x34\n\x16\x63\x61pability_claims_json\x18\x07 \x01(\tR\x14\x63\x61pabilityClaimsJson\"\xe4\x01\n\x14\x41\x63quireLeaseResponse\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x1a\n\x08\x65ndpoint\x18\x02 \x01(\tR\x08\x65ndpoint\x12\x39\n\nexpires_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1d\n\nbackend_id\x18\x04 \x01(\tR\tbackendId\x12;\n\x05state\x18\x05 \x01(\x0e\x32%.model_plane.v1.SandboxLifecycleStateR\x05state\"O\n\x13ReleaseLeaseRequest\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x1d\n\nbackend_id\x18\x02 \x01(\tR\tbackendId\"2\n\x14ReleaseLeaseResponse\x12\x1a\n\x08released\x18\x01 \x01(\x08R\x08released\"a\n\x0fSnapshotRequest\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x14\n\x05label\x18\x02 \x01(\tR\x05label\x12\x1d\n\nbackend_id\x18\x03 \x01(\tR\tbackendId\"R\n\x10SnapshotResponse\x12\x1f\n\x0bsnapshot_id\x18\x01 \x01(\tR\nsnapshotId\x12\x1d\n\nobject_key\x18\x02 \x01(\tR\tobjectKey\"P\n\x14\x41\x63tivateLeaseRequest\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x1d\n\nbackend_id\x18\x02 \x01(\tR\tbackendId\"T\n\x15\x41\x63tivateLeaseResponse\x12;\n\x05state\x18\x01 \x01(\x0e\x32%.model_plane.v1.SandboxLifecycleStateR\x05state\"\x16\n\x14SandboxHealthRequest\"/\n\x15SandboxHealthResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status*l\n\x15SandboxLifecycleState\x12\x19\n\x15LIFECYCLE_UNSPECIFIED\x10\x00\x12\x0b\n\x07SCRATCH\x10\x01\x12\n\n\x06\x41\x43TIVE\x10\x02\x12\x10\n\x0cSNAPSHOTTING\x10\x03\x12\r\n\tDESTROYED\x10\x04\x32\xd1\x03\n\x0eSandboxManager\x12Y\n\x0c\x41\x63quireLease\x12#.model_plane.v1.AcquireLeaseRequest\x1a$.model_plane.v1.AcquireLeaseResponse\x12Y\n\x0cReleaseLease\x12#.model_plane.v1.ReleaseLeaseRequest\x1a$.model_plane.v1.ReleaseLeaseResponse\x12T\n\x0fSnapshotSandbox\x12\x1f.model_plane.v1.SnapshotRequest\x1a .model_plane.v1.SnapshotResponse\x12\\\n\rActivateLease\x12$.model_plane.v1.ActivateLeaseRequest\x1a%.model_plane.v1.ActivateLeaseResponse\x12U\n\x06Health\x12$.model_plane.v1.SandboxHealthRequest\x1a%.model_plane.v1.SandboxHealthResponseB\xb6\x01\n\x12\x63om.model_plane.v1B\x0eSandboxesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1emodel_plane/v1/sandboxes.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1egoogle/protobuf/duration.proto\"\x95\x02\n\x13\x41\x63quireLeaseRequest\x12\x19\n\x08scope_id\x18\x01 \x01(\tR\x07scopeId\x12\x1d\n\nscope_type\x18\x02 \x01(\tR\tscopeType\x12+\n\x03ttl\x18\x03 \x01(\x0b\x32\x19.google.protobuf.DurationR\x03ttl\x12\x15\n\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x19\n\x08space_id\x18\x05 \x01(\tR\x07spaceId\x12/\n\x13\x63\x61pability_decision\x18\x06 \x01(\tR\x12\x63\x61pabilityDecision\x12\x34\n\x16\x63\x61pability_claims_json\x18\x07 \x01(\tR\x14\x63\x61pabilityClaimsJson\"\xe4\x01\n\x14\x41\x63quireLeaseResponse\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x1a\n\x08\x65ndpoint\x18\x02 \x01(\tR\x08\x65ndpoint\x12\x39\n\nexpires_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1d\n\nbackend_id\x18\x04 \x01(\tR\tbackendId\x12;\n\x05state\x18\x05 \x01(\x0e\x32%.model_plane.v1.SandboxLifecycleStateR\x05state\"O\n\x13ReleaseLeaseRequest\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x1d\n\nbackend_id\x18\x02 \x01(\tR\tbackendId\"2\n\x14ReleaseLeaseResponse\x12\x1a\n\x08released\x18\x01 \x01(\x08R\x08released\"\xac\x01\n\x0fSnapshotRequest\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x14\n\x05label\x18\x02 \x01(\tR\x05label\x12\x1d\n\nbackend_id\x18\x03 \x01(\tR\tbackendId\x12I\n\rchanged_files\x18\x04 \x03(\x0b\x32$.model_plane.v1.WorkspaceChangedFileR\x0c\x63hangedFiles\"R\n\x10SnapshotResponse\x12\x1f\n\x0bsnapshot_id\x18\x01 \x01(\tR\nsnapshotId\x12\x1d\n\nobject_key\x18\x02 \x01(\tR\tobjectKey\"P\n\x14\x41\x63tivateLeaseRequest\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x1d\n\nbackend_id\x18\x02 \x01(\tR\tbackendId\"T\n\x15\x41\x63tivateLeaseResponse\x12;\n\x05state\x18\x01 \x01(\x0e\x32%.model_plane.v1.SandboxLifecycleStateR\x05state\"W\n\x1bGetWorkspaceManifestRequest\x12\x19\n\x08lease_id\x18\x01 \x01(\tR\x07leaseId\x12\x1d\n\nbackend_id\x18\x02 \x01(\tR\tbackendId\"O\n\x16WorkspaceManifestEntry\x12\x12\n\x04path\x18\x01 \x01(\tR\x04path\x12!\n\x0c\x63ontent_hash\x18\x02 \x01(\tR\x0b\x63ontentHash\"`\n\x1cGetWorkspaceManifestResponse\x12@\n\x07\x65ntries\x18\x01 \x03(\x0b\x32&.model_plane.v1.WorkspaceManifestEntryR\x07\x65ntries\"\x89\x01\n\x14WorkspaceChangedFile\x12\x12\n\x04path\x18\x01 \x01(\tR\x04path\x12!\n\x0c\x63ontent_hash\x18\x02 \x01(\tR\x0b\x63ontentHash\x12\x1d\n\nsize_bytes\x18\x03 \x01(\x03R\tsizeBytes\x12\x1b\n\tbase_hash\x18\x04 \x01(\tR\x08\x62\x61seHash\"\x16\n\x14SandboxHealthRequest\"/\n\x15SandboxHealthResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status*l\n\x15SandboxLifecycleState\x12\x19\n\x15LIFECYCLE_UNSPECIFIED\x10\x00\x12\x0b\n\x07SCRATCH\x10\x01\x12\n\n\x06\x41\x43TIVE\x10\x02\x12\x10\n\x0cSNAPSHOTTING\x10\x03\x12\r\n\tDESTROYED\x10\x04\x32\xc4\x04\n\x0eSandboxManager\x12Y\n\x0c\x41\x63quireLease\x12#.model_plane.v1.AcquireLeaseRequest\x1a$.model_plane.v1.AcquireLeaseResponse\x12Y\n\x0cReleaseLease\x12#.model_plane.v1.ReleaseLeaseRequest\x1a$.model_plane.v1.ReleaseLeaseResponse\x12T\n\x0fSnapshotSandbox\x12\x1f.model_plane.v1.SnapshotRequest\x1a .model_plane.v1.SnapshotResponse\x12\\\n\rActivateLease\x12$.model_plane.v1.ActivateLeaseRequest\x1a%.model_plane.v1.ActivateLeaseResponse\x12q\n\x14GetWorkspaceManifest\x12+.model_plane.v1.GetWorkspaceManifestRequest\x1a,.model_plane.v1.GetWorkspaceManifestResponse\x12U\n\x06Health\x12$.model_plane.v1.SandboxHealthRequest\x1a%.model_plane.v1.SandboxHealthResponseB\xb6\x01\n\x12\x63om.model_plane.v1B\x0eSandboxesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,8 +34,8 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'model_plane.v1.sandboxes_pb
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\022com.model_plane.v1B\016SandboxesProtoP\001Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\242\002\003MXX\252\002\rModelPlane.V1\312\002\rModelPlane\\V1\342\002\031ModelPlane\\V1\\GPBMetadata\352\002\016ModelPlane::V1'
-  _globals['_SANDBOXLIFECYCLESTATE']._serialized_start=1183
-  _globals['_SANDBOXLIFECYCLESTATE']._serialized_end=1291
+  _globals['_SANDBOXLIFECYCLESTATE']._serialized_start=1667
+  _globals['_SANDBOXLIFECYCLESTATE']._serialized_end=1775
   _globals['_ACQUIRELEASEREQUEST']._serialized_start=116
   _globals['_ACQUIRELEASEREQUEST']._serialized_end=393
   _globals['_ACQUIRELEASERESPONSE']._serialized_start=396
@@ -44,18 +44,26 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_RELEASELEASEREQUEST']._serialized_end=705
   _globals['_RELEASELEASERESPONSE']._serialized_start=707
   _globals['_RELEASELEASERESPONSE']._serialized_end=757
-  _globals['_SNAPSHOTREQUEST']._serialized_start=759
-  _globals['_SNAPSHOTREQUEST']._serialized_end=856
-  _globals['_SNAPSHOTRESPONSE']._serialized_start=858
-  _globals['_SNAPSHOTRESPONSE']._serialized_end=940
-  _globals['_ACTIVATELEASEREQUEST']._serialized_start=942
-  _globals['_ACTIVATELEASEREQUEST']._serialized_end=1022
-  _globals['_ACTIVATELEASERESPONSE']._serialized_start=1024
-  _globals['_ACTIVATELEASERESPONSE']._serialized_end=1108
-  _globals['_SANDBOXHEALTHREQUEST']._serialized_start=1110
-  _globals['_SANDBOXHEALTHREQUEST']._serialized_end=1132
-  _globals['_SANDBOXHEALTHRESPONSE']._serialized_start=1134
-  _globals['_SANDBOXHEALTHRESPONSE']._serialized_end=1181
-  _globals['_SANDBOXMANAGER']._serialized_start=1294
-  _globals['_SANDBOXMANAGER']._serialized_end=1759
+  _globals['_SNAPSHOTREQUEST']._serialized_start=760
+  _globals['_SNAPSHOTREQUEST']._serialized_end=932
+  _globals['_SNAPSHOTRESPONSE']._serialized_start=934
+  _globals['_SNAPSHOTRESPONSE']._serialized_end=1016
+  _globals['_ACTIVATELEASEREQUEST']._serialized_start=1018
+  _globals['_ACTIVATELEASEREQUEST']._serialized_end=1098
+  _globals['_ACTIVATELEASERESPONSE']._serialized_start=1100
+  _globals['_ACTIVATELEASERESPONSE']._serialized_end=1184
+  _globals['_GETWORKSPACEMANIFESTREQUEST']._serialized_start=1186
+  _globals['_GETWORKSPACEMANIFESTREQUEST']._serialized_end=1273
+  _globals['_WORKSPACEMANIFESTENTRY']._serialized_start=1275
+  _globals['_WORKSPACEMANIFESTENTRY']._serialized_end=1354
+  _globals['_GETWORKSPACEMANIFESTRESPONSE']._serialized_start=1356
+  _globals['_GETWORKSPACEMANIFESTRESPONSE']._serialized_end=1452
+  _globals['_WORKSPACECHANGEDFILE']._serialized_start=1455
+  _globals['_WORKSPACECHANGEDFILE']._serialized_end=1592
+  _globals['_SANDBOXHEALTHREQUEST']._serialized_start=1594
+  _globals['_SANDBOXHEALTHREQUEST']._serialized_end=1616
+  _globals['_SANDBOXHEALTHRESPONSE']._serialized_start=1618
+  _globals['_SANDBOXHEALTHRESPONSE']._serialized_end=1665
+  _globals['_SANDBOXMANAGER']._serialized_start=1778
+  _globals['_SANDBOXMANAGER']._serialized_end=2358
 # @@protoc_insertion_point(module_scope)

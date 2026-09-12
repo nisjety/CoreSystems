@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
+import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -60,6 +60,21 @@ export const SandboxManager = {
       name: "ActivateLease",
       I: ActivateLeaseRequest,
       O: ActivateLeaseResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Resolve the layered workspace manifest a Space-scoped lease sees: the
+     * Space's own durable files, shadowed path-for-path by this lease's own
+     * not-yet-merged overlay. Empty for a non-Space lease. See
+     * apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+     * §8 item 3.5.C.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.GetWorkspaceManifest
+     */
+    getWorkspaceManifest: {
+      name: "GetWorkspaceManifest",
+      I: GetWorkspaceManifestRequest,
+      O: GetWorkspaceManifestResponse,
       kind: MethodKind.Unary,
     },
     /**

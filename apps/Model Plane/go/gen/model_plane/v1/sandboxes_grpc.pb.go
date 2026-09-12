@@ -19,11 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SandboxManager_AcquireLease_FullMethodName    = "/model_plane.v1.SandboxManager/AcquireLease"
-	SandboxManager_ReleaseLease_FullMethodName    = "/model_plane.v1.SandboxManager/ReleaseLease"
-	SandboxManager_SnapshotSandbox_FullMethodName = "/model_plane.v1.SandboxManager/SnapshotSandbox"
-	SandboxManager_ActivateLease_FullMethodName   = "/model_plane.v1.SandboxManager/ActivateLease"
-	SandboxManager_Health_FullMethodName          = "/model_plane.v1.SandboxManager/Health"
+	SandboxManager_AcquireLease_FullMethodName         = "/model_plane.v1.SandboxManager/AcquireLease"
+	SandboxManager_ReleaseLease_FullMethodName         = "/model_plane.v1.SandboxManager/ReleaseLease"
+	SandboxManager_SnapshotSandbox_FullMethodName      = "/model_plane.v1.SandboxManager/SnapshotSandbox"
+	SandboxManager_ActivateLease_FullMethodName        = "/model_plane.v1.SandboxManager/ActivateLease"
+	SandboxManager_GetWorkspaceManifest_FullMethodName = "/model_plane.v1.SandboxManager/GetWorkspaceManifest"
+	SandboxManager_Health_FullMethodName               = "/model_plane.v1.SandboxManager/Health"
 )
 
 // SandboxManagerClient is the client API for SandboxManager service.
@@ -44,6 +45,12 @@ type SandboxManagerClient interface {
 	// permission per the capability decision's granted permissions). See
 	// docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
 	ActivateLease(ctx context.Context, in *ActivateLeaseRequest, opts ...grpc.CallOption) (*ActivateLeaseResponse, error)
+	// Resolve the layered workspace manifest a Space-scoped lease sees: the
+	// Space's own durable files, shadowed path-for-path by this lease's own
+	// not-yet-merged overlay. Empty for a non-Space lease. See
+	// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §8 item 3.5.C.
+	GetWorkspaceManifest(ctx context.Context, in *GetWorkspaceManifestRequest, opts ...grpc.CallOption) (*GetWorkspaceManifestResponse, error)
 	// Health check.
 	Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error)
 }
@@ -96,6 +103,16 @@ func (c *sandboxManagerClient) ActivateLease(ctx context.Context, in *ActivateLe
 	return out, nil
 }
 
+func (c *sandboxManagerClient) GetWorkspaceManifest(ctx context.Context, in *GetWorkspaceManifestRequest, opts ...grpc.CallOption) (*GetWorkspaceManifestResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetWorkspaceManifestResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_GetWorkspaceManifest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxManagerClient) Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SandboxHealthResponse)
@@ -124,6 +141,12 @@ type SandboxManagerServer interface {
 	// permission per the capability decision's granted permissions). See
 	// docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
 	ActivateLease(context.Context, *ActivateLeaseRequest) (*ActivateLeaseResponse, error)
+	// Resolve the layered workspace manifest a Space-scoped lease sees: the
+	// Space's own durable files, shadowed path-for-path by this lease's own
+	// not-yet-merged overlay. Empty for a non-Space lease. See
+	// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §8 item 3.5.C.
+	GetWorkspaceManifest(context.Context, *GetWorkspaceManifestRequest) (*GetWorkspaceManifestResponse, error)
 	// Health check.
 	Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error)
 	mustEmbedUnimplementedSandboxManagerServer()
@@ -147,6 +170,9 @@ func (UnimplementedSandboxManagerServer) SnapshotSandbox(context.Context, *Snaps
 }
 func (UnimplementedSandboxManagerServer) ActivateLease(context.Context, *ActivateLeaseRequest) (*ActivateLeaseResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ActivateLease not implemented")
+}
+func (UnimplementedSandboxManagerServer) GetWorkspaceManifest(context.Context, *GetWorkspaceManifestRequest) (*GetWorkspaceManifestResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWorkspaceManifest not implemented")
 }
 func (UnimplementedSandboxManagerServer) Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
@@ -244,6 +270,24 @@ func _SandboxManager_ActivateLease_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxManager_GetWorkspaceManifest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWorkspaceManifestRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).GetWorkspaceManifest(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_GetWorkspaceManifest_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).GetWorkspaceManifest(ctx, req.(*GetWorkspaceManifestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxManager_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SandboxHealthRequest)
 	if err := dec(in); err != nil {
@@ -284,6 +328,10 @@ var SandboxManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ActivateLease",
 			Handler:    _SandboxManager_ActivateLease_Handler,
+		},
+		{
+			MethodName: "GetWorkspaceManifest",
+			Handler:    _SandboxManager_GetWorkspaceManifest_Handler,
 		},
 		{
 			MethodName: "Health",

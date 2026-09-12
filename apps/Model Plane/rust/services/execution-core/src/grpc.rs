@@ -30,6 +30,7 @@ use crate::scheduled_inference_auth::ScheduledInferenceTokenProvider;
 use crate::scheduled_step_decision::ScheduledStepDecisionVerifier;
 use crate::session_terminal_auth::{ManagedRunTokenProvider, SessionTerminalTokenProvider};
 use crate::state::{RunSnapshot, RunStatus, StateStore};
+use crate::workspace_cas::CasClient;
 
 pub(crate) struct ExecutionService {
     state: StateStore,
@@ -48,6 +49,12 @@ pub(crate) struct ExecutionService {
     /// `sandbox_lease::ensure_sandbox_lease`); every other step is unaffected.
     capability_client: Option<CapabilityClient>,
     sandbox_manager_client: SandboxManagerClient,
+    /// Absent exactly when `CasClient::from_env` found no MinIO
+    /// configuration — a valid disabled state, same convention as
+    /// `capability_client` above. 3.5.C's own `code_interpreter.rs` rewrite
+    /// (not yet landed) is this field's first real reader; nothing consumes
+    /// it yet.
+    cas_client: Option<CasClient>,
     /// This instance's own stable identifier — see
     /// `http_health::resolve_backend_id`'s doc for why the SAME value must be
     /// presented on every request from this process.
@@ -116,6 +123,7 @@ impl ExecutionService {
         scheduled_inference_tokens: Option<Arc<ScheduledInferenceTokenProvider>>,
         capability_client: Option<CapabilityClient>,
         sandbox_manager_client: SandboxManagerClient,
+        cas_client: Option<CasClient>,
         backend_id: String,
         sandbox_tokens: crate::sandbox_lease::SandboxManagerTokenProvider,
     ) -> Self {
@@ -135,6 +143,7 @@ impl ExecutionService {
             scheduled_inference_tokens,
             capability_client,
             sandbox_manager_client,
+            cas_client,
             backend_id,
             sandbox_tokens,
         }
@@ -1267,6 +1276,11 @@ pub async fn serve(
         .map_err(|error| anyhow::anyhow!("sandbox capability client configuration: {error}"))?;
     let sandbox_manager_client = SandboxManagerClient::from_env()
         .map_err(|error| anyhow::anyhow!("sandbox-manager client configuration: {error}"))?;
+    // Absent configuration is a valid disabled state (§1's own convention) —
+    // a Space-scoped code_interpreter step fails closed without it, same as
+    // an absent capability_client above; nothing reads this yet (3.5.C.5).
+    let cas_client = CasClient::from_env()
+        .map_err(|error| anyhow::anyhow!("CAS client configuration: {error}"))?;
     let backend_id = crate::http_health::resolve_backend_id();
     // Same deployment service principal capability_policy's own
     // ServiceTokenProvider already requires (EXECUTION_CORE_SERVICE_ID/
@@ -1293,6 +1307,7 @@ pub async fn serve(
         scheduled_inference_tokens,
         capability_client,
         sandbox_manager_client,
+        cas_client,
         backend_id,
         sandbox_tokens,
     )
@@ -1314,6 +1329,7 @@ async fn serve_with_listener(
     scheduled_inference_tokens: Option<Arc<ScheduledInferenceTokenProvider>>,
     capability_client: Option<CapabilityClient>,
     sandbox_manager_client: SandboxManagerClient,
+    cas_client: Option<CasClient>,
     backend_id: String,
     sandbox_tokens: crate::sandbox_lease::SandboxManagerTokenProvider,
 ) -> anyhow::Result<()> {
@@ -1339,6 +1355,7 @@ async fn serve_with_listener(
                 scheduled_inference_tokens,
                 capability_client,
                 sandbox_manager_client,
+                cas_client,
                 backend_id,
                 sandbox_tokens,
             ),
@@ -1784,6 +1801,7 @@ mod auth_tests {
             None,
             None,
             SandboxManagerClient::from_env().expect("valid default sandbox-manager endpoint"),
+            None,
             "test-backend".to_owned(),
             crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
                 "http://127.0.0.1:1",

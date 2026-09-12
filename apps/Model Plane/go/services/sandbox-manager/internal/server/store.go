@@ -6,6 +6,7 @@ import (
 
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 )
 
 // LeaseStore is the narrow surface Server actually calls — exactly
@@ -34,4 +35,13 @@ type LeaseStore interface {
 // SnapshotStore is the narrow surface Server actually calls.
 type SnapshotStore interface {
 	Create(ctx context.Context, l *lease.Lease, label string) (*snapshot.Snapshot, error)
+}
+
+// WorkspaceStore is the narrow surface Server actually calls — exactly
+// *workspace.Store's two methods, the same seam-at-the-consumer shape as
+// LeaseStore/SnapshotStore above. Backs GetWorkspaceManifest and
+// SnapshotSandbox's overlay upsert (design doc §8 item 3.5.C).
+type WorkspaceStore interface {
+	GetManifest(ctx context.Context, orgID, spaceID, runID string) ([]workspace.ManifestEntry, error)
+	UpsertOverlay(ctx context.Context, orgID, spaceID, runID string, files []workspace.ChangedFile) error
 }

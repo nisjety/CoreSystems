@@ -25,6 +25,13 @@ service SandboxManager {
   // docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
   rpc ActivateLease(ActivateLeaseRequest) returns (ActivateLeaseResponse);
 
+  // Resolve the layered workspace manifest a Space-scoped lease sees: the
+  // Space's own durable files, shadowed path-for-path by this lease's own
+  // not-yet-merged overlay. Empty for a non-Space lease. See
+  // apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+  // §8 item 3.5.C.
+  rpc GetWorkspaceManifest(GetWorkspaceManifestRequest) returns (GetWorkspaceManifestResponse);
+
   // Health check.
   rpc Health(SandboxHealthRequest) returns (SandboxHealthResponse);
 }
@@ -112,6 +119,12 @@ message SnapshotRequest {
 
   // Caller's asserted backend id; must match the lease's pinned backend.
   string backend_id = 3;
+
+  // This run's changed/new files since it hydrated its workspace, to
+  // upsert as this lease's own workspace_files overlay. Empty for every
+  // non-Space snapshot (existing behavior, unchanged) and for a
+  // Space-scoped snapshot that hydrated nothing new.
+  repeated WorkspaceChangedFile changed_files = 4;
 }
 
 message SnapshotResponse {
@@ -133,6 +146,46 @@ message ActivateLeaseRequest {
 message ActivateLeaseResponse {
   // Lifecycle state after the transition (ACTIVE on success).
   SandboxLifecycleState state = 1;
+}
+
+message GetWorkspaceManifestRequest {
+  // Lease whose layered workspace manifest to resolve.
+  string lease_id = 1;
+
+  // Caller's asserted backend id; must match the lease's pinned backend.
+  string backend_id = 2;
+}
+
+message WorkspaceManifestEntry {
+  // Path relative to the workspace root.
+  string path = 1;
+
+  // "sha256:<hex>" CAS key of this path's current content.
+  string content_hash = 2;
+}
+
+message GetWorkspaceManifestResponse {
+  // The layered view: Space rows shadowed by this lease's own overlay.
+  // Empty for a non-Space lease.
+  repeated WorkspaceManifestEntry entries = 1;
+}
+
+message WorkspaceChangedFile {
+  // Path relative to the workspace root.
+  string path = 1;
+
+  // "sha256:<hex>" CAS key of this path's new content.
+  string content_hash = 2;
+
+  // Size of the new content, in bytes.
+  int64 size_bytes = 3;
+
+  // The Space-level hash this path had when this run's hydrate observed
+  // it, captured at hydrate time (not re-derived here). Empty means the
+  // path did not exist yet when this run hydrated. Consumed by step 4's
+  // PromoteWorkspace compare-and-swap merge, not by SnapshotSandbox
+  // itself.
+  string base_hash = 4;
 }
 
 message SandboxHealthRequest {}

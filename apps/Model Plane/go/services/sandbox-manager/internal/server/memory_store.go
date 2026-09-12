@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 )
 
 // MemoryLeaseStore and MemorySnapshotStore are the pre-S3.3 in-memory
@@ -205,4 +208,75 @@ func (s *MemorySnapshotStore) newID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf[:]), nil
+}
+
+// MemoryWorkspaceStore is an in-memory WorkspaceStore, the same
+// pre-Postgres-durability convenience MemoryLeaseStore/MemorySnapshotStore
+// already provide: cmd/main.go's ephemeral-development fallback and this
+// package's own fast unit tests (server_test.go). The durable, production
+// implementation is workspace.Store (Postgres-backed, migration 0001).
+type MemoryWorkspaceStore struct {
+	mu   sync.RWMutex
+	rows map[string]workspace.ChangedFile // key: org_id + "/" + space_id + "/" + coalesce(run_id, "") + "/" + path
+}
+
+// NewMemoryWorkspaceStore constructs an empty MemoryWorkspaceStore.
+func NewMemoryWorkspaceStore() *MemoryWorkspaceStore {
+	return &MemoryWorkspaceStore{rows: make(map[string]workspace.ChangedFile)}
+}
+
+func workspaceRowKey(orgID, spaceID, runID, path string) string {
+	return orgID + "/" + spaceID + "/" + runID + "/" + path
+}
+
+// GetManifest mirrors workspace.Store.GetManifest's layered view: this
+// runID's own overlay rows shadow the Space's rows (runID == "") for the
+// same path.
+func (s *MemoryWorkspaceStore) GetManifest(_ context.Context, orgID, spaceID, runID string) ([]workspace.ManifestEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	prefix := orgID + "/" + spaceID + "/"
+	spaceRows := make(map[string]workspace.ManifestEntry)
+	overlayRows := make(map[string]workspace.ManifestEntry)
+	for key, row := range s.rows {
+		rest, ok := strings.CutPrefix(key, prefix)
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		rowRunID, path := parts[0], parts[1]
+		entry := workspace.ManifestEntry{Path: path, ContentHash: row.ContentHash}
+		switch rowRunID {
+		case "":
+			spaceRows[path] = entry
+		case runID:
+			overlayRows[path] = entry
+		}
+	}
+
+	merged := spaceRows
+	for path, entry := range overlayRows {
+		merged[path] = entry // this run's overlay shadows the Space row for the same path
+	}
+	entries := make([]workspace.ManifestEntry, 0, len(merged))
+	for _, e := range merged {
+		entries = append(entries, e)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	return entries, nil
+}
+
+// UpsertOverlay mirrors workspace.Store.UpsertOverlay: one upsert per file
+// under this runID's own overlay key.
+func (s *MemoryWorkspaceStore) UpsertOverlay(_ context.Context, orgID, spaceID, runID string, files []workspace.ChangedFile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, f := range files {
+		s.rows[workspaceRowKey(orgID, spaceID, runID, f.Path)] = f
+	}
+	return nil
 }

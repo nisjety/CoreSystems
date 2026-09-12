@@ -64,6 +64,31 @@ func TestAuthorizationPinsTenantAndPrincipalContext(t *testing.T) {
 	}
 }
 
+// TestActivateLeaseAndGetWorkspaceManifestAreKnownMethods is a direct,
+// JWT-independent regression lock for the 2026-09-12 fix: Authorize's
+// switch previously had no case for ActivateLease at all (it fell into
+// `default: return errors.New("unknown sandbox-manager method")`) and
+// GetWorkspaceManifest never existed before 3.5.C. Both must now be
+// recognized, with the same ScopeWrite/ScopeRead split as every other
+// mutating/read-only method on this service.
+func TestActivateLeaseAndGetWorkspaceManifestAreKnownMethods(t *testing.T) {
+	writeOnly := authctx.Principal{OrganizationID: "org-a", ActorID: "service:execution-core", PrincipalType: "service", Scopes: []string{ScopeWrite}}
+	if err := Authorize(writeOnly, "/model_plane.v1.SandboxManager/ActivateLease", nil); err != nil {
+		t.Fatalf("ActivateLease with sandbox:write unexpectedly refused: %v", err)
+	}
+	readOnly := authctx.Principal{OrganizationID: "org-a", ActorID: "service:execution-core", PrincipalType: "service", Scopes: []string{ScopeRead}}
+	if err := Authorize(readOnly, "/model_plane.v1.SandboxManager/ActivateLease", nil); err == nil {
+		t.Fatal("ActivateLease with only sandbox:read unexpectedly authorized")
+	}
+	if err := Authorize(readOnly, "/model_plane.v1.SandboxManager/GetWorkspaceManifest", nil); err != nil {
+		t.Fatalf("GetWorkspaceManifest with sandbox:read unexpectedly refused: %v", err)
+	}
+	noScope := authctx.Principal{OrganizationID: "org-a", ActorID: "service:execution-core", PrincipalType: "service"}
+	if err := Authorize(noScope, "/model_plane.v1.SandboxManager/GetWorkspaceManifest", nil); err == nil {
+		t.Fatal("GetWorkspaceManifest with no scope unexpectedly authorized")
+	}
+}
+
 func testAuth(t *testing.T) (*authctx.Verifier, *rsa.PrivateKey) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -109,6 +134,15 @@ func TestInterceptorFailsClosedAndEnforcesServiceScopes(t *testing.T) {
 		{name: "wrong audience", method: "/model_plane.v1.SandboxManager/AcquireLease", authorization: "Bearer " + token(t, key, "model-gateway", "org-a", "user-a", "user"), want: codes.Unauthenticated},
 		{name: "internal credential missing scope", method: "/model_plane.v1.SandboxManager/SnapshotSandbox", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.PermissionDenied},
 		{name: "valid service", method: "/model_plane.v1.SandboxManager/SnapshotSandbox", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
+		// ActivateLease was missing from Authorize's switch entirely until
+		// 2026-09-12 (S3.3 step 3.5.C) -- these two cases lock in the fix:
+		// it is reachable through the real interceptor now, with the same
+		// ScopeWrite gate as the other three write RPCs, not silently
+		// refused as "unknown sandbox-manager method" regardless of scope.
+		{name: "ActivateLease missing scope", method: "/model_plane.v1.SandboxManager/ActivateLease", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.PermissionDenied},
+		{name: "ActivateLease valid service", method: "/model_plane.v1.SandboxManager/ActivateLease", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
+		{name: "GetWorkspaceManifest valid service with read scope", method: "/model_plane.v1.SandboxManager/GetWorkspaceManifest", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.OK},
+		{name: "GetWorkspaceManifest missing read scope", method: "/model_plane.v1.SandboxManager/GetWorkspaceManifest", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
 		{name: "custom health is protected", method: "/model_plane.v1.SandboxManager/Health", want: codes.Unauthenticated},
 		{name: "standard health is public", method: "/grpc.health.v1.Health/Check", want: codes.OK},
 	}

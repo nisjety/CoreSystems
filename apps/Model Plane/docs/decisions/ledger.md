@@ -2132,3 +2132,40 @@ C.2 (proto regen) → C.3 (server.go wiring + both authz.go fixes) → C.4
 rewrite). Not yet implemented as of this entry.
 
 Full detail: design doc §8 item 3.5.C.
+
+## S3.3 step 3.5.C.1-C.4 implemented same day — the ActivateLease authz fix is now regression-locked (2026-09-12)
+
+Sub-slices C.1 (Go workspace store), C.2 (proto), C.3 (Go server wiring +
+both `authz.go` fixes), and C.4 (Rust client + `CasClient` startup wiring)
+all landed together, since C.2's proto change does not compile in Rust
+without C.4's client update — see the design doc's §8 item 3.5.C for full
+per-slice detail. Highlights not already in the prior entry:
+
+- The `ActivateLease` fix (adding it to `authz.go`'s `ScopeWrite` case) now
+  has direct regression coverage: a JWT-independent `Authorize()` unit test,
+  plus two new rows in the existing interceptor table test proving it is
+  reachable with the right scope and refused without it — the exact
+  scenario that was silently broken before this fix, now locked so it
+  cannot regress unnoticed a second time.
+- `SnapshotSandbox`'s new `changed_files` upsert runs *before*
+  `snapshots.Create` deliberately: fail closed rather than let a snapshot
+  record reference workspace content whose overlay row was never durably
+  written. A non-Space lease never attempts the write at all (proven with
+  a workspace-store stub that fails the test if `UpsertOverlay` is ever
+  called for one).
+- `execution-core` gained its first non-test `CasClient` in this slice,
+  constructed but not yet consumed — the same "ship the primitive, wire
+  the caller next" position `capability_client` and `sandbox_manager_client`
+  were each in for exactly one commit before their own first real caller
+  landed. C.5 (not yet started) is that caller.
+
+Tests: sandbox-manager's full `go test ./...` green (`cmd`, `authz`,
+`lease`, `server`, `snapshot`, `workspace`); `execution-core --lib` 541
+passed, same 2 pre-existing unrelated failures as every prior slice this
+initiative. `gofmt -l`/`cargo fmt --check` diffs on touched files
+double-checked against `git show HEAD` + a plain reformat — all differences
+confirmed as this Windows checkout's pre-existing CRLF-driven drift (line
+endings only, verified via `gofmt -d`), not real content changes; nothing
+new introduced.
+
+Full detail: design doc §8 item 3.5.C.
