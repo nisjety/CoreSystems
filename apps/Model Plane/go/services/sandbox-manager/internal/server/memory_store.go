@@ -75,8 +75,9 @@ func (s *MemoryLeaseStore) lookup(id, orgID, ownerID, backendID string) (*lease.
 	return l, nil
 }
 
-// GetScoped is not part of the LeaseStore interface Server consumes, but is
-// kept for direct test use, mirroring lease.Store's own public surface.
+// GetScoped joined the LeaseStore interface for 3.5.C's GetWorkspaceManifest
+// handler (design doc §8 item 3.5.C); this in-memory implementation mirrors
+// lease.Store's own GetScoped exactly.
 func (s *MemoryLeaseStore) GetScoped(_ context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
