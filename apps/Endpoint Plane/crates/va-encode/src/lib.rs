@@ -11,6 +11,15 @@
 //! Input frames are BGRA8 (the pixel format DXGI/`windows-capture`
 //! produces) — this crate owns the BGRA→YUV 4:2:0 conversion `rav1e`
 //! needs, since `va-capture` has no reason to know anything about encoding.
+//!
+//! Input frames also don't need to match the encoder's configured
+//! resolution: `bgra_to_yuv420` nearest-neighbor-resamples whatever size
+//! it's given down (or up) to exactly `width x height`. This is what lets
+//! `Av1Encoder` stay fixed at a resolution it's actually measured to hit
+//! the target framerate at (see `docs/architecture.md`'s performance
+//! findings) while real screen capture hands it frames at the display's
+//! own native resolution -- `va-capture` has no reason to know the
+//! encoder's target size either.
 
 // Pixel-format math below is inherently cast-heavy (i32 accumulators ->
 // u8 samples, clamped first) and reads clearest with the conventional
@@ -27,11 +36,8 @@ pub enum EncodeError {
     InvalidConfig(#[from] InvalidConfig),
     #[error("encoder returned a failure status")]
     EncoderFailure,
-    #[error(
-        "frame dimensions ({width}x{height}) do not match the encoder's configured \
-         {configured_width}x{configured_height} -- a resolution change needs a new encoder"
-    )]
-    DimensionMismatch { width: u32, height: u32, configured_width: u32, configured_height: u32 },
+    #[error("a frame with a zero width or height cannot be encoded")]
+    EmptyFrame,
 }
 
 /// One raw captured frame: BGRA8, 4 bytes per pixel. `stride` is bytes per
@@ -127,6 +133,21 @@ impl Av1Encoder {
             // is what actually gets a real-time stream's first packet out
             // promptly.
             reservoir_frame_delay: Some(12),
+            // Left at 0 (the default), rav1e computes tile count from
+            // RESOLUTION alone via an AV1-spec-mandated minimum, not from
+            // available CPU parallelism -- at 480x270 or 1280x720 that
+            // minimum is 1 tile, so despite `threading` being enabled and
+            // rav1e defaulting to a 20-thread Rayon pool on this machine
+            // (`Config::new()` never calls `with_threads`, so it falls
+            // back to Rayon's own global pool sized off
+            // `available_parallelism()`), the actual per-block RDO/motion-
+            // search cost -- the dominant cost per-frame -- runs on
+            // exactly ONE thread today, because `into_par_iter()` over a
+            // single tile has nothing to parallelize. Explicitly requesting
+            // 4 tiles (a safe 2x2 split at these resolutions, well clear of
+            // AV1's minimum-tile-size constraints) is what actually puts
+            // the already-enabled thread pool to work on the dominant cost.
+            tiles: 4,
             ..Default::default()
         };
         let cfg = Config::new().with_encoder_config(enc);
@@ -137,17 +158,12 @@ impl Av1Encoder {
 
 impl VideoEncoder for Av1Encoder {
     fn encode(&mut self, frame: &RawFrame, force_keyframe: bool) -> Result<Vec<EncodedChunk>, EncodeError> {
-        if frame.width != self.width || frame.height != self.height {
-            return Err(EncodeError::DimensionMismatch {
-                width: frame.width,
-                height: frame.height,
-                configured_width: self.width,
-                configured_height: self.height,
-            });
+        if frame.width == 0 || frame.height == 0 {
+            return Err(EncodeError::EmptyFrame);
         }
 
         let mut av1_frame = self.ctx.new_frame();
-        bgra_to_yuv420(&mut av1_frame, frame);
+        bgra_to_yuv420(&mut av1_frame, frame, self.width as usize, self.height as usize);
 
         let params = FrameParameters {
             frame_type_override: if force_keyframe { FrameTypeOverride::Key } else { FrameTypeOverride::No },
@@ -186,30 +202,41 @@ impl VideoEncoder for Av1Encoder {
 /// average, not a dedicated downsampling filter) — correctness and
 /// simplicity over maximum color fidelity or performance for this first
 /// pass. `frame.planes[0]` is Y, `[1]` is U (Cb), `[2]` is V (Cr).
-fn bgra_to_yuv420(av1_frame: &mut Frame<u8>, source: &RawFrame) {
-    let width = source.width as usize;
-    let height = source.height as usize;
+///
+/// `source` is resampled to exactly `target_width x target_height` via
+/// nearest-neighbor sampling -- the one resize algorithm simple enough to
+/// fold directly into this same per-pixel loop, in both directions
+/// (downscaling real screen capture to this encoder's fixed, measured
+/// resolution; upscaling a smaller source, e.g. in tests). A proper box
+/// filter would look better when downscaling but isn't needed for this
+/// pass -- `source.width`/`height` are guaranteed nonzero by `encode`'s own
+/// `EmptyFrame` check before this is ever called.
+fn bgra_to_yuv420(av1_frame: &mut Frame<u8>, source: &RawFrame, target_width: usize, target_height: usize) {
+    let src_width = source.width as usize;
+    let src_height = source.height as usize;
     let stride = source.stride as usize;
 
-    let mut y_plane = vec![0u8; width * height];
-    let chroma_width = width.div_ceil(2);
-    let chroma_height = height.div_ceil(2);
+    let mut y_plane = vec![0u8; target_width * target_height];
+    let chroma_width = target_width.div_ceil(2);
+    let chroma_height = target_height.div_ceil(2);
     let mut u_plane = vec![0u8; chroma_width * chroma_height];
     let mut v_plane = vec![0u8; chroma_width * chroma_height];
 
     let pixel = |x: usize, y: usize| -> (i32, i32, i32) {
-        let offset = y * stride + x * 4;
+        let src_x = (x * src_width / target_width.max(1)).min(src_width - 1);
+        let src_y = (y * src_height / target_height.max(1)).min(src_height - 1);
+        let offset = src_y * stride + src_x * 4;
         let b = i32::from(source.bgra[offset]);
         let g = i32::from(source.bgra[offset + 1]);
         let r = i32::from(source.bgra[offset + 2]);
         (r, g, b)
     };
 
-    for y in 0..height {
-        for x in 0..width {
+    for y in 0..target_height {
+        for x in 0..target_width {
             let (r, g, b) = pixel(x, y);
             let y_value = (66 * r + 129 * g + 25 * b + 128) / 256 + 16;
-            y_plane[y * width + x] = y_value.clamp(0, 255) as u8;
+            y_plane[y * target_width + x] = y_value.clamp(0, 255) as u8;
         }
     }
 
@@ -225,7 +252,7 @@ fn bgra_to_yuv420(av1_frame: &mut Frame<u8>, source: &RawFrame) {
                 for dx in 0..2 {
                     let x = x0 + dx;
                     let y = y0 + dy;
-                    if x < width && y < height {
+                    if x < target_width && y < target_height {
                         let (r, g, b) = pixel(x, y);
                         r_sum += r;
                         g_sum += g;
@@ -244,7 +271,7 @@ fn bgra_to_yuv420(av1_frame: &mut Frame<u8>, source: &RawFrame) {
         }
     }
 
-    av1_frame.planes[0].copy_from_raw_u8(&y_plane, width, 1);
+    av1_frame.planes[0].copy_from_raw_u8(&y_plane, target_width, 1);
     av1_frame.planes[1].copy_from_raw_u8(&u_plane, chroma_width, 1);
     av1_frame.planes[2].copy_from_raw_u8(&v_plane, chroma_width, 1);
 }
@@ -288,11 +315,28 @@ mod tests {
     }
 
     #[test]
-    fn wrong_dimensions_are_rejected_without_touching_the_encoder() {
+    fn a_zero_sized_frame_is_rejected() {
         let mut encoder = Av1Encoder::new(64, 64, 500).unwrap();
-        let wrong_size = solid_frame(32, 32, 0, 0, 0);
-        let err = encoder.encode(&wrong_size, false).unwrap_err();
-        assert!(matches!(err, EncodeError::DimensionMismatch { .. }));
+        let empty = RawFrame { width: 0, height: 64, stride: 0, bgra: Vec::new() };
+        let err = encoder.encode(&empty, false).unwrap_err();
+        assert!(matches!(err, EncodeError::EmptyFrame));
+    }
+
+    #[test]
+    fn a_larger_source_frame_is_downscaled_instead_of_rejected() {
+        // Real screen capture hands frames at the display's native
+        // resolution, never this encoder's fixed, measured-real-time
+        // configured size -- a mismatch here must be resampled, not an error.
+        let mut encoder = Av1Encoder::new(64, 64, 500).unwrap();
+        let larger = solid_frame(256, 256, 40, 80, 120);
+        encoder.encode(&larger, true).unwrap();
+    }
+
+    #[test]
+    fn a_smaller_source_frame_is_upscaled_instead_of_rejected() {
+        let mut encoder = Av1Encoder::new(64, 64, 500).unwrap();
+        let smaller = solid_frame(16, 16, 40, 80, 120);
+        encoder.encode(&smaller, true).unwrap();
     }
 
     #[test]

@@ -17,18 +17,26 @@
 //! unprompted. Receive `LoginRequest`; check its password hash against the
 //! salt/challenge just sent and whichever secret(s) this device accepts.
 //! Send `LoginResponse` (success carries `PeerInfo`). Then: echo any
-//! `TestDelay{from_client: true}` verbatim, and allow the caller to push
-//! video frames — permissions start and stay at `screen.view` only in this
-//! phase (no `PermissionInfo` push), matching what a real stock `RustDesk`
-//! host was observed doing for a one-time-password connection.
+//! `TestDelay{from_client: true}` verbatim, allow the caller to push video
+//! frames, and decode any `MouseEvent`/`KeyEvent` the controller sends into
+//! `Event::MouseInput`/`Event::KeyInput` for the caller to act on (this
+//! state machine has no I/O and no permission model of its own — it just
+//! decodes and hands the typed event upward; whether to actually inject it
+//! is entirely the caller's call). Permissions start and stay at
+//! `screen.view` only in this phase (no `PermissionInfo` push), matching
+//! what a real stock `RustDesk` host was observed doing for a
+//! one-time-password connection — a real product would want an explicit
+//! permission/consent model gating `MouseInput`/`KeyInput` before ever
+//! reaching `va-input`, which this pass does not build.
 
 use thiserror::Error;
 use va_crypto::{unseal, CryptoError, EphemeralKeyPair, IdentityKeyPair, SessionCipher};
 
 use crate::messages::{
-    decode_login_request, decode_public_key, decode_test_delay, encode_hash,
-    encode_login_response, encode_signed_id, encode_test_delay, message_field,
-    read_envelope_field, wrap_message, DisplayInfo, Hash, LoginResponse, PeerInfo, TestDelay,
+    decode_key_event, decode_login_request, decode_mouse_event, decode_public_key,
+    decode_test_delay, encode_hash, encode_login_response, encode_signed_id, encode_test_delay,
+    message_field, read_envelope_field, wrap_message, DisplayInfo, Hash, KeyEvent, LoginResponse,
+    MouseEvent, PeerInfo, TestDelay,
 };
 
 #[derive(Debug, Error)]
@@ -99,6 +107,14 @@ pub enum Event {
     /// `LoginResponse::Error` envelope to send; the client may retry on the
     /// same connection.
     LoginFailed { reason: String, response: Vec<u8> },
+    /// A pointer action the controller sent (move/click/scroll). The
+    /// caller decides whether to actually inject it (e.g. via `va-input`)
+    /// — this state machine has no permission model of its own to gate on;
+    /// see this module's docs for why that's still an open gap.
+    MouseInput(MouseEvent),
+    /// A keyboard action the controller sent. Same permission caveat as
+    /// `MouseInput`.
+    KeyInput(KeyEvent),
     /// Nothing to send back for this message (e.g. the echo of our own
     /// outbound `TestDelay` probe, which needs no further reply).
     None,
@@ -251,9 +267,14 @@ impl HostSession {
             // va-net's caller is responsible for using the round-trip time.
             return Ok(Event::None);
         }
-        // Unknown/unhandled field for this phase (e.g. pointer/keyboard
-        // actions this phase never grants permission for) — ignored rather
-        // than erroring, matching proto3's forward-compatibility contract.
+        if field_number == message_field::MOUSE_EVENT {
+            return Ok(Event::MouseInput(decode_mouse_event(payload)?));
+        }
+        if field_number == message_field::KEY_EVENT {
+            return Ok(Event::KeyInput(decode_key_event(payload)?));
+        }
+        // Unknown/unhandled field for this phase — ignored rather than
+        // erroring, matching proto3's forward-compatibility contract.
         Ok(Event::None)
     }
 

@@ -217,7 +217,11 @@ async fn run_host_session(
                                 return;
                             }
                         }
-                        Ok(Event::None) => {}
+                        // This diagnostic tool only proves the
+                        // registration/relay/handshake/login sequence;
+                        // input injection is `verevon-agent`'s job, not
+                        // this example's.
+                        Ok(Event::MouseInput(_) | Event::KeyInput(_) | Event::None) => {}
                         Err(err) => {
                             println!("on_encrypted_message failed: {err}");
                             return;

@@ -20,6 +20,8 @@ pub mod message_field {
     pub const LOGIN_REQUEST: u32 = 7;
     pub const LOGIN_RESPONSE: u32 = 8;
     pub const HASH: u32 = 9;
+    pub const MOUSE_EVENT: u32 = 10;
+    pub const KEY_EVENT: u32 = 15;
     pub const MISC: u32 = 19;
     pub const AUTH_2FA: u32 = 27;
 }
@@ -535,6 +537,183 @@ pub fn encode_av1_video_frame(frames: &[EncodedVideoFrame], display: i32) -> Vec
 }
 
 // =====================================================================
+// MouseEvent / KeyEvent — the controller sends these; `va-input` (a
+// separate crate) turns a decoded value into a real OS input event. Field
+// numbers and shapes are citation-backed against `@verevon/remote-core`'s
+// own already-reviewed wire encoders (`encodeMouseEvent`/`encodeKeyEvent`
+// in `packages/remote-core/src/protocol/rustdesk/messages/controlCodec.ts`,
+// and the field layout in that package's sibling `messages/types.ts`),
+// which that package independently verified against `hbb_common`'s
+// `message.proto` (`Message.mouse_event` = oneof field 10,
+// `Message.key_event` = oneof field 15 — see `docs/rustdesk-protocol.md`'s
+// message-catalog table). This host never SENDS either message — only
+// decodes them — so there is no corresponding `encode_*` function here.
+// =====================================================================
+
+/// Low 3 bits of `MouseEvent.mask`. Named per `RustDesk`'s own numbering,
+/// not invented here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseEventKind {
+    Move,
+    Down,
+    Up,
+    Wheel,
+    Trackpad,
+    MoveRelative,
+    /// A value this catalog doesn't recognize — forward-compatible with a
+    /// future client adding new kinds, rather than erroring.
+    Unknown(u32),
+}
+
+impl MouseEventKind {
+    fn from_low_bits(bits: u32) -> Self {
+        match bits {
+            0 => Self::Move,
+            1 => Self::Down,
+            2 => Self::Up,
+            3 => Self::Wheel,
+            4 => Self::Trackpad,
+            5 => Self::MoveRelative,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// High bits of `MouseEvent.mask` (the sender shifts these left 3 before
+/// OR'ing in `kind`) — which button(s) a Down/Up event refers to. A real
+/// client only ever sets one bit per event; exposed as a bitmask anyway
+/// rather than assuming that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseButtonFlags(pub u32);
+
+impl MouseButtonFlags {
+    pub const LEFT: u32 = 0x01;
+    pub const RIGHT: u32 = 0x02;
+    pub const WHEEL: u32 = 0x04;
+    pub const BACK: u32 = 0x08;
+    pub const FORWARD: u32 = 0x10;
+
+    #[must_use]
+    pub fn contains(self, flag: u32) -> bool {
+        self.0 & flag != 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub kind: MouseEventKind,
+    pub button_flags: MouseButtonFlags,
+    /// Absolute pixel coordinates within the display this event targets —
+    /// the same width/height this host reported in its own `DisplayInfo`
+    /// at login. `remote-core`'s `CanvasRenderer.clientToRemote` is what
+    /// produces these on the sending side; nothing here needs to rescale
+    /// them.
+    pub x: i32,
+    pub y: i32,
+    /// Currently-held `ControlKey` codes (Ctrl/Shift/Alt/Meta) accompanying
+    /// this event.
+    pub modifiers: Vec<u64>,
+}
+
+pub fn decode_mouse_event(data: &[u8]) -> Result<MouseEvent, WireError> {
+    let mut r = ProtoReader::new(data);
+    let mut mask: u32 = 0;
+    let mut x = 0;
+    let mut y = 0;
+    let mut modifiers = Vec::new();
+    while !r.eof() {
+        let tag = r.read_tag()?;
+        match tag.field_number {
+            1 => mask = r.read_int32()?.cast_unsigned(),
+            2 => x = r.read_sint32()?,
+            3 => y = r.read_sint32()?,
+            4 => modifiers = r.read_packed_varints()?,
+            _ => r.skip(tag.wire_type)?,
+        }
+    }
+    Ok(MouseEvent { kind: MouseEventKind::from_low_bits(mask & 0x7), button_flags: MouseButtonFlags(mask >> 3), x, y, modifiers })
+}
+
+/// `KeyEvent.mode` (field 9). `remote-core` only ever sends `Legacy` (named
+/// `ControlKey`s + Unicode codepoints, never `Map`-mode positional
+/// scancodes) — see `va-input`'s crate docs for why that's the only mode
+/// this host needs to handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyboardMode {
+    Legacy,
+    Map,
+    Translate,
+    Auto,
+    Unknown(i32),
+}
+
+impl KeyboardMode {
+    fn from_wire(value: i32) -> Self {
+        match value {
+            0 => Self::Legacy,
+            1 => Self::Map,
+            2 => Self::Translate,
+            3 => Self::Auto,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// `KeyEvent`'s identification oneof (fields 3-6) — exactly one is ever set
+/// on the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KeyIdentification {
+    /// A named, non-printable key (`ControlKey` enum, field 3).
+    ControlKey(u32),
+    /// An ASCII character code (field 4) — `remote-core` never sends this
+    /// today (Unicode codepoints cover it), but proto3 forward
+    /// compatibility means a decoder should still recognize it.
+    Chr(u32),
+    /// A Unicode codepoint (field 5) — what `remote-core` sends for any
+    /// single printable character.
+    Unicode(u32),
+    /// A composed text sequence (field 6) — IME input, paste, or
+    /// `keyboard.type()`.
+    Seq(String),
+    /// No identification field was set at all — shouldn't happen from a
+    /// real client, but proto3 doesn't forbid it.
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyEvent {
+    pub down: bool,
+    pub press: bool,
+    pub identification: KeyIdentification,
+    pub modifiers: Vec<u64>,
+    pub mode: KeyboardMode,
+}
+
+pub fn decode_key_event(data: &[u8]) -> Result<KeyEvent, WireError> {
+    let mut r = ProtoReader::new(data);
+    let mut down = false;
+    let mut press = false;
+    let mut identification = KeyIdentification::None;
+    let mut modifiers = Vec::new();
+    let mut mode = KeyboardMode::Legacy;
+    while !r.eof() {
+        let tag = r.read_tag()?;
+        match tag.field_number {
+            1 => down = r.read_bool()?,
+            2 => press = r.read_bool()?,
+            3 => identification = KeyIdentification::ControlKey(r.read_int32()?.cast_unsigned()),
+            4 => identification = KeyIdentification::Chr(r.read_uint32()?),
+            5 => identification = KeyIdentification::Unicode(r.read_uint32()?),
+            6 => identification = KeyIdentification::Seq(r.read_string()?),
+            8 => modifiers = r.read_packed_varints()?,
+            9 => mode = KeyboardMode::from_wire(r.read_int32()?),
+            _ => r.skip(tag.wire_type)?,
+        }
+    }
+    Ok(KeyEvent { down, press, identification, modifiers, mode })
+}
+
+// =====================================================================
 // Misc / PermissionInfo — RustDesk gates BOTH mouse and keyboard behind a
 // single Keyboard permission flag; there is no separate mouse permission
 // on the wire.
@@ -1030,6 +1209,76 @@ mod tests {
         let tag = r.read_tag().unwrap();
         assert_eq!(tag.field_number, 14, "display field");
         assert_eq!(r.read_int32().unwrap(), 2);
+    }
+
+    #[test]
+    fn mouse_event_decodes_kind_and_button_flags_from_the_packed_mask() {
+        // mask = (buttonFlags << 3) | kind, matching remote-core's own
+        // encodeMouseEvent -- Down (kind=1) with the Left button (0x01)
+        // packs to (0x01 << 3) | 1 = 9.
+        let mut w = ProtoWriter::new();
+        w.int32(1, 9).sint32(2, 100).sint32(3, -200).packed_varint(4, &[29]);
+        let decoded = decode_mouse_event(&w.finish()).unwrap();
+        assert_eq!(decoded.kind, MouseEventKind::Down);
+        assert!(decoded.button_flags.contains(MouseButtonFlags::LEFT));
+        assert!(!decoded.button_flags.contains(MouseButtonFlags::RIGHT));
+        assert_eq!(decoded.x, 100);
+        assert_eq!(decoded.y, -200);
+        assert_eq!(decoded.modifiers, vec![29]);
+    }
+
+    #[test]
+    fn mouse_event_omits_modifiers_when_none_held() {
+        let mut w = ProtoWriter::new();
+        w.int32(1, 0).sint32(2, 5).sint32(3, 5);
+        let decoded = decode_mouse_event(&w.finish()).unwrap();
+        assert_eq!(decoded.kind, MouseEventKind::Move);
+        assert!(decoded.modifiers.is_empty());
+    }
+
+    #[test]
+    fn mouse_event_unknown_kind_is_forward_compatible() {
+        // Low 3 bits = 6 -- not one of RustDesk's own 0-5 kinds.
+        let mut w = ProtoWriter::new();
+        w.int32(1, 6);
+        let decoded = decode_mouse_event(&w.finish()).unwrap();
+        assert_eq!(decoded.kind, MouseEventKind::Unknown(6));
+    }
+
+    #[test]
+    fn key_event_decodes_control_key_identification() {
+        let mut w = ProtoWriter::new();
+        w.bool(1, true).int32(3, 27); // ControlKey::Return
+        let decoded = decode_key_event(&w.finish()).unwrap();
+        assert!(decoded.down);
+        assert!(!decoded.press);
+        assert_eq!(decoded.identification, KeyIdentification::ControlKey(27));
+        assert_eq!(decoded.mode, KeyboardMode::Legacy, "field 9 omitted -- proto3 default");
+    }
+
+    #[test]
+    fn key_event_decodes_unicode_identification_and_modifiers() {
+        let mut w = ProtoWriter::new();
+        w.bool(1, true).bool(2, true).uint32(5, 0x1F600).packed_varint(8, &[29, 4]);
+        let decoded = decode_key_event(&w.finish()).unwrap();
+        assert_eq!(decoded.identification, KeyIdentification::Unicode(0x1F600));
+        assert_eq!(decoded.modifiers, vec![29, 4]);
+    }
+
+    #[test]
+    fn key_event_decodes_seq_identification_for_composed_text() {
+        let mut w = ProtoWriter::new();
+        w.bool(1, true).bool(2, true).string(6, "hello");
+        let decoded = decode_key_event(&w.finish()).unwrap();
+        assert_eq!(decoded.identification, KeyIdentification::Seq("hello".into()));
+    }
+
+    #[test]
+    fn key_event_unknown_mode_value_is_forward_compatible() {
+        let mut w = ProtoWriter::new();
+        w.bool(1, true).int32(9, 99);
+        let decoded = decode_key_event(&w.finish()).unwrap();
+        assert_eq!(decoded.mode, KeyboardMode::Unknown(99));
     }
 
     #[test]

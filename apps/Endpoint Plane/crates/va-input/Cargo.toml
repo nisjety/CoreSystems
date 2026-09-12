@@ -1,0 +1,22 @@
+[package]
+name = "va-input"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+va-protocol = { path = "../va-protocol" }
+
+# `enigo`'s public API is fully safe (verified by reading its Windows
+# backend directly: every `unsafe` block -- SendInput, GetCursorPos,
+# MapVirtualKeyExW -- is internal to enigo's own crate) despite this
+# workspace's `unsafe_code = "forbid"` lint, the same precedent
+# `va-capture` already relies on for `windows-capture`. `default-features
+# = false` drops `x11rb` (Linux-only; this crate is Windows-only, gated
+# below) and `serde` (this crate never (de)serializes input events).
+[target.'cfg(windows)'.dependencies]
+enigo = { version = "0.6", default-features = false }

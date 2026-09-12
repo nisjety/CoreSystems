@@ -1,18 +1,26 @@
 //! Screen capture: a `FrameSource` trait producing raw BGRA8 frames, plus
-//! [`TestPatternSource`] (synthetic, no OS dependency) for proving the
-//! video pipeline end to end before wiring in real DXGI capture.
-//!
-//! Per the build plan's own stated order — "swap in real DXGI frames once
-//! handshake+login+video-wire-format already work against a synthetic
-//! frame source" — a real screen source is a deliberate next step, not
-//! something this crate needs before the wire path can be proven live.
+//! [`TestPatternSource`] (synthetic, no OS dependency, used by all of this
+//! crate's own tests) and, on Windows, the real [`dxgi::DxgiDuplicationSource`]
+//! (via `windows-capture`) -- see that module's doc comment for the
+//! citation-backed API details and the risks worth knowing before touching
+//! it.
 
 use thiserror::Error;
+
+#[cfg(windows)]
+pub mod dxgi;
+#[cfg(windows)]
+pub use dxgi::DxgiDuplicationSource;
 
 #[derive(Debug, Error)]
 pub enum CaptureError {
     #[error("no display/monitor is available to capture")]
     NoDisplay,
+    /// The capture session is alive but hasn't produced a frame within the
+    /// expected startup window yet -- distinct from `NoDisplay` (which
+    /// means capture can never work here at all).
+    #[error("capture session has not produced a frame yet")]
+    NotReady,
 }
 
 /// One captured frame, BGRA8 (4 bytes/pixel) — the format DXGI/Desktop

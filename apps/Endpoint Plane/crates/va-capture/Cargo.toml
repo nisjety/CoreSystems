@@ -8,6 +8,11 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-capture = "1"
+# Pinned to the minor version whose exact API (Settings::new's field order,
+# start_free_threaded, FrameBuffer::row_pitch/as_raw_buffer) this crate's
+# dxgi.rs was written and verified against -- see that module's doc comment
+# for citations.
+windows-capture = "1.5"

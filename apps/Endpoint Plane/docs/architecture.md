@@ -157,16 +157,47 @@ long-running process):**
   rendering stream, not a frozen first frame. `Bilder per sekund` (fps)
   and `Forsinkelse` (latency) in the UI both showed real nonzero values
   for the first time in this initiative's history.
-- **A real, measured performance finding, not yet solved**: pure-Rust
-  `rav1e` (no SIMD `asm`, per the codec-choice rationale above) encoding a
-  1280x720 frame took **6-38 seconds per frame** on this machine — nowhere
-  near real-time. Dropping to 480x270 brought steady-state frame time down
-  to roughly ~1 second (still well short of the 12fps target, but a
-  sustained, working stream rather than a stall). `main.rs` runs at 480x270
-  today for exactly this reason; a real performance pass (tiling to use
-  the already-enabled `threading` feature, a faster/lower-quality preset,
-  or accepting the `asm`/`nasm` dependency after all) is unstarted follow-up
-  work, not solved by this pass.
+- **A real, measured performance finding — since resolved by a single root
+  cause, not a codec limitation.** Pure-Rust `rav1e` (no SIMD `asm`, per the
+  codec-choice rationale above) encoding a 1280x720 frame took **6-38
+  seconds per frame** on this machine — but that measurement was taken from
+  a **DEBUG build**; this binary had never once been run with `--release`.
+  `crates/va-encode/examples/bench.rs` (a new diagnostic tool, kept
+  permanently — rerun it after any future encoder tuning change) measured
+  the SAME 1280x720 workload in `--release`: **0.6-2.4s/frame**, and
+  480x270 in `--release`: **0.04-0.19s/frame**, comfortably inside the
+  12fps target. LTO + `codegen-units = 1` were tried and measured **no
+  further improvement** over plain `--release` — not added, since they cost
+  real build time for nothing. **The practical takeaway: `cargo run -p
+  verevon-agent` with no `--release` is not a valid way to evaluate or use
+  this binary at all.**
+  - **A second, independent finding on top of that**: `rav1e`'s own
+    tiling was never actually engaged. `EncoderConfig`'s `tiles`/
+    `tile_cols`/`tile_rows` all defaulted to 0, and rav1e computes real
+    tile count from RESOLUTION against an AV1-spec minimum, not from
+    available CPU parallelism — at both 480x270 and 1280x720 that
+    minimum was 1 tile. Since the actual per-block RDO/motion-search cost
+    (the dominant per-frame cost) only parallelizes ACROSS tiles, this
+    crate was running that cost on exactly one thread the whole time,
+    despite `threading` being enabled and rav1e defaulting to a 20-thread
+    Rayon pool on this machine (`Config::new()` never calls
+    `with_threads`, so it uses Rayon's own global pool sized off
+    `available_parallelism()` automatically — no manual thread count is
+    needed). Explicitly setting `tiles: 4` (a safe 2x2 split, well clear
+    of AV1's tile-size floor at these resolutions) measured a real ~1.5-2x
+    additional improvement at 1280x720 (steady state roughly
+    0.3-1.05s/frame, down from 0.6-2.4s/frame) and made 854x480 a
+    genuinely close-to-viable middle ground (mostly 0.08-0.3s/frame).
+    480x270 barely changed with tiling (too small a frame to split
+    usefully into 4 tiles at 64x64 superblocks) — it was already the
+    resolution clearing the 12fps target reliably, and still is.
+  - `main.rs` stays at 480x270: it's the only resolution measured to
+    reliably clear the 12fps target, even though 854x480 is now much
+    closer than before tiling. Revisiting the resolution once real (not
+    synthetic-noise) screen content is flowing through the encoder is a
+    reasonable next step — real desktop content is typically far more
+    compressible than this crate's adversarial per-pixel-increment
+    benchmark pattern.
 - `remote-dev`'s `App.tsx` now always passes a console-forwarding logger to
   `createRemoteClient` — discovered as a genuine gap while debugging the
   above: `remote-core` defaults to a silent `noopLogger`, so a real
@@ -281,38 +312,148 @@ a real session):**
   proven against a real, not fake-peer, disconnection). This is the first
   time ANY two independently-built implementations of this protocol have
   completed a full session with each other in this codebase.
-- Input injection, file transfer, a Verevon Control-Plane identity contract
-  for the agent, cross-platform support, and packaging/installer are all
-  explicitly out of scope for this pass; see the build plan for why.
-- **Genuinely still not built**: real screen capture (`DxgiDuplicationSource`
-  — video is a synthetic test pattern today), real-time-speed encoding at a
-  useful resolution (measured 480x270 at well under the 12fps target — see
-  above), audio, and anything for a second concurrent connection (the
-  current registration socket design assumes one in-flight punch-hole
-  exchange at a time). `va-encode`'s VP9 path (`encode_vp9_video_frame`) is
-  tested but unused; `main.rs` sends AV1 only.
+- A Verevon Control-Plane identity contract for the agent, file transfer,
+  cross-platform support, and packaging/installer remain explicitly out of
+  scope; see the build plan for why.
+
+**Implemented and live-verified end to end (M4 — real screen capture, real
+mouse/keyboard input, and a resolved performance gap):**
+
+- **Real screen capture, not a synthetic test pattern.** `va-capture::
+  dxgi::DxgiDuplicationSource` wraps `windows-capture` (WinRT Graphics
+  Capture + DXGI), bridging its callback-based API to this crate's
+  synchronous `FrameSource::capture_frame` via a single-slot mailbox (an
+  `Arc<Mutex<Option<CapturedFrame>>>` + `Condvar`) that re-serves the
+  latest observed frame on every call rather than blocking for a genuinely
+  new one — WGC only fires its callback when the screen actually changes,
+  so a quiet capture thread over a static desktop is normal, not a hang.
+  Every API claim in that module is cited against the actual
+  `windows-capture 1.5.0` source (file+line), not docs.rs or memory — see
+  its own doc comment. `CaptureControl::stop()` (torn down on `Drop`) is a
+  REAL blocking call (posts `WM_QUIT`, then joins the capture thread), so
+  `main.rs`'s video-pump shutdown was changed from `task.abort()` to a
+  cooperative stop flag (checked once per tick) with a 2s abort fallback —
+  an aborted task's `Drop` glue still runs synchronously wherever its stack
+  unwinds, which could stall a tokio worker thread for as long as that join
+  takes; letting the task exit on its own avoids compounding that with a
+  forced-unwind mid-abort.
+- **A real, necessary resize step this milestone surfaced**: real capture
+  hands frames at the display's native resolution, never this encoder's
+  fixed, measured-real-time size (see the M3 performance finding). Rather
+  than rejecting a mismatch, `va-encode`'s `bgra_to_yuv420` now
+  nearest-neighbor-resamples whatever size it's given (up or down) to
+  exactly its configured resolution, folded directly into the existing
+  per-pixel BT.601 conversion loop — `EncodeError::DimensionMismatch` is
+  gone; only a genuinely empty (zero-width/height) frame is rejected now
+  (`EncodeError::EmptyFrame`).
+- **A second real tuning fix, found by reading `rav1e`'s own source, not
+  guessing**: despite `threading` being enabled and rav1e defaulting to a
+  20-thread Rayon pool on this machine, `EncoderConfig`'s `tiles`/
+  `tile_cols`/`tile_rows` all defaulted to 0 — and rav1e computes real tile
+  count from RESOLUTION against an AV1-spec minimum, not from available
+  CPU parallelism, which came out to exactly 1 tile at both 480x270 and
+  1280x720. Since the dominant per-frame cost (RDO/motion search) only
+  parallelizes ACROSS tiles, this encoder ran that cost on a single thread
+  the whole time. Explicitly setting `tiles: 4` (a safe 2x2 split) measured
+  a real further ~1.5-2x improvement at 1280x720 on top of the M3
+  `--release` fix (steady state ~0.3-1.05s/frame, down from
+  0.6-2.4s/frame) and made 854x480 a genuinely close-to-viable middle
+  ground. 480x270 barely changed (too small a frame to split usefully at
+  64x64 superblocks) — it was already clearing the 12fps target and still
+  is. `crates/va-encode/examples/bench.rs`, a new diagnostic tool kept
+  permanently (not a throwaway), is what found and measured both fixes —
+  rerun it after any future encoder tuning change.
+- **Real mouse/keyboard input, decoded and injected, not just wired.**
+  `va-protocol` gained `decode_mouse_event`/`decode_key_event`
+  (`Message.mouse_event` = oneof field 10, `Message.key_event` = field 15,
+  both citation-backed against `remote-core`'s own already-reviewed wire
+  encoders) and two new `HostSession::Event` variants
+  (`MouseInput`/`KeyInput`); `handle_session_message` decodes and hands
+  them upward instead of silently discarding them. A new crate,
+  `va-input`, turns a decoded event into a real `SendInput` call via
+  `enigo` (confirmed via its actual source to be 100% safe on its public
+  API — no `unsafe` in this workspace's own code, the same precedent
+  `windows-capture` already relies on despite this workspace's
+  `unsafe_code = "forbid"` lint) — absolute mouse positioning, button
+  down/up, scroll, named-key down/up (a citation-backed `ControlKey` ->
+  `enigo::Key` table; `CtrlAltDel`/`Power`/`LockScreen` correctly rejected
+  as `Unsupported` rather than silently mismapped — Windows blocks
+  synthetic Ctrl+Alt+Del from `SendInput` unconditionally, by design), and
+  bulk text typing (`KeyIdentification::Seq`, what `keyboard.type()` sends)
+  are all real.
+  - **A real, necessary coordinate-scaling fix this milestone required**:
+    incoming `MouseEvent` x/y are expressed in whatever resolution the
+    video is actually encoded/reported at (480x270), which is essentially
+    NEVER the real display's own resolution once real capture is
+    downscaling native frames down to that fixed size. `EnigoInjector` now
+    queries the real primary display's size once via `enigo`'s own
+    `main_display()` and rescales every incoming coordinate before calling
+    `move_mouse` — passing coordinates straight through (which is exactly
+    what the synthetic-video build did, harmlessly, since nothing rendered
+    was ever meant to be clicked precisely) would silently land every real
+    click in the wrong place as soon as capture and encode resolutions
+    ever differ, which in practice is always.
+  - **Live-verified for real, on a real desktop, with the user's explicit
+    live-in-the-moment sign-off** (moving the real OS cursor and injecting
+    real keystrokes is a genuine physical side effect, not a sandboxed
+    test): a `pointer.move`, a `pointer.click` (Down then Up, correct
+    button flag), `keyboard.type` (`KeyIdentification::Seq`), and a named
+    key down/up (`keyboard.keyDown`/`keyUp`, `ControlKey::Escape`,
+    exercising the OTHER identification code path) were each driven from a
+    real `remote-core` session against a real running `verevon-agent`, and
+    each logged a real decoded event followed by "injected successfully"
+    with no error — confirming the full chain (wire decode -> `Event` ->
+    `va-input` -> real `enigo`/`SendInput`) end to end, not just via unit
+    tests.
+- **The full, now-complete pipeline, live-verified visually, on a real
+  desktop**: `verevon-agent` registers, pairs via the relay, logs in, and
+  streams REAL captured screen content (confirmed via a real screenshot of
+  the browser canvas showing an actual application window, not a
+  synthetic pattern) at real, varying encoded frame sizes (thousands to
+  tens of thousands of bytes per frame, tracking real content complexity —
+  a synthetic pattern's output would be far more uniform) — this is the
+  first time in this initiative's history that what the controller sees is
+  the actual host desktop, not a stand-in.
+- **Genuinely still not built**: audio, file transfer, and anything for a
+  second concurrent connection (the current registration socket design
+  assumes one in-flight punch-hole exchange at a time). A real
+  permission/consent model gating `MouseInput`/`KeyInput` before they ever
+  reach `va-input` is still missing — this pass injects whatever the
+  authenticated controller sends, unconditionally, which is fine for this
+  development milestone but not for a real product. `DxgiDuplicationSource`
+  only ever captures the OS-designated PRIMARY monitor
+  (`Monitor::primary()`) — multi-monitor selection is unbuilt. The mouse
+  wheel's scroll-delta scaling (`enigo::scroll`'s own `WHEEL_DELTA=120`
+  multiplier vs `remote-core`'s raw, unscaled deltas) is unverified against
+  a real trackpad/mouse. `va-encode`'s VP9 path (`encode_vp9_video_frame`)
+  is tested but unused; `main.rs` sends AV1 only.
 
 ## Verification
 
 ```bash
 cd "apps/Endpoint Plane"
-cargo test --workspace   # 65 unit tests, 5 live (ignored)
+cargo test --workspace   # 86 unit/integration tests, 5 live (ignored)
 cargo clippy --workspace --all-targets  # 0 warnings
-cargo build --workspace  # everything, including va-encode -- no exclusions needed anymore
+cargo build --workspace  # everything -- no exclusions needed
 cargo build -p verevon-agent
 
 # Live, not mocked -- needs `docker compose up -d hbbs hbbr readiness` in apps/Support Plane first:
 cargo test -p va-net --test register_live -- --ignored --nocapture
 
 # The real agent, running for real: registers a device, waits for a real
-# connection attempt, pairs via the relay, logs in, and continuously
-# streams synthetic video. Needs VEREVON_LICENCE_KEY (hbbs's own logged
-# `Key:` value) and a real controller (e.g. apps/Frontend Plane/verevonv3/
+# connection attempt, pairs via the relay, logs in, captures and streams
+# the REAL primary monitor, and injects real mouse/keyboard input the
+# controller sends. Needs VEREVON_LICENCE_KEY (hbbs's own logged `Key:`
+# value) and a real controller (e.g. apps/Frontend Plane/verevonv3/
 # apps/remote-dev, pointed at ws://localhost:21118 with
 # VITE_REMOTE_SERVER_PUBLIC_KEY set to that same key) driving a connection
 # attempt against the same device id + password while it runs.
+# --release is not optional -- see the M3 performance finding above.
 VEREVON_AGENT_ID=<id> VEREVON_AGENT_PASSWORD=<password> VEREVON_LICENCE_KEY=<key> \
-  cargo run -p verevon-agent
+  cargo run --release -p verevon-agent
+
+# Re-run after any encoder tuning change to confirm a real improvement:
+cargo run --release -p va-encode --example bench -- 1280 720 30
 
 # Diagnostic tool (not the real binary): registers a device id and dumps
 # whatever hbbs forwards next -- what produced the original PunchHole live
