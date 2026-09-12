@@ -482,7 +482,15 @@ pub fn decode_test_delay(data: &[u8]) -> Result<TestDelay, WireError> {
 }
 
 // =====================================================================
-// VideoFrame — the host sends VP9-encoded chunks, batched.
+// VideoFrame — the host sends encoded video chunks, batched. `av1s` (field
+// 13) is what this host actually sends (see `va-encode`'s crate docs for
+// why AV1 over VP9); `vp9s` (field 6) is kept as a citation-backed,
+// tested-but-currently-unused alternative in case a future build ever
+// wants it, matching this file's file-level policy of only ever encoding
+// wire shapes it has verified, not guessing at ones it doesn't use yet.
+// Both field numbers and `EncodedVideoFrame`/`EncodedVideoFrames`'s shape
+// are citation-backed against `hbb_common`'s `protos/message.proto` at
+// commit `69cea8dafee147848ae88702029f4bf7df7224c3`.
 // =====================================================================
 
 pub struct EncodedVideoFrame {
@@ -497,19 +505,31 @@ fn encode_encoded_video_frame(value: &EncodedVideoFrame) -> Vec<u8> {
     w.finish()
 }
 
+fn encode_encoded_video_frames(frames: &[EncodedVideoFrame]) -> Vec<u8> {
+    let mut inner = ProtoWriter::new();
+    for frame in frames {
+        inner.message(1, &encode_encoded_video_frame(frame));
+    }
+    inner.finish()
+}
+
 /// `VideoFrame.vp9s` (oneof field 6 within `VideoFrame` — VP9 is the one
 /// codec every client is guaranteed to accept). Batches one or more encoded
 /// chunks into a single `EncodedVideoFrames` wire message; a single encoded
 /// frame is never itself split across multiple wire messages.
 pub fn encode_vp9_video_frame(frames: &[EncodedVideoFrame], display: i32) -> Vec<u8> {
-    let mut inner = ProtoWriter::new();
-    for frame in frames {
-        inner.message(1, &encode_encoded_video_frame(frame));
-    }
-    let encoded_frames = inner.finish();
-
     let mut w = ProtoWriter::new();
-    w.message(6, &encoded_frames);
+    w.message(6, &encode_encoded_video_frames(frames));
+    w.int32(14, display);
+    w.finish()
+}
+
+/// `VideoFrame.av1s` (oneof field 13 within `VideoFrame`) — what this host
+/// actually sends. Same `EncodedVideoFrames` wrapper shape as `vp9s`; only
+/// the oneof field number differs.
+pub fn encode_av1_video_frame(frames: &[EncodedVideoFrame], display: i32) -> Vec<u8> {
+    let mut w = ProtoWriter::new();
+    w.message(13, &encode_encoded_video_frames(frames));
     w.int32(14, display);
     w.finish()
 }
@@ -984,6 +1004,32 @@ mod tests {
             chunk_count += 1;
         }
         assert_eq!(chunk_count, 2);
+    }
+
+    #[test]
+    fn av1_video_frame_uses_field_thirteen_with_the_same_batch_shape_as_vp9() {
+        let frames = vec![EncodedVideoFrame { data: vec![9, 8, 7], key: true, pts: 100 }];
+        let encoded = encode_av1_video_frame(&frames, 2);
+        let mut r = ProtoReader::new(&encoded);
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 13, "av1s oneof field");
+        let batch_bytes = r.read_length_delimited().unwrap();
+
+        let mut br = ProtoReader::new(batch_bytes);
+        let tag = br.read_tag().unwrap();
+        assert_eq!(tag.field_number, 1);
+        let frame_bytes = br.read_length_delimited().unwrap();
+        let mut fr = ProtoReader::new(frame_bytes);
+        assert_eq!(fr.read_tag().unwrap().field_number, 1);
+        assert_eq!(fr.read_length_delimited().unwrap(), &[9, 8, 7]);
+        assert_eq!(fr.read_tag().unwrap().field_number, 2);
+        assert!(fr.read_bool().unwrap());
+        assert_eq!(fr.read_tag().unwrap().field_number, 3);
+        assert_eq!(fr.read_int64().unwrap(), 100);
+
+        let tag = r.read_tag().unwrap();
+        assert_eq!(tag.field_number, 14, "display field");
+        assert_eq!(r.read_int32().unwrap(), 2);
     }
 
     #[test]

@@ -30,6 +30,11 @@ pub enum CryptoError {
 /// A device's persistent Ed25519 identity keypair. Generated once per
 /// install and registered with hbbs (`RegisterPk`); every connection's
 /// `SignedId` is signed with this key, never regenerated per-session.
+/// `Copy` because both halves are plain fixed-size byte arrays — cheap to
+/// duplicate, and callers that reconnect across sessions need to reuse the
+/// SAME identity, not just the same public key (see `from_secret_key`'s
+/// doc for why that matters).
+#[derive(Clone, Copy)]
 pub struct IdentityKeyPair {
     public: sign_api::PublicKey,
     secret: sign_api::SecretKey,
@@ -42,9 +47,33 @@ impl IdentityKeyPair {
         Self { public, secret }
     }
 
+    /// Reconstructs a previously-[`generate`](Self::generate)d identity from
+    /// its 64-byte secret key (libsodium's Ed25519 convention embeds the
+    /// 32-byte public key in the secret key's own second half, so no
+    /// separate public key needs to be stored). This is what makes a
+    /// persistent, on-disk identity possible — without it, a caller has no
+    /// way to reload the SAME keypair across restarts, and hbbs will
+    /// reject a changed identity reusing the same device id (see
+    /// `va-net`'s crate docs for the live-reproduced failure this exists
+    /// to prevent: a fresh keypair each run makes hbbs treat every restart
+    /// as a different, colliding device).
+    #[must_use]
+    pub fn from_secret_key(secret: [u8; 64]) -> Self {
+        let mut public = [0u8; 32];
+        public.copy_from_slice(&secret[32..64]);
+        Self { public, secret }
+    }
+
     #[must_use]
     pub fn public_key(&self) -> [u8; 32] {
         self.public
+    }
+
+    /// The full 64-byte secret key, suitable for persisting to disk and
+    /// later reloading via [`from_secret_key`](Self::from_secret_key).
+    #[must_use]
+    pub fn secret_key_bytes(&self) -> [u8; 64] {
+        self.secret
     }
 
     /// Produces an ATTACHED Ed25519 signature over `message`: the wire
@@ -280,6 +309,24 @@ mod tests {
         assert_eq!(signed.len(), message.len() + 64);
         let recovered = verify_signed(&identity.public_key(), &signed).unwrap();
         assert_eq!(recovered, message);
+    }
+
+    #[test]
+    fn identity_survives_a_secret_key_round_trip() {
+        // This is what makes a persistent on-disk identity possible: save
+        // secret_key_bytes(), reload via from_secret_key(), and the
+        // reloaded identity must be usable exactly like the original --
+        // same public key, and a signature it produces must verify against
+        // that SAME public key (proving the reconstructed secret half is
+        // correct, not just that a public key byte pattern was copied).
+        let original = IdentityKeyPair::generate();
+        let reloaded = IdentityKeyPair::from_secret_key(original.secret_key_bytes());
+
+        assert_eq!(reloaded.public_key(), original.public_key());
+
+        let signed = reloaded.sign(b"reloaded identity signs correctly");
+        let recovered = verify_signed(&original.public_key(), &signed).unwrap();
+        assert_eq!(recovered, b"reloaded identity signs correctly");
     }
 
     #[test]

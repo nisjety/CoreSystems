@@ -20,6 +20,19 @@
 //! is the corrected per-cycle operation; [`RegistrationClient::run_keepalive`]
 //! drives it forever.
 //!
+//! **A second live-found bug on top of that one**: `request_pk` (hbbs's
+//! signal that it wants a fresh `RegisterPk`) reflects hbbs's OWN state,
+//! not whether THIS `RegistrationClient` instance has ever actually sent
+//! one. A caller that reuses the same device id with a fresh identity
+//! keypair every process start (no persistent identity yet — see the
+//! Endpoint Plane build docs) can register successfully, yet the very
+//! first real connection attempt fails signature verification, because
+//! hbbs is still vouching for a PREVIOUS run's `pk` that this run's
+//! identity no longer holds the secret half of. Fixed by always sending
+//! `RegisterPk` on THIS client's own first `ensure_online_once` call, not
+//! only when hbbs's `request_pk` asks for it — see that method's doc for
+//! the full live-reproduction.
+//!
 //! What a real hbbs forwards to a registered host once a controller sends
 //! `PunchHoleRequest` for it was live-captured (a real `PunchHole`, oneof
 //! field 9) and, for Support Plane's `ALWAYS_USE_RELAY=Y` deployment (the
@@ -31,6 +44,7 @@
 pub mod relay;
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -77,6 +91,10 @@ pub struct RegistrationClient {
     id: String,
     uuid: Vec<u8>,
     pk: Vec<u8>,
+    /// Set once this client has successfully sent `RegisterPk` for its own
+    /// `pk` at least once. See [`ensure_online_once`](Self::ensure_online_once)
+    /// for why this can't just defer to hbbs's `request_pk` flag.
+    sent_register_pk: AtomicBool,
 }
 
 impl RegistrationClient {
@@ -106,7 +124,7 @@ impl RegistrationClient {
             .expect("hardcoded wildcard address is always valid");
         let socket = UdpSocket::bind(bind_addr).await?;
         socket.connect(hbbs_addr).await?;
-        Ok(Self { socket, hbbs_addr, id, uuid, pk })
+        Ok(Self { socket, hbbs_addr, id, uuid, pk, sent_register_pk: AtomicBool::new(false) })
     }
 
     #[must_use]
@@ -172,7 +190,10 @@ impl RegistrationClient {
             return Err(NetError::UnexpectedReply(field_number));
         }
         match decode_register_pk_response(&payload)?.result {
-            RegisterPkResult::Ok => Ok(()),
+            RegisterPkResult::Ok => {
+                self.sent_register_pk.store(true, Ordering::Relaxed);
+                Ok(())
+            }
             other => Err(NetError::Rejected(other)),
         }
     }
@@ -185,6 +206,26 @@ impl RegistrationClient {
     /// that update on any `RegisterPeer` call where `request_pk` came back
     /// `true`.
     ///
+    /// **Live-discovered edge case this method exists to close**: hbbs's
+    /// `request_pk` flag reflects only ITS OWN state (does it already have
+    /// a `pk` on file for this `id`, from a possibly-earlier process run
+    /// under the same `id`?) — not whether the identity THIS
+    /// `RegistrationClient` was constructed with has ever actually been
+    /// told to hbbs. A caller that reuses the same device `id` across
+    /// restarts with a FRESH keypair each time (no persistent identity —
+    /// see `apps/Endpoint Plane/docs/architecture.md` for why that's
+    /// currently deferred) can hit exactly this: hbbs still remembers the
+    /// PREVIOUS run's `pk` (same `id`, unchanged IP), so `request_pk`
+    /// comes back `false` on the very first call, and this client would
+    /// silently never register its own new `pk` at all — leaving hbbs
+    /// vouching for a key the client no longer holds the secret half of,
+    /// which fails signature verification on the controller's end the
+    /// instant a real connection is attempted. Live-reproduced against a
+    /// real hbbs and a real `remote-core` controller (`Signature
+    /// verification failed`) before this fix. Fixed by always sending
+    /// `RegisterPk` on this client's OWN first `ensure_online_once` call,
+    /// regardless of what `request_pk` says.
+    ///
     /// # Errors
     ///
     /// Whatever [`register_peer_once`](Self::register_peer_once) or
@@ -192,7 +233,9 @@ impl RegistrationClient {
     /// [`NetError::PkStillRequested`] if hbbs asks for `RegisterPk` again
     /// immediately after we just sent one (registration not sticking).
     pub async fn ensure_online_once(&self) -> Result<(), NetError> {
-        if self.register_peer_once().await? {
+        let hbbs_wants_pk = self.register_peer_once().await?;
+        let never_sent_our_own_pk = !self.sent_register_pk.load(Ordering::Relaxed);
+        if hbbs_wants_pk || never_sent_our_own_pk {
             self.register_pk_once().await?;
             if self.register_peer_once().await? {
                 return Err(NetError::PkStillRequested);

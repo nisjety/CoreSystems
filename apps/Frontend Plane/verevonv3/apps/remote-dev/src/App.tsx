@@ -127,6 +127,17 @@ export function App() {
         // Vi tillater det KUN her, i utviklingsverktøyet, og aldri som
         // standard — se docs/security.md.
         allowUnverifiedPeer: !SERVER_PUBLIC_KEY,
+        // Without this, remote-core defaults to a noopLogger and swallows
+        // every debug/info/warn/error silently -- proved a real problem
+        // debugging the Verevon Agent's first live video session (a
+        // genuine decode/protocol issue produced zero console output until
+        // this was added). This dev-only harness should always surface it.
+        logger: {
+          debug: (m, c) => console.debug('[remote-core]', m, c),
+          info: (m, c) => console.info('[remote-core]', m, c),
+          warn: (m, c) => console.warn('[remote-core]', m, c),
+          error: (m, c) => console.error('[remote-core]', m, c),
+        },
       });
 
       abortController = new AbortController();

@@ -8,6 +8,9 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-vpx-encode = "0.4"
+# default-features off: "asm" needs a system `nasm` install and "binaries"
+# pulls in an unused CLI toolchain (clap/y4m/ivf/...) -- neither is needed
+# to use rav1e as a library, and avoiding "asm" is the whole reason this
+# crate uses rav1e over vpx-encode/libvpx in the first place (pure Rust,
+# no native toolchain to install on a fresh machine).
+rav1e = { version = "0.7", default-features = false, features = ["threading", "signal_support"] }

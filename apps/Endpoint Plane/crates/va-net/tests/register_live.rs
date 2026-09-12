@@ -141,3 +141,37 @@ async fn ensure_online_once_completes_the_full_dance_from_a_fresh_identity() {
         .await
         .expect("steady-state ensure_online_once should succeed without needing a fresh RegisterPk");
 }
+
+#[tokio::test]
+#[ignore = "requires a real local hbbs (apps/Support Plane) reachable at 127.0.0.1:21116"]
+async fn ensure_online_once_re_registers_the_same_persisted_identity_from_a_fresh_client_instance() {
+    // Live-reproduces the exact bug this test is named for: a NEW process
+    // (a new RegistrationClient instance, its own sent_register_pk flag
+    // starting false) reconnecting with the SAME persisted identity/uuid
+    // an earlier instance already registered. hbbs's own request_pk signal
+    // correctly says "no need" here (same pk, same uuid, unchanged IP) --
+    // that's exactly the case this fix's own client-side flag is needed
+    // for, since deferring entirely to hbbs's signal would silently skip
+    // RegisterPk for this brand-new client instance.
+    //
+    // (A DIFFERENT uuid reusing the same id is a separate, already-covered
+    // case: `registering_a_different_identity_under_the_same_id_is_rejected`
+    // proves hbbs correctly rejects that as UuidMismatch -- a real client's
+    // uuid is machine-derived and stable, so this never legitimately
+    // happens for one persisted identity across restarts.)
+    let id = random_device_id();
+    let pk = IdentityKeyPair::generate().public_key().to_vec();
+
+    let first_instance = RegistrationClient::connect(hbbs_addr(), id.clone(), pk.clone(), pk.clone())
+        .await
+        .expect("bind/connect to local hbbs");
+    first_instance.ensure_online_once().await.expect("first instance registers cleanly");
+
+    let second_instance = RegistrationClient::connect(hbbs_addr(), id, pk.clone(), pk)
+        .await
+        .expect("bind/connect to local hbbs");
+    second_instance
+        .ensure_online_once()
+        .await
+        .expect("a fresh client instance reconnecting with the SAME persisted identity must still send its own RegisterPk");
+}

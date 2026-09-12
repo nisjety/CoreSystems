@@ -83,25 +83,95 @@ but not cross-verified) unit test suite alone.**
   never catch each other's bug in a mutual round-trip test — only testing
   against a genuinely independent third implementation can.
 
-**Confirmed to compile on this real Windows machine, not yet exercised:**
+**A deliberate codec change: AV1 (`rav1e`) instead of VP9 (`vpx-encode`/libvpx).**
+`vpx-encode` needs `pkg-config` and a system libvpx to link — neither
+installed on this machine, and getting them means installing `vcpkg` and
+building libvpx from source (a heavy, ~20-30 minute native-toolchain
+install). `rav1e` is a mature, actively-maintained pure-Rust AV1 encoder —
+no native toolchain at all once its own `asm`/`binaries` default features
+are disabled (see `va-encode`'s `Cargo.toml`). This was a real choice, not
+a default: `hbb_common`'s `message.proto` already has an `av1s` oneof field
+(13) using the exact same `EncodedVideoFrames` wrapper as `vp9s`, and
+`remote-core` (the browser side) turned out to **already fully support
+AV1** — wire decode (`videoCodec.ts`'s `CODEC_FIELD` map), the WebCodecs
+codec string (`av01.0.04M.08`), and capability negotiation
+(`SupportedDecoding.abilityAv1`) were all already there from earlier
+sessions, needing zero changes. `encode_vp9_video_frame` is kept
+alongside `encode_av1_video_frame` in `va-protocol` (tested, unused by
+`main.rs` today) in case VP9 is ever revisited.
 
-- `va-capture` — wraps the `windows-capture` crate (MIT, built on the
-  official `windows` crate; an independent third party's implementation of
-  Microsoft's public capture APIs, unrelated to RustDesk's own `scrap`
-  crate). Builds cleanly. No actual capture code written yet, and no
-  `FrameSource` trait implementation exists beyond the plan's design.
+**Implemented and live-verified end to end (M3 — continuous video, a real
+long-running process):**
 
-**Blocked on a missing system dependency, not a code problem:**
-
-- `va-encode` — `vpx-encode` (VP9/libvpx bindings) needs `pkg-config` and a
-  system libvpx to link, neither of which is installed on this machine.
-  This was flagged as a real risk before any code was written (`vpx-encode`
-  hasn't published a release since 2022); resolving it (installing
-  pkg-config + libvpx for MSVC, or forking/replacing the `-sys` crate) is
-  M2 work, not attempted here. The root `verevon-agent` binary deliberately
-  does not depend on `va-capture`/`va-encode`/`va-net` yet for exactly this
-  reason — `cargo build --workspace --exclude va-encode` and
-  `cargo build -p verevon-agent` both succeed cleanly today.
+- `va-encode`'s `Av1Encoder` wraps `rav1e` in low-latency mode (no frame
+  reordering, fastest speed preset). A real, live-measured tuning bug: the
+  default `reservoir_frame_delay` (rate-control smoothing) is
+  `min(max_key_frame_interval * 1.5, 240)` frames — with an
+  unexamined `max_key_frame_interval`, that computed to **240 frames (8s
+  at 30fps) of startup latency before the first packet**, measured
+  directly in this crate's own tests. Pinned to `12` (the value `rav1e`'s
+  own source names as its recommended floor) and `max_key_frame_interval`
+  dropped to 60 (a keyframe every ~2s — faster recovery matters far more
+  here than file-size amortization). Owns the BGRA8->YUV 4:2:0 conversion
+  (BT.601, simple 2:1 box-average chroma subsampling) `rav1e` needs, since
+  `va-capture` has no reason to know anything about encoding.
+- `va-capture`'s `FrameSource` trait ships with `TestPatternSource` — a
+  synthetic, deterministic moving checkerboard, no OS dependency at all —
+  matching the build plan's own staged order ("prove the wire+decode path
+  before swapping in real DXGI frames"). The real `DxgiDuplicationSource`
+  (via `windows-capture`) is not built yet.
+- **A second identity bug, found by the SAME kind of live testing as the
+  registration ones above, not hypothesized in advance**: an early
+  `verevon-agent` main.rs generated a fresh `IdentityKeyPair` every
+  process start. The FIRST live connection worked; the very next one (same
+  device id, after a restart) failed with `Signature verification failed —
+  wrong signer key or tampered payload` on the controller's end. Root
+  cause: hbbs's `request_pk` signal reflects hbbs's OWN state (does it
+  already have a `pk` on file for this `id`?), not whether THIS run's
+  identity has ever actually been registered — so a fresh keypair reusing
+  an `id` hbbs already has a (different, PREVIOUS run's) `pk` for never
+  got its own `RegisterPk` sent at all, leaving hbbs vouching for a key the
+  new run doesn't hold the secret half of. Chasing this ALSO surfaced a
+  more fundamental constraint: hbbs additionally rejects a *changed*
+  `uuid` reusing an existing `id` (`UuidMismatch`) — a real client's `uuid`
+  is machine-derived and stable for exactly this reason, so a genuinely
+  fresh identity can never legitimately reconnect under the same id at
+  all. Fixed two ways: `RegistrationClient::ensure_online_once` now always
+  sends `RegisterPk` on its own first call regardless of `request_pk` (a
+  new client instance reusing a **persisted** identity needs this even
+  when hbbs's own signal says no); and `verevon-agent`'s identity is now
+  actually persisted to a local file (`IdentityKeyPair::from_secret_key`/
+  `secret_key_bytes`, new in `va-crypto`) and reloaded across restarts,
+  which is what makes the `uuid` stable in the first place. Both
+  live-verified: `va-crypto`'s secret-key round-trip test, and a new
+  `va-net` live test reconnecting with the same persisted identity from a
+  fresh client instance.
+- **The full pipeline, live-verified, visually, not just by log lines**:
+  `verevon-agent`'s real `main.rs` (not a demo) registers, waits for a
+  `PunchHole`, pairs via the relay, logs in, and then continuously pumps
+  `TestPatternSource` frames through `Av1Encoder` and the wire to a real
+  `apps/remote-dev` browser session. Confirmed with actual screenshots of
+  the browser's canvas showing the live checkerboard-and-moving-band
+  pattern, the band visibly in a different position between two
+  screenshots taken 8 seconds apart — proof of a genuinely live, decoding,
+  rendering stream, not a frozen first frame. `Bilder per sekund` (fps)
+  and `Forsinkelse` (latency) in the UI both showed real nonzero values
+  for the first time in this initiative's history.
+- **A real, measured performance finding, not yet solved**: pure-Rust
+  `rav1e` (no SIMD `asm`, per the codec-choice rationale above) encoding a
+  1280x720 frame took **6-38 seconds per frame** on this machine — nowhere
+  near real-time. Dropping to 480x270 brought steady-state frame time down
+  to roughly ~1 second (still well short of the 12fps target, but a
+  sustained, working stream rather than a stall). `main.rs` runs at 480x270
+  today for exactly this reason; a real performance pass (tiling to use
+  the already-enabled `threading` feature, a faster/lower-quality preset,
+  or accepting the `asm`/`nasm` dependency after all) is unstarted follow-up
+  work, not solved by this pass.
+- `remote-dev`'s `App.tsx` now always passes a console-forwarding logger to
+  `createRemoteClient` — discovered as a genuine gap while debugging the
+  above: `remote-core` defaults to a silent `noopLogger`, so a real
+  decode/protocol issue produced zero console output at all until this was
+  added. Kept permanently in this dev-only harness, not reverted.
 
 **Implemented and live-verified against the real local Support Plane (M2a —
 hbbs registration):**
@@ -212,32 +282,40 @@ a real session):**
   time ANY two independently-built implementations of this protocol have
   completed a full session with each other in this codebase.
 - Input injection, file transfer, a Verevon Control-Plane identity contract
-  for the agent, cross-platform support, packaging/installer, and any UI —
-  all explicitly out of scope for this pass; see the build plan for why.
-- **Genuinely still not built**: continuous video (the demo exits right
-  after login — it doesn't push frames), input handling, a real
-  `main.rs` wiring registration + relay + capture/encode together into one
-  long-running process, and anything for a second concurrent connection
-  (the current registration socket design assumes one in-flight punch-hole
-  exchange at a time).
+  for the agent, cross-platform support, and packaging/installer are all
+  explicitly out of scope for this pass; see the build plan for why.
+- **Genuinely still not built**: real screen capture (`DxgiDuplicationSource`
+  — video is a synthetic test pattern today), real-time-speed encoding at a
+  useful resolution (measured 480x270 at well under the 12fps target — see
+  above), audio, and anything for a second concurrent connection (the
+  current registration socket design assumes one in-flight punch-hole
+  exchange at a time). `va-encode`'s VP9 path (`encode_vp9_video_frame`) is
+  tested but unused; `main.rs` sends AV1 only.
 
 ## Verification
 
 ```bash
 cd "apps/Endpoint Plane"
-cargo test -p va-crypto -p va-wire -p va-protocol -p va-testkit -p va-net   # 56 unit tests, 4 live (ignored)
-cargo clippy -p va-crypto -p va-wire -p va-protocol -p va-testkit -p va-net --all-targets  # 0 warnings
+cargo test --workspace   # 65 unit tests, 5 live (ignored)
+cargo clippy --workspace --all-targets  # 0 warnings
+cargo build --workspace  # everything, including va-encode -- no exclusions needed anymore
+cargo build -p verevon-agent
+
 # Live, not mocked -- needs `docker compose up -d hbbs hbbr readiness` in apps/Support Plane first:
 cargo test -p va-net --test register_live -- --ignored --nocapture
-cargo build --workspace --exclude va-encode   # everything except the pkg-config-blocked crate
-cargo build -p verevon-agent                  # the actual binary
 
-# The capstone live demo: registers a device, captures a real PunchHole,
-# pairs via the relay, and runs a real HostSession login. Needs a real local
-# Support Plane AND a real controller driving a connection attempt against
-# the same device id + password while it runs (e.g. apps/Frontend Plane/
-# verevonv3/apps/remote-dev via `pnpm -C "apps/Frontend Plane/verevonv3"
-# --filter remote-dev dev`, pointed at ws://localhost:21118 with
-# VITE_REMOTE_SERVER_PUBLIC_KEY set to hbbs's logged Key:).
+# The real agent, running for real: registers a device, waits for a real
+# connection attempt, pairs via the relay, logs in, and continuously
+# streams synthetic video. Needs VEREVON_LICENCE_KEY (hbbs's own logged
+# `Key:` value) and a real controller (e.g. apps/Frontend Plane/verevonv3/
+# apps/remote-dev, pointed at ws://localhost:21118 with
+# VITE_REMOTE_SERVER_PUBLIC_KEY set to that same key) driving a connection
+# attempt against the same device id + password while it runs.
+VEREVON_AGENT_ID=<id> VEREVON_AGENT_PASSWORD=<password> VEREVON_LICENCE_KEY=<key> \
+  cargo run -p verevon-agent
+
+# Diagnostic tool (not the real binary): registers a device id and dumps
+# whatever hbbs forwards next -- what produced the original PunchHole live
+# capture during M2b's research.
 cargo run -p va-net --example listen_for_punch_hole -- <device-id> <password> [licence-key]
 ```
