@@ -491,15 +491,91 @@ model, closing M4's biggest known gap):**
 - **Genuinely still not built**: a CONFIGURABLE consent policy (today the
   credential-kind rule is hardcoded, not a setting); revoking a
   MID-SESSION grant (there's no wire trigger or local UI for the operator
-  to take back control once given); audio, file transfer, multi-monitor
-  selection, and multi-session support all remain exactly as unbuilt as
-  M4 left them.
+  to take back control once given); audio, file transfer, and
+  multi-session support all remain exactly as unbuilt as M4 left them.
+  Multi-monitor selection is addressed by M6 below.
+
+**Implemented (M6 — multi-monitor support, closing M4's other known gap;
+partially live-verified — this dev machine has exactly one physical
+monitor, see below):**
+
+- **Real per-monitor enumeration, not a stub.** `windows-capture`'s own
+  `Monitor` type has no safe way to read a monitor's POSITION in the
+  virtual desktop (only width/height/name/index — confirmed against its
+  actual source), so `va-capture::enumerate_monitors` instead uses the
+  `display-info` crate, whose entire public API is safe (every `unsafe`
+  block — `GetMonitorInfoW`, `EnumDisplayMonitors` — is internal to its own
+  crate, the same precedent `windows-capture`/`enigo`/`rfd` already
+  established for this workspace's `unsafe_code = "forbid"` lint) and
+  returns real `{x, y, width, height, is_primary, raw_handle}` per display.
+  Bridging back to `windows_capture::monitor::Monitor` (needed by
+  `DxgiDuplicationSource`) needs no unsafe code either:
+  `windows::Win32::Graphics::Gdi::HMONITOR` is a tuple struct with a PUBLIC
+  field (confirmed in the `windows` crate's own source), so
+  `raw_handle.0` — a raw, version-agnostic `*mut c_void` — passes directly
+  into `Monitor::from_raw_hmonitor` (itself a plain, non-`unsafe` `pub
+  const fn`). **Live-verified for real**: an ignored test
+  (`enumerate_monitors_finds_at_least_one_real_display_with_sane_geometry`)
+  returned `MonitorInfo { index: 0, name: "\\\\.\\DISPLAY1", x: 0, y: 0,
+  width: 1920, height: 1200, is_primary: true }`, matching
+  `[System.Windows.Forms.Screen]::AllScreens` on the same machine
+  byte-for-byte.
+- **The switch-display wire round trip.** `Misc.switch_display` (oneof
+  field 5) already existed from M1 as the HOST's own confirmation shape
+  (`encode_switch_display`/`SwitchDisplay`); this milestone added the
+  DECODER for the CLIENT's simpler request shape (only `display` set) —
+  `decode_switch_display_request`, a new `Event::DisplaySwitchRequested`,
+  and `HostSession::confirm_display_switch` (reuses the existing encoder to
+  answer with the real new monitor's geometry).
+- **Host orchestration**: `main.rs` enumerates monitors once at login,
+  reports them all to the controller with their REAL position/size
+  (replacing the old single hardcoded `DisplayInfo`), and starts the video
+  pump on the primary monitor's index. A `DisplaySwitchRequested` event
+  stops the current video pump (reusing the exact cooperative stop-flag +
+  bounded-abort mechanism M4 built for safe `DxgiDuplicationSource::Drop`
+  teardown — no new shutdown mechanism invented), starts a fresh one via
+  `DxgiDuplicationSource::new_for_monitor_index`, updates the input
+  injector's active-display origin, and sends the real confirmation back.
+  An out-of-range requested index is logged and ignored rather than
+  panicking or switching to a wrong monitor.
+- **A real coordinate-origin fix this milestone required.**
+  `EnigoInjector` no longer queries `enigo::main_display()` on its own —
+  `main.rs` already enumerates real monitors for `DisplayInfo` reporting,
+  so it now hands the injector the ACTIVE display's real geometry directly
+  (`ActiveDisplay{x, y, width, height}`) via `EnigoInjector::new`/
+  `set_active_display`, avoiding two OS queries that could disagree. The
+  scaled coordinate then gets the active display's `(x, y)` origin added —
+  but ONLY for an absolute position (`Coordinate::Abs`); a relative delta
+  (`Coordinate::Rel`) must never be origin-shifted, since it's not a
+  position at all. 3 new unit tests cover both branches plus the
+  zero-origin (primary monitor) case explicitly.
+- **Known, deliberately unfixed limitation — not a bug, a real library
+  constraint**: `enigo`'s `move_mouse(_, Coordinate::Abs)` on Windows
+  normalizes only against the PRIMARY monitor's dimensions (confirmed via
+  its own `// TODO: Check if we should use MOUSEEVENTF_VIRTUALDESK too`
+  comment in its Windows backend source), not the full virtual desktop —
+  so a correctly-computed virtual-desktop-absolute position for a
+  SECONDARY monitor can still land in the wrong place once it passes
+  through `enigo`'s own internal normalization. Fixing this needs a
+  patched/forked `enigo` or a reviewed raw `SetCursorPos`/`SendInput`
+  carve-out — a bigger, separate change deliberately not attempted here.
+- **What's genuinely live-verified vs. not, honestly**: monitor enumeration
+  is live-verified with real OS values (above). The switch-display wire
+  decode/confirm round trip, the video-pump-restart-on-switch mechanism,
+  and the coordinate-origin math are all unit-tested but have NOT been
+  driven end to end against a real running agent + browser session — this
+  dev machine has exactly one physical monitor
+  (`[System.Windows.Forms.Screen]::AllScreens` confirms it), so the most a
+  live test here could prove is a same-index "switch" with no visually
+  distinct second display to switch to. A genuine multi-monitor
+  live-verification (including the secondary-monitor input-accuracy
+  question above) needs a machine with two or more real displays attached.
 
 ## Verification
 
 ```bash
 cd "apps/Endpoint Plane"
-cargo test --workspace   # 90 unit/integration tests, 5 live (ignored)
+cargo test --workspace   # 95 unit/integration tests, 6 live (ignored)
 cargo clippy --workspace --all-targets  # 0 warnings
 cargo build --workspace  # everything -- no exclusions needed
 cargo build -p verevon-agent

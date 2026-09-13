@@ -144,49 +144,93 @@ fn control_key_to_enigo(code: u32) -> Result<enigo::Key, InputError> {
     })
 }
 
+/// The currently-streamed display's REAL geometry (position AND size) --
+/// what `EnigoInjector` needs to place a click correctly, independent of
+/// which monitor `va-capture` happens to be capturing right now. Supplied
+/// by the caller (`main.rs`, which already enumerates real monitors via
+/// `va_capture::enumerate_monitors` to report `DisplayInfo` at login) --
+/// this crate never queries the OS for it independently, so there's a
+/// single source of truth instead of two OS queries that could disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActiveDisplay {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Injects already-decoded `va_protocol` input events via `enigo`.
 pub struct EnigoInjector {
     enigo: Enigo,
-    /// The real primary display's own size in pixels, queried once at
-    /// construction via `enigo`'s own `main_display()` -- NOT the same as
-    /// `reported_size` below. A display resolution change mid-session
-    /// (e.g. an RDP client reconnecting at a different size) is a known,
-    /// unhandled limitation: this is queried once, not re-queried per
-    /// event.
-    real_display_size: (i32, i32),
+    active_display: ActiveDisplay,
     /// The resolution `DisplayInfo`/the encoded video actually reports to
     /// the controller (see `main.rs`'s `WIDTH`/`HEIGHT`) -- virtually never
-    /// the display's real resolution, since the encoder runs at a fixed,
-    /// measured-real-time size regardless of what's actually being
-    /// captured (`va-encode`'s own resize step). Incoming `MouseEvent`
-    /// x/y are expressed in THIS space, matching what the controller's own
-    /// canvas is actually showing, and must be rescaled up to
-    /// `real_display_size` before reaching `enigo` -- passing them through
-    /// unscaled would land every click in the wrong place as soon as the
-    /// two resolutions differ (which, in practice, is always).
+    /// `active_display`'s real resolution, since the encoder runs at a
+    /// fixed, measured-real-time size regardless of what's actually being
+    /// captured (`va-encode`'s own resize step) or which monitor is
+    /// active. Incoming `MouseEvent` x/y are expressed in THIS space,
+    /// matching what the controller's own canvas is actually showing, and
+    /// must be rescaled up to `active_display`'s real size (plus its
+    /// origin, for an absolute position) before reaching `enigo` --
+    /// passing them through unscaled would land every click in the wrong
+    /// place as soon as the two resolutions differ, which in practice is
+    /// always.
     reported_size: (u32, u32),
 }
 
 impl EnigoInjector {
     /// `reported_width`/`reported_height` must match whatever
     /// `DisplayInfo` this host actually advertised at login (`main.rs`'s
-    /// `WIDTH`/`HEIGHT`) -- see this struct's docs for why.
+    /// `WIDTH`/`HEIGHT`); `active_display` is the REAL geometry of
+    /// whichever monitor is being streamed right now (see this struct's
+    /// docs for why that's supplied, not queried here) -- see this
+    /// struct's docs for why.
     ///
     /// # Errors
     ///
     /// [`InputError::Backend`] if `enigo` fails to initialize (e.g. no
-    /// interactive desktop session is available) or its primary-display
-    /// query fails.
-    pub fn new(reported_width: u32, reported_height: u32) -> Result<Self, InputError> {
+    /// interactive desktop session is available).
+    pub fn new(
+        reported_width: u32,
+        reported_height: u32,
+        active_display: ActiveDisplay,
+    ) -> Result<Self, InputError> {
         let enigo = Enigo::new(&Settings::default()).map_err(backend_err)?;
-        let real_display_size = enigo.main_display().map_err(backend_err)?;
-        Ok(Self { enigo, real_display_size, reported_size: (reported_width, reported_height) })
+        Ok(Self { enigo, active_display, reported_size: (reported_width, reported_height) })
     }
 
-    /// Rescales a coordinate (position OR delta -- both scale the same way)
-    /// from `reported_size` space to `real_display_size` space.
-    fn scale(&self, x: i32, y: i32) -> (i32, i32) {
-        scale_coordinate(self.real_display_size, self.reported_size, x, y)
+    /// Called whenever the streamed display switches (`va_protocol::
+    /// Event::DisplaySwitchRequested`, handled by the caller) -- without
+    /// this, coordinates would keep scaling against the OLD display's
+    /// geometry after a switch, landing every click in the wrong place on
+    /// the NEW one.
+    pub fn set_active_display(&mut self, active_display: ActiveDisplay) {
+        self.active_display = active_display;
+    }
+
+    /// Rescales a coordinate from `reported_size` space to
+    /// `active_display`'s real size, adding `active_display`'s own origin
+    /// ONLY for an absolute position -- a RELATIVE delta must stay a pure
+    /// delta, or it would be corrupted by an unrelated absolute offset.
+    ///
+    /// **A known, NOT-fixed limitation for any monitor other than the
+    /// primary one**: `enigo`'s own `move_mouse(_, Coordinate::Abs)`
+    /// normalizes the position it's given against the PRIMARY monitor's
+    /// size only (confirmed directly in its Windows backend source, which
+    /// carries its own `// TODO: Check if we should use
+    /// MOUSEEVENTF_VIRTUALDESK too` acknowledging this) -- NOT the full
+    /// virtual desktop `MOUSEEVENTF_VIRTUALDESK` spans. This method
+    /// computes the CORRECT virtual-desktop-absolute target position, but
+    /// whether it actually lands there once it reaches `enigo` depends on
+    /// that unfixed upstream behavior. Fixing it for real needs either a
+    /// patched/forked `enigo`, or a narrowly-scoped `unsafe` `SetCursorPos`/
+    /// raw `SendInput` call -- a deliberate, reviewed exception to this
+    /// workspace's `unsafe_code = "forbid"` lint that this pass does not
+    /// make. Verified correct for the PRIMARY monitor (the only
+    /// configuration this project can currently live-test on real
+    /// hardware).
+    fn scale(&self, x: i32, y: i32, coordinate: Coordinate) -> (i32, i32) {
+        scale_for_active_display(self.active_display, self.reported_size, x, y, coordinate)
     }
 
     /// # Errors
@@ -268,7 +312,7 @@ impl EnigoInjector {
     }
 
     fn move_to(&mut self, x: i32, y: i32, coordinate: Coordinate) -> Result<(), InputError> {
-        let (x, y) = self.scale(x, y);
+        let (x, y) = self.scale(x, y, coordinate);
         self.enigo.move_mouse(x, y, coordinate).map_err(backend_err)
     }
 }
@@ -284,6 +328,29 @@ fn scale_coordinate(real_size: (i32, i32), reported_size: (u32, u32), x: i32, y:
     let scaled_x = if reported_w == 0 { x } else { x * real_w / i32::try_from(reported_w).unwrap_or(i32::MAX) };
     let scaled_y = if reported_h == 0 { y } else { y * real_h / i32::try_from(reported_h).unwrap_or(i32::MAX) };
     (scaled_x, scaled_y)
+}
+
+/// `scale_coordinate` plus `active`'s own origin -- but ONLY for an
+/// absolute position; a RELATIVE delta must stay a pure delta, or it would
+/// be corrupted by an unrelated absolute offset. A free function for the
+/// same testability reason as `scale_coordinate`.
+fn scale_for_active_display(
+    active: ActiveDisplay,
+    reported_size: (u32, u32),
+    x: i32,
+    y: i32,
+    coordinate: Coordinate,
+) -> (i32, i32) {
+    let active_size = (
+        i32::try_from(active.width).unwrap_or(i32::MAX),
+        i32::try_from(active.height).unwrap_or(i32::MAX),
+    );
+    let (scaled_x, scaled_y) = scale_coordinate(active_size, reported_size, x, y);
+    if coordinate == Coordinate::Abs {
+        (scaled_x + active.x, scaled_y + active.y)
+    } else {
+        (scaled_x, scaled_y)
+    }
 }
 
 fn button_from_flags(flags: MouseButtonFlags) -> Option<Button> {
@@ -383,5 +450,37 @@ mod tests {
     #[test]
     fn scale_coordinate_does_not_divide_by_zero_for_a_degenerate_reported_size() {
         assert_eq!(scale_coordinate((1920, 1080), (0, 0), 10, 10), (10, 10));
+    }
+
+    #[test]
+    fn scale_for_active_display_adds_the_origin_for_an_absolute_position() {
+        // A secondary monitor sitting to the right of a 1920-wide primary:
+        // origin (1920, 0), its own 2560x1440 real size.
+        let active = ActiveDisplay { x: 1920, y: 0, width: 2560, height: 1440 };
+        // Dead center of the 480x270-reported video -> dead center of the
+        // secondary monitor, THEN shifted right by the origin.
+        let (x, y) = scale_for_active_display(active, (480, 270), 240, 135, Coordinate::Abs);
+        assert_eq!((x, y), (1920 + 1280, 720));
+    }
+
+    #[test]
+    fn scale_for_active_display_does_not_add_the_origin_for_a_relative_delta() {
+        // Same active display, but a MoveRelative delta must stay a pure
+        // (scaled) delta -- adding the origin here would be a real bug,
+        // corrupting every relative move by the target monitor's offset.
+        let active = ActiveDisplay { x: 1920, y: 0, width: 2560, height: 1440 };
+        let (x, y) = scale_for_active_display(active, (480, 270), 10, 10, Coordinate::Rel);
+        let (expected_x, expected_y) = scale_coordinate((2560, 1440), (480, 270), 10, 10);
+        assert_eq!((x, y), (expected_x, expected_y));
+    }
+
+    #[test]
+    fn scale_for_active_display_on_the_primary_monitor_matches_a_zero_origin() {
+        // The primary monitor's origin is always (0, 0) -- confirms the
+        // offset math is a no-op in the one configuration this project can
+        // currently live-test on real hardware.
+        let active = ActiveDisplay { x: 0, y: 0, width: 1920, height: 1200 };
+        let (x, y) = scale_for_active_display(active, (480, 270), 240, 135, Coordinate::Abs);
+        assert_eq!((x, y), scale_coordinate((1920, 1200), (480, 270), 240, 135));
     }
 }

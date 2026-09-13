@@ -3,18 +3,30 @@
 //! connection attempt, pairs via the relay, and runs a real login +
 //! continuous video session.
 //!
-//! **Deliberately still a single-session-at-a-time build.** Video is the
-//! real primary monitor via [`va_capture::DxgiDuplicationSource`], resized
-//! by `va-encode` down to this binary's fixed, measured-real-time encode
-//! resolution (see `WIDTH`/`HEIGHT` below) -- never the display's own
-//! native size. Mouse/keyboard input is real (`va-input`), and now gated
-//! by a real permission model: a temporary-password login shows a native
-//! Yes/No consent prompt (`consent::ask_for_input_control`) before any
-//! input is granted; a permanent-password login is pre-authorized,
-//! unattended access and grants immediately with no prompt -- see
-//! `va_protocol::handshake`'s docs for the underlying state machine. File
-//! transfer and multi-session support remain explicitly out of scope for
-//! this pass.
+//! **Deliberately still a single-session-at-a-time build.** All real
+//! monitors are enumerated up front (`va_capture::enumerate_monitors`,
+//! backed by the `display-info` crate) and reported to the controller with
+//! their real position/size; the session starts on the primary monitor and
+//! switches to any other monitor on request (`Misc.switch_display`),
+//! restarting the video pump against
+//! [`va_capture::DxgiDuplicationSource::new_for_monitor_index`] and
+//! re-pointing the input injector's active-display origin so absolute
+//! mouse coordinates offset correctly for a non-primary monitor's position
+//! in the virtual desktop. Frames are resized by `va-encode` down to this
+//! binary's fixed, measured-real-time encode resolution (see
+//! `WIDTH`/`HEIGHT` below) -- never the display's own native size. **Known
+//! limitation:** `enigo`'s absolute-position backend normalizes only
+//! against the PRIMARY monitor's dimensions (not the full virtual desktop),
+//! so clicks on a secondary monitor may not land pixel-accurately; fixing
+//! that needs a patched/forked `enigo` or a reviewed raw `SetCursorPos`
+//! carve-out, deliberately not attempted in this pass. Mouse/keyboard input
+//! is real (`va-input`), and gated by a real permission model: a
+//! temporary-password login shows a native Yes/No consent prompt
+//! (`consent::ask_for_input_control`) before any input is granted; a
+//! permanent-password login is pre-authorized, unattended access and
+//! grants immediately with no prompt -- see `va_protocol::handshake`'s docs
+//! for the underlying state machine. File transfer and multi-session
+//! support remain explicitly out of scope for this pass.
 //!
 //! **The device identity IS persisted to a local file across restarts** —
 //! not a nicety, a correctness requirement discovered live: hbbs rejects a
@@ -46,14 +58,15 @@ use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex as AsyncMutex;
 
-use va_capture::{CaptureError, DxgiDuplicationSource, FrameSource};
+use va_capture::{CaptureError, DxgiDuplicationSource, FrameSource, MonitorInfo};
 use va_crypto::IdentityKeyPair;
 use va_encode::{Av1Encoder, RawFrame, VideoEncoder};
+use va_input::ActiveDisplay;
 use va_protocol::{
     decode_punch_hole, decode_register_peer_response, decode_register_pk_response,
     encode_av1_video_frame, encode_register_peer, encode_register_pk, read_envelope_field,
     rendezvous_field, wrap_message, Credentials, DisplayInfo, Event, HostIdentity, HostInfo,
-    HostSession, RegisterPeer, RegisterPk, NAT_TYPE_SYMMETRIC,
+    HostSession, RegisterPeer, RegisterPk, SwitchDisplay, NAT_TYPE_SYMMETRIC,
 };
 
 // 480x270, not 1280x720: this is a real, tested resolution choice, not
@@ -75,6 +88,61 @@ const TARGET_FPS: u64 = 12;
 const TARGET_BITRATE_KBPS: u32 = 1500;
 const REG_INTERVAL: Duration = Duration::from_secs(10);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Real per-monitor `DisplayInfo` for `PeerInfo.displays` at login, from an
+/// ALREADY-enumerated monitor list (the caller's own `enumerate_monitors()`
+/// call -- this never re-enumerates itself, so it always reflects exactly
+/// what the caller already decided the display set to be). Each monitor's
+/// REAL native x/y/width/height (for a display-picker UI to show something
+/// honest) is deliberately NOT the same as the fixed `WIDTH`/`HEIGHT` this
+/// binary actually encodes video at regardless of which monitor is
+/// streamed (`va-encode`'s resize step already handles any real source
+/// resolution). Falls back to a single synthetic entry -- preserving this
+/// binary's old single-display behavior -- only if `monitors` is empty,
+/// which real capture couldn't work with anyway.
+fn real_displays(monitors: &[MonitorInfo]) -> Vec<DisplayInfo> {
+    if monitors.is_empty() {
+        tracing::warn!("monitor enumeration returned no displays -- falling back to a single synthetic entry");
+        return vec![fallback_display_info()];
+    }
+    monitors.iter().cloned().map(monitor_to_display_info).collect()
+}
+
+fn monitor_to_display_info(monitor: MonitorInfo) -> DisplayInfo {
+    DisplayInfo {
+        x: monitor.x,
+        y: monitor.y,
+        width: monitor.width as i32,
+        height: monitor.height as i32,
+        name: monitor.name,
+        online: true,
+        cursor_embedded: false,
+        original_resolution: None,
+        scale: 1.0,
+    }
+}
+
+fn fallback_display_info() -> DisplayInfo {
+    DisplayInfo {
+        x: 0,
+        y: 0,
+        width: WIDTH as i32,
+        height: HEIGHT as i32,
+        name: "Display1".to_string(),
+        online: true,
+        cursor_embedded: false,
+        original_resolution: None,
+        scale: 1.0,
+    }
+}
+
+/// The index of the primary monitor in a fresh `enumerate_monitors()`
+/// result, or `0` if enumeration found nothing / nothing is marked primary
+/// (shouldn't happen on a real Windows machine, but a real fallback
+/// default is cheaper than an error path for something this recoverable).
+fn primary_monitor_index(monitors: &[MonitorInfo]) -> usize {
+    monitors.iter().position(|m| m.is_primary).unwrap_or(0)
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -206,22 +274,25 @@ async fn run_host_session(
     let (mut read_half, write_half) = stream.into_split();
     let write_half = Arc::new(AsyncMutex::new(write_half));
 
+    // Enumerated ONCE at login, not re-checked per frame -- a monitor
+    // connected/disconnected mid-session isn't picked up until the next
+    // login or display-switch request (both re-enumerate fresh).
+    let monitors_at_login = va_capture::enumerate_monitors().unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "monitor enumeration failed -- falling back to a single synthetic entry");
+        Vec::new()
+    });
+    let initial_monitor_index = primary_monitor_index(&monitors_at_login);
+    let initial_active_display = monitors_at_login.get(initial_monitor_index).map_or(
+        ActiveDisplay { x: 0, y: 0, width: WIDTH, height: HEIGHT },
+        |m| ActiveDisplay { x: m.x, y: m.y, width: m.width, height: m.height },
+    );
+
     let (session, first_envelope) = HostSession::start(
         HostIdentity { keypair: identity, device_id: device_id.to_string() },
         HostInfo {
             hostname: "verevon-agent".to_string(),
             platform: env::consts::OS.to_string(),
-            displays: vec![DisplayInfo {
-                x: 0,
-                y: 0,
-                width: WIDTH as i32,
-                height: HEIGHT as i32,
-                name: "Display1".to_string(),
-                online: true,
-                cursor_embedded: false,
-                original_resolution: None,
-                scale: 1.0,
-            }],
+            displays: real_displays(&monitors_at_login),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
         Credentials {
@@ -232,7 +303,7 @@ async fn run_host_session(
     let session = Arc::new(AsyncMutex::new(session));
     send_frame(&write_half, &first_envelope).await?;
 
-    let mut injector = init_injector();
+    let mut injector = init_injector(initial_active_display);
 
     let mut inbuf = BytesMut::with_capacity(4096);
     let mut read_chunk = [0u8; 4096];
@@ -266,7 +337,13 @@ async fn run_host_session(
                             }
                             tracing::info!("logged in -- starting the video pump");
                             video_task =
-                                Some(start_session_tasks(&session, &write_half, device_id, requires_consent));
+                                Some(start_session_tasks(
+                                    &session,
+                                    &write_half,
+                                    device_id,
+                                    requires_consent,
+                                    initial_monitor_index,
+                                ));
                         }
                         Ok(Event::LoginFailed { reason, response }) => {
                             drop(session_guard);
@@ -288,6 +365,20 @@ async fn run_host_session(
                         Ok(Event::InputDenied) => {
                             drop(session_guard);
                             tracing::debug!("controller sent input while input control isn't granted -- ignored");
+                        }
+                        Ok(Event::DisplaySwitchRequested { display }) => {
+                            drop(session_guard);
+                            let outcome = handle_display_switch_request(
+                                display,
+                                &session,
+                                &write_half,
+                                &mut injector,
+                                &mut video_task,
+                            )
+                            .await;
+                            if let Err(err) = outcome {
+                                break 'session Err(err);
+                            }
                         }
                         Ok(Event::None) => {}
                         Err(err) => break 'session Err(err.into()),
@@ -314,27 +405,96 @@ async fn run_host_session(
     result
 }
 
-/// Spawns the two tasks a fresh login kicks off: the video pump, and the
-/// input-permission decision (see `decide_input_permission`). Returns the
-/// video pump's handle+stop-flag for the caller to track and eventually
-/// tear down; the permission-decision task is fire-and-forget -- nothing
-/// needs to wait on or cancel it, it always finishes on its own (granted,
-/// denied, or the connection just closes out from under it).
+/// Spawns the two tasks a fresh login kicks off: the video pump (see
+/// `start_video_pump`), and the input-permission decision (see
+/// `decide_input_permission`). Returns the video pump's handle+stop-flag
+/// for the caller to track and eventually tear down; the permission-
+/// decision task is fire-and-forget -- nothing needs to wait on or cancel
+/// it, it always finishes on its own (granted, denied, or the connection
+/// just closes out from under it).
 fn start_session_tasks(
     session: &Arc<AsyncMutex<HostSession>>,
     write_half: &Arc<AsyncMutex<OwnedWriteHalf>>,
     device_id: &str,
     requires_consent: bool,
+    monitor_index: usize,
 ) -> (tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let video_task = tokio::spawn(pump_video(session.clone(), write_half.clone(), stop.clone()));
+    let video_task = start_video_pump(session, write_half, monitor_index);
     tokio::spawn(decide_input_permission(
         session.clone(),
         write_half.clone(),
         device_id.to_string(),
         requires_consent,
     ));
-    (video_task, stop)
+    video_task
+}
+
+/// Spawns just the video pump for `monitor_index` -- factored out of
+/// `start_session_tasks` so a display switch (which restarts ONLY the
+/// video pump, not the permission decision) can reuse it without also
+/// re-triggering a consent prompt.
+fn start_video_pump(
+    session: &Arc<AsyncMutex<HostSession>>,
+    write_half: &Arc<AsyncMutex<OwnedWriteHalf>>,
+    monitor_index: usize,
+) -> (tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let task = tokio::spawn(pump_video(session.clone(), write_half.clone(), stop.clone(), monitor_index));
+    (task, stop)
+}
+
+/// Handles a `DisplaySwitchRequested` event: validates the requested index
+/// against a FRESH enumeration (the display set may have changed since
+/// login), restarts the video pump for the new monitor, updates the
+/// injector's active-display geometry so future clicks land correctly, and
+/// sends a real confirmation with the new display's real geometry. An
+/// out-of-range request is logged and ignored -- not a session-ending
+/// error, since a stale or malformed request from the controller shouldn't
+/// take down an otherwise-healthy session.
+async fn handle_display_switch_request(
+    requested_index: i32,
+    session: &Arc<AsyncMutex<HostSession>>,
+    write_half: &Arc<AsyncMutex<OwnedWriteHalf>>,
+    injector: &mut Option<va_input::EnigoInjector>,
+    video_task: &mut Option<(tokio::task::JoinHandle<()>, Arc<AtomicBool>)>,
+) -> anyhow::Result<()> {
+    let monitors = va_capture::enumerate_monitors().unwrap_or_default();
+    let Some(monitor) = usize::try_from(requested_index).ok().and_then(|index| monitors.get(index).cloned()) else {
+        tracing::warn!(
+            requested_index,
+            "controller requested a display switch to an out-of-range index -- ignoring"
+        );
+        return Ok(());
+    };
+
+    if let Some((mut task, stop)) = video_task.take() {
+        stop_video_pump(&mut task, &stop).await;
+    }
+    *video_task = Some(start_video_pump(session, write_half, monitor.index));
+
+    if let Some(injector) = injector.as_mut() {
+        injector.set_active_display(ActiveDisplay {
+            x: monitor.x,
+            y: monitor.y,
+            width: monitor.width,
+            height: monitor.height,
+        });
+    }
+
+    let confirmation = SwitchDisplay {
+        display: i32::try_from(monitor.index).unwrap_or(0),
+        x: monitor.x,
+        y: monitor.y,
+        width: monitor.width as i32,
+        height: monitor.height as i32,
+        cursor_embedded: false,
+    };
+    let envelope = {
+        let mut session_guard = session.lock().await;
+        session_guard.confirm_display_switch(&confirmation)?
+    };
+    send_frame(write_half, &envelope).await?;
+    Ok(())
 }
 
 /// Signals `pump_video` to stop and waits briefly for it to exit on its
@@ -400,8 +560,8 @@ async fn decide_input_permission(
 /// permission is checked upstream, in `va_protocol::HostSession` itself
 /// (see `decide_input_permission`) -- by the time an event reaches this
 /// injector, the controller was already allowed to send it.
-fn init_injector() -> Option<va_input::EnigoInjector> {
-    match va_input::EnigoInjector::new(WIDTH, HEIGHT) {
+fn init_injector(initial_active_display: ActiveDisplay) -> Option<va_input::EnigoInjector> {
+    match va_input::EnigoInjector::new(WIDTH, HEIGHT, initial_active_display) {
         Ok(injector) => Some(injector),
         Err(err) => {
             tracing::warn!(error = %err, "failed to initialize input injection -- input will be ignored");
@@ -429,15 +589,20 @@ fn inject_input_event(injector: &mut Option<va_input::EnigoInjector>, event: &Ev
 /// Runs until `stop` is set (checked once per tick -- see
 /// `stop_video_pump`'s docs for why this is cooperative rather than an
 /// `abort()`) or the shared write half errors (the connection is gone).
+/// Captures `monitor_index` in the MOST RECENT `enumerate_monitors()`
+/// result at the time this task was spawned -- switching displays means
+/// starting a whole new `pump_video` task (see `handle_display_switch_request`),
+/// not signaling this one to swap its source internally.
 async fn pump_video(
     session: Arc<AsyncMutex<HostSession>>,
     write_half: Arc<AsyncMutex<OwnedWriteHalf>>,
     stop: Arc<AtomicBool>,
+    monitor_index: usize,
 ) {
     // Real GPU/COM setup that briefly blocks the calling thread (see
     // `va-capture::dxgi`'s doc comment) -- must not run directly on this
     // async task.
-    let mut source = match tokio::task::spawn_blocking(DxgiDuplicationSource::new_for_primary_monitor).await {
+    let mut source = match tokio::task::spawn_blocking(move || DxgiDuplicationSource::new_for_monitor_index(monitor_index)).await {
         Ok(Ok(source)) => source,
         Ok(Err(err)) => {
             tracing::error!(error = %err, "failed to start screen capture -- no video will be sent");

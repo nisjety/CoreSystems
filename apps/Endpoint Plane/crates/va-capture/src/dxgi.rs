@@ -5,8 +5,12 @@
 //! API surface verified directly against the cached `windows-capture 1.5.0`
 //! source (not docs.rs, not assumed) -- exact file+line citations:
 //! - `Monitor::primary()` (`monitor.rs:74`) picks the OS-designated primary
-//!   monitor; multi-monitor selection is a known future gap (`Monitor::
-//!   enumerate`/`from_index`, `monitor.rs:406,96`), not addressed here.
+//!   monitor. Multi-monitor selection (`new_for_monitor_index`) is real,
+//!   but `Monitor` itself (`monitor.rs`) has no safe way to read a
+//!   monitor's POSITION -- only `width`/`height`/`name`/`index`
+//!   (`monitor.rs:362,384,127,116` -- verified directly, not assumed) --
+//!   so `enumerate_monitors`/`new_for_monitor_index` go through
+//!   `display-info` instead (its own doc comment covers the safe bridge).
 //! - `Settings::new` (`settings.rs:133`) takes eight positional arguments in
 //!   a fixed order; every one except `color_format` is left at `Default`
 //!   deliberately -- `GraphicsCaptureApi::new` gates cursor/border/
@@ -113,7 +117,51 @@ impl GraphicsCaptureApiHandler for DuplicationHandler {
     }
 }
 
-/// Real screen capture of the OS-designated primary monitor.
+/// One real display, enumerated fresh on every [`enumerate_monitors`] call
+/// -- monitors can be connected/disconnected at any time, so this is never
+/// cached. `index` is only stable WITHIN one enumeration; re-enumerate
+/// before acting on an index from a previous call, since the OS is free to
+/// reorder or renumber displays when the physical set changes.
+#[derive(Debug, Clone)]
+pub struct MonitorInfo {
+    pub index: usize,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
+}
+
+/// Lists every currently-connected display, with real position/size (see
+/// this module's doc comment for why this goes through `display-info`
+/// rather than `windows_capture::monitor::Monitor` directly).
+///
+/// # Errors
+///
+/// [`CaptureError::NoDisplay`] if the OS enumeration call itself fails
+/// (distinct from a genuinely empty result, which just returns `Ok(vec![])`
+/// -- an empty list is a fact the caller can act on, not an error).
+pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>, CaptureError> {
+    let displays = display_info::DisplayInfo::all().map_err(|_| CaptureError::NoDisplay)?;
+    Ok(displays
+        .into_iter()
+        .enumerate()
+        .map(|(index, d)| MonitorInfo {
+            index,
+            name: d.name,
+            x: d.x,
+            y: d.y,
+            width: d.width,
+            height: d.height,
+            is_primary: d.is_primary,
+        })
+        .collect())
+}
+
+/// Real screen capture of one monitor -- the primary one by default
+/// ([`DxgiDuplicationSource::new_for_primary_monitor`]), or any enumerated
+/// one ([`DxgiDuplicationSource::new_for_monitor_index`]).
 pub struct DxgiDuplicationSource {
     shared: Arc<SharedFrame>,
     control: Option<CaptureControl<DuplicationHandler, CaptureError>>,
@@ -132,6 +180,30 @@ impl DxgiDuplicationSource {
     /// session, DirectX device creation failure).
     pub fn new_for_primary_monitor() -> Result<Self, CaptureError> {
         let monitor = Monitor::primary().map_err(|_| CaptureError::NoDisplay)?;
+        Self::new_for_monitor(monitor)
+    }
+
+    /// Starts a capture session for the monitor at `index` in the MOST
+    /// RECENT [`enumerate_monitors`] result -- re-enumerate immediately
+    /// before calling this if the physical monitor set could have changed
+    /// since. Same blocking/threading caveats as
+    /// [`Self::new_for_primary_monitor`].
+    ///
+    /// # Errors
+    ///
+    /// [`CaptureError::NoDisplay`] if `index` is out of range for the
+    /// current display set, or WGC session setup fails.
+    pub fn new_for_monitor_index(index: usize) -> Result<Self, CaptureError> {
+        let displays = display_info::DisplayInfo::all().map_err(|_| CaptureError::NoDisplay)?;
+        let display = displays.get(index).ok_or(CaptureError::NoDisplay)?;
+        // `HMONITOR(pub *mut c_void)` -- `.0` is a plain field read, not a
+        // pointer dereference, so this needs no `unsafe` on our side (see
+        // this module's doc comment for the full citation).
+        let monitor = Monitor::from_raw_hmonitor(display.raw_handle.0);
+        Self::new_for_monitor(monitor)
+    }
+
+    fn new_for_monitor(monitor: Monitor) -> Result<Self, CaptureError> {
         let shared = Arc::new(SharedFrame {
             slot: Mutex::new(None),
             ready: Condvar::new(),
@@ -192,6 +264,26 @@ impl Drop for DxgiDuplicationSource {
             if let Err(err) = control.stop() {
                 tracing::warn!(?err, "windows-capture session did not stop cleanly");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs a real display -- headless CI runners have none"]
+    fn enumerate_monitors_finds_at_least_one_real_display_with_sane_geometry() {
+        let monitors = enumerate_monitors().unwrap();
+        assert!(!monitors.is_empty(), "expected at least one real display");
+        assert_eq!(
+            monitors.iter().filter(|m| m.is_primary).count(),
+            1,
+            "expected exactly one primary display"
+        );
+        for m in &monitors {
+            assert!(m.width > 0 && m.height > 0, "a real monitor must report a nonzero size: {m:?}");
         }
     }
 }
