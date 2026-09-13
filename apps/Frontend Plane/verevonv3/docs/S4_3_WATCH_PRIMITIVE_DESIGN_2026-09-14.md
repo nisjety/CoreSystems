@@ -276,7 +276,57 @@ The exact edit, modelled on execution-core's own entry (`audiences: [..., "sandb
 
 Each step is independently testable and ships with no caller ahead of the step that needs it — the S3.2/S3.3/S4.2 precedent.
 
-1. **Watch core.** session-core migration (`space_watches`, `space_watch_events`), `capability-core/internal/watch` (store, state machine, bounded predicate + its tests), and a sweeper that claims rows and does nothing with them because no adapter is registered. No proto, no HTTP, nothing fires.
+1. **Watch core.** session-core migration (`space_watches`, `space_watch_events`), `capability-core/internal/watch` (store, state machine, bounded predicate + its tests), and a sweeper that claims rows and does nothing with them because no adapter is registered. No proto, no HTTP, nothing fires. **DONE 2026-09-14.** What differed from this list, and why:
+
+   - **The claim commits BEFORE the work, which the cron sweeper does not do.**
+     That sweeper runs everything — including a network call to Control — inside
+     one transaction holding row locks on all 100 claimed rows. Survivable at
+     one fire per minute; not at a two-second poll whose work is a remote read,
+     where the same shape would hold locks across an RPC for every watch in the
+     fleet at once. So `ClaimDue` is its own short transaction: select `FOR
+     UPDATE SKIP LOCKED`, push `next_poll_at` forward, commit. The cost is that
+     a sweeper which dies after claiming delays that watch by one interval,
+     which is invisible next to a 2–30s poll and far cheaper than the
+     alternative.
+   - **`next_poll_at` and `idle_polls` are new columns.** §3's draft had
+     `last_polled_at` and `consecutive_failures` but nothing the claim query
+     could order or filter by, so the backoff §7.1 specifies was not
+     expressible. `next_poll_at` is both the due-time and the claim — exactly
+     what `cron_schedules.next_fire_at` already is. `idle_polls` is the backoff
+     LEVEL rather than a stored duration, so there is one source of truth: a
+     counter and a duration kept side by side are two things that can disagree,
+     and the one that disagrees silently is the duration.
+   - **A partial unique index on ACTIVE watches**, keyed on
+     `(org, space, source, predicate, creator)`. Not in §3, and it earns its
+     place: watching the same thing for the same reason twice is a duplicate
+     rather than two answers, and without the index a retried create silently
+     doubles the events a person receives. Terminal watches fall outside it, so
+     re-watching after one ends is still allowed.
+   - **`gap` became its own event kind** rather than a flag on a match. Output
+     produced and then trimmed is not output that never existed, and a reader
+     summarising a log has to be told which they are looking at. It is emitted
+     at the WATCH's own cursor, not the next line's, so it is attached to where
+     the hole actually was.
+   - **The kind/trust pairing is enforced, not just documented.** A `match`
+     event must carry `unscreened_source_payload`; `validateEmission` refuses
+     anything else. Without that rule an adapter could launder a payload into
+     the label a consumer renders as the owning plane's own assertion — the
+     exact failure §5's trust column exists to prevent.
+   - **`delivery_state` carries a CHECK pinning it to `'recorded'`.** §6 said
+     S4.4 owns everything past it; the constraint makes that enforceable rather
+     than a convention, and forces S4.4 to widen the vocabulary deliberately.
+   - **The sweeper is NOT wired into `cmd/main.go`.** There is no create path
+     until step 3, so no watch row can exist, so a wired sweeper would tick
+     every second over an empty table forever. It ships built and tested; step 2
+     wires it when it has an adapter and step 3 gives it rows. This is the
+     no-caller-ahead-of-its-step rule the whole sequence follows.
+   - **An integration test against a real Postgres, not only stubs.** The
+     store's SQL is where this repo has actually been bitten: S4.2's process
+     store passed every stub test — right text, right bound arguments — and
+     still failed 14 of 17 integration tests on a type deduction only a real
+     planner performs. A 25-parameter INSERT, a `FOR UPDATE SKIP LOCKED` claim,
+     and an UPDATE fenced on state are all in that category, so they are
+     exercised against a throwaway container under `-tags integration`.
 2. **Process-output adapter.** The `SourceAdapter` seam and its first implementation: poll, evaluate, emit, commit cursor, drain-then-terminate. The cursor/partial-line/gap proofs live here. Still no caller — the sweeper runs, but nothing can create a watch.
 3. **Create/cancel + authority.** Control `watch-create-decision`, capability-core HTTP surface, the per-emission reauthorization, the Space check on `source_ref`. First point at which a watch can exist.
 4. **Read path.** model-gateway `/v1/watches`, the V3 gateway's `/work` fourth section, `activityFromWatch`. A watch becomes visible in the room.

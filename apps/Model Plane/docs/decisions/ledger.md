@@ -3120,3 +3120,106 @@ S4.4's); and every adapter past process output.
 
 Full detail, including the state machine, the record, the authority argument and
 the per-verification test plan: the design doc.
+
+## S4.3 step 1 implemented — the Watch core, and a claim that does not hold locks across the network (2026-09-14)
+
+**State:** `implemented` (design doc §3, §9 step 1). session-core migration
+`0036` and `capability-core/internal/watch`. Nothing fires: no adapter is
+registered, no create path exists, and the sweeper is deliberately not wired.
+
+**The claim commits BEFORE the work, which is where this departs from the cron
+sweeper it otherwise copies.** That sweeper does everything inside one
+transaction — including an HTTP call to Control — while holding row locks on
+every one of up to 100 claimed schedules. At one fire per minute that is
+survivable. A watch polls every two seconds and its work is a remote read, so
+the same shape would hold locks across an RPC for the whole fleet at once.
+
+So `ClaimDue` is its own short transaction: select `FOR UPDATE SKIP LOCKED`,
+push `next_poll_at` forward by the current backoff, commit. A second replica
+then cannot re-pick the row and no transaction is open while an adapter talks to
+the network. The cost is stated rather than hidden: a sweeper that dies after
+claiming delays that watch by one interval — invisible next to a 2–30s poll, and
+much cheaper than the alternative.
+
+**`next_poll_at` is both the due-time and the claim**, exactly as
+`cron_schedules.next_fire_at` already is. The design's draft schema had
+`last_polled_at` but nothing the claim could order or filter by, so the backoff
+§7.1 specifies was not actually expressible. `idle_polls` is the backoff LEVEL
+rather than a stored duration, so there is one source of truth: a counter and a
+duration side by side are two things that can disagree, and the one that
+disagrees silently is the duration.
+
+**The commit ordering is the whole correctness argument, and it is one
+transaction.** The event insert and the cursor move happen together, event
+first:
+
+- an event without a committed cursor is re-derived next poll (adapters are
+  idempotent in the cursor) and deduplicated by the unique index on
+  `(watch_id, cursor_value, kind)` — harmless;
+- a committed cursor without its event silently skips a match, and nothing
+  downstream could ever discover it.
+
+That asymmetry is why the order is fixed. A terminal state is applied in the
+same transaction as the final event, because a separate call would leave a
+window where the watch polls a source it has already reported as gone.
+
+**The unwatch race is resolved in favour of the person who asked to stop.** The
+cursor UPDATE is fenced on the watch still being ACTIVE, so a cancellation that
+lands mid-poll wins: the update matches nothing, the cursor does not move, and
+the watch stays cancelled. Events already inserted remain — they are a true
+account of what was observed — but the watch does not resume.
+
+**A partial unique index on ACTIVE watches**, keyed on `(org, space, source,
+predicate, creator)`. Watching the same thing for the same reason twice is a
+duplicate rather than two answers, and without the index a retried create
+silently doubles the events a person receives. `Create` surfaces that as its own
+error, because the right response is to show the existing watch: the person
+asked to be told about something and they already will be. Terminal watches fall
+outside the index, so re-watching after one ends is a new row carrying new
+authority — which is the point.
+
+**A `match` may not be labelled owner metadata, and the code refuses it.** The
+trust column exists so a consumer can tell a program's own bytes from the owning
+plane's assertions. Without a pairing rule an adapter could launder a payload
+into the label a consumer renders as trustworthy, which would defeat the column
+entirely. `validateEmission` enforces it and a test asserts it directly. The
+same reasoning put `state_change` on the predicate side of that line:
+`MatchLine` returns false for it unconditionally, so no program can emit text
+that forges a lifecycle event.
+
+**No regular expressions, and the migration enforces the closure too.** The
+predicate vocabulary is a CHECK constraint, not only a Go switch — a future
+adapter that wants a new predicate has to change a line of SQL, which is the
+review it deserves. Go validates the same rules anyway, because a constraint
+violation arrives as an opaque Postgres error several layers from the caller and
+"a contains predicate requires a value" is a sentence a caller can act on.
+
+**`delivery_state` carries a CHECK pinning it to `'recorded'`.** The design said
+S4.4 owns everything past it; the constraint makes that enforceable rather than
+a convention, and forces S4.4 to widen the vocabulary deliberately instead of
+writing a state nothing else understands.
+
+**The sweeper is built, tested, and NOT wired into `cmd/main.go`.** There is no
+create path until step 3, so no row can exist, so a wired sweeper would tick
+every second over an empty table forever. It ships inert; step 2 wires it when
+it has an adapter. This is the no-caller-ahead-of-its-step rule S3.2, S3.3 and
+S4.2 all followed, applied to a case where the design's own step list implied
+otherwise.
+
+**An unadapted watch backs off rather than terminating.** A binary older than a
+watch's `source_kind` is a deployment-ordering question, and ending a person's
+watch is the wrong answer to it. The same reasoning governs failures: five
+consecutive ones push the watch to the ceiling interval and no further. The only
+things that end a watch are the member, the clock, and the source.
+
+Verification: 24 unit tests over the state machine, the predicate grammar and
+the emission contract — all pure, no database. Plus 12 integration tests under
+`-tags integration` against a throwaway Postgres, because the store's SQL is
+where this repo has actually been bitten: S4.2's process store passed every stub
+test (right text, right bound arguments) and still failed 14 of 17 integration
+tests on a type deduction only a real planner performs. A 25-parameter INSERT, a
+`FOR UPDATE SKIP LOCKED` claim, and a fenced UPDATE are all in that category.
+The migration was separately proven to apply, re-apply idempotently, and
+actually refuse each of the twelve things its constraints claim to refuse.
+
+Full detail: design doc §3 and §9 step 1.
