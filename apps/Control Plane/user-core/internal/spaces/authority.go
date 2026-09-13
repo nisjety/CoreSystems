@@ -178,6 +178,14 @@ type EffectPolicy struct {
 	// its own agents' compute. See
 	// apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md.
 	SandboxCapabilityEntitled bool `json:"sandbox_capability_entitled"`
+	// ProcessRegistryEntitled is deliberately separate from
+	// SandboxCapabilityEntitled, for the same reason ScheduleFireEntitled is
+	// separate from ThreadCreateEntitled: acquiring a sandbox is bounded work
+	// a caller waits on, while a background process keeps running after the
+	// turn that started it, retains its own output, and can be reattached to
+	// later. A Space allowed the first is not thereby allowed the second. See
+	// apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §4.
+	ProcessRegistryEntitled bool `json:"process_registry_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {

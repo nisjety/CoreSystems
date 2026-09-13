@@ -102,6 +102,7 @@ type PersonalThreadDecisionEvidence struct {
 	AgentActionEntitled       bool
 	ScheduleFireEntitled      bool
 	SandboxCapabilityEntitled bool
+	ProcessRegistryEntitled   bool
 	ResourceAuthorizationRef  string
 }
 

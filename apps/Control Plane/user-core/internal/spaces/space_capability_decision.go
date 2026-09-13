@@ -14,7 +14,32 @@ const (
 	spaceCapabilityAction   = "model.space.capability_profile"
 	spaceCapabilityAudience = "model-plane-sandbox-manager"
 	spaceCapabilitySchema   = "sha256:space-capability-profile-v1"
+
+	// ProcessesBoundedOneshot is the substrate profile every execution-core
+	// reports by default: bounded one-shot children only, nothing that
+	// outlives the call that started it.
+	ProcessesBoundedOneshot = "bounded_oneshot"
+	// ProcessesBackgroundRegistry is what a backend reports when it can host
+	// reattachable background processes (S4.2). Mirrored by
+	// sandbox-manager's authz.ProcessesBackgroundRegistry and produced by
+	// execution-core's sandbox.rs; all three must agree on the spelling,
+	// because the value is bound into this decision's payload digest.
+	ProcessesBackgroundRegistry = "background_registry"
 )
+
+// allowedProcessesClaims is the closed vocabulary Control will sign.
+//
+// This is the first validation the `processes` claim has ever had. It was a
+// free-form string checked only for non-emptiness, which meant Control would
+// sign a decision for a backend claiming anything at all — and the S3.2
+// design's own §1 promised a policy allowlist here that was never built.
+// This closes that gap for one dimension rather than all of them: an
+// unrecognized claim is refused before signing instead of being carried into
+// a digest that two other services then treat as authoritative.
+var allowedProcessesClaims = map[string]struct{}{
+	ProcessesBoundedOneshot:     {},
+	ProcessesBackgroundRegistry: {},
+}
 
 // SpaceCapabilityIntent is the non-secret, measured sandbox substrate claim a
 // sandbox-manager backend presents to Control immediately before requesting a
@@ -49,6 +74,9 @@ func (i SpaceCapabilityIntent) Validate() error {
 	}
 	if !strings.HasPrefix(i.ProfileDigest, "sha256:") || len(i.ProfileDigest) != len("sha256:")+64 {
 		return fmt.Errorf("space capability intent profile digest is invalid")
+	}
+	if _, ok := allowedProcessesClaims[i.Processes]; !ok {
+		return fmt.Errorf("space capability intent processes claim %q is not a recognized substrate profile", i.Processes)
 	}
 	return nil
 }
@@ -137,6 +165,17 @@ func IssueSpaceCapabilityDecision(
 	permissions := []string{"space:sandbox:use"}
 	if intent.Egress != "disabled_by_default" {
 		permissions = append(permissions, "space:egress")
+	}
+	// Deliberately NOT symmetric with egress above. An egress-capable claim
+	// without the entitlement is refused outright by the verifier, because a
+	// backend that can reach the network must not serve a Space that was
+	// never allowed network reach. A process-capable backend is different:
+	// it is still a perfectly good bounded one-shot substrate for a Space
+	// that is not entitled to background work, so the lease is granted and
+	// only the permission is withheld. sandbox-manager then records the
+	// absence on the lease row and refuses the process RPCs alone.
+	if intent.Processes == ProcessesBackgroundRegistry && evidence.ProcessRegistryEntitled {
+		permissions = append(permissions, "space:processes")
 	}
 	return Decision{
 		DecisionRef: strings.TrimSpace(decisionRef), OrgID: evidence.Membership.OrgID, SpaceRef: evidence.Membership.SpaceRef,

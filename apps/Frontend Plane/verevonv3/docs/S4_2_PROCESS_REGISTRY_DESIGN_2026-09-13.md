@@ -871,6 +871,28 @@ the step that needs it — the S3.2/S3.3 precedent.
 3. **Control** (§4 first layer): migration `028`, evidence field,
    `space:processes` permission, `processes` enum validation. Independent of
    2 (a decision without the permission is what every current caller gets).
+   **DONE 2026-09-13.** Notes:
+   - **`process_registry_entitled` is its own column, not a widening of
+     `sandbox_capability_entitled`**, for the reason `ScheduleFireEntitled`
+     is separate from `ThreadCreateEntitled`: acquiring a sandbox is bounded
+     work a caller waits on, while a background process keeps running after
+     the turn that started it, holds its own output, and can be reattached
+     to. A Space allowed the first is not thereby allowed the second. It
+     also joins `entitlementChanged`, so granting or revoking it bumps
+     `entitlement_revision` and invalidates authority material already
+     issued — the same fencing every other entitlement gets.
+   - **The enum validation closes a gap S3.2 promised and never built.**
+     That doc's §1 described a policy allowlist validating the measured
+     profile before signing; `processes` shipped as a free-form string
+     checked only for non-emptiness, so Control would sign a decision for a
+     backend claiming anything at all. `"isolated"` is not a hypothetical
+     example in the test — it is the value sandbox-manager's own verifier
+     fixture uses, which is precisely how nobody noticed. This closes it for
+     one dimension; `persistence`, `backup` and `credential_mode` remain
+     unvalidated and are still an open item.
+   - **No HTTP change was needed.** `upsertSpaceEffectPolicy` decodes
+     straight into `spaces.EffectPolicy`, so the new JSON field is settable
+     the moment the struct has it.
 4. **Process host** (§3): `process_host.rs`, measured profile, `SandboxLease.
    processes_permitted`, boot reconcile, kill-before-release; behind
    `EXECUTION_CORE_PROCESS_HOST`, default off. Linux TERM/KILL probe added to

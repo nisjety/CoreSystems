@@ -222,9 +222,6 @@ func TestProcessStore_RegisterRefusesAScratchOrWrongBackendLease(t *testing.T) {
 	}
 }
 
-// TestProcessStore_RegisterEnforcesTheLiveLimitAndFreesItOnExit proves the
-// limit is evaluated against live rows only — a finished process must not
-// permanently consume a slot.
 // TestProcessStore_RegisterRefusesANonSpaceLease: a thread/agent-scoped
 // lease has no Space workspace, so there is nowhere to run a background
 // process even in principle. RegisterRequest carries no Space of its own —
@@ -243,6 +240,9 @@ func TestProcessStore_RegisterRefusesANonSpaceLease(t *testing.T) {
 	}
 }
 
+// TestProcessStore_RegisterEnforcesTheLiveLimitAndFreesItOnExit proves the
+// limit is evaluated against live rows only — a finished process must not
+// permanently consume a slot.
 func TestProcessStore_RegisterEnforcesTheLiveLimitAndFreesItOnExit(t *testing.T) {
 	dsn := setupProcessDB(t)
 	store := newPoolStore(t, dsn).WithLimits(Limits{MaxLivePerLease: 2})

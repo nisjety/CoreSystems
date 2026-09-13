@@ -2623,3 +2623,63 @@ real-Postgres integration suite including a new non-Space-lease refusal.
 `authorize` in the same file and is the crate-wide pattern.
 
 Full detail: design doc §5 and §10 step 2.
+## S4.2 step 3 implemented — Control grants space:processes, and the `processes` claim gets its first validation (2026-09-13)
+
+**State:** `implemented` (design doc §4 first layer, §10 step 3). Control
+Plane user-core only; independent of step 2, since a decision without the new
+permission is exactly what every caller already gets.
+
+**`process_registry_entitled` is its own deny-by-default column** (migration
+`028`), not a widening of `sandbox_capability_entitled` — the same separation
+`ScheduleFireEntitled` has from `ThreadCreateEntitled`, and for the same
+reason. Acquiring a sandbox is bounded work a caller waits on. A background
+process keeps running after the turn that started it, retains its own output,
+and can be reattached to later. A Space allowed the first is not thereby
+allowed the second, and inheriting would have made the entitlement mean
+something different from what its name says. It participates in
+`entitlementChanged`, so granting or revoking it bumps `entitlement_revision`
+and invalidates authority material already issued — the fencing every other
+entitlement class gets.
+
+**The grant is deliberately NOT symmetric with egress.** An egress-capable
+claim without the entitlement is refused outright by sandbox-manager's
+verifier, because a backend that can reach the network must not serve a Space
+that was never allowed network reach. A process-capable backend is different:
+it is still a perfectly good bounded one-shot substrate for a Space not
+entitled to background work. So the decision is signed, the lease is granted,
+and only `space:processes` is withheld; sandbox-manager records the absence on
+the lease row and refuses the process RPCs alone. Getting this backwards would
+have made a backend upgrade silently break every non-entitled Space's
+ordinary `code_interpreter`.
+
+**`processes` gets its first validation ever — closing a gap S3.2 promised
+and never built.** That design's §1 described a policy allowlist checking the
+measured profile before signing; what shipped validated `processes` only for
+non-emptiness, so Control would sign a decision for a backend claiming
+anything at all. The test's `"isolated"` case is not invented: it is the value
+sandbox-manager's own capability-verifier fixture uses, which is exactly how
+nobody noticed the claim was never checked — each side was internally
+consistent and nothing compared them. The vocabulary is now closed
+(`bounded_oneshot` | `background_registry`), spelled identically in three
+services, and a test asserts the claim actually changes the payload digest so
+a process-capable profile cannot be swapped under a signature issued for a
+one-shot one.
+
+**Still open, named rather than quietly left:** `persistence`, `backup` and
+`credential_mode` remain free-form and unvalidated. This slice closes one
+dimension because one dimension is what it needs; the rest of S3.2's promised
+allowlist is still owed.
+
+**No HTTP change was needed** — `upsertSpaceEffectPolicy` decodes straight
+into `spaces.EffectPolicy`, so the field is settable the moment the struct has
+it. Migrations are applied by lexicographic scan of `*.up.sql`, so `028`
+needs no registration.
+
+Verification: full user-core `go build`/`go vet`/`go test`, with new coverage
+for the four-way grant matrix (claimed×entitled), the independence of the
+process entitlement from the sandbox one (it cannot substitute for it), the
+rejected-vocabulary table, and the digest binding. The pre-existing gofmt
+CRLF debt across `internal/spaces` is unchanged and was verified as
+predating this change rather than introduced by it.
+
+Full detail: design doc §4 and §10 step 3.
