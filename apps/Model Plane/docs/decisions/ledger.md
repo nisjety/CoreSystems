@@ -3010,3 +3010,113 @@ audience tests. model-gateway and the V3 gateway build clean. verevonv3:
 process activity adapter.
 
 Full detail: design doc §7 and §10 step 6.
+
+## S4.3 general Watch primitive designed — capability-core owns it, and the duplicate it does not delete (2026-09-14)
+
+**State:** `proposed` (design doc `apps/Frontend Plane/verevonv3/docs/S4_3_WATCH_PRIMITIVE_DESIGN_2026-09-14.md`). Nothing implemented. S4.2 was its only blocker and is complete.
+
+**capability-core owns the Watch record, and the evidence is that a Watch IS a
+Schedule.** The ownership matrix had no watch row and this ledger had no prior
+ruling, so this was a decision to make rather than look up. Compare what
+capability-core already runs: a `cron_schedules` row is created by a Space
+member under a Control decision, stores the Space ref plus all five authority
+revisions plus `delivery_target_ref`, is advanced by a sweeper claiming rows
+`FOR UPDATE SKIP LOCKED`, and is reauthorized freshly per fire because — in the
+sweeper's own words — *a long-lived schedule record is not authority by itself*.
+Every one of those sentences is true of a watch. The single difference is the
+trigger: a clock versus a source's cursor moving.
+
+Rows land in the shared `session_core` Postgres beside `cron_schedules`, created
+by a session-core migration and operated by capability-core — the split that
+already exists for cron, and inside one plane, so no plane database boundary is
+crossed. No new service.
+
+**`run_watch_subscriptions` is NOT deleted, and this is the part worth
+recording.** capability-core already owns a watch: AUTO-2's fire-once "notify me
+when a run finishes" trigger, one row per (org, run, user), no Space, no cursor,
+no predicate. The new `space_watches` is a cursor-bearing stream subscription:
+Space-scoped, authority-bound, resumable. They answer different questions, and
+the new one only becomes a superset of the old when the Model-runs adapter
+exists — a later slice. Retiring AUTO-2 before then would ship a regression for
+its users in exchange for tidiness.
+
+So the duplication is deliberate and bounded: one owner, two records, and the
+Model-runs adapter is the named retirement path. This is the letta-bridge
+memory-adapter and sandbox-backend-trait precedent applied again — build the
+seam when the second real implementation lands, not before — and it is written
+down so the next reader finds a decision rather than an oversight.
+
+**The first adapter POLLS, against the plan's stated preference for owner
+events, and the argument is that S4.2 already built the better mechanism.** The
+process registry has host-assigned monotonic cursors, `(process_id, seq)`
+idempotency, `gap_before`, `retained_from_seq`, and a terminal state on every
+row; `ReadProcessOutput(after_seq)` is idempotent by construction, so "crash
+before cursor commit" is satisfied by re-reading with nothing to reconcile. An
+event per output chunk would be a firehose — the host flushes every 250ms per
+stream per process — and would need its own dedup and its own retention,
+re-solving what the registry solves. sandbox-manager also publishes nothing to
+NATS today, so the event route needs a publisher, a stream, and a provisioner
+change before the adapter could be written at all.
+
+The plan permits polling "only behind an adapter with explicit lag/rate/budget
+behavior", so the design states them: 2s base interval, ×2 backoff to a 30s
+ceiling on idle, one ≤32 KiB page per poll, 8 concurrent process-output watches
+per Space, and a failure budget that backs off rather than cancelling. The
+honest cost is stated too: up to 2s of lag on the first event and 30s on a quiet
+process. A watch is not a live tail, and if the Work tab ever needs one, that is
+a different mechanism rather than a smaller interval.
+
+**No regular expressions in the predicate grammar.** A watch predicate runs
+against output a model wrote, on a shared sweeper, where a model-created watch
+could supply both the pattern and the subject — a ReDoS surface with the
+attacker on both ends. Literal substring, stream selector, and state-change
+cover what people actually want ("tell me when it says ERROR"). If more is
+needed later the honest addition is a fixed set of named predicates, not an
+expression language.
+
+**Matching is on COMPLETE lines only.** S4.2 carries `ends_with_newline` on
+every chunk precisely so this is decidable. A predicate evaluated against a
+partial line fires on a prefix the next chunk completes into something else —
+the same class of error as scrubbing a secret cut in half, which is the
+documented reason S4.2 scrubs at line boundaries in the first place.
+
+**A deployment dependency found while designing, not while debugging.**
+capability-core cannot address sandbox-manager at all today: the policy half of
+the service-principal registry (`apps/Control Plane/config/plane-service-principals.json`,
+in git and reviewable) grants it `session-core`, `inference-core` and
+`orchestrator-core`. Auth Core issues exactly the scopes requested, narrowed by
+that allowlist, so the first poll would refuse at sandbox-manager's interceptor.
+
+This is the same shape as the bug S3.3 shipped and S4.2 found a slice later —
+`sandbox:write` requested, `sandbox:read` required, refused at the real
+interceptor while every Rust test passed. The design names the exact edit
+(`sandbox:read` only, `persistent` retention, modelled on execution-core's
+entry) and attaches it to the step that first reads, with the explicit note that
+no Go unit test can see that file. The check that could is an Auth Core
+integration test in the shape S3.3's postmortem asked for and nobody has built.
+
+**Destination stops at `recorded`.** S4.4 owns `pending | claimed |
+sent_unconfirmed | acknowledged | failed | unknown` and the reconciliation that
+makes them mean something. A watch that sent a notification today would promise
+at-least-once delivery with no outbox, claim or receipt, and the first transient
+notification-core outage would lose events silently. `delivery_target_ref` is
+stored and unused; the existing runwatch consumer keeps its own notification
+path until S4.4 gives it somewhere better to stand.
+
+**Content trust is a first-class field, not a convention.** Process output is
+unscreened by construction — bytes a model chose, from a program a model wrote.
+Every emitted event carries `trust`: `unscreened_source_payload` for anything
+derived from watched content, `owner_metadata` for facts the owning plane
+asserts. Redaction is not trust: S4.2 already scrubbed the line, and a scrubbed
+line is still attacker-chosen text. A watch is the first thing that carries
+process output OUT of the run that produced it, which is why the rule is written
+down rather than assumed.
+
+**Deliberately not in this pass, with reasons:** a `watch_*` tool family (a
+model creating a standing intent addressed to a human, before delivery has
+semantics, is the wrong order — ship human-created watches first and see what
+people watch); `trigger_mode='continuous'` (a delivery-rate problem, which is
+S4.4's); and every adapter past process output.
+
+Full detail, including the state machine, the record, the authority argument and
+the per-verification test plan: the design doc.
