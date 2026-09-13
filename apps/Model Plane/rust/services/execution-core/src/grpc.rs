@@ -63,7 +63,12 @@ pub(crate) struct ExecutionService {
     /// `ReleaseLease` at a run's actual end (`cancel_run`, `run_agent`'s own
     /// `finalize()`) — never for `AcquireLease`, which needs the delegated
     /// user-bound bearer instead. See `sandbox_lease`'s module doc.
-    sandbox_tokens: crate::sandbox_lease::SandboxManagerTokenProvider,
+    sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
+    /// S4.2's background process host, or `None` when this instance does not
+    /// run background processes (the default). Its only reader today is the
+    /// lease-release path, which stops a lease's children before the
+    /// workspace is uploaded; the tools that start one arrive in step 5.
+    process_host: Option<Arc<crate::process_host::ProcessHost>>,
 }
 
 #[tonic::async_trait]
@@ -125,11 +130,22 @@ impl ExecutionService {
         sandbox_manager_client: SandboxManagerClient,
         cas_client: Option<CasClient>,
         backend_id: String,
-        sandbox_tokens: crate::sandbox_lease::SandboxManagerTokenProvider,
+        sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
     ) -> Self {
         let ownership = Arc::new(SessionCoreRunOwnershipResolver {
             channel: session_channel.clone(),
         });
+        // Built here rather than passed in: everything it needs is already an
+        // argument, so no caller grows a parameter for a capability that is
+        // off by default. `None` is the ordinary case — see
+        // `ProcessHost::from_env`, which returns it unless an operator asked
+        // for background processes AND bwrap can actually isolate them.
+        let process_host = crate::process_host::ProcessHost::from_env(
+            sandbox_manager_client.clone(),
+            sandbox_tokens.clone(),
+            &backend_id,
+        )
+        .map(Arc::new);
         Self {
             state,
             auth,
@@ -146,6 +162,7 @@ impl ExecutionService {
             cas_client,
             backend_id,
             sandbox_tokens,
+            process_host,
         }
     }
 
@@ -1073,6 +1090,7 @@ impl ExecutionCore for ExecutionService {
             &self.sandbox_manager_client,
             &self.sandbox_tokens,
             self.cas_client.as_ref(),
+            self.process_host.as_deref(),
             &req.run_id,
             &caller.org_id,
         )
@@ -1292,10 +1310,11 @@ pub async fn serve(
     // already fails startup closed without them, so requiring them again
     // here for a different audience changes nothing about what a deployment
     // must configure.
-    let sandbox_tokens =
+    let sandbox_tokens = Arc::new(
         crate::sandbox_lease::SandboxManagerTokenProvider::from_env().map_err(|error| {
             anyhow::anyhow!("sandbox-manager service token provider configuration: {error}")
-        })?;
+        })?,
+    );
 
     serve_with_listener(
         state,
@@ -1335,7 +1354,7 @@ async fn serve_with_listener(
     sandbox_manager_client: SandboxManagerClient,
     cas_client: Option<CasClient>,
     backend_id: String,
-    sandbox_tokens: crate::sandbox_lease::SandboxManagerTokenProvider,
+    sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
 ) -> anyhow::Result<()> {
     let session_channel = tonic::transport::Endpoint::from_shared(session_url)?.connect_lazy();
     let inference_channel = tonic::transport::Endpoint::from_shared(inference_url)?.connect_lazy();
@@ -1807,10 +1826,12 @@ mod auth_tests {
             SandboxManagerClient::from_env().expect("valid default sandbox-manager endpoint"),
             None,
             "test-backend".to_owned(),
-            crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
-                "http://127.0.0.1:1",
-                "execution-core",
-                "test-service-secret-at-least-32-bytes",
+            std::sync::Arc::new(
+                crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                    "http://127.0.0.1:1",
+                    "execution-core",
+                    "test-service-secret-at-least-32-bytes",
+                ),
             ),
         ));
 

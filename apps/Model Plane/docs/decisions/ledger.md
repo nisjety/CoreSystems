@@ -2683,3 +2683,109 @@ CRLF debt across `internal/spaces` is unchanged and was verified as
 predating this change rather than introduced by it.
 
 Full detail: design doc §4 and §10 step 3.
+
+## S4.2 step 4 implemented — the process host, and a negative result that saved a silently broken TERM (2026-09-13)
+
+**State:** `implemented` (design doc §3, §10 step 4). execution-core only,
+behind `EXECUTION_CORE_PROCESS_HOST=enabled`, default off — every existing
+deployment reports the same capability profile and the same digest it did
+before, and `capability_profile_never_claims_durable_or_credentialed_workspace`
+now asserts that relationship rather than a constant.
+
+**The design's one deferred open question was answered by measurement, and
+the useful half of the answer is the negative one.** §3.4 could not decide
+from a Windows checkout whether a signal sent to bubblewrap's monitor would
+reach the sandboxed command, because with `--unshare-pid` a signal from
+outside a namespace reaches its init only if init handles it. A probe under
+real bwrap on Linux settled it three ways:
+
+- SIGTERM to the pid found by walking `/proc/<pid>/task/<pid>/children`
+  twice — monitor → sandbox init → command — **does** fire the command's
+  trap. Mechanism (a) stands; the `--json-status-fd` fallback is not needed.
+- SIGTERM to the bwrap monitor **does not reach the command at all.**
+- SIGKILL to the monitor still leaves nothing alive, via the
+  `--die-with-parent` PDEATHSIG chain the argv already uses.
+
+The second line is why the probe exists. "Signal the child we spawned" is the
+implementation anyone writes first; it returns success, logs nothing unusual,
+and would have made every `term` request a no-op — the process running on
+until the grace timer escalated to KILL, skipping the graceful shutdown the
+escalation exists to offer. A dev server's cleanup would simply never run,
+and nothing in the state machine would look wrong: the row still reaches a
+terminal state, just always the violent one. A probe asserting only the
+positive result would pass against that broken code, so it asserts the
+negative too. This is the same reasoning `cross_service_loop_contract.rs`
+applies to cross-service constants — the assertion has to be able to fail.
+
+**The verification script was checking an argv the service does not emit.**
+`verify-sandbox-isolation.sh`'s `BASE` still carried `--proc /proc`, which
+`sandbox.rs` dropped some time ago: under `--unshare-pid` it needs
+`CAP_SYS_ADMIN`, the container runs `CapEff=0`, and the removal is pinned by
+`the_argv_never_mounts_a_fresh_proc`. A script verifying a stale argv verifies
+nothing, and here it was worse than nothing — a fresh procfs inside the
+sandbox is exactly what would break the host-side `/proc` child walk the new
+probe depends on, so the probe could have failed for a reason the real
+service does not have, and the obvious "fix" would have been to abandon a
+mechanism that works. Removed, with the reasoning recorded in the script so
+it does not come back.
+
+**Reconcile is lazy, not at boot — a deliberate deviation from §3.5.**
+`ReconcileProcesses` needs a sandbox-manager token, and
+`SandboxManagerTokenProvider::token()` is per-org. A host that has just
+booted has no org to mint one for, and choosing one would be a lie about who
+is asking — the same honesty constraint that made the profile flag
+`OnceLock`-read rather than per-request. So the reconcile is `OnceCell`-guarded
+and runs on the first `start()`: the first moment an org exists, and equally
+the first moment a stale row could be mistaken for a live one. The cost is a
+window where a restarted host's previous rows still read `RUNNING`. That
+window is precisely what step 1's staleness sweeper was built for, which is
+why it runs on a timer rather than only behind a reconcile — the backstop
+existed before the thing it backs stopped being eager. `/readyz` keeps its
+current meaning instead of acquiring a precondition it cannot satisfy.
+
+**Kill before diff, not after.** `release_sandbox_lease_if_any` awaits
+`kill_for_lease` ahead of the workspace diff and upload. A background process
+still writing into the workspace would make the promoted snapshot a picture of
+a moving target, and S3.3's promote contract assumes the tree is quiescent
+when it is read. The ordering is load-bearing, not tidiness.
+
+**`nix`, not `libc`.** The workspace sets `unsafe_code = "forbid"`, so
+`libc::kill` is unreachable from this crate — `nix` with only its `signal`
+feature, `cfg(unix)`-gated, is the smallest safe alternative, and the design
+already preferred a library call to spawning `/bin/kill`.
+
+**Nothing calls the host yet, on purpose.** `runtime_loop/agent.rs` passes
+`None`; step 5 adds the tool that can start a process and owns replacing it.
+The call site names step 5 in a comment so the gap is discoverable rather
+than merely absent — the same no-caller-ahead-of-its-step rule S3.2 and S3.3
+followed.
+
+**Clippy caught a doc comment changing owner.** `child_env_for` is a
+`pub(crate)` delegation added so the host and `code_interpreter` share one
+environment allowlist rather than maintaining two. Inserting it directly above
+`child_env` silently handed it `child_env`'s doc comment — the long
+explanation of why execution-core's own environment must never be inherited,
+and why `TMPDIR`/`MPLCONFIGDIR` have to be workspace *subdirectories* — and
+left the function that actually builds the allowlist undocumented. The code
+was correct and every test passed; only clippy's doc lints noticed that a
+list had quietly acquired a new paragraph. This is the second time in S4.2 that
+inserting an item above an existing declaration stole its doc comment (step 2
+did it to a test in `store_integration_test.go`), so it is recorded as a
+pattern rather than an incident: on a security surface the reasoning is the
+artifact, and it belongs to the implementation, not to whatever wrapper ends
+up in front of it.
+
+Verification: `cargo test -p execution-core --lib` — 574 passed, 2 failed,
+both the known pre-existing Windows failures (`cwd_applies_and_the_inherited_
+environment_is_replaced`, `direct_hitl_rejects_an_undurable_approval_pause`),
+unchanged from before this step; 16 of those tests are new. The full
+`verify-sandbox-isolation.sh` ran on real Linux with all six checks passing —
+the three original isolation checks and the three new signal checks. rustfmt
+drift was triaged against `HEAD` rather than assumed: the two sites in
+`sandbox.rs` that this change introduced are formatted, the one that predates
+it is left alone, as is the wider execution-core drift in `workspace_*`,
+`capability_client` and `control_http_client`. `cargo clippy --lib`
+(pedantic, warn-level) reports 96 warnings, none of them in this change's
+files; the five it did raise against them were fixed rather than allowed.
+
+Full detail: design doc §3 and §10 step 4.

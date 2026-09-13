@@ -156,6 +156,78 @@ pub fn scrub_string(s: &str) -> String {
     out
 }
 
+/// Flag names whose NEXT argv element is the secret.
+///
+/// Every pattern in this module keys on a `:` or `=` separator, so a
+/// space-separated pair (`--token abc123`, `-p hunter2`) passes through all of
+/// them untouched. Matching that is positional and cannot be done on a joined
+/// string, which is why [`redact_command`] exists rather than callers doing
+/// `scrub_string(&argv.join(" "))`.
+///
+/// Deliberately narrow, and mirrored by sandbox-manager's own
+/// `internal/redact`. `--key` and `-k` are NOT here: `--key` is a file path
+/// far more often than a secret and `-k` is curl's insecure flag, so including
+/// them would redact ordinary arguments and teach readers to distrust the
+/// redaction.
+const SECRET_FLAGS: &[&str] = &[
+    "token",
+    "auth-token",
+    "access-token",
+    "refresh-token",
+    "password",
+    "passwd",
+    "pwd",
+    "pass",
+    "p",
+    "secret",
+    "client-secret",
+    "secret-key",
+    "api-key",
+    "apikey",
+    "access-key",
+    "private-key",
+    "credential",
+    "credentials",
+    "auth",
+];
+
+/// Redact a command's identity for durable storage: [`scrub_string`] over the
+/// program and every argument, plus the positional [`SECRET_FLAGS`] rule that
+/// no text pattern can express.
+///
+/// Returns copies; the caller's argv is untouched, because the unredacted form
+/// is still what actually gets spawned.
+#[must_use]
+pub fn redact_command(program: &str, args: &[String]) -> (String, Vec<String>) {
+    let mut redacted: Vec<String> = args.iter().map(|arg| scrub_string(arg)).collect();
+    for index in 0..args.len().saturating_sub(1) {
+        if !is_secret_flag(&args[index]) {
+            continue;
+        }
+        // A following token that is itself a flag is the next option, not this
+        // one's value.
+        if args[index + 1].starts_with('-') {
+            continue;
+        }
+        REDACTED.clone_into(&mut redacted[index + 1]);
+    }
+    (scrub_string(program), redacted)
+}
+
+/// Whether `arg` is a flag whose value must be redacted. An `=`-joined form is
+/// left to the inline capture pattern in [`scrub_string`].
+fn is_secret_flag(arg: &str) -> bool {
+    let Some(name) = arg.strip_prefix('-') else {
+        return false;
+    };
+    let name = name.trim_start_matches('-');
+    if name.is_empty() || name.contains('=') {
+        return false;
+    }
+    let normalized = name.to_ascii_lowercase().replace('_', "-");
+    SECRET_FLAGS.contains(&normalized.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +302,75 @@ mod tests {
         // Non-secret key=value must survive untouched.
         let out = scrub_string("status=completed path=/usr/bin count=42");
         assert_eq!(out, "status=completed path=/usr/bin count=42");
+    }
+
+    #[test]
+    fn redact_command_covers_a_separated_flag_value() {
+        // The rule that exists only here: every pattern above keys on a ':'
+        // or '=', so `--token abc123` as two argv elements reaches none of
+        // them.
+        let secret = "s".repeat(20);
+        let args = vec![
+            "--token".to_owned(),
+            secret.clone(),
+            "https://api.example.com".to_owned(),
+        ];
+        let (program, redacted) = redact_command("curl", &args);
+        assert_eq!(program, "curl");
+        assert_eq!(redacted[1], REDACTED);
+        assert_eq!(redacted[2], "https://api.example.com");
+        assert_eq!(args[1], secret, "the caller's argv must not be mutated");
+    }
+
+    #[test]
+    fn redact_command_recognizes_each_flag_spelling() {
+        let secret = "s".repeat(20);
+        for flag in [
+            "--token",
+            "--password",
+            "-p",
+            "--api-key",
+            "--API_KEY",
+            "--access-key",
+            "--auth",
+            "--client-secret",
+        ] {
+            let args = vec![flag.to_owned(), secret.clone()];
+            let (_, redacted) = redact_command("tool", &args);
+            assert_eq!(redacted[1], REDACTED, "flag {flag} did not redact");
+        }
+    }
+
+    #[test]
+    fn redact_command_leaves_the_joined_form_to_the_patterns() {
+        // `--token=x` never reaches the positional rule (an '=' disqualifies
+        // it); the inline capture pattern handles it instead, so the two
+        // rules compose rather than overlap.
+        let secret = "s".repeat(20);
+        let args = vec![format!("--token={secret}")];
+        let (_, redacted) = redact_command("tool", &args);
+        assert!(!redacted[0].contains(&secret));
+        assert!(redacted[0].starts_with("--token="));
+    }
+
+    #[test]
+    fn redact_command_does_not_swallow_the_next_flag_or_an_ordinary_path() {
+        // `--token --verbose` is a missing value, not a secret; and `--key`
+        // is deliberately not a secret flag because it is a file path far
+        // more often than a credential.
+        let args = vec!["--token".to_owned(), "--verbose".to_owned()];
+        let (_, redacted) = redact_command("tool", &args);
+        assert_eq!(redacted, vec!["--token", "--verbose"]);
+
+        let args = vec!["--key".to_owned(), "/etc/ssl/app.pem".to_owned()];
+        let (_, redacted) = redact_command("tool", &args);
+        assert_eq!(redacted, vec!["--key", "/etc/ssl/app.pem"]);
+    }
+
+    #[test]
+    fn redact_command_handles_a_trailing_secret_flag() {
+        let args = vec!["run".to_owned(), "--token".to_owned()];
+        let (_, redacted) = redact_command("tool", &args);
+        assert_eq!(redacted, vec!["run", "--token"]);
     }
 }

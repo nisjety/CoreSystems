@@ -700,11 +700,18 @@ async fn run_agent_with_tools(
     // subagent's `LoopContext.req` is `parent.req` verbatim, never its own),
     // so `state.sandbox_lease` was cached under the one key this run has
     // ever used.
+    // `None`, and provably harmless today: no tool can start a background
+    // process until S4.2 step 5 adds them, so a RunAgent lease cannot have
+    // children for this to kill. Step 5 threads the real host through
+    // `LoopContext` — the same seam it needs anyway to let a tool reach it —
+    // and MUST replace this argument when it does, or a lease's processes
+    // would keep writing into the workspace while it is being uploaded.
     crate::sandbox_lease::release_sandbox_lease_if_any(
         state,
         sandbox_manager_client,
         sandbox_tokens,
         cas_client,
+        None,
         &req.run_id,
         &req.org_id,
     )

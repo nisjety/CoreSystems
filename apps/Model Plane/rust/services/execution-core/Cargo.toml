@@ -49,6 +49,12 @@ chrono = { workspace = true }
 aws-sigv4 = "1"
 aws-credential-types = "1"
 
+# S4.2 background process host: SIGTERM to the sandboxed command. The
+# workspace forbids unsafe_code, so libc::kill is not an option; nix wraps the
+# same syscall safely and is already in the lock file transitively.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 mp-slo = { path = "../../crates/mp-slo" }

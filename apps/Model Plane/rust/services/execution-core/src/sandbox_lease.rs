@@ -431,12 +431,23 @@ pub async fn release_sandbox_lease_if_any(
     sandbox_manager_client: &SandboxManagerClient,
     tokens: &SandboxManagerTokenProvider,
     cas_client: Option<&CasClient>,
+    process_host: Option<&crate::process_host::ProcessHost>,
     run_id: &str,
     org_id: &str,
 ) {
     let Some(lease) = state.take_sandbox_lease(run_id) else {
         return;
     };
+
+    // Stop this lease's background processes BEFORE the workspace is diffed
+    // and uploaded: a process still writing into it would otherwise race the
+    // upload, and whatever it wrote after the diff would be silently lost
+    // rather than merged. Best effort — sandbox-manager marks the rows killed
+    // when the lease is released regardless, and a child that outlives this
+    // dies with the host.
+    if let Some(host) = process_host {
+        host.kill_for_lease(&lease.lease_id).await;
+    }
     let token = match tokens.token(org_id).await {
         Ok(token) => token,
         Err(error) => {
@@ -632,6 +643,7 @@ mod tests {
             &sandbox_manager_client,
             &tokens,
             None,
+            None,
             "run-1",
             "org-a",
         )
@@ -660,6 +672,7 @@ mod tests {
             &state,
             &sandbox_manager_client,
             &tokens,
+            None,
             None,
             "run-1",
             "org-a",
@@ -771,6 +784,7 @@ mod tests {
             &state,
             &sandbox_manager_client,
             &tokens,
+            None,
             None,
             "run-1",
             "org-a",

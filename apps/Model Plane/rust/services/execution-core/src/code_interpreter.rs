@@ -393,6 +393,16 @@ pub(crate) fn path_slug(raw: &str) -> String {
     }
 }
 
+/// The child-environment allowlist, exposed for S4.2's background process
+/// host. Shared rather than re-derived precisely because it is a security
+/// surface: execution-core's own environment holds the keys it uses to reach
+/// the other planes, and a second hand-written allowlist is a second place to
+/// forget that. A background process gets exactly what a `code_interpreter`
+/// call gets; [`child_env`] carries the reasoning for every entry.
+pub(crate) fn child_env_for(workspace: &Path) -> Vec<(String, String)> {
+    child_env(workspace)
+}
+
 /// The program's ENTIRE environment — it inherits nothing.
 ///
 /// execution-core's own environment carries the internal keys it uses to reach

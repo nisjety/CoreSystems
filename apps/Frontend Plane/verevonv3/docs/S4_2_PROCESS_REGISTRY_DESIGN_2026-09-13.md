@@ -897,7 +897,62 @@ the step that needs it — the S3.2/S3.3 precedent.
    processes_permitted`, boot reconcile, kill-before-release; behind
    `EXECUTION_CORE_PROCESS_HOST`, default off. Linux TERM/KILL probe added to
    `verify-sandbox-isolation.sh` and run in the runtime image before this
-   step is called done.
+   step is called done. **DONE 2026-09-13.** What differed from this list,
+   and why:
+   - **§3.4's open question is resolved, and its negative result is worth
+     more than its positive one.** The probe ran under real bwrap on Linux.
+     (a) SIGTERM to the pid found by walking
+     `/proc/<pid>/task/<pid>/children` twice does fire the command's trap,
+     so mechanism (a) stands and `--json-status-fd` is not needed. (b)
+     **SIGTERM to the bwrap monitor does not reach the command at all** —
+     and that is the load-bearing finding. "Signal the child we spawned" is
+     the obvious implementation, it raises no error, and it would have left
+     every `term` request silently undelivered: the process would run on
+     until the grace timer escalated to KILL, skipping the graceful
+     shutdown the whole escalation exists to offer. A probe asserting only
+     (a) would pass against that broken code too, so it asserts the
+     negative as well. (c) SIGKILL to the monitor still leaves nothing
+     alive, so the escalation's *guarantee* holds regardless of either.
+   - **Reconcile is lazy, not at boot** — the one real deviation from §3.5.
+     `ReconcileProcesses` needs a sandbox-manager token and
+     `SandboxManagerTokenProvider::token()` is *per-org*; a host that has
+     just booted has no org to mint one for, and picking one would be a lie
+     about who is asking. So it is `OnceCell`-guarded and runs on the first
+     `start()` — the first moment an org exists, and also the first moment
+     a stale row could be mistaken for a live one. The cost is a window
+     where a restarted host's old rows still read `RUNNING`; the staleness
+     sweeper from step 1 already closes exactly that window, which is why
+     it was built to run on a timer rather than only behind a reconcile.
+     `/readyz` keeps its current meaning instead of gaining a dependency it
+     cannot satisfy.
+   - **`verify-sandbox-isolation.sh` was verifying an argv the service does
+     not emit.** Its `BASE` still carried `--proc /proc`, which `sandbox.rs`
+     dropped some time ago — it needs `CAP_SYS_ADMIN` under `--unshare-pid`,
+     the container runs `CapEff=0`, and the removal is pinned by
+     `the_argv_never_mounts_a_fresh_proc`. A verification script checking a
+     stale argv verifies nothing, and here it would have been actively
+     misleading: a fresh procfs inside the sandbox is precisely what would
+     break the host-side `/proc` child walk the new probe depends on, so
+     the probe could have failed for a reason the real service does not
+     have. Dropped, with the reasoning left in the script.
+   - **`nix`, not `libc`.** The workspace sets `unsafe_code = "forbid"`, so
+     `libc::kill` is not reachable from this crate at all. `nix` with only
+     its `signal` feature, `cfg(unix)`-gated, is the smallest safe
+     alternative — and the design already preferred a library call over
+     spawning `/bin/kill`.
+   - **The lease release kills before it diffs.** `release_sandbox_lease_if_any`
+     awaits `kill_for_lease` ahead of the workspace diff and upload, not
+     after. This is ordering, not tidiness: a background process still
+     writing into the workspace would make the promoted snapshot a picture
+     of a moving target, and S3.3's whole promote contract assumes the tree
+     is quiescent when it is read.
+   - **`runtime_loop/agent.rs` passes `None` for the host, deliberately.**
+     Nothing in the runtime loop can start a background process until step
+     5 adds the tool, so threading a live handle through now would wire a
+     caller ahead of the step that needs it — the rule this sequence
+     follows throughout. The call site carries a comment naming step 5 as
+     the owner of replacing it, so the gap is discoverable rather than just
+     absent.
 5. **Tools + capability** (§6): `cap.process.background` (migration `0015`,
    allowlist, seed, attestation), dispatch arms, offering, contract test,
    ZDR gate. First point at which a model can start a process.
@@ -940,8 +995,11 @@ the step that needs it — the S3.2/S3.3 precedent.
   this and the previous item; recommended, but it widens step 2.
 - **Risk level of `cap.process.background`** — `low` recommended (§6); `ask`
   is one field if product prefers to start there.
-- **TERM delivery mechanism** — resolved on Linux in step 4 (§3.4); the
-  contract does not change either way.
+- **TERM delivery mechanism** — **RESOLVED 2026-09-13** in step 4 (§3.4).
+  Mechanism (a), the two-hop `/proc` walk, is verified under real bwrap;
+  (b) `--json-status-fd` is not needed. Signalling the monitor directly was
+  measured *not* to reach the command, so the walk is required rather than
+  merely preferred. The contract did not change either way.
 - **Retention purge.** Terminal rows and their output are kept indefinitely
   by this design (soft-terminal, like leases). A purge policy
   (`PROCESS_RETENTION_HOURS`) touches Space deletion semantics

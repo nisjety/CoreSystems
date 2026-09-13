@@ -1184,6 +1184,7 @@ dependencies = [
  "mp-ids",
  "mp-slo",
  "mp-telemetry",
+ "nix",
  "prost",
  "prost-types",
  "rand 0.8.6",

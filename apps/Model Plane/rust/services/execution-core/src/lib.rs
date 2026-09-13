@@ -25,6 +25,7 @@ pub mod org_directory;
 pub mod permission;
 pub mod policy;
 pub mod postcondition;
+pub mod process_host;
 pub mod promote_on_use;
 pub mod provenance;
 pub mod quarry_agent;

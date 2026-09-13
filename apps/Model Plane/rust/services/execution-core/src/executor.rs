@@ -137,6 +137,22 @@ fn egress_proxy_configured() -> bool {
 /// isolation — while still having FULLY UNRESTRICTED network egress, because
 /// bwrap alone cannot enforce a domain allowlist. Without this check, that gap
 /// was silent: `sandboxed` reported success while the allowlist was a no-op.
+/// The same fail-closed gate every one-shot spawn runs, for callers that
+/// build their own `tokio::process::Command` rather than going through
+/// [`execute_sandboxed_in_dir`] — S4.2's background process host needs piped
+/// stdio and a child that outlives the call, but must not thereby get a
+/// weaker isolation check than a 30-second `code_interpreter` call.
+///
+/// # Errors
+/// `Unsupported` when the policy demands local isolation this host cannot
+/// provide, or when `AllowDomains` has no egress proxy behind it.
+pub(crate) fn require_requested_isolation_for(
+    policy: &MpSandboxPolicy,
+    sandboxed: bool,
+) -> std::io::Result<()> {
+    require_requested_isolation(policy, sandboxed, egress_proxy_configured())
+}
+
 fn require_requested_isolation(
     policy: &MpSandboxPolicy,
     sandboxed: bool,

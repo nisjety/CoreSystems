@@ -866,6 +866,15 @@ services:
       EXECUTION_CORE_CONTROL_SANDBOX_CAPABILITY_TOKEN: ${EXECUTION_CORE_CONTROL_SANDBOX_CAPABILITY_TOKEN:-}
       # Optional; falls back to $HOSTNAME (this container's id) when unset.
       EXECUTION_CORE_BACKEND_ID: ${EXECUTION_CORE_BACKEND_ID:-}
+      # S4.2 background process registry. The exact string "enabled" switches
+      # it on; nothing else does, including "true"/"1" — this changes what
+      # /capability-profile advertises to Control, which then signs it, so it
+      # is not a value to fall into by accident. Left unset (off) on purpose:
+      # a deployment opts in only once its Spaces are meant to keep processes
+      # running between turns, and Control must separately grant
+      # space:processes before any of them can actually start.
+      # See apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §3.1.
+      EXECUTION_CORE_PROCESS_HOST: ${EXECUTION_CORE_PROCESS_HOST:-}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
