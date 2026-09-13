@@ -131,7 +131,6 @@ func registerRequest(id string) RegisterRequest {
 	return RegisterRequest{
 		ID:            id,
 		OrgID:         "org-a",
-		SpaceID:       "space-1",
 		LeaseID:       "lease-1",
 		BackendID:     "backend-1",
 		HostEpoch:     "epoch-1",
@@ -226,6 +225,24 @@ func TestProcessStore_RegisterRefusesAScratchOrWrongBackendLease(t *testing.T) {
 // TestProcessStore_RegisterEnforcesTheLiveLimitAndFreesItOnExit proves the
 // limit is evaluated against live rows only — a finished process must not
 // permanently consume a slot.
+// TestProcessStore_RegisterRefusesANonSpaceLease: a thread/agent-scoped
+// lease has no Space workspace, so there is nowhere to run a background
+// process even in principle. RegisterRequest carries no Space of its own —
+// it is read from the lease inside the insert — so this is the only place
+// the case can be refused.
+func TestProcessStore_RegisterRefusesANonSpaceLease(t *testing.T) {
+	dsn := setupProcessDB(t)
+	store := newPoolStore(t, dsn)
+
+	lease := defaultLease()
+	lease.spaceID = ""
+	seedLease(t, dsn, lease)
+
+	if _, err := store.Register(context.Background(), registerRequest("proc-001")); err == nil {
+		t.Fatal("a non-Space lease unexpectedly hosted a process")
+	}
+}
+
 func TestProcessStore_RegisterEnforcesTheLiveLimitAndFreesItOnExit(t *testing.T) {
 	dsn := setupProcessDB(t)
 	store := newPoolStore(t, dsn).WithLimits(Limits{MaxLivePerLease: 2})

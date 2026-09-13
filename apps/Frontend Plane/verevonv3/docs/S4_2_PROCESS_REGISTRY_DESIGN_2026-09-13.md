@@ -825,7 +825,49 @@ the step that needs it — the S3.2/S3.3 precedent.
 2. **RPCs + authz + lease column** (§4 sandbox-manager half, §5): proto,
    handlers, seven authz cases + interceptor rows, `Verify` returns
    permissions, `AcquireLease` persists `processes_permitted`. Rust client
-   methods regenerate against it. Still no host.
+   methods regenerate against it. Still no host. **DONE 2026-09-13.** What
+   differed from this list, and why:
+   - **The Space is no longer a parameter anywhere.** `RegisterRequest` had
+     a `SpaceID` field in step 1; it is gone. sandbox-manager reads the
+     Space from the lease row inside the same statement that inserts, so a
+     caller cannot name a Space at all, let alone the wrong one — the same
+     "fold the read into the write" move the fence and the limits already
+     use. A non-Space lease is refused by that join rather than by a check
+     someone could forget.
+   - **All seven RPCs are service-principal only, and the three reads say
+     why.** Writes are permanently service-only: the caller is a host
+     reporting what an OS process it owns actually did, which a user bearer
+     cannot observe. The reads are service-only *for now* and return
+     `FailedPrecondition` naming the missing Space read decision, because
+     admitting a user bearer before step 6 would let any member of an
+     organization read any process's output in it. Refusing with the reason
+     stated beats shipping the hole and documenting it.
+   - **`ErrProcessesNotPermitted` split out of `ErrLeaseNotEligible`**, so
+     "this Space was never granted `space:processes`" maps to
+     `PermissionDenied` while "the lease is expired/SCRATCH/on another
+     backend" maps to `FailedPrecondition`. The two mean different things to
+     a caller — retry never, versus retry later — and a single code would
+     have collapsed them.
+   - **No `MemoryProcessStore`, still.** Step 1 deferred it to "when the
+     handlers need it"; the handlers turned out not to. Their tests use a
+     recording stub, because the registry's real semantics are already
+     proven against Postgres and a second hand-written copy of them would be
+     a thing that can disagree with the original rather than extra
+     assurance. `cmd/main.go` passes no registry in ephemeral-development
+     mode and every process RPC fails closed there.
+   - **A contract test for the enum numbering.** The handlers cast
+     `process.State` ↔ `mpv1.ProcessState` directly, which is only sound
+     because both are the numbers migration 0003 stores. The two
+     declarations live in different files and nothing else would notice them
+     drifting, so `process_test.go` asserts every pairing — the same
+     cross-boundary-invariant-as-a-test shape `cross_service_loop_contract.rs`
+     uses.
+   - **The proto additions are lint-clean.** buf requires a doc comment on
+     every field, message, enum value and oneof, and an enum-name prefix on
+     every value. The first draft added 105 new violations to a file that
+     had 31; this one adds zero. Per-field docs earn their place on a
+     cross-plane contract surface even where the repo's general style
+     discourages narration.
 3. **Control** (§4 first layer): migration `028`, evidence field,
    `space:processes` permission, `processes` enum validation. Independent of
    2 (a decision without the permission is what every current caller gets).

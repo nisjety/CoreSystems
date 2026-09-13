@@ -82,6 +82,192 @@ func (SandboxLifecycleState) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{0}
 }
 
+// Lifecycle of one background process. The numeric values are stored directly
+// in sandbox_processes.state (migration 0003), the same way
+// SandboxLifecycleState's are stored in leases.state.
+type ProcessState int32
+
+const (
+	// Never sent; a zero value means the field was not set.
+	ProcessState_PROCESS_STATE_UNSPECIFIED ProcessState = 0
+	// Slot reserved, nothing spawned yet. Exists so lease eligibility, the TTL
+	// clamp and the live-count limits are decided BEFORE the host spawns; a
+	// spawn failure moves straight to EXITED with end_reason "spawn_failed".
+	ProcessState_PROCESS_STATE_STARTING ProcessState = 1
+	// The host has spawned the process and is appending its output.
+	ProcessState_PROCESS_STATE_RUNNING ProcessState = 2
+	// The process ran to completion on its own.
+	ProcessState_PROCESS_STATE_EXITED ProcessState = 3
+	// The process was terminated: a requested signal, or its lease's release.
+	ProcessState_PROCESS_STATE_KILLED ProcessState = 4
+	// The host that owned the process stopped heartbeating or was superseded by
+	// a newer boot. The children died with it; the rows say so.
+	ProcessState_PROCESS_STATE_LOST ProcessState = 5
+	// The process outlived its TTL and the host stopped it.
+	ProcessState_PROCESS_STATE_EXPIRED ProcessState = 6
+)
+
+// Enum value maps for ProcessState.
+var (
+	ProcessState_name = map[int32]string{
+		0: "PROCESS_STATE_UNSPECIFIED",
+		1: "PROCESS_STATE_STARTING",
+		2: "PROCESS_STATE_RUNNING",
+		3: "PROCESS_STATE_EXITED",
+		4: "PROCESS_STATE_KILLED",
+		5: "PROCESS_STATE_LOST",
+		6: "PROCESS_STATE_EXPIRED",
+	}
+	ProcessState_value = map[string]int32{
+		"PROCESS_STATE_UNSPECIFIED": 0,
+		"PROCESS_STATE_STARTING":    1,
+		"PROCESS_STATE_RUNNING":     2,
+		"PROCESS_STATE_EXITED":      3,
+		"PROCESS_STATE_KILLED":      4,
+		"PROCESS_STATE_LOST":        5,
+		"PROCESS_STATE_EXPIRED":     6,
+	}
+)
+
+func (x ProcessState) Enum() *ProcessState {
+	p := new(ProcessState)
+	*p = x
+	return p
+}
+
+func (x ProcessState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProcessState) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_sandboxes_proto_enumTypes[1].Descriptor()
+}
+
+func (ProcessState) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[1]
+}
+
+func (x ProcessState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProcessState.Descriptor instead.
+func (ProcessState) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{1}
+}
+
+// The strongest termination signal a caller has asked for. Ordered so an
+// escalation to KILL can never be downgraded back to TERM.
+type ProcessSignal int32
+
+const (
+	// No signal has been requested.
+	ProcessSignal_PROCESS_SIGNAL_UNSPECIFIED ProcessSignal = 0
+	// Ask the process to stop, with a grace period before escalation.
+	ProcessSignal_PROCESS_SIGNAL_TERM ProcessSignal = 1
+	// Stop the process now, with no grace period.
+	ProcessSignal_PROCESS_SIGNAL_KILL ProcessSignal = 2
+)
+
+// Enum value maps for ProcessSignal.
+var (
+	ProcessSignal_name = map[int32]string{
+		0: "PROCESS_SIGNAL_UNSPECIFIED",
+		1: "PROCESS_SIGNAL_TERM",
+		2: "PROCESS_SIGNAL_KILL",
+	}
+	ProcessSignal_value = map[string]int32{
+		"PROCESS_SIGNAL_UNSPECIFIED": 0,
+		"PROCESS_SIGNAL_TERM":        1,
+		"PROCESS_SIGNAL_KILL":        2,
+	}
+)
+
+func (x ProcessSignal) Enum() *ProcessSignal {
+	p := new(ProcessSignal)
+	*p = x
+	return p
+}
+
+func (x ProcessSignal) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProcessSignal) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_sandboxes_proto_enumTypes[2].Descriptor()
+}
+
+func (ProcessSignal) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[2]
+}
+
+func (x ProcessSignal) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProcessSignal.Descriptor instead.
+func (ProcessSignal) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{2}
+}
+
+// Which stream an output chunk came from.
+type ProcessStream int32
+
+const (
+	// Never sent; a zero value means the field was not set.
+	ProcessStream_PROCESS_STREAM_UNSPECIFIED ProcessStream = 0
+	// The process's standard output.
+	ProcessStream_PROCESS_STREAM_STDOUT ProcessStream = 1
+	// The process's standard error.
+	ProcessStream_PROCESS_STREAM_STDERR ProcessStream = 2
+	// A registry-authored marker ("process started", "SIGTERM requested",
+	// "output trimmed"), never process content.
+	ProcessStream_PROCESS_STREAM_SYSTEM ProcessStream = 3
+)
+
+// Enum value maps for ProcessStream.
+var (
+	ProcessStream_name = map[int32]string{
+		0: "PROCESS_STREAM_UNSPECIFIED",
+		1: "PROCESS_STREAM_STDOUT",
+		2: "PROCESS_STREAM_STDERR",
+		3: "PROCESS_STREAM_SYSTEM",
+	}
+	ProcessStream_value = map[string]int32{
+		"PROCESS_STREAM_UNSPECIFIED": 0,
+		"PROCESS_STREAM_STDOUT":      1,
+		"PROCESS_STREAM_STDERR":      2,
+		"PROCESS_STREAM_SYSTEM":      3,
+	}
+)
+
+func (x ProcessStream) Enum() *ProcessStream {
+	p := new(ProcessStream)
+	*p = x
+	return p
+}
+
+func (x ProcessStream) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ProcessStream) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_sandboxes_proto_enumTypes[3].Descriptor()
+}
+
+func (ProcessStream) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_sandboxes_proto_enumTypes[3]
+}
+
+func (x ProcessStream) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ProcessStream.Descriptor instead.
+func (ProcessStream) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{3}
+}
+
 type AcquireLeaseRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Thread or agent scope.
@@ -1014,6 +1200,1618 @@ func (x *SandboxHealthResponse) GetStatus() string {
 	return ""
 }
 
+// A process's argv, ALREADY REDACTED by the host before it is sent. The
+// registry never receives the plaintext; command_digest is what lets a caller
+// recognize "the same command" without it.
+type RedactedCommand struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The program, redacted.
+	Program string `protobuf:"bytes,1,opt,name=program,proto3" json:"program,omitempty"`
+	// The arguments, redacted — including the value after a secret-bearing flag
+	// such as `--token`, which no text pattern can reach because they all key on
+	// a ':' or '=' separator.
+	Args          []string `protobuf:"bytes,2,rep,name=args,proto3" json:"args,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RedactedCommand) Reset() {
+	*x = RedactedCommand{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RedactedCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RedactedCommand) ProtoMessage() {}
+
+func (x *RedactedCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RedactedCommand.ProtoReflect.Descriptor instead.
+func (*RedactedCommand) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *RedactedCommand) GetProgram() string {
+	if x != nil {
+		return x.Program
+	}
+	return ""
+}
+
+func (x *RedactedCommand) GetArgs() []string {
+	if x != nil {
+		return x.Args
+	}
+	return nil
+}
+
+// One registered background process.
+type Process struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// ULID minted by the host.
+	ProcessId string `protobuf:"bytes,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	// Tenant this process belongs to, derived from the registering principal.
+	OrgId string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// Space whose workspace and authority the process runs under.
+	SpaceId string `protobuf:"bytes,3,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Lease that admitted this process; its expiry bounds the process's own.
+	LeaseId string `protobuf:"bytes,4,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	// The execution-core instance hosting the process. With host_epoch below,
+	// this is the write fence: only the exact instance and boot that registered
+	// a process may append to it or move its state.
+	BackendId string `protobuf:"bytes,5,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	// The hosting instance's boot identity. A restarted host mints a new one, so
+	// its predecessor's rows become unwritable rather than interleaved.
+	HostEpoch string `protobuf:"bytes,6,opt,name=host_epoch,json=hostEpoch,proto3" json:"host_epoch,omitempty"`
+	// Agent run that started the process.
+	RunId string `protobuf:"bytes,7,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Step within that run, when the caller had one.
+	StepId string `protobuf:"bytes,8,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	// The Space member whose capability decision the lease carries.
+	SubjectId string `protobuf:"bytes,9,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// The redacted argv.
+	Command *RedactedCommand `protobuf:"bytes,10,opt,name=command,proto3" json:"command,omitempty"`
+	// sha256 over the UNREDACTED argv, computed by the host.
+	CommandDigest string `protobuf:"bytes,11,opt,name=command_digest,json=commandDigest,proto3" json:"command_digest,omitempty"`
+	// Current lifecycle state.
+	State ProcessState `protobuf:"varint,12,opt,name=state,proto3,enum=model_plane.v1.ProcessState" json:"state,omitempty"`
+	// Absent unless the process actually exited with a code.
+	ExitCode *int32 `protobuf:"varint,13,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
+	// Why the process ended. A closed vocabulary, mirrored by a CHECK constraint
+	// in migration 0003: a free-form reason would eventually carry command
+	// output. Empty while the process is live.
+	EndReason string `protobuf:"bytes,14,opt,name=end_reason,json=endReason,proto3" json:"end_reason,omitempty"`
+	// The strongest signal requested so far.
+	SignalRequested ProcessSignal `protobuf:"varint,15,opt,name=signal_requested,json=signalRequested,proto3,enum=model_plane.v1.ProcessSignal" json:"signal_requested,omitempty"`
+	// When TERM was first requested, which is when the grace period started.
+	TermRequestedAt *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=term_requested_at,json=termRequestedAt,proto3" json:"term_requested_at,omitempty"`
+	// Whether the host has finished tearing down the process's pipes and scratch
+	// directory.
+	CleanupDone bool `protobuf:"varint,17,opt,name=cleanup_done,json=cleanupDone,proto3" json:"cleanup_done,omitempty"`
+	// The TTL the caller asked for, recorded as requested.
+	TtlSeconds int32 `protobuf:"varint,18,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	// Clamped to the lease's own expiry: a process never outlives the lease
+	// whose workspace and authority it runs under.
+	ExpiresAt *timestamppb.Timestamp `protobuf:"bytes,19,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	// When the host reported the process spawned.
+	StartedAt *timestamppb.Timestamp `protobuf:"bytes,20,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	// When the process reached a terminal state.
+	EndedAt *timestamppb.Timestamp `protobuf:"bytes,21,opt,name=ended_at,json=endedAt,proto3" json:"ended_at,omitempty"`
+	// Last time the host reported anything about this process. Staleness here is
+	// what the registry's sweeper uses to declare a host lost.
+	LastHeartbeatAt *timestamppb.Timestamp `protobuf:"bytes,22,opt,name=last_heartbeat_at,json=lastHeartbeatAt,proto3" json:"last_heartbeat_at,omitempty"`
+	// The next output seq the host will use.
+	NextSeq int64 `protobuf:"varint,23,opt,name=next_seq,json=nextSeq,proto3" json:"next_seq,omitempty"`
+	// The first seq still readable. A reader compares its cursor against this to
+	// detect output trimmed away by retention.
+	RetainedFromSeq int64 `protobuf:"varint,24,opt,name=retained_from_seq,json=retainedFromSeq,proto3" json:"retained_from_seq,omitempty"`
+	// Bytes of output currently stored.
+	RetainedBytes int64 `protobuf:"varint,25,opt,name=retained_bytes,json=retainedBytes,proto3" json:"retained_bytes,omitempty"`
+	// Bytes of output deleted by retention over this process's lifetime.
+	DroppedBytes int64 `protobuf:"varint,26,opt,name=dropped_bytes,json=droppedBytes,proto3" json:"dropped_bytes,omitempty"`
+	// Bytes written to the process's stdin. A count only; stdin content is never
+	// stored anywhere.
+	StdinBytes int64 `protobuf:"varint,27,opt,name=stdin_bytes,json=stdinBytes,proto3" json:"stdin_bytes,omitempty"`
+	// When the row was created.
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,28,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// When the row last changed.
+	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,29,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Process) Reset() {
+	*x = Process{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Process) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Process) ProtoMessage() {}
+
+func (x *Process) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Process.ProtoReflect.Descriptor instead.
+func (*Process) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *Process) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *Process) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *Process) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *Process) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *Process) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
+	}
+	return ""
+}
+
+func (x *Process) GetHostEpoch() string {
+	if x != nil {
+		return x.HostEpoch
+	}
+	return ""
+}
+
+func (x *Process) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *Process) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *Process) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *Process) GetCommand() *RedactedCommand {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+func (x *Process) GetCommandDigest() string {
+	if x != nil {
+		return x.CommandDigest
+	}
+	return ""
+}
+
+func (x *Process) GetState() ProcessState {
+	if x != nil {
+		return x.State
+	}
+	return ProcessState_PROCESS_STATE_UNSPECIFIED
+}
+
+func (x *Process) GetExitCode() int32 {
+	if x != nil && x.ExitCode != nil {
+		return *x.ExitCode
+	}
+	return 0
+}
+
+func (x *Process) GetEndReason() string {
+	if x != nil {
+		return x.EndReason
+	}
+	return ""
+}
+
+func (x *Process) GetSignalRequested() ProcessSignal {
+	if x != nil {
+		return x.SignalRequested
+	}
+	return ProcessSignal_PROCESS_SIGNAL_UNSPECIFIED
+}
+
+func (x *Process) GetTermRequestedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.TermRequestedAt
+	}
+	return nil
+}
+
+func (x *Process) GetCleanupDone() bool {
+	if x != nil {
+		return x.CleanupDone
+	}
+	return false
+}
+
+func (x *Process) GetTtlSeconds() int32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
+func (x *Process) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
+func (x *Process) GetStartedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.StartedAt
+	}
+	return nil
+}
+
+func (x *Process) GetEndedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.EndedAt
+	}
+	return nil
+}
+
+func (x *Process) GetLastHeartbeatAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LastHeartbeatAt
+	}
+	return nil
+}
+
+func (x *Process) GetNextSeq() int64 {
+	if x != nil {
+		return x.NextSeq
+	}
+	return 0
+}
+
+func (x *Process) GetRetainedFromSeq() int64 {
+	if x != nil {
+		return x.RetainedFromSeq
+	}
+	return 0
+}
+
+func (x *Process) GetRetainedBytes() int64 {
+	if x != nil {
+		return x.RetainedBytes
+	}
+	return 0
+}
+
+func (x *Process) GetDroppedBytes() int64 {
+	if x != nil {
+		return x.DroppedBytes
+	}
+	return 0
+}
+
+func (x *Process) GetStdinBytes() int64 {
+	if x != nil {
+		return x.StdinBytes
+	}
+	return 0
+}
+
+func (x *Process) GetCreatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CreatedAt
+	}
+	return nil
+}
+
+func (x *Process) GetUpdatedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return nil
+}
+
+// One append-only slice of a process's output.
+type ProcessOutputChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Assigned by the host, which the fence makes the single writer for its own
+	// process. The (process_id, seq) primary key is what turns a retried batch
+	// into a no-op instead of a duplicate.
+	Seq int64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	// Which stream this came from.
+	Stream ProcessStream `protobuf:"varint,2,opt,name=stream,proto3,enum=model_plane.v1.ProcessStream" json:"stream,omitempty"`
+	// Already redacted at a line boundary by the host: a secret split across two
+	// fixed-size chunks would no longer match any scrub pattern.
+	Content []byte `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
+	// Whether the chunk ends on a complete line. S4.3's process-output watch
+	// adapter needs this before it can emit the last line as an event.
+	EndsWithNewline bool `protobuf:"varint,4,opt,name=ends_with_newline,json=endsWithNewline,proto3" json:"ends_with_newline,omitempty"`
+	// When the host read these bytes.
+	CapturedAt    *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=captured_at,json=capturedAt,proto3" json:"captured_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProcessOutputChunk) Reset() {
+	*x = ProcessOutputChunk{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProcessOutputChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProcessOutputChunk) ProtoMessage() {}
+
+func (x *ProcessOutputChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProcessOutputChunk.ProtoReflect.Descriptor instead.
+func (*ProcessOutputChunk) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ProcessOutputChunk) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *ProcessOutputChunk) GetStream() ProcessStream {
+	if x != nil {
+		return x.Stream
+	}
+	return ProcessStream_PROCESS_STREAM_UNSPECIFIED
+}
+
+func (x *ProcessOutputChunk) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+func (x *ProcessOutputChunk) GetEndsWithNewline() bool {
+	if x != nil {
+		return x.EndsWithNewline
+	}
+	return false
+}
+
+func (x *ProcessOutputChunk) GetCapturedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.CapturedAt
+	}
+	return nil
+}
+
+// Reserve a process row before spawning.
+type RegisterProcessRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Minted by the host (a ULID), so an ambiguous retry re-registers the same
+	// id rather than creating a second process.
+	ProcessId string `protobuf:"bytes,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	// Lease to run under. Must be ACTIVE, unexpired, pinned to this backend, and
+	// carry the space:processes permission Control grants.
+	LeaseId string `protobuf:"bytes,2,opt,name=lease_id,json=leaseId,proto3" json:"lease_id,omitempty"`
+	// The registering host's backend id.
+	BackendId string `protobuf:"bytes,3,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	// The registering host's boot identity.
+	HostEpoch string `protobuf:"bytes,4,opt,name=host_epoch,json=hostEpoch,proto3" json:"host_epoch,omitempty"`
+	// Agent run starting the process.
+	RunId string `protobuf:"bytes,5,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Step within that run, if any.
+	StepId string `protobuf:"bytes,6,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	// The Space member the lease's capability decision names.
+	SubjectId string `protobuf:"bytes,7,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	// The redacted argv. The registry must never receive the plaintext.
+	Command *RedactedCommand `protobuf:"bytes,8,opt,name=command,proto3" json:"command,omitempty"`
+	// sha256 over the unredacted argv.
+	CommandDigest string `protobuf:"bytes,9,opt,name=command_digest,json=commandDigest,proto3" json:"command_digest,omitempty"`
+	// Requested lifetime; the registry clamps the resulting expiry to the
+	// lease's own.
+	TtlSeconds    int32 `protobuf:"varint,10,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterProcessRequest) Reset() {
+	*x = RegisterProcessRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterProcessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterProcessRequest) ProtoMessage() {}
+
+func (x *RegisterProcessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterProcessRequest.ProtoReflect.Descriptor instead.
+func (*RegisterProcessRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *RegisterProcessRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *RegisterProcessRequest) GetLeaseId() string {
+	if x != nil {
+		return x.LeaseId
+	}
+	return ""
+}
+
+func (x *RegisterProcessRequest) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
+	}
+	return ""
+}
+
+func (x *RegisterProcessRequest) GetHostEpoch() string {
+	if x != nil {
+		return x.HostEpoch
+	}
+	return ""
+}
+
+func (x *RegisterProcessRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *RegisterProcessRequest) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *RegisterProcessRequest) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *RegisterProcessRequest) GetCommand() *RedactedCommand {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+func (x *RegisterProcessRequest) GetCommandDigest() string {
+	if x != nil {
+		return x.CommandDigest
+	}
+	return ""
+}
+
+func (x *RegisterProcessRequest) GetTtlSeconds() int32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
+// The reserved row.
+type RegisterProcessResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The row, in STARTING, with expires_at already clamped.
+	Process       *Process `protobuf:"bytes,1,opt,name=process,proto3" json:"process,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RegisterProcessResponse) Reset() {
+	*x = RegisterProcessResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterProcessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterProcessResponse) ProtoMessage() {}
+
+func (x *RegisterProcessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterProcessResponse.ProtoReflect.Descriptor instead.
+func (*RegisterProcessResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *RegisterProcessResponse) GetProcess() *Process {
+	if x != nil {
+		return x.Process
+	}
+	return nil
+}
+
+// The host observed the process start.
+type ProcessStarted struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProcessStarted) Reset() {
+	*x = ProcessStarted{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProcessStarted) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProcessStarted) ProtoMessage() {}
+
+func (x *ProcessStarted) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProcessStarted.ProtoReflect.Descriptor instead.
+func (*ProcessStarted) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{21}
+}
+
+// A caller asked the process to stop. Recorded here; the host is what actually
+// delivers the signal.
+type ProcessSignalRequested struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The signal requested. An escalation to KILL is never downgraded.
+	Signal        ProcessSignal `protobuf:"varint,1,opt,name=signal,proto3,enum=model_plane.v1.ProcessSignal" json:"signal,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProcessSignalRequested) Reset() {
+	*x = ProcessSignalRequested{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProcessSignalRequested) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProcessSignalRequested) ProtoMessage() {}
+
+func (x *ProcessSignalRequested) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProcessSignalRequested.ProtoReflect.Descriptor instead.
+func (*ProcessSignalRequested) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ProcessSignalRequested) GetSignal() ProcessSignal {
+	if x != nil {
+		return x.Signal
+	}
+	return ProcessSignal_PROCESS_SIGNAL_UNSPECIFIED
+}
+
+// The process reached a terminal state.
+type ProcessExited struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// EXITED, KILLED or EXPIRED.
+	State ProcessState `protobuf:"varint,1,opt,name=state,proto3,enum=model_plane.v1.ProcessState" json:"state,omitempty"`
+	// Present only when the process exited with a code.
+	ExitCode *int32 `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
+	// Why it ended, from the closed vocabulary migration 0003 enforces.
+	EndReason string `protobuf:"bytes,3,opt,name=end_reason,json=endReason,proto3" json:"end_reason,omitempty"`
+	// Whether the host has finished its own teardown.
+	CleanupDone   bool `protobuf:"varint,4,opt,name=cleanup_done,json=cleanupDone,proto3" json:"cleanup_done,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProcessExited) Reset() {
+	*x = ProcessExited{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProcessExited) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProcessExited) ProtoMessage() {}
+
+func (x *ProcessExited) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProcessExited.ProtoReflect.Descriptor instead.
+func (*ProcessExited) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ProcessExited) GetState() ProcessState {
+	if x != nil {
+		return x.State
+	}
+	return ProcessState_PROCESS_STATE_UNSPECIFIED
+}
+
+func (x *ProcessExited) GetExitCode() int32 {
+	if x != nil && x.ExitCode != nil {
+		return *x.ExitCode
+	}
+	return 0
+}
+
+func (x *ProcessExited) GetEndReason() string {
+	if x != nil {
+		return x.EndReason
+	}
+	return ""
+}
+
+func (x *ProcessExited) GetCleanupDone() bool {
+	if x != nil {
+		return x.CleanupDone
+	}
+	return false
+}
+
+// Report a host-driven lifecycle transition.
+type UpdateProcessStateRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Process to move.
+	ProcessId string `protobuf:"bytes,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	// Reporting host's backend id; part of the write fence.
+	BackendId string `protobuf:"bytes,2,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	// Reporting host's boot identity; part of the write fence.
+	HostEpoch string `protobuf:"bytes,3,opt,name=host_epoch,json=hostEpoch,proto3" json:"host_epoch,omitempty"`
+	// Which transition is being reported.
+	//
+	// Types that are valid to be assigned to Transition:
+	//
+	//	*UpdateProcessStateRequest_Started
+	//	*UpdateProcessStateRequest_Signal
+	//	*UpdateProcessStateRequest_Exited
+	Transition    isUpdateProcessStateRequest_Transition `protobuf_oneof:"transition"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateProcessStateRequest) Reset() {
+	*x = UpdateProcessStateRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateProcessStateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateProcessStateRequest) ProtoMessage() {}
+
+func (x *UpdateProcessStateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateProcessStateRequest.ProtoReflect.Descriptor instead.
+func (*UpdateProcessStateRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *UpdateProcessStateRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *UpdateProcessStateRequest) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
+	}
+	return ""
+}
+
+func (x *UpdateProcessStateRequest) GetHostEpoch() string {
+	if x != nil {
+		return x.HostEpoch
+	}
+	return ""
+}
+
+func (x *UpdateProcessStateRequest) GetTransition() isUpdateProcessStateRequest_Transition {
+	if x != nil {
+		return x.Transition
+	}
+	return nil
+}
+
+func (x *UpdateProcessStateRequest) GetStarted() *ProcessStarted {
+	if x != nil {
+		if x, ok := x.Transition.(*UpdateProcessStateRequest_Started); ok {
+			return x.Started
+		}
+	}
+	return nil
+}
+
+func (x *UpdateProcessStateRequest) GetSignal() *ProcessSignalRequested {
+	if x != nil {
+		if x, ok := x.Transition.(*UpdateProcessStateRequest_Signal); ok {
+			return x.Signal
+		}
+	}
+	return nil
+}
+
+func (x *UpdateProcessStateRequest) GetExited() *ProcessExited {
+	if x != nil {
+		if x, ok := x.Transition.(*UpdateProcessStateRequest_Exited); ok {
+			return x.Exited
+		}
+	}
+	return nil
+}
+
+type isUpdateProcessStateRequest_Transition interface {
+	isUpdateProcessStateRequest_Transition()
+}
+
+type UpdateProcessStateRequest_Started struct {
+	// The process spawned.
+	Started *ProcessStarted `protobuf:"bytes,4,opt,name=started,proto3,oneof"`
+}
+
+type UpdateProcessStateRequest_Signal struct {
+	// A signal was requested.
+	Signal *ProcessSignalRequested `protobuf:"bytes,5,opt,name=signal,proto3,oneof"`
+}
+
+type UpdateProcessStateRequest_Exited struct {
+	// The process ended.
+	Exited *ProcessExited `protobuf:"bytes,6,opt,name=exited,proto3,oneof"`
+}
+
+func (*UpdateProcessStateRequest_Started) isUpdateProcessStateRequest_Transition() {}
+
+func (*UpdateProcessStateRequest_Signal) isUpdateProcessStateRequest_Transition() {}
+
+func (*UpdateProcessStateRequest_Exited) isUpdateProcessStateRequest_Transition() {}
+
+// Empty: the transition either applied or was refused by the fence.
+type UpdateProcessStateResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateProcessStateResponse) Reset() {
+	*x = UpdateProcessStateResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateProcessStateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateProcessStateResponse) ProtoMessage() {}
+
+func (x *UpdateProcessStateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateProcessStateResponse.ProtoReflect.Descriptor instead.
+func (*UpdateProcessStateResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{25}
+}
+
+// Append output and refresh the heartbeat.
+type AppendProcessOutputRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Process the output belongs to.
+	ProcessId string `protobuf:"bytes,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	// Reporting host's backend id; part of the write fence.
+	BackendId string `protobuf:"bytes,2,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	// Reporting host's boot identity; part of the write fence.
+	HostEpoch string `protobuf:"bytes,3,opt,name=host_epoch,json=hostEpoch,proto3" json:"host_epoch,omitempty"`
+	// May be empty: that makes this call a pure heartbeat, which is what keeps
+	// silence distinguishable from a dead host.
+	Chunks []*ProcessOutputChunk `protobuf:"bytes,4,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	// Bytes written to the process's stdin since the last call. A count only.
+	StdinBytesDelta int64 `protobuf:"varint,5,opt,name=stdin_bytes_delta,json=stdinBytesDelta,proto3" json:"stdin_bytes_delta,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *AppendProcessOutputRequest) Reset() {
+	*x = AppendProcessOutputRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendProcessOutputRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendProcessOutputRequest) ProtoMessage() {}
+
+func (x *AppendProcessOutputRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendProcessOutputRequest.ProtoReflect.Descriptor instead.
+func (*AppendProcessOutputRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *AppendProcessOutputRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *AppendProcessOutputRequest) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
+	}
+	return ""
+}
+
+func (x *AppendProcessOutputRequest) GetHostEpoch() string {
+	if x != nil {
+		return x.HostEpoch
+	}
+	return ""
+}
+
+func (x *AppendProcessOutputRequest) GetChunks() []*ProcessOutputChunk {
+	if x != nil {
+		return x.Chunks
+	}
+	return nil
+}
+
+func (x *AppendProcessOutputRequest) GetStdinBytesDelta() int64 {
+	if x != nil {
+		return x.StdinBytesDelta
+	}
+	return 0
+}
+
+// Output bookkeeping after the append.
+type AppendProcessOutputResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The next seq the host should use.
+	NextSeq int64 `protobuf:"varint,1,opt,name=next_seq,json=nextSeq,proto3" json:"next_seq,omitempty"`
+	// First seq still readable after any retention trimming this append caused.
+	RetainedFromSeq int64 `protobuf:"varint,2,opt,name=retained_from_seq,json=retainedFromSeq,proto3" json:"retained_from_seq,omitempty"`
+	// Bytes of output currently stored.
+	RetainedBytes int64 `protobuf:"varint,3,opt,name=retained_bytes,json=retainedBytes,proto3" json:"retained_bytes,omitempty"`
+	// Bytes deleted by retention over this process's lifetime.
+	DroppedBytes  int64 `protobuf:"varint,4,opt,name=dropped_bytes,json=droppedBytes,proto3" json:"dropped_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppendProcessOutputResponse) Reset() {
+	*x = AppendProcessOutputResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendProcessOutputResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendProcessOutputResponse) ProtoMessage() {}
+
+func (x *AppendProcessOutputResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendProcessOutputResponse.ProtoReflect.Descriptor instead.
+func (*AppendProcessOutputResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *AppendProcessOutputResponse) GetNextSeq() int64 {
+	if x != nil {
+		return x.NextSeq
+	}
+	return 0
+}
+
+func (x *AppendProcessOutputResponse) GetRetainedFromSeq() int64 {
+	if x != nil {
+		return x.RetainedFromSeq
+	}
+	return 0
+}
+
+func (x *AppendProcessOutputResponse) GetRetainedBytes() int64 {
+	if x != nil {
+		return x.RetainedBytes
+	}
+	return 0
+}
+
+func (x *AppendProcessOutputResponse) GetDroppedBytes() int64 {
+	if x != nil {
+		return x.DroppedBytes
+	}
+	return 0
+}
+
+// Declare a superseded host's processes lost.
+type ReconcileProcessesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Backend whose rows to reconcile.
+	BackendId string `protobuf:"bytes,1,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
+	// This host's CURRENT boot identity. Every live row on this backend under a
+	// different epoch is marked lost; this epoch's own rows are untouched.
+	HostEpoch     string `protobuf:"bytes,2,opt,name=host_epoch,json=hostEpoch,proto3" json:"host_epoch,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReconcileProcessesRequest) Reset() {
+	*x = ReconcileProcessesRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconcileProcessesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconcileProcessesRequest) ProtoMessage() {}
+
+func (x *ReconcileProcessesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconcileProcessesRequest.ProtoReflect.Descriptor instead.
+func (*ReconcileProcessesRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *ReconcileProcessesRequest) GetBackendId() string {
+	if x != nil {
+		return x.BackendId
+	}
+	return ""
+}
+
+func (x *ReconcileProcessesRequest) GetHostEpoch() string {
+	if x != nil {
+		return x.HostEpoch
+	}
+	return ""
+}
+
+// How much was reconciled.
+type ReconcileProcessesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Rows moved to LOST.
+	LostCount     int64 `protobuf:"varint,1,opt,name=lost_count,json=lostCount,proto3" json:"lost_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReconcileProcessesResponse) Reset() {
+	*x = ReconcileProcessesResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReconcileProcessesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReconcileProcessesResponse) ProtoMessage() {}
+
+func (x *ReconcileProcessesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReconcileProcessesResponse.ProtoReflect.Descriptor instead.
+func (*ReconcileProcessesResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *ReconcileProcessesResponse) GetLostCount() int64 {
+	if x != nil {
+		return x.LostCount
+	}
+	return 0
+}
+
+// Read one process's metadata.
+type GetProcessRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Process to resolve, within the caller's own organization.
+	ProcessId     string `protobuf:"bytes,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetProcessRequest) Reset() {
+	*x = GetProcessRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetProcessRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetProcessRequest) ProtoMessage() {}
+
+func (x *GetProcessRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetProcessRequest.ProtoReflect.Descriptor instead.
+func (*GetProcessRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *GetProcessRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+// The resolved process.
+type GetProcessResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The process, terminal or live.
+	Process       *Process `protobuf:"bytes,1,opt,name=process,proto3" json:"process,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetProcessResponse) Reset() {
+	*x = GetProcessResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetProcessResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetProcessResponse) ProtoMessage() {}
+
+func (x *GetProcessResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetProcessResponse.ProtoReflect.Descriptor instead.
+func (*GetProcessResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *GetProcessResponse) GetProcess() *Process {
+	if x != nil {
+		return x.Process
+	}
+	return nil
+}
+
+// Page a Space's processes.
+type ListProcessesRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Space to list within.
+	SpaceId string `protobuf:"bytes,1,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Terminal processes are hidden unless asked for.
+	IncludeTerminal bool `protobuf:"varint,2,opt,name=include_terminal,json=includeTerminal,proto3" json:"include_terminal,omitempty"`
+	// Page size; clamped by the server.
+	Limit int32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Keyset cursor: the last process_id of the previous page. Ids are ULIDs, so
+	// id order is creation order — the same shape ListRuns uses.
+	AfterProcessId string `protobuf:"bytes,4,opt,name=after_process_id,json=afterProcessId,proto3" json:"after_process_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ListProcessesRequest) Reset() {
+	*x = ListProcessesRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListProcessesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListProcessesRequest) ProtoMessage() {}
+
+func (x *ListProcessesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListProcessesRequest.ProtoReflect.Descriptor instead.
+func (*ListProcessesRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *ListProcessesRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ListProcessesRequest) GetIncludeTerminal() bool {
+	if x != nil {
+		return x.IncludeTerminal
+	}
+	return false
+}
+
+func (x *ListProcessesRequest) GetLimit() int32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *ListProcessesRequest) GetAfterProcessId() string {
+	if x != nil {
+		return x.AfterProcessId
+	}
+	return ""
+}
+
+// One page of processes.
+type ListProcessesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Newest first.
+	Processes []*Process `protobuf:"bytes,1,rep,name=processes,proto3" json:"processes,omitempty"`
+	// Whether another page follows.
+	HasMore       bool `protobuf:"varint,2,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListProcessesResponse) Reset() {
+	*x = ListProcessesResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListProcessesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListProcessesResponse) ProtoMessage() {}
+
+func (x *ListProcessesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListProcessesResponse.ProtoReflect.Descriptor instead.
+func (*ListProcessesResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *ListProcessesResponse) GetProcesses() []*Process {
+	if x != nil {
+		return x.Processes
+	}
+	return nil
+}
+
+func (x *ListProcessesResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
+}
+
+// Read a process's output after a cursor.
+type ReadProcessOutputRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Process to read.
+	ProcessId string `protobuf:"bytes,1,opt,name=process_id,json=processId,proto3" json:"process_id,omitempty"`
+	// Exclusive: chunks strictly after this seq. Zero starts from the beginning
+	// of whatever is still retained.
+	AfterSeq int64 `protobuf:"varint,2,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
+	// Byte budget for this page; clamped by the server. A single chunk larger
+	// than the budget is still returned, so a reader can never be wedged.
+	MaxBytes      int64 `protobuf:"varint,3,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadProcessOutputRequest) Reset() {
+	*x = ReadProcessOutputRequest{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadProcessOutputRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadProcessOutputRequest) ProtoMessage() {}
+
+func (x *ReadProcessOutputRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadProcessOutputRequest.ProtoReflect.Descriptor instead.
+func (*ReadProcessOutputRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *ReadProcessOutputRequest) GetProcessId() string {
+	if x != nil {
+		return x.ProcessId
+	}
+	return ""
+}
+
+func (x *ReadProcessOutputRequest) GetAfterSeq() int64 {
+	if x != nil {
+		return x.AfterSeq
+	}
+	return 0
+}
+
+func (x *ReadProcessOutputRequest) GetMaxBytes() int64 {
+	if x != nil {
+		return x.MaxBytes
+	}
+	return 0
+}
+
+// One page of output.
+type ReadProcessOutputResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The chunks, in seq order.
+	Chunks []*ProcessOutputChunk `protobuf:"bytes,1,rep,name=chunks,proto3" json:"chunks,omitempty"`
+	// Cursor to pass as after_seq next time.
+	NextCursor int64 `protobuf:"varint,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	// Output between the caller's cursor and the first chunk here was trimmed
+	// and will never be returned. Because retention protects the head, the hole
+	// a trim leaves is in the MIDDLE of the stream, so this is computed from the
+	// first returned chunk's seq and not only from retained_from_seq.
+	GapBefore bool `protobuf:"varint,3,opt,name=gap_before,json=gapBefore,proto3" json:"gap_before,omitempty"`
+	// First seq still readable at all.
+	RetainedFromSeq int64 `protobuf:"varint,4,opt,name=retained_from_seq,json=retainedFromSeq,proto3" json:"retained_from_seq,omitempty"`
+	// The process's state, carried on every page so a drained terminal stream is
+	// an empty page with an outcome rather than a not-found.
+	State ProcessState `protobuf:"varint,5,opt,name=state,proto3,enum=model_plane.v1.ProcessState" json:"state,omitempty"`
+	// Present only when the process exited with a code.
+	ExitCode *int32 `protobuf:"varint,6,opt,name=exit_code,json=exitCode,proto3,oneof" json:"exit_code,omitempty"`
+	// Why the process ended; empty while it is live.
+	EndReason string `protobuf:"bytes,7,opt,name=end_reason,json=endReason,proto3" json:"end_reason,omitempty"`
+	// Whether more chunks follow this page.
+	HasMore       bool `protobuf:"varint,8,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReadProcessOutputResponse) Reset() {
+	*x = ReadProcessOutputResponse{}
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReadProcessOutputResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReadProcessOutputResponse) ProtoMessage() {}
+
+func (x *ReadProcessOutputResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sandboxes_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReadProcessOutputResponse.ProtoReflect.Descriptor instead.
+func (*ReadProcessOutputResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sandboxes_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *ReadProcessOutputResponse) GetChunks() []*ProcessOutputChunk {
+	if x != nil {
+		return x.Chunks
+	}
+	return nil
+}
+
+func (x *ReadProcessOutputResponse) GetNextCursor() int64 {
+	if x != nil {
+		return x.NextCursor
+	}
+	return 0
+}
+
+func (x *ReadProcessOutputResponse) GetGapBefore() bool {
+	if x != nil {
+		return x.GapBefore
+	}
+	return false
+}
+
+func (x *ReadProcessOutputResponse) GetRetainedFromSeq() int64 {
+	if x != nil {
+		return x.RetainedFromSeq
+	}
+	return 0
+}
+
+func (x *ReadProcessOutputResponse) GetState() ProcessState {
+	if x != nil {
+		return x.State
+	}
+	return ProcessState_PROCESS_STATE_UNSPECIFIED
+}
+
+func (x *ReadProcessOutputResponse) GetExitCode() int32 {
+	if x != nil && x.ExitCode != nil {
+		return *x.ExitCode
+	}
+	return 0
+}
+
+func (x *ReadProcessOutputResponse) GetEndReason() string {
+	if x != nil {
+		return x.EndReason
+	}
+	return ""
+}
+
+func (x *ReadProcessOutputResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
+}
+
 var File_model_plane_v1_sandboxes_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
@@ -1082,21 +2880,198 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\x11conflicting_paths\x18\x01 \x03(\tR\x10conflictingPaths\"\x16\n" +
 	"\x14SandboxHealthRequest\"/\n" +
 	"\x15SandboxHealthResponse\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status*l\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status\"?\n" +
+	"\x0fRedactedCommand\x12\x18\n" +
+	"\aprogram\x18\x01 \x01(\tR\aprogram\x12\x12\n" +
+	"\x04args\x18\x02 \x03(\tR\x04args\"\xdc\t\n" +
+	"\aProcess\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x15\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x19\n" +
+	"\bspace_id\x18\x03 \x01(\tR\aspaceId\x12\x19\n" +
+	"\blease_id\x18\x04 \x01(\tR\aleaseId\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x05 \x01(\tR\tbackendId\x12\x1d\n" +
+	"\n" +
+	"host_epoch\x18\x06 \x01(\tR\thostEpoch\x12\x15\n" +
+	"\x06run_id\x18\a \x01(\tR\x05runId\x12\x17\n" +
+	"\astep_id\x18\b \x01(\tR\x06stepId\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\t \x01(\tR\tsubjectId\x129\n" +
+	"\acommand\x18\n" +
+	" \x01(\v2\x1f.model_plane.v1.RedactedCommandR\acommand\x12%\n" +
+	"\x0ecommand_digest\x18\v \x01(\tR\rcommandDigest\x122\n" +
+	"\x05state\x18\f \x01(\x0e2\x1c.model_plane.v1.ProcessStateR\x05state\x12 \n" +
+	"\texit_code\x18\r \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x1d\n" +
+	"\n" +
+	"end_reason\x18\x0e \x01(\tR\tendReason\x12H\n" +
+	"\x10signal_requested\x18\x0f \x01(\x0e2\x1d.model_plane.v1.ProcessSignalR\x0fsignalRequested\x12F\n" +
+	"\x11term_requested_at\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\x0ftermRequestedAt\x12!\n" +
+	"\fcleanup_done\x18\x11 \x01(\bR\vcleanupDone\x12\x1f\n" +
+	"\vttl_seconds\x18\x12 \x01(\x05R\n" +
+	"ttlSeconds\x129\n" +
+	"\n" +
+	"expires_at\x18\x13 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x129\n" +
+	"\n" +
+	"started_at\x18\x14 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x125\n" +
+	"\bended_at\x18\x15 \x01(\v2\x1a.google.protobuf.TimestampR\aendedAt\x12F\n" +
+	"\x11last_heartbeat_at\x18\x16 \x01(\v2\x1a.google.protobuf.TimestampR\x0flastHeartbeatAt\x12\x19\n" +
+	"\bnext_seq\x18\x17 \x01(\x03R\anextSeq\x12*\n" +
+	"\x11retained_from_seq\x18\x18 \x01(\x03R\x0fretainedFromSeq\x12%\n" +
+	"\x0eretained_bytes\x18\x19 \x01(\x03R\rretainedBytes\x12#\n" +
+	"\rdropped_bytes\x18\x1a \x01(\x03R\fdroppedBytes\x12\x1f\n" +
+	"\vstdin_bytes\x18\x1b \x01(\x03R\n" +
+	"stdinBytes\x129\n" +
+	"\n" +
+	"created_at\x18\x1c \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
+	"\n" +
+	"updated_at\x18\x1d \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAtB\f\n" +
+	"\n" +
+	"_exit_code\"\xe0\x01\n" +
+	"\x12ProcessOutputChunk\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x03R\x03seq\x125\n" +
+	"\x06stream\x18\x02 \x01(\x0e2\x1d.model_plane.v1.ProcessStreamR\x06stream\x12\x18\n" +
+	"\acontent\x18\x03 \x01(\fR\acontent\x12*\n" +
+	"\x11ends_with_newline\x18\x04 \x01(\bR\x0fendsWithNewline\x12;\n" +
+	"\vcaptured_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"capturedAt\"\xe2\x02\n" +
+	"\x16RegisterProcessRequest\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x19\n" +
+	"\blease_id\x18\x02 \x01(\tR\aleaseId\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x03 \x01(\tR\tbackendId\x12\x1d\n" +
+	"\n" +
+	"host_epoch\x18\x04 \x01(\tR\thostEpoch\x12\x15\n" +
+	"\x06run_id\x18\x05 \x01(\tR\x05runId\x12\x17\n" +
+	"\astep_id\x18\x06 \x01(\tR\x06stepId\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\a \x01(\tR\tsubjectId\x129\n" +
+	"\acommand\x18\b \x01(\v2\x1f.model_plane.v1.RedactedCommandR\acommand\x12%\n" +
+	"\x0ecommand_digest\x18\t \x01(\tR\rcommandDigest\x12\x1f\n" +
+	"\vttl_seconds\x18\n" +
+	" \x01(\x05R\n" +
+	"ttlSeconds\"L\n" +
+	"\x17RegisterProcessResponse\x121\n" +
+	"\aprocess\x18\x01 \x01(\v2\x17.model_plane.v1.ProcessR\aprocess\"\x10\n" +
+	"\x0eProcessStarted\"O\n" +
+	"\x16ProcessSignalRequested\x125\n" +
+	"\x06signal\x18\x01 \x01(\x0e2\x1d.model_plane.v1.ProcessSignalR\x06signal\"\xb5\x01\n" +
+	"\rProcessExited\x122\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x1c.model_plane.v1.ProcessStateR\x05state\x12 \n" +
+	"\texit_code\x18\x02 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x1d\n" +
+	"\n" +
+	"end_reason\x18\x03 \x01(\tR\tendReason\x12!\n" +
+	"\fcleanup_done\x18\x04 \x01(\bR\vcleanupDoneB\f\n" +
+	"\n" +
+	"_exit_code\"\xbd\x02\n" +
+	"\x19UpdateProcessStateRequest\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x02 \x01(\tR\tbackendId\x12\x1d\n" +
+	"\n" +
+	"host_epoch\x18\x03 \x01(\tR\thostEpoch\x12:\n" +
+	"\astarted\x18\x04 \x01(\v2\x1e.model_plane.v1.ProcessStartedH\x00R\astarted\x12@\n" +
+	"\x06signal\x18\x05 \x01(\v2&.model_plane.v1.ProcessSignalRequestedH\x00R\x06signal\x127\n" +
+	"\x06exited\x18\x06 \x01(\v2\x1d.model_plane.v1.ProcessExitedH\x00R\x06exitedB\f\n" +
+	"\n" +
+	"transition\"\x1c\n" +
+	"\x1aUpdateProcessStateResponse\"\xe1\x01\n" +
+	"\x1aAppendProcessOutputRequest\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x02 \x01(\tR\tbackendId\x12\x1d\n" +
+	"\n" +
+	"host_epoch\x18\x03 \x01(\tR\thostEpoch\x12:\n" +
+	"\x06chunks\x18\x04 \x03(\v2\".model_plane.v1.ProcessOutputChunkR\x06chunks\x12*\n" +
+	"\x11stdin_bytes_delta\x18\x05 \x01(\x03R\x0fstdinBytesDelta\"\xb0\x01\n" +
+	"\x1bAppendProcessOutputResponse\x12\x19\n" +
+	"\bnext_seq\x18\x01 \x01(\x03R\anextSeq\x12*\n" +
+	"\x11retained_from_seq\x18\x02 \x01(\x03R\x0fretainedFromSeq\x12%\n" +
+	"\x0eretained_bytes\x18\x03 \x01(\x03R\rretainedBytes\x12#\n" +
+	"\rdropped_bytes\x18\x04 \x01(\x03R\fdroppedBytes\"Y\n" +
+	"\x19ReconcileProcessesRequest\x12\x1d\n" +
+	"\n" +
+	"backend_id\x18\x01 \x01(\tR\tbackendId\x12\x1d\n" +
+	"\n" +
+	"host_epoch\x18\x02 \x01(\tR\thostEpoch\";\n" +
+	"\x1aReconcileProcessesResponse\x12\x1d\n" +
+	"\n" +
+	"lost_count\x18\x01 \x01(\x03R\tlostCount\"2\n" +
+	"\x11GetProcessRequest\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x01 \x01(\tR\tprocessId\"G\n" +
+	"\x12GetProcessResponse\x121\n" +
+	"\aprocess\x18\x01 \x01(\v2\x17.model_plane.v1.ProcessR\aprocess\"\x9c\x01\n" +
+	"\x14ListProcessesRequest\x12\x19\n" +
+	"\bspace_id\x18\x01 \x01(\tR\aspaceId\x12)\n" +
+	"\x10include_terminal\x18\x02 \x01(\bR\x0fincludeTerminal\x12\x14\n" +
+	"\x05limit\x18\x03 \x01(\x05R\x05limit\x12(\n" +
+	"\x10after_process_id\x18\x04 \x01(\tR\x0eafterProcessId\"i\n" +
+	"\x15ListProcessesResponse\x125\n" +
+	"\tprocesses\x18\x01 \x03(\v2\x17.model_plane.v1.ProcessR\tprocesses\x12\x19\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"s\n" +
+	"\x18ReadProcessOutputRequest\x12\x1d\n" +
+	"\n" +
+	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x1b\n" +
+	"\tafter_seq\x18\x02 \x01(\x03R\bafterSeq\x12\x1b\n" +
+	"\tmax_bytes\x18\x03 \x01(\x03R\bmaxBytes\"\xe1\x02\n" +
+	"\x19ReadProcessOutputResponse\x12:\n" +
+	"\x06chunks\x18\x01 \x03(\v2\".model_plane.v1.ProcessOutputChunkR\x06chunks\x12\x1f\n" +
+	"\vnext_cursor\x18\x02 \x01(\x03R\n" +
+	"nextCursor\x12\x1d\n" +
+	"\n" +
+	"gap_before\x18\x03 \x01(\bR\tgapBefore\x12*\n" +
+	"\x11retained_from_seq\x18\x04 \x01(\x03R\x0fretainedFromSeq\x122\n" +
+	"\x05state\x18\x05 \x01(\x0e2\x1c.model_plane.v1.ProcessStateR\x05state\x12 \n" +
+	"\texit_code\x18\x06 \x01(\x05H\x00R\bexitCode\x88\x01\x01\x12\x1d\n" +
+	"\n" +
+	"end_reason\x18\a \x01(\tR\tendReason\x12\x19\n" +
+	"\bhas_more\x18\b \x01(\bR\ahasMoreB\f\n" +
+	"\n" +
+	"_exit_code*l\n" +
 	"\x15SandboxLifecycleState\x12\x19\n" +
 	"\x15LIFECYCLE_UNSPECIFIED\x10\x00\x12\v\n" +
 	"\aSCRATCH\x10\x01\x12\n" +
 	"\n" +
 	"\x06ACTIVE\x10\x02\x12\x10\n" +
 	"\fSNAPSHOTTING\x10\x03\x12\r\n" +
-	"\tDESTROYED\x10\x042\xab\x05\n" +
+	"\tDESTROYED\x10\x04*\xcb\x01\n" +
+	"\fProcessState\x12\x1d\n" +
+	"\x19PROCESS_STATE_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16PROCESS_STATE_STARTING\x10\x01\x12\x19\n" +
+	"\x15PROCESS_STATE_RUNNING\x10\x02\x12\x18\n" +
+	"\x14PROCESS_STATE_EXITED\x10\x03\x12\x18\n" +
+	"\x14PROCESS_STATE_KILLED\x10\x04\x12\x16\n" +
+	"\x12PROCESS_STATE_LOST\x10\x05\x12\x19\n" +
+	"\x15PROCESS_STATE_EXPIRED\x10\x06*a\n" +
+	"\rProcessSignal\x12\x1e\n" +
+	"\x1aPROCESS_SIGNAL_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13PROCESS_SIGNAL_TERM\x10\x01\x12\x17\n" +
+	"\x13PROCESS_SIGNAL_KILL\x10\x02*\x80\x01\n" +
+	"\rProcessStream\x12\x1e\n" +
+	"\x1aPROCESS_STREAM_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15PROCESS_STREAM_STDOUT\x10\x01\x12\x19\n" +
+	"\x15PROCESS_STREAM_STDERR\x10\x02\x12\x19\n" +
+	"\x15PROCESS_STREAM_SYSTEM\x10\x032\xf6\n" +
+	"\n" +
 	"\x0eSandboxManager\x12Y\n" +
 	"\fAcquireLease\x12#.model_plane.v1.AcquireLeaseRequest\x1a$.model_plane.v1.AcquireLeaseResponse\x12Y\n" +
 	"\fReleaseLease\x12#.model_plane.v1.ReleaseLeaseRequest\x1a$.model_plane.v1.ReleaseLeaseResponse\x12T\n" +
 	"\x0fSnapshotSandbox\x12\x1f.model_plane.v1.SnapshotRequest\x1a .model_plane.v1.SnapshotResponse\x12\\\n" +
 	"\rActivateLease\x12$.model_plane.v1.ActivateLeaseRequest\x1a%.model_plane.v1.ActivateLeaseResponse\x12q\n" +
 	"\x14GetWorkspaceManifest\x12+.model_plane.v1.GetWorkspaceManifestRequest\x1a,.model_plane.v1.GetWorkspaceManifestResponse\x12e\n" +
-	"\x10PromoteWorkspace\x12'.model_plane.v1.PromoteWorkspaceRequest\x1a(.model_plane.v1.PromoteWorkspaceResponse\x12U\n" +
+	"\x10PromoteWorkspace\x12'.model_plane.v1.PromoteWorkspaceRequest\x1a(.model_plane.v1.PromoteWorkspaceResponse\x12b\n" +
+	"\x0fRegisterProcess\x12&.model_plane.v1.RegisterProcessRequest\x1a'.model_plane.v1.RegisterProcessResponse\x12k\n" +
+	"\x12UpdateProcessState\x12).model_plane.v1.UpdateProcessStateRequest\x1a*.model_plane.v1.UpdateProcessStateResponse\x12n\n" +
+	"\x13AppendProcessOutput\x12*.model_plane.v1.AppendProcessOutputRequest\x1a+.model_plane.v1.AppendProcessOutputResponse\x12k\n" +
+	"\x12ReconcileProcesses\x12).model_plane.v1.ReconcileProcessesRequest\x1a*.model_plane.v1.ReconcileProcessesResponse\x12S\n" +
+	"\n" +
+	"GetProcess\x12!.model_plane.v1.GetProcessRequest\x1a\".model_plane.v1.GetProcessResponse\x12\\\n" +
+	"\rListProcesses\x12$.model_plane.v1.ListProcessesRequest\x1a%.model_plane.v1.ListProcessesResponse\x12h\n" +
+	"\x11ReadProcessOutput\x12(.model_plane.v1.ReadProcessOutputRequest\x1a).model_plane.v1.ReadProcessOutputResponse\x12U\n" +
 	"\x06Health\x12$.model_plane.v1.SandboxHealthRequest\x1a%.model_plane.v1.SandboxHealthResponseB\xb6\x01\n" +
 	"\x12com.model_plane.v1B\x0eSandboxesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
@@ -1112,55 +3087,116 @@ func file_model_plane_v1_sandboxes_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_sandboxes_proto_rawDescData
 }
 
-var file_model_plane_v1_sandboxes_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_model_plane_v1_sandboxes_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_model_plane_v1_sandboxes_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_model_plane_v1_sandboxes_proto_goTypes = []any{
 	(SandboxLifecycleState)(0),           // 0: model_plane.v1.SandboxLifecycleState
-	(*AcquireLeaseRequest)(nil),          // 1: model_plane.v1.AcquireLeaseRequest
-	(*AcquireLeaseResponse)(nil),         // 2: model_plane.v1.AcquireLeaseResponse
-	(*ReleaseLeaseRequest)(nil),          // 3: model_plane.v1.ReleaseLeaseRequest
-	(*ReleaseLeaseResponse)(nil),         // 4: model_plane.v1.ReleaseLeaseResponse
-	(*SnapshotRequest)(nil),              // 5: model_plane.v1.SnapshotRequest
-	(*SnapshotResponse)(nil),             // 6: model_plane.v1.SnapshotResponse
-	(*ActivateLeaseRequest)(nil),         // 7: model_plane.v1.ActivateLeaseRequest
-	(*ActivateLeaseResponse)(nil),        // 8: model_plane.v1.ActivateLeaseResponse
-	(*GetWorkspaceManifestRequest)(nil),  // 9: model_plane.v1.GetWorkspaceManifestRequest
-	(*WorkspaceManifestEntry)(nil),       // 10: model_plane.v1.WorkspaceManifestEntry
-	(*GetWorkspaceManifestResponse)(nil), // 11: model_plane.v1.GetWorkspaceManifestResponse
-	(*WorkspaceChangedFile)(nil),         // 12: model_plane.v1.WorkspaceChangedFile
-	(*PromoteWorkspaceRequest)(nil),      // 13: model_plane.v1.PromoteWorkspaceRequest
-	(*PromoteWorkspaceResponse)(nil),     // 14: model_plane.v1.PromoteWorkspaceResponse
-	(*SandboxHealthRequest)(nil),         // 15: model_plane.v1.SandboxHealthRequest
-	(*SandboxHealthResponse)(nil),        // 16: model_plane.v1.SandboxHealthResponse
-	(*durationpb.Duration)(nil),          // 17: google.protobuf.Duration
-	(*timestamppb.Timestamp)(nil),        // 18: google.protobuf.Timestamp
+	(ProcessState)(0),                    // 1: model_plane.v1.ProcessState
+	(ProcessSignal)(0),                   // 2: model_plane.v1.ProcessSignal
+	(ProcessStream)(0),                   // 3: model_plane.v1.ProcessStream
+	(*AcquireLeaseRequest)(nil),          // 4: model_plane.v1.AcquireLeaseRequest
+	(*AcquireLeaseResponse)(nil),         // 5: model_plane.v1.AcquireLeaseResponse
+	(*ReleaseLeaseRequest)(nil),          // 6: model_plane.v1.ReleaseLeaseRequest
+	(*ReleaseLeaseResponse)(nil),         // 7: model_plane.v1.ReleaseLeaseResponse
+	(*SnapshotRequest)(nil),              // 8: model_plane.v1.SnapshotRequest
+	(*SnapshotResponse)(nil),             // 9: model_plane.v1.SnapshotResponse
+	(*ActivateLeaseRequest)(nil),         // 10: model_plane.v1.ActivateLeaseRequest
+	(*ActivateLeaseResponse)(nil),        // 11: model_plane.v1.ActivateLeaseResponse
+	(*GetWorkspaceManifestRequest)(nil),  // 12: model_plane.v1.GetWorkspaceManifestRequest
+	(*WorkspaceManifestEntry)(nil),       // 13: model_plane.v1.WorkspaceManifestEntry
+	(*GetWorkspaceManifestResponse)(nil), // 14: model_plane.v1.GetWorkspaceManifestResponse
+	(*WorkspaceChangedFile)(nil),         // 15: model_plane.v1.WorkspaceChangedFile
+	(*PromoteWorkspaceRequest)(nil),      // 16: model_plane.v1.PromoteWorkspaceRequest
+	(*PromoteWorkspaceResponse)(nil),     // 17: model_plane.v1.PromoteWorkspaceResponse
+	(*SandboxHealthRequest)(nil),         // 18: model_plane.v1.SandboxHealthRequest
+	(*SandboxHealthResponse)(nil),        // 19: model_plane.v1.SandboxHealthResponse
+	(*RedactedCommand)(nil),              // 20: model_plane.v1.RedactedCommand
+	(*Process)(nil),                      // 21: model_plane.v1.Process
+	(*ProcessOutputChunk)(nil),           // 22: model_plane.v1.ProcessOutputChunk
+	(*RegisterProcessRequest)(nil),       // 23: model_plane.v1.RegisterProcessRequest
+	(*RegisterProcessResponse)(nil),      // 24: model_plane.v1.RegisterProcessResponse
+	(*ProcessStarted)(nil),               // 25: model_plane.v1.ProcessStarted
+	(*ProcessSignalRequested)(nil),       // 26: model_plane.v1.ProcessSignalRequested
+	(*ProcessExited)(nil),                // 27: model_plane.v1.ProcessExited
+	(*UpdateProcessStateRequest)(nil),    // 28: model_plane.v1.UpdateProcessStateRequest
+	(*UpdateProcessStateResponse)(nil),   // 29: model_plane.v1.UpdateProcessStateResponse
+	(*AppendProcessOutputRequest)(nil),   // 30: model_plane.v1.AppendProcessOutputRequest
+	(*AppendProcessOutputResponse)(nil),  // 31: model_plane.v1.AppendProcessOutputResponse
+	(*ReconcileProcessesRequest)(nil),    // 32: model_plane.v1.ReconcileProcessesRequest
+	(*ReconcileProcessesResponse)(nil),   // 33: model_plane.v1.ReconcileProcessesResponse
+	(*GetProcessRequest)(nil),            // 34: model_plane.v1.GetProcessRequest
+	(*GetProcessResponse)(nil),           // 35: model_plane.v1.GetProcessResponse
+	(*ListProcessesRequest)(nil),         // 36: model_plane.v1.ListProcessesRequest
+	(*ListProcessesResponse)(nil),        // 37: model_plane.v1.ListProcessesResponse
+	(*ReadProcessOutputRequest)(nil),     // 38: model_plane.v1.ReadProcessOutputRequest
+	(*ReadProcessOutputResponse)(nil),    // 39: model_plane.v1.ReadProcessOutputResponse
+	(*durationpb.Duration)(nil),          // 40: google.protobuf.Duration
+	(*timestamppb.Timestamp)(nil),        // 41: google.protobuf.Timestamp
 }
 var file_model_plane_v1_sandboxes_proto_depIdxs = []int32{
-	17, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
-	18, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
+	40, // 0: model_plane.v1.AcquireLeaseRequest.ttl:type_name -> google.protobuf.Duration
+	41, // 1: model_plane.v1.AcquireLeaseResponse.expires_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: model_plane.v1.AcquireLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
-	12, // 3: model_plane.v1.SnapshotRequest.changed_files:type_name -> model_plane.v1.WorkspaceChangedFile
+	15, // 3: model_plane.v1.SnapshotRequest.changed_files:type_name -> model_plane.v1.WorkspaceChangedFile
 	0,  // 4: model_plane.v1.ActivateLeaseResponse.state:type_name -> model_plane.v1.SandboxLifecycleState
-	10, // 5: model_plane.v1.GetWorkspaceManifestResponse.entries:type_name -> model_plane.v1.WorkspaceManifestEntry
-	1,  // 6: model_plane.v1.SandboxManager.AcquireLease:input_type -> model_plane.v1.AcquireLeaseRequest
-	3,  // 7: model_plane.v1.SandboxManager.ReleaseLease:input_type -> model_plane.v1.ReleaseLeaseRequest
-	5,  // 8: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
-	7,  // 9: model_plane.v1.SandboxManager.ActivateLease:input_type -> model_plane.v1.ActivateLeaseRequest
-	9,  // 10: model_plane.v1.SandboxManager.GetWorkspaceManifest:input_type -> model_plane.v1.GetWorkspaceManifestRequest
-	13, // 11: model_plane.v1.SandboxManager.PromoteWorkspace:input_type -> model_plane.v1.PromoteWorkspaceRequest
-	15, // 12: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
-	2,  // 13: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
-	4,  // 14: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
-	6,  // 15: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
-	8,  // 16: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
-	11, // 17: model_plane.v1.SandboxManager.GetWorkspaceManifest:output_type -> model_plane.v1.GetWorkspaceManifestResponse
-	14, // 18: model_plane.v1.SandboxManager.PromoteWorkspace:output_type -> model_plane.v1.PromoteWorkspaceResponse
-	16, // 19: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
-	13, // [13:20] is the sub-list for method output_type
-	6,  // [6:13] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	13, // 5: model_plane.v1.GetWorkspaceManifestResponse.entries:type_name -> model_plane.v1.WorkspaceManifestEntry
+	20, // 6: model_plane.v1.Process.command:type_name -> model_plane.v1.RedactedCommand
+	1,  // 7: model_plane.v1.Process.state:type_name -> model_plane.v1.ProcessState
+	2,  // 8: model_plane.v1.Process.signal_requested:type_name -> model_plane.v1.ProcessSignal
+	41, // 9: model_plane.v1.Process.term_requested_at:type_name -> google.protobuf.Timestamp
+	41, // 10: model_plane.v1.Process.expires_at:type_name -> google.protobuf.Timestamp
+	41, // 11: model_plane.v1.Process.started_at:type_name -> google.protobuf.Timestamp
+	41, // 12: model_plane.v1.Process.ended_at:type_name -> google.protobuf.Timestamp
+	41, // 13: model_plane.v1.Process.last_heartbeat_at:type_name -> google.protobuf.Timestamp
+	41, // 14: model_plane.v1.Process.created_at:type_name -> google.protobuf.Timestamp
+	41, // 15: model_plane.v1.Process.updated_at:type_name -> google.protobuf.Timestamp
+	3,  // 16: model_plane.v1.ProcessOutputChunk.stream:type_name -> model_plane.v1.ProcessStream
+	41, // 17: model_plane.v1.ProcessOutputChunk.captured_at:type_name -> google.protobuf.Timestamp
+	20, // 18: model_plane.v1.RegisterProcessRequest.command:type_name -> model_plane.v1.RedactedCommand
+	21, // 19: model_plane.v1.RegisterProcessResponse.process:type_name -> model_plane.v1.Process
+	2,  // 20: model_plane.v1.ProcessSignalRequested.signal:type_name -> model_plane.v1.ProcessSignal
+	1,  // 21: model_plane.v1.ProcessExited.state:type_name -> model_plane.v1.ProcessState
+	25, // 22: model_plane.v1.UpdateProcessStateRequest.started:type_name -> model_plane.v1.ProcessStarted
+	26, // 23: model_plane.v1.UpdateProcessStateRequest.signal:type_name -> model_plane.v1.ProcessSignalRequested
+	27, // 24: model_plane.v1.UpdateProcessStateRequest.exited:type_name -> model_plane.v1.ProcessExited
+	22, // 25: model_plane.v1.AppendProcessOutputRequest.chunks:type_name -> model_plane.v1.ProcessOutputChunk
+	21, // 26: model_plane.v1.GetProcessResponse.process:type_name -> model_plane.v1.Process
+	21, // 27: model_plane.v1.ListProcessesResponse.processes:type_name -> model_plane.v1.Process
+	22, // 28: model_plane.v1.ReadProcessOutputResponse.chunks:type_name -> model_plane.v1.ProcessOutputChunk
+	1,  // 29: model_plane.v1.ReadProcessOutputResponse.state:type_name -> model_plane.v1.ProcessState
+	4,  // 30: model_plane.v1.SandboxManager.AcquireLease:input_type -> model_plane.v1.AcquireLeaseRequest
+	6,  // 31: model_plane.v1.SandboxManager.ReleaseLease:input_type -> model_plane.v1.ReleaseLeaseRequest
+	8,  // 32: model_plane.v1.SandboxManager.SnapshotSandbox:input_type -> model_plane.v1.SnapshotRequest
+	10, // 33: model_plane.v1.SandboxManager.ActivateLease:input_type -> model_plane.v1.ActivateLeaseRequest
+	12, // 34: model_plane.v1.SandboxManager.GetWorkspaceManifest:input_type -> model_plane.v1.GetWorkspaceManifestRequest
+	16, // 35: model_plane.v1.SandboxManager.PromoteWorkspace:input_type -> model_plane.v1.PromoteWorkspaceRequest
+	23, // 36: model_plane.v1.SandboxManager.RegisterProcess:input_type -> model_plane.v1.RegisterProcessRequest
+	28, // 37: model_plane.v1.SandboxManager.UpdateProcessState:input_type -> model_plane.v1.UpdateProcessStateRequest
+	30, // 38: model_plane.v1.SandboxManager.AppendProcessOutput:input_type -> model_plane.v1.AppendProcessOutputRequest
+	32, // 39: model_plane.v1.SandboxManager.ReconcileProcesses:input_type -> model_plane.v1.ReconcileProcessesRequest
+	34, // 40: model_plane.v1.SandboxManager.GetProcess:input_type -> model_plane.v1.GetProcessRequest
+	36, // 41: model_plane.v1.SandboxManager.ListProcesses:input_type -> model_plane.v1.ListProcessesRequest
+	38, // 42: model_plane.v1.SandboxManager.ReadProcessOutput:input_type -> model_plane.v1.ReadProcessOutputRequest
+	18, // 43: model_plane.v1.SandboxManager.Health:input_type -> model_plane.v1.SandboxHealthRequest
+	5,  // 44: model_plane.v1.SandboxManager.AcquireLease:output_type -> model_plane.v1.AcquireLeaseResponse
+	7,  // 45: model_plane.v1.SandboxManager.ReleaseLease:output_type -> model_plane.v1.ReleaseLeaseResponse
+	9,  // 46: model_plane.v1.SandboxManager.SnapshotSandbox:output_type -> model_plane.v1.SnapshotResponse
+	11, // 47: model_plane.v1.SandboxManager.ActivateLease:output_type -> model_plane.v1.ActivateLeaseResponse
+	14, // 48: model_plane.v1.SandboxManager.GetWorkspaceManifest:output_type -> model_plane.v1.GetWorkspaceManifestResponse
+	17, // 49: model_plane.v1.SandboxManager.PromoteWorkspace:output_type -> model_plane.v1.PromoteWorkspaceResponse
+	24, // 50: model_plane.v1.SandboxManager.RegisterProcess:output_type -> model_plane.v1.RegisterProcessResponse
+	29, // 51: model_plane.v1.SandboxManager.UpdateProcessState:output_type -> model_plane.v1.UpdateProcessStateResponse
+	31, // 52: model_plane.v1.SandboxManager.AppendProcessOutput:output_type -> model_plane.v1.AppendProcessOutputResponse
+	33, // 53: model_plane.v1.SandboxManager.ReconcileProcesses:output_type -> model_plane.v1.ReconcileProcessesResponse
+	35, // 54: model_plane.v1.SandboxManager.GetProcess:output_type -> model_plane.v1.GetProcessResponse
+	37, // 55: model_plane.v1.SandboxManager.ListProcesses:output_type -> model_plane.v1.ListProcessesResponse
+	39, // 56: model_plane.v1.SandboxManager.ReadProcessOutput:output_type -> model_plane.v1.ReadProcessOutputResponse
+	19, // 57: model_plane.v1.SandboxManager.Health:output_type -> model_plane.v1.SandboxHealthResponse
+	44, // [44:58] is the sub-list for method output_type
+	30, // [30:44] is the sub-list for method input_type
+	30, // [30:30] is the sub-list for extension type_name
+	30, // [30:30] is the sub-list for extension extendee
+	0,  // [0:30] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_sandboxes_proto_init() }
@@ -1168,13 +3204,21 @@ func file_model_plane_v1_sandboxes_proto_init() {
 	if File_model_plane_v1_sandboxes_proto != nil {
 		return
 	}
+	file_model_plane_v1_sandboxes_proto_msgTypes[17].OneofWrappers = []any{}
+	file_model_plane_v1_sandboxes_proto_msgTypes[23].OneofWrappers = []any{}
+	file_model_plane_v1_sandboxes_proto_msgTypes[24].OneofWrappers = []any{
+		(*UpdateProcessStateRequest_Started)(nil),
+		(*UpdateProcessStateRequest_Signal)(nil),
+		(*UpdateProcessStateRequest_Exited)(nil),
+	}
+	file_model_plane_v1_sandboxes_proto_msgTypes[35].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sandboxes_proto_rawDesc), len(file_model_plane_v1_sandboxes_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   16,
+			NumEnums:      4,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

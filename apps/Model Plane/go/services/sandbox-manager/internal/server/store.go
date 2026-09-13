@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 )
@@ -24,7 +25,7 @@ import (
 // every other method here already uses. It was real and tested on
 // *lease.Store itself well before this, just unused by Server until now.
 type LeaseStore interface {
-	Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, ttl time.Duration) (*lease.Lease, error)
+	Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, processesPermitted bool, ttl time.Duration) (*lease.Lease, error)
 	Activate(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
 	BeginSnapshot(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
 	EndSnapshot(ctx context.Context, id string)
@@ -54,4 +55,31 @@ type WorkspaceStore interface {
 	// per path, and returns the paths that conflicted (every other path
 	// still merged).
 	Promote(ctx context.Context, orgID, spaceID, runID string) ([]string, error)
+}
+
+// ProcessStore is the narrow surface Server calls on the S4.2 background
+// process registry — exactly *process.Store's methods, the same
+// seam-at-the-consumer shape as the three above.
+//
+// Unlike LeaseStore and SnapshotStore there is deliberately NO in-memory
+// implementation. The other two have one for cmd/main.go's
+// ephemeral-development fallback, but a registry whose entire purpose is to
+// stay truthful across a restart has nothing to offer in a mode that
+// discards it on every boot. A Server constructed without a ProcessStore
+// refuses every process RPC with FailedPrecondition rather than serving one
+// against state that will silently vanish.
+type ProcessStore interface {
+	Register(ctx context.Context, req process.RegisterRequest) (*process.Process, error)
+	MarkStarted(ctx context.Context, f process.Fence) error
+	RequestSignal(ctx context.Context, f process.Fence, signal process.Signal) error
+	MarkEnded(ctx context.Context, f process.Fence, state process.State, exitCode *int32, endReason string, cleanupDone bool) error
+	AppendOutput(ctx context.Context, f process.Fence, chunks []process.Chunk, stdinBytesDelta int64) (*process.AppendResult, error)
+	Reconcile(ctx context.Context, backendID, hostEpoch string) (int64, error)
+	Get(ctx context.Context, orgID, processID string) (*process.Process, error)
+	List(ctx context.Context, orgID, spaceID string, includeTerminal bool, limit int32, afterID string) ([]process.Process, bool, error)
+	ReadOutput(ctx context.Context, orgID, processID string, afterSeq, maxBytes int64) (*process.OutputPage, error)
+	// KillForLease is called from ReleaseLease so a released lease leaves no
+	// row claiming to be running. The registry half only: the host does the
+	// actual killing on its own release path.
+	KillForLease(ctx context.Context, orgID, leaseID string) (int64, error)
 }

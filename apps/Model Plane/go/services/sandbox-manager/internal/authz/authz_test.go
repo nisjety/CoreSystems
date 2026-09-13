@@ -151,6 +151,26 @@ func TestInterceptorFailsClosedAndEnforcesServiceScopes(t *testing.T) {
 		{name: "GetWorkspaceManifest missing read scope", method: "/model_plane.v1.SandboxManager/GetWorkspaceManifest", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
 		{name: "PromoteWorkspace missing scope", method: "/model_plane.v1.SandboxManager/PromoteWorkspace", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.PermissionDenied},
 		{name: "PromoteWorkspace valid service", method: "/model_plane.v1.SandboxManager/PromoteWorkspace", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
+		// S4.2 process registry. One row per method, added in the same commit
+		// as the RPCs themselves: a method absent from Authorize's switch is
+		// refused for EVERY principal with "unknown sandbox-manager method",
+		// and nothing else in this service's tests would notice, because
+		// every handler test calls the Server method directly. That is
+		// exactly how ActivateLease shipped unreachable.
+		{name: "RegisterProcess valid service", method: "/model_plane.v1.SandboxManager/RegisterProcess", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
+		{name: "RegisterProcess missing write scope", method: "/model_plane.v1.SandboxManager/RegisterProcess", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.PermissionDenied},
+		{name: "UpdateProcessState valid service", method: "/model_plane.v1.SandboxManager/UpdateProcessState", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
+		{name: "UpdateProcessState missing write scope", method: "/model_plane.v1.SandboxManager/UpdateProcessState", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.PermissionDenied},
+		{name: "AppendProcessOutput valid service", method: "/model_plane.v1.SandboxManager/AppendProcessOutput", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
+		{name: "AppendProcessOutput missing write scope", method: "/model_plane.v1.SandboxManager/AppendProcessOutput", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.PermissionDenied},
+		{name: "ReconcileProcesses valid service", method: "/model_plane.v1.SandboxManager/ReconcileProcesses", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.OK},
+		{name: "ReconcileProcesses missing write scope", method: "/model_plane.v1.SandboxManager/ReconcileProcesses", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.PermissionDenied},
+		{name: "GetProcess valid service with read scope", method: "/model_plane.v1.SandboxManager/GetProcess", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.OK},
+		{name: "GetProcess missing read scope", method: "/model_plane.v1.SandboxManager/GetProcess", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
+		{name: "ListProcesses valid service with read scope", method: "/model_plane.v1.SandboxManager/ListProcesses", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.OK},
+		{name: "ListProcesses missing read scope", method: "/model_plane.v1.SandboxManager/ListProcesses", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
+		{name: "ReadProcessOutput valid service with read scope", method: "/model_plane.v1.SandboxManager/ReadProcessOutput", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeRead), want: codes.OK},
+		{name: "ReadProcessOutput missing read scope", method: "/model_plane.v1.SandboxManager/ReadProcessOutput", authorization: "Bearer " + token(t, key, Audience, "org-a", "service:execution-core", "service", ScopeWrite), want: codes.PermissionDenied},
 		{name: "custom health is protected", method: "/model_plane.v1.SandboxManager/Health", want: codes.Unauthenticated},
 		{name: "standard health is public", method: "/grpc.health.v1.Health/Check", want: codes.OK},
 	}

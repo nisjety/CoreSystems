@@ -100,6 +100,9 @@ func main() {
 	var leaseStore sbxserver.LeaseStore
 	var snapStore sbxserver.SnapshotStore
 	var workspaceStore sbxserver.WorkspaceStore
+	// Nil unless a durable database is configured; a Server without it
+	// refuses every process RPC.
+	var processStore sbxserver.ProcessStore
 	if databaseURL != "" {
 		pool, err := pgxpool.New(ctx, databaseURL)
 		if err != nil {
@@ -125,22 +128,25 @@ func main() {
 		leaseStore, snapStore, workspaceStore = pgLeaseStore, pgSnapStore, pgWorkspaceStore
 		slog.Info("sandbox-manager using durable Postgres-backed lease/snapshot/workspace stores")
 
-		// S4.2 step 1: the background-process registry and its staleness
-		// sweeper. No RPC reaches the registry yet, so the sweeper has
-		// nothing to find — it is started here because it is the piece that
-		// keeps the registry from lying once rows exist, and running it
-		// from the start means a host that dies between steps never leaves
-		// a row claiming to be RUNNING. Postgres-only by construction:
-		// there is no in-memory process store, since a registry whose whole
-		// purpose is surviving a restart has nothing to offer if it does not.
-		processStore, err := process.NewStore(pool)
+		// S4.2: the background-process registry and its staleness sweeper.
+		// Postgres-only by construction — there is no in-memory process
+		// store, because a registry whose whole purpose is surviving a
+		// restart has nothing to offer in a mode that discards it. In
+		// ephemeral-development mode the Server therefore gets no registry
+		// at all and refuses every process RPC, which is the honest answer
+		// rather than serving state that vanishes on the next boot.
+		pgProcessStore, err := process.NewStore(pool)
 		if err != nil {
 			slog.Error("sandbox-manager process store unavailable", "error", err)
 			os.Exit(1)
 		}
+		processStore = pgProcessStore
 		if process.EnvSweeperEnabled() {
 			interval, staleAfter := process.TimingFromEnv(os.Getenv)
-			go process.NewSweeper(processStore).WithTiming(interval, staleAfter).Start(ctx)
+			// The concrete store, not the Server's narrowed interface: the
+			// sweeper needs SweepStale, which is deliberately not part of
+			// what the Server calls.
+			go process.NewSweeper(pgProcessStore).WithTiming(interval, staleAfter).Start(ctx)
 			slog.Info("process staleness sweeper started",
 				"interval", interval.String(), "stale_after", staleAfter.String())
 		} else {
@@ -151,7 +157,7 @@ func main() {
 		slog.Warn("starting sandbox-manager with in-memory lease/snapshot/workspace stores (ephemeral development only); a restart discards all leases, snapshots, and workspace overlays")
 	}
 
-	server := sbxserver.NewServer(leaseStore, snapStore, workspaceStore)
+	server := sbxserver.NewServer(leaseStore, snapStore, workspaceStore).WithProcessStore(processStore)
 	if capabilityVerifier != nil {
 		server = server.WithCapabilityVerifier(capabilityVerifier.Verify, backendID)
 	}

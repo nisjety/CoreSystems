@@ -61,10 +61,20 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 		"/model_plane.v1.SandboxManager/ReleaseLease",
 		"/model_plane.v1.SandboxManager/SnapshotSandbox",
 		"/model_plane.v1.SandboxManager/ActivateLease",
-		"/model_plane.v1.SandboxManager/PromoteWorkspace":
+		"/model_plane.v1.SandboxManager/PromoteWorkspace",
+		// S4.2 process registry writes. Listed here in the same commit that
+		// added the RPCs, for the reason the comment above records.
+		"/model_plane.v1.SandboxManager/RegisterProcess",
+		"/model_plane.v1.SandboxManager/UpdateProcessState",
+		"/model_plane.v1.SandboxManager/AppendProcessOutput",
+		"/model_plane.v1.SandboxManager/ReconcileProcesses":
 		required = ScopeWrite
 	case "/model_plane.v1.SandboxManager/Health",
-		"/model_plane.v1.SandboxManager/GetWorkspaceManifest":
+		"/model_plane.v1.SandboxManager/GetWorkspaceManifest",
+		// S4.2 process registry reads.
+		"/model_plane.v1.SandboxManager/GetProcess",
+		"/model_plane.v1.SandboxManager/ListProcesses",
+		"/model_plane.v1.SandboxManager/ReadProcessOutput":
 	default:
 		return errors.New("unknown sandbox-manager method")
 	}

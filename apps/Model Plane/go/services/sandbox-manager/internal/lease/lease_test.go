@@ -84,6 +84,8 @@ func (r leaseRow) Scan(dest ...any) error {
 			*target = r.values[i].(int32)
 		case *time.Time:
 			*target = r.values[i].(time.Time)
+		case *bool:
+			*target = r.values[i].(bool)
 		default:
 			return fmt.Errorf("leaseRow.Scan: unsupported dest type %T", d)
 		}
@@ -96,7 +98,7 @@ func notFoundRow() leaseRow { return leaseRow{err: pgx.ErrNoRows} }
 func rowFor(l *Lease) leaseRow {
 	return leaseRow{values: []any{
 		l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint,
-		l.SpaceID, l.BackendID, int32(l.State), l.ExpiresAt, l.CreatedAt,
+		l.SpaceID, l.BackendID, l.ProcessesPermitted, int32(l.State), l.ExpiresAt, l.CreatedAt,
 	}}
 }
 
@@ -128,7 +130,7 @@ func TestNewStoreRejectsNilPool(t *testing.T) {
 
 func TestCreateInsertsAScratchLease(t *testing.T) {
 	store, database := newTestStore(nil)
-	l, err := store.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	l, err := store.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", false, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,8 +141,32 @@ func TestCreateInsertsAScratchLease(t *testing.T) {
 		t.Fatalf("query = %q, want an INSERT into leases", database.lastQuery())
 	}
 	args := database.lastArgs()
-	if args[8] != int32(mpv1.SandboxLifecycleState_SCRATCH) {
-		t.Fatalf("state arg = %v, want SCRATCH", args[8])
+	if args[8] != false {
+		t.Fatalf("processes_permitted arg = %v, want false", args[8])
+	}
+	if args[9] != int32(mpv1.SandboxLifecycleState_SCRATCH) {
+		t.Fatalf("state arg = %v, want SCRATCH", args[9])
+	}
+}
+
+// TestCreatePersistsTheProcessesPermittedDecision: AcquireLease decides this
+// once from the verified capability decision, and the lease row is the only
+// place a later process RPC — arriving on a service token with no decision in
+// hand — can read it back from.
+func TestCreatePersistsTheProcessesPermittedDecision(t *testing.T) {
+	store, database := newTestStore(nil)
+	l, err := store.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", true, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.ProcessesPermitted {
+		t.Fatal("returned lease lost the decision")
+	}
+	if !strings.Contains(database.lastQuery(), "processes_permitted") {
+		t.Fatalf("insert does not write the column: %q", database.lastQuery())
+	}
+	if database.lastArgs()[8] != true {
+		t.Fatalf("processes_permitted arg = %v, want true", database.lastArgs()[8])
 	}
 }
 

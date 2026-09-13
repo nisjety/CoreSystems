@@ -95,7 +95,6 @@ func testRegisterRequest() RegisterRequest {
 	return RegisterRequest{
 		ID:            "proc-1",
 		OrgID:         "org-a",
-		SpaceID:       "space-1",
 		LeaseID:       "lease-1",
 		BackendID:     "backend-1",
 		HostEpoch:     "epoch-1",
@@ -148,7 +147,6 @@ func TestRegisterRejectsIncompleteRequests(t *testing.T) {
 	cases := map[string]func(*RegisterRequest){
 		"missing id":         func(r *RegisterRequest) { r.ID = "" },
 		"missing org":        func(r *RegisterRequest) { r.OrgID = "" },
-		"missing space":      func(r *RegisterRequest) { r.SpaceID = "" },
 		"missing lease":      func(r *RegisterRequest) { r.LeaseID = "" },
 		"missing backend":    func(r *RegisterRequest) { r.BackendID = "" },
 		"missing host epoch": func(r *RegisterRequest) { r.HostEpoch = "" },
@@ -185,35 +183,36 @@ func TestRegisterGatesOnTheLeaseAndBothLimitsInOneStatement(t *testing.T) {
 	database := &processDatabaseStub{rowScans: []func(...any) error{
 		// The insert matches no row; the diagnostic below explains why.
 		func(...any) error { return pgx.ErrNoRows },
-		scanValues(int32(2), false, "backend-1", false, int64(0), int64(0)),
+		scanValues(int32(2), false, "backend-1", "space-1", false, int64(0), int64(0)),
 	}}
 	store := &Store{pool: database, limits: DefaultLimits()}
 
 	_, err := store.Register(context.Background(), testRegisterRequest())
-	if !errors.Is(err, ErrLeaseNotEligible) {
-		t.Fatalf("err = %v, want ErrLeaseNotEligible", err)
+	if !errors.Is(err, ErrProcessesNotPermitted) {
+		t.Fatalf("err = %v, want ErrProcessesNotPermitted", err)
 	}
 
 	insert := database.queries[0]
 	for _, fragment := range []string{
 		"FROM leases l",
 		"l.processes_permitted",
-		"l.backend_id = $5",
+		"l.backend_id = $4",
 		"l.expires_at > now()",
-		"LEAST(now() + ($17::bigint * interval '1 second'), l.expires_at)",
-		"WHERE p.lease_id = $4 AND p.state IN (1, 2)) < $15",
-		"WHERE p.org_id = $2 AND p.space_id = $3 AND p.state IN (1, 2)) < $16",
+		"l.space_id <> ''",
+		"SELECT $1, $2, l.space_id, $3, $4, $5,",
+		"LEAST(now() + ($15::bigint * interval '1 second'), l.expires_at)",
+		"WHERE p.lease_id = $3 AND p.state IN (1, 2)) < $14",
+		"WHERE p.org_id = $2 AND p.space_id = l.space_id AND p.state IN (1, 2)) < $16",
 	} {
 		if !strings.Contains(insert, fragment) {
 			t.Fatalf("insert is missing %q:\n%s", fragment, insert)
 		}
 	}
 	wantArgs := []any{
-		"proc-1", "org-a", "space-1", "lease-1", "backend-1", "epoch-1",
+		"proc-1", "org-a", "lease-1", "backend-1", "epoch-1",
 		"run-1", "step-1", "user-a", `{"program":"python3","args":["main.py"]}`, "sha256:abc",
 		int16(StateStarting), int32(900), int32(2),
-		DefaultLimits().MaxLivePerLease, DefaultLimits().MaxLivePerSpace,
-		int64(900),
+		DefaultLimits().MaxLivePerLease, int64(900), DefaultLimits().MaxLivePerSpace,
 	}
 	if !reflect.DeepEqual(database.args[0], wantArgs) {
 		t.Fatalf("insert args = %#v,\nwant %#v", database.args[0], wantArgs)
@@ -231,43 +230,43 @@ func TestRegisterClassifiesEachRefusal(t *testing.T) {
 	}{
 		{
 			name:       "not permitted",
-			diagnostic: []any{int32(2), false, "backend-1", false, int64(0), int64(0)},
-			want:       ErrLeaseNotEligible,
+			diagnostic: []any{int32(2), false, "backend-1", "space-1", false, int64(0), int64(0)},
+			want:       ErrProcessesNotPermitted,
 			contains:   "space:processes",
 		},
 		{
 			name:       "wrong backend",
-			diagnostic: []any{int32(2), true, "backend-2", false, int64(0), int64(0)},
+			diagnostic: []any{int32(2), true, "backend-2", "space-1", false, int64(0), int64(0)},
 			want:       ErrLeaseNotEligible,
 			contains:   "pinned to another backend",
 		},
 		{
 			name:       "expired lease",
-			diagnostic: []any{int32(2), true, "backend-1", true, int64(0), int64(0)},
+			diagnostic: []any{int32(2), true, "backend-1", "space-1", true, int64(0), int64(0)},
 			want:       ErrLeaseNotEligible,
 			contains:   "expired",
 		},
 		{
 			name:       "lease still scratch",
-			diagnostic: []any{int32(1), true, "backend-1", false, int64(0), int64(0)},
+			diagnostic: []any{int32(1), true, "backend-1", "space-1", false, int64(0), int64(0)},
 			want:       ErrLeaseNotEligible,
 			contains:   "not ACTIVE",
 		},
 		{
 			name:       "lease process limit",
-			diagnostic: []any{int32(2), true, "backend-1", false, int64(limits.MaxLivePerLease), int64(0)},
+			diagnostic: []any{int32(2), true, "backend-1", "space-1", false, int64(limits.MaxLivePerLease), int64(0)},
 			want:       ErrProcessLimit,
 			contains:   "on this lease",
 		},
 		{
 			name:       "space process limit",
-			diagnostic: []any{int32(2), true, "backend-1", false, int64(0), int64(limits.MaxLivePerSpace)},
+			diagnostic: []any{int32(2), true, "backend-1", "space-1", false, int64(0), int64(limits.MaxLivePerSpace)},
 			want:       ErrProcessLimit,
 			contains:   "in this Space",
 		},
 		{
 			name:       "lost race",
-			diagnostic: []any{int32(2), true, "backend-1", false, int64(0), int64(0)},
+			diagnostic: []any{int32(2), true, "backend-1", "space-1", false, int64(0), int64(0)},
 			want:       ErrProcessLimit,
 			contains:   "concurrent race",
 		},

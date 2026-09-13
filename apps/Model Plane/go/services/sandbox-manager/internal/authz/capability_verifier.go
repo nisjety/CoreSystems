@@ -103,37 +103,78 @@ type CapabilityExpectation struct {
 	Now       time.Time
 }
 
+// ProcessesBackgroundRegistry is the substrate profile value a backend
+// reports when it can host reattachable background processes, as opposed to
+// the bounded one-shot children every execution-core can run. Control
+// validates the claim against this same closed vocabulary before signing
+// (S4.2 design doc §4).
+const ProcessesBackgroundRegistry = "background_registry"
+
+// VerifiedCapability is what a caller may trust after Verify: the claims
+// themselves, plus the permissions the decision actually granted.
+//
+// Permissions are surfaced (rather than consumed entirely inside Verify)
+// because AcquireLease has to persist one of them — whether this lease may
+// host background processes — onto the lease row. The leases table otherwise
+// keeps nothing from the decision but backend_id, so without this there is
+// nothing for a later process RPC, arriving on a service token with no user
+// bearer in hand, to check against.
+type VerifiedCapability struct {
+	Claims      SpaceCapabilityClaims
+	Permissions []string
+}
+
+// HasPermission reports whether the decision granted permission.
+func (c VerifiedCapability) HasPermission(permission string) bool {
+	return hasPermission(c.Permissions, permission)
+}
+
+// AllowsBackgroundProcesses reports whether this lease may host S4.2
+// background processes: the backend must claim the capability AND Control
+// must have granted it.
+//
+// Both halves are required and neither implies the other. A backend claiming
+// the profile without the grant is a Space that simply is not entitled —
+// which, unlike egress, is NOT a reason to refuse the lease: a
+// process-capable backend is still a perfectly good one-shot substrate. The
+// grant without the claim would be a Space entitled to something this
+// backend cannot do.
+func (c VerifiedCapability) AllowsBackgroundProcesses() bool {
+	return c.Claims.Processes == ProcessesBackgroundRegistry && c.HasPermission("space:processes")
+}
+
 // Verify checks token's signature and claimsJSON's digest binding, then
 // returns the claims a caller may trust — in particular BackendID, which
-// AcquireLease pins against this instance's own configured backend id.
-func (v *SpaceCapabilityVerifier) Verify(token, claimsJSON string, expect CapabilityExpectation) (SpaceCapabilityClaims, error) {
+// AcquireLease pins against this instance's own configured backend id — plus
+// the decision's granted permissions.
+func (v *SpaceCapabilityVerifier) Verify(token, claimsJSON string, expect CapabilityExpectation) (VerifiedCapability, error) {
 	decision, err := v.verify(token)
 	if err != nil {
-		return SpaceCapabilityClaims{}, err
+		return VerifiedCapability{}, err
 	}
 	var claims SpaceCapabilityClaims
 	if err := json.Unmarshal([]byte(claimsJSON), &claims); err != nil {
-		return SpaceCapabilityClaims{}, fmt.Errorf("invalid Space capability claims payload")
+		return VerifiedCapability{}, fmt.Errorf("invalid Space capability claims payload")
 	}
 	if decision.OrgID != expect.OrgID || decision.SpaceRef != expect.SpaceRef || decision.SubjectID != expect.SubjectID ||
 		decision.ServiceAudience != spaceCapabilityAudience || decision.ActionID != spaceCapabilityAction ||
 		decision.ActionSchemaHash != spaceCapabilitySchema {
-		return SpaceCapabilityClaims{}, fmt.Errorf("Space capability decision does not match the claimed lease request")
+		return VerifiedCapability{}, fmt.Errorf("Space capability decision does not match the claimed lease request")
 	}
 	now := expect.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if !now.Before(decision.ExpiresAt) || !hasPermission(decision.Permissions, "space:sandbox:use") {
-		return SpaceCapabilityClaims{}, fmt.Errorf("Space capability decision is not currently usable")
+		return VerifiedCapability{}, fmt.Errorf("Space capability decision is not currently usable")
 	}
 	if decision.PayloadDigest != expectedCapabilityPayloadDigest(decision, claims) {
-		return SpaceCapabilityClaims{}, fmt.Errorf("Space capability decision payload does not bind this claim")
+		return VerifiedCapability{}, fmt.Errorf("Space capability decision payload does not bind this claim")
 	}
 	if claims.Egress != "disabled_by_default" && !hasPermission(decision.Permissions, "space:egress") {
-		return SpaceCapabilityClaims{}, fmt.Errorf("Space capability decision does not grant egress for the claimed profile")
+		return VerifiedCapability{}, fmt.Errorf("Space capability decision does not grant egress for the claimed profile")
 	}
-	return claims, nil
+	return VerifiedCapability{Claims: claims, Permissions: decision.Permissions}, nil
 }
 
 func (v *SpaceCapabilityVerifier) verify(token string) (spaceCapabilityDecision, error) {

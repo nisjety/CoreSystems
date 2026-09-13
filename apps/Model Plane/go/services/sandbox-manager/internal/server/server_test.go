@@ -265,9 +265,9 @@ func TestSnapshotSandbox_Success(t *testing.T) {
 
 func TestAcquireLeaseWithoutSpaceIDNeverConsultsCapabilityVerification(t *testing.T) {
 	s := newTestServer()
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
 		t.Fatal("capability verification must not run for a non-Space lease request")
-		return authz.SpaceCapabilityClaims{}, nil
+		return authz.VerifiedCapability{}, nil
 	}
 	if _, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
 		ScopeId: "scope-1", ScopeType: "agent", OrgId: "org-1", Ttl: durationpb.New(time.Minute),
@@ -289,8 +289,8 @@ func TestAcquireLeaseRejectsSpaceScopedRequestWhenCapabilityVerificationIsNotCon
 
 func TestAcquireLeaseRejectsAnInvalidCapabilityDecision(t *testing.T) {
 	s := newTestServer()
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{}, errors.New("Space capability decision does not match the claimed lease request")
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{}, errors.New("Space capability decision does not match the claimed lease request")
 	}
 	s.backendID = "backend-1"
 	_, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
@@ -308,8 +308,8 @@ func TestAcquireLeaseRejectsAnInvalidCapabilityDecision(t *testing.T) {
 // different backend than this instance must still be refused.
 func TestAcquireLeaseFailsClosedWhenClaimedBackendMismatchesInstance(t *testing.T) {
 	s := newTestServer()
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-other"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-other"}}, nil
 	}
 	s.backendID = "backend-1"
 	_, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
@@ -324,12 +324,12 @@ func TestAcquireLeaseFailsClosedWhenClaimedBackendMismatchesInstance(t *testing.
 func TestAcquireLeaseGrantsASpaceScopedLeaseOnAMatchingVerifiedBackend(t *testing.T) {
 	s := newTestServer()
 	var gotExpectation authz.CapabilityExpectation
-	s.capabilityVerify = func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
+	s.capabilityVerify = func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
 		gotExpectation = expect
 		if token != "signed-token" || claimsJSON != "{}" {
 			t.Fatalf("unexpected verify input: token=%q claims=%q", token, claimsJSON)
 		}
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 	resp, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
@@ -352,8 +352,8 @@ func TestAcquireLeaseGrantsASpaceScopedLeaseOnAMatchingVerifiedBackend(t *testin
 
 func TestReleaseLeaseAndSnapshotSandboxEnforceTheBackendPinOnASpaceScopedLease(t *testing.T) {
 	s := newTestServer()
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
@@ -394,8 +394,8 @@ func TestReleaseLeaseAndSnapshotSandboxEnforceTheBackendPinOnASpaceScopedLease(t
 
 func TestSnapshotSandboxRejectsAScratchSpaceScopedLease(t *testing.T) {
 	s := newTestServer()
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
@@ -416,8 +416,8 @@ func TestSnapshotSandboxRejectsAScratchSpaceScopedLease(t *testing.T) {
 
 func TestActivateLeasePromotesScratchToActiveAndIsIdempotent(t *testing.T) {
 	s := newTestServer()
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
@@ -446,8 +446,8 @@ func TestActivateLeasePromotesScratchToActiveAndIsIdempotent(t *testing.T) {
 
 func TestActivateLeaseFailsClosedOnWrongBackend(t *testing.T) {
 	s := newTestServer()
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 	acquired, err := s.AcquireLease(context.Background(), &AcquireLeaseRequest{
@@ -506,8 +506,8 @@ func TestGetWorkspaceManifestAndSnapshotSandboxLayerTheOverlayOverTheSpace(t *te
 	s.principal = func(context.Context) (authctx.Principal, error) {
 		return authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"}, nil
 	}
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 
@@ -618,8 +618,8 @@ func TestPromoteWorkspaceReportsConflictWithoutOverwriting(t *testing.T) {
 	s.principal = func(context.Context) (authctx.Principal, error) {
 		return authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"}, nil
 	}
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 
@@ -667,8 +667,8 @@ func TestPromoteWorkspaceMergesNonConflictingPathsIndependently(t *testing.T) {
 	s.principal = func(context.Context) (authctx.Principal, error) {
 		return authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"}, nil
 	}
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 
@@ -729,8 +729,8 @@ func TestPromoteWorkspaceStillWorksAfterReleaseLease(t *testing.T) {
 	s.principal = func(context.Context) (authctx.Principal, error) {
 		return authctx.Principal{OrganizationID: "org-1", ActorID: "user-1", PrincipalType: "user"}, nil
 	}
-	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error) {
-		return authz.SpaceCapabilityClaims{BackendID: "backend-1"}, nil
+	s.capabilityVerify = func(string, string, authz.CapabilityExpectation) (authz.VerifiedCapability, error) {
+		return authz.VerifiedCapability{Claims: authz.SpaceCapabilityClaims{BackendID: "backend-1"}}, nil
 	}
 	s.backendID = "backend-1"
 

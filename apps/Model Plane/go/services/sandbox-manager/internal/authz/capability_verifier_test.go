@@ -77,8 +77,64 @@ func TestVerifyAcceptsAFreshSignedBoundDecisionAndReturnsItsClaims(t *testing.T)
 	if err != nil {
 		t.Fatalf("valid fresh signed decision denied: %v", err)
 	}
-	if got.BackendID != claims.BackendID {
-		t.Fatalf("BackendID = %q, want %q", got.BackendID, claims.BackendID)
+	if got.Claims.BackendID != claims.BackendID {
+		t.Fatalf("BackendID = %q, want %q", got.Claims.BackendID, claims.BackendID)
+	}
+	if !got.HasPermission("space:sandbox:use") {
+		t.Fatal("the decision's granted permissions should reach the caller")
+	}
+}
+
+// TestAllowsBackgroundProcessesNeedsBothTheClaimAndTheGrant pins S4.2's
+// authority rule: the backend must claim it can host background processes AND
+// Control must have granted space:processes. Neither half implies the other,
+// and — unlike egress — a claim without the grant is NOT a reason to refuse
+// the lease, so this is a predicate the caller asks about rather than an
+// error Verify returns.
+func TestAllowsBackgroundProcessesNeedsBothTheClaimAndTheGrant(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		processes   string
+		permissions []string
+		want        bool
+	}{
+		{
+			name:        "claimed and granted",
+			processes:   ProcessesBackgroundRegistry,
+			permissions: []string{"space:sandbox:use", "space:processes"},
+			want:        true,
+		},
+		{
+			name:        "claimed but the Space is not entitled",
+			processes:   ProcessesBackgroundRegistry,
+			permissions: []string{"space:sandbox:use"},
+			want:        false,
+		},
+		{
+			name:        "granted but this backend only runs one-shot children",
+			processes:   "bounded_oneshot",
+			permissions: []string{"space:sandbox:use", "space:processes"},
+			want:        false,
+		},
+		{
+			name:        "neither",
+			processes:   "bounded_oneshot",
+			permissions: []string{"space:sandbox:use"},
+			want:        false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			verified := VerifiedCapability{
+				Claims:      SpaceCapabilityClaims{Processes: tc.processes},
+				Permissions: tc.permissions,
+			}
+			if got := verified.AllowsBackgroundProcesses(); got != tc.want {
+				t.Fatalf("AllowsBackgroundProcesses() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

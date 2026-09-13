@@ -115,10 +115,15 @@ var (
 	// that is no longer live. A host receiving this must stop writing and
 	// drop its local handle — the registry has moved on without it.
 	ErrProcessFenced = errors.New("process is not owned by this host epoch")
-	// ErrLeaseNotEligible means the lease cannot host background processes:
-	// missing, not ACTIVE, expired, pinned to another backend, or without
-	// the space:processes permission Control grants (leases.processes_permitted).
+	// ErrLeaseNotEligible means the lease cannot host background processes
+	// because of its own state: missing, not ACTIVE, expired, or pinned to
+	// another backend.
 	ErrLeaseNotEligible = errors.New("lease is not eligible to host background processes")
+	// ErrProcessesNotPermitted means the lease is otherwise fine but its
+	// Space capability decision never granted space:processes. Separate from
+	// ErrLeaseNotEligible because it is an authority answer, not a state
+	// one — the caller is refused no matter how long it waits or retries.
+	ErrProcessesNotPermitted = errors.New("lease is not permitted to host background processes")
 	// ErrProcessLimit means this lease or Space already has as many live
 	// processes as it is allowed.
 	ErrProcessLimit = errors.New("live process limit reached")
@@ -229,10 +234,13 @@ func (f Fence) validate() error {
 }
 
 // RegisterRequest reserves a process slot before the host spawns anything.
+//
+// There is deliberately no SpaceID: the Space is whatever the lease says it
+// is, read from the lease row inside the same statement that inserts. A
+// caller cannot name one, so it cannot name the wrong one.
 type RegisterRequest struct {
 	ID        string
 	OrgID     string
-	SpaceID   string
 	LeaseID   string
 	BackendID string
 	HostEpoch string
@@ -345,9 +353,9 @@ const processColumns = `id, org_id, space_id, lease_id, backend_id, host_epoch, 
 // outlive the lease whose workspace and authority it runs under. The
 // requested TTL is stored as-is for the record.
 func (s *Store) Register(ctx context.Context, req RegisterRequest) (*Process, error) {
-	if req.ID == "" || req.OrgID == "" || req.SpaceID == "" || req.LeaseID == "" ||
+	if req.ID == "" || req.OrgID == "" || req.LeaseID == "" ||
 		req.BackendID == "" || req.HostEpoch == "" || req.RunID == "" || req.SubjectID == "" {
-		return nil, fmt.Errorf("id, org_id, space_id, lease_id, backend_id, host_epoch, run_id, and subject_id are required")
+		return nil, fmt.Errorf("id, org_id, lease_id, backend_id, host_epoch, run_id, and subject_id are required")
 	}
 	if req.Command.Program == "" {
 		return nil, fmt.Errorf("command program is required")
@@ -368,33 +376,34 @@ func (s *Store) Register(ctx context.Context, req RegisterRequest) (*Process, er
 			id, org_id, space_id, lease_id, backend_id, host_epoch,
 			run_id, step_id, subject_id, command_redacted, command_digest,
 			state, ttl_seconds, expires_at, last_heartbeat_at, created_at, updated_at)
-		SELECT $1, $2, $3, $4, $5, $6,
-		       $7, $8, $9, $10::jsonb, $11,
-		       $12, $13, LEAST(now() + ($17::bigint * interval '1 second'), l.expires_at),
+		SELECT $1, $2, l.space_id, $3, $4, $5,
+		       $6, $7, $8, $9::jsonb, $10,
+		       $11, $12, LEAST(now() + ($15::bigint * interval '1 second'), l.expires_at),
 		       now(), now(), now()
 		FROM leases l
-		WHERE l.id = $4
+		WHERE l.id = $3
 		  AND l.org_id = $2
-		  AND l.space_id = $3
-		  AND l.backend_id = $5
+		  AND l.backend_id = $4
 		  AND l.processes_permitted
-		  AND l.state = $14
+		  AND l.state = $13
 		  AND l.expires_at > now()
+		  AND l.space_id <> ''
 		  AND (SELECT count(*) FROM sandbox_processes p
-		        WHERE p.lease_id = $4 AND p.state IN (1, 2)) < $15
+		        WHERE p.lease_id = $3 AND p.state IN (1, 2)) < $14
 		  AND (SELECT count(*) FROM sandbox_processes p
-		        WHERE p.org_id = $2 AND p.space_id = $3 AND p.state IN (1, 2)) < $16
+		        WHERE p.org_id = $2 AND p.space_id = l.space_id AND p.state IN (1, 2)) < $16
 		RETURNING `+processColumns,
-		req.ID, req.OrgID, req.SpaceID, req.LeaseID, req.BackendID, req.HostEpoch,
+		req.ID, req.OrgID, req.LeaseID, req.BackendID, req.HostEpoch,
 		req.RunID, req.StepID, req.SubjectID, string(command), req.CommandDigest,
 		int16(StateStarting), req.TTLSeconds, int32(mpv1.SandboxLifecycleState_ACTIVE),
-		s.limits.MaxLivePerLease, s.limits.MaxLivePerSpace,
+		s.limits.MaxLivePerLease,
 		// The same TTL again, as its own parameter: Postgres deduces a
 		// parameter's type from every use, and one placeholder cannot be
 		// both the INTEGER ttl_seconds column and the bigint of the
 		// interval arithmetic ("inconsistent types deduced for parameter",
 		// SQLSTATE 42P08).
-		int64(req.TTLSeconds))
+		int64(req.TTLSeconds),
+		s.limits.MaxLivePerSpace)
 	p, err := scanProcess(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, s.diagnoseRefusal(ctx, req)
@@ -413,18 +422,19 @@ func (s *Store) diagnoseRefusal(ctx context.Context, req RegisterRequest) error 
 		leaseState int32
 		permitted  bool
 		backendID  string
+		spaceID    string
 		expired    bool
 		leaseLive  int64
 		spaceLive  int64
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT l.state, l.processes_permitted, l.backend_id, l.expires_at <= now(),
+		SELECT l.state, l.processes_permitted, l.backend_id, l.space_id, l.expires_at <= now(),
 		       (SELECT count(*) FROM sandbox_processes p WHERE p.lease_id = l.id AND p.state IN (1, 2)),
 		       (SELECT count(*) FROM sandbox_processes p
 		         WHERE p.org_id = l.org_id AND p.space_id = l.space_id AND p.state IN (1, 2))
 		FROM leases l
 		WHERE l.id = $1 AND l.org_id = $2
-	`, req.LeaseID, req.OrgID).Scan(&leaseState, &permitted, &backendID, &expired, &leaseLive, &spaceLive)
+	`, req.LeaseID, req.OrgID).Scan(&leaseState, &permitted, &backendID, &spaceID, &expired, &leaseLive, &spaceLive)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: lease %q not found in this organization", ErrLeaseNotEligible, req.LeaseID)
 	}
@@ -432,8 +442,12 @@ func (s *Store) diagnoseRefusal(ctx context.Context, req RegisterRequest) error 
 		return fmt.Errorf("diagnose process registration refusal: %w", err)
 	}
 	switch {
+	case spaceID == "":
+		// A thread/agent-scoped lease has no Space workspace to run in, so
+		// there is nowhere to put a background process even in principle.
+		return fmt.Errorf("%w: lease is not Space-scoped", ErrLeaseNotEligible)
 	case !permitted:
-		return fmt.Errorf("%w: the lease's Space capability decision does not grant space:processes", ErrLeaseNotEligible)
+		return fmt.Errorf("%w: the lease's Space capability decision does not grant space:processes", ErrProcessesNotPermitted)
 	case backendID != req.BackendID:
 		return fmt.Errorf("%w: lease is pinned to another backend", ErrLeaseNotEligible)
 	case expired:

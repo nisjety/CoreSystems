@@ -1,6 +1,9 @@
 //! gRPC client for sandbox-manager's `SandboxManager` service —
 //! `AcquireLease`, `ActivateLease`, `SnapshotSandbox`, `ReleaseLease`,
-//! `GetWorkspaceManifest`, `PromoteWorkspace`, `Health`.
+//! `GetWorkspaceManifest`, `PromoteWorkspace`, `Health`, and the S4.2
+//! background process registry (`RegisterProcess`, `UpdateProcessState`,
+//! `AppendProcessOutput`, `ReconcileProcesses`, `GetProcess`,
+//! `ListProcesses`, `ReadProcessOutput`).
 //!
 //! Real and independently callable, but **not yet wired into a production
 //! caller** — see
@@ -34,11 +37,17 @@
 use std::time::Duration;
 
 use mp_contracts::model_plane::v1::{
-    sandbox_manager_client::SandboxManagerClient as GeneratedClient, AcquireLeaseRequest,
-    AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, GetWorkspaceManifestRequest,
-    GetWorkspaceManifestResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse,
-    ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse,
-    SnapshotRequest, SnapshotResponse, WorkspaceChangedFile,
+    sandbox_manager_client::SandboxManagerClient as GeneratedClient, update_process_state_request,
+    AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse,
+    AppendProcessOutputRequest, AppendProcessOutputResponse, GetProcessRequest, GetProcessResponse,
+    GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, ListProcessesRequest,
+    ListProcessesResponse, ProcessExited, ProcessOutputChunk, ProcessSignal,
+    ProcessSignalRequested, ProcessStarted, ProcessState, PromoteWorkspaceRequest,
+    PromoteWorkspaceResponse, ReadProcessOutputRequest, ReadProcessOutputResponse,
+    ReconcileProcessesRequest, ReconcileProcessesResponse, RedactedCommand, RegisterProcessRequest,
+    RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest,
+    SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest,
+    WorkspaceChangedFile,
 };
 use tonic::{transport::Channel, Request, Status};
 
@@ -56,6 +65,64 @@ pub struct LeaseRequest<'a> {
     pub space_id: &'a str,
     pub capability_decision: &'a str,
     pub capability_claims_json: &'a str,
+}
+
+/// Identifies both a process and the exact host allowed to write it.
+///
+/// sandbox-manager folds these three into the predicate of every statement
+/// a host's report runs, so a superseded boot lands nothing rather than
+/// interleaving into rows a newer one now owns.
+pub struct ProcessFence<'a> {
+    pub process_id: &'a str,
+    pub backend_id: &'a str,
+    pub host_epoch: &'a str,
+}
+
+impl ProcessFence<'_> {
+    fn validate(&self) -> Result<(), Status> {
+        if self.process_id.trim().is_empty() {
+            return Err(Status::invalid_argument("process_id is required"));
+        }
+        if self.backend_id.trim().is_empty() || self.host_epoch.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "backend_id and host_epoch are required",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A command's argv, ALREADY REDACTED. The registry must never receive the
+/// plaintext; `command_digest` on [`ProcessRegistration`] is what lets a
+/// caller recognize the same command without it.
+pub struct RedactedArgv<'a> {
+    pub program: &'a str,
+    pub args: &'a [&'a str],
+}
+
+/// One process registration. There is deliberately no Space: sandbox-manager
+/// reads it from the lease.
+pub struct ProcessRegistration<'a> {
+    pub process_id: &'a str,
+    pub lease_id: &'a str,
+    pub backend_id: &'a str,
+    pub host_epoch: &'a str,
+    pub run_id: &'a str,
+    pub step_id: &'a str,
+    pub subject_id: &'a str,
+    pub command: RedactedArgv<'a>,
+    pub command_digest: &'a str,
+    pub ttl_seconds: i32,
+}
+
+/// How a process ended.
+pub struct ProcessOutcome<'a> {
+    pub state: ProcessState,
+    pub exit_code: Option<i32>,
+    pub end_reason: &'a str,
+    /// Whether the host finished tearing down the process's pipes and
+    /// scratch directory.
+    pub cleanup_done: bool,
 }
 
 #[derive(Clone)]
@@ -297,6 +364,329 @@ impl SandboxManagerClient {
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().health(wire))
             .await
             .map_err(|_| Status::deadline_exceeded("sandbox-manager Health timed out"))?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Reserves a process row before the host spawns — S4.2 step 2.
+    ///
+    /// The Space is never named here: sandbox-manager reads it from the
+    /// lease, inside the same statement that inserts, so a caller cannot
+    /// name the wrong one. The organization comes from the verified bearer
+    /// for the same reason.
+    ///
+    /// Like every other method on this client, and every other S4.2 slice,
+    /// this ships as a callable primitive with no production caller: the
+    /// host that will drive it is step 4.
+    ///
+    /// # Errors
+    /// `invalid_argument` for a blank `process_id`/`lease_id`;
+    /// `permission_denied` when the lease's Space was never granted
+    /// `space:processes`; `failed_precondition` when the lease itself is
+    /// ineligible; `resource_exhausted` at the live-process limit;
+    /// `deadline_exceeded` past [`RPC_TIMEOUT`].
+    pub async fn register_process(
+        &self,
+        bearer: &str,
+        request: &ProcessRegistration<'_>,
+    ) -> Result<RegisterProcessResponse, Status> {
+        if request.process_id.trim().is_empty() {
+            return Err(Status::invalid_argument("process_id is required"));
+        }
+        if request.lease_id.trim().is_empty() {
+            return Err(Status::invalid_argument("lease_id is required"));
+        }
+        if request.ttl_seconds <= 0 {
+            return Err(Status::invalid_argument("ttl_seconds must be positive"));
+        }
+        let message = RegisterProcessRequest {
+            process_id: request.process_id.to_owned(),
+            lease_id: request.lease_id.to_owned(),
+            backend_id: request.backend_id.to_owned(),
+            host_epoch: request.host_epoch.to_owned(),
+            run_id: request.run_id.to_owned(),
+            step_id: request.step_id.to_owned(),
+            subject_id: request.subject_id.to_owned(),
+            command: Some(RedactedCommand {
+                program: request.command.program.to_owned(),
+                args: request
+                    .command
+                    .args
+                    .iter()
+                    .map(|a| (*a).to_owned())
+                    .collect(),
+            }),
+            command_digest: request.command_digest.to_owned(),
+            ttl_seconds: request.ttl_seconds,
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().register_process(wire))
+            .await
+            .map_err(|_| Status::deadline_exceeded("sandbox-manager RegisterProcess timed out"))?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Reports that the host spawned the process.
+    ///
+    /// # Errors
+    /// `failed_precondition` when this host no longer owns the process (a
+    /// newer boot took over, or it is already terminal) — the caller must
+    /// stop writing and drop its handle rather than retry.
+    pub async fn mark_process_started(
+        &self,
+        bearer: &str,
+        fence: &ProcessFence<'_>,
+    ) -> Result<(), Status> {
+        self.update_process_state(
+            bearer,
+            fence,
+            update_process_state_request::Transition::Started(ProcessStarted {}),
+            "started",
+        )
+        .await
+    }
+
+    /// Records a request to stop the process. The host is what actually
+    /// delivers the signal; an escalation to kill is never downgraded.
+    ///
+    /// # Errors
+    /// As [`Self::mark_process_started`].
+    pub async fn request_process_signal(
+        &self,
+        bearer: &str,
+        fence: &ProcessFence<'_>,
+        signal: ProcessSignal,
+    ) -> Result<(), Status> {
+        if signal == ProcessSignal::Unspecified {
+            return Err(Status::invalid_argument("signal must be term or kill"));
+        }
+        self.update_process_state(
+            bearer,
+            fence,
+            update_process_state_request::Transition::Signal(ProcessSignalRequested {
+                signal: signal as i32,
+            }),
+            "signal",
+        )
+        .await
+    }
+
+    /// Reports a terminal outcome. The first terminal outcome wins: a late
+    /// report for a process the registry already settled is an idempotent
+    /// no-op, not an error.
+    ///
+    /// # Errors
+    /// `invalid_argument` for a non-terminal state or a blank reason;
+    /// otherwise as [`Self::mark_process_started`].
+    pub async fn mark_process_ended(
+        &self,
+        bearer: &str,
+        fence: &ProcessFence<'_>,
+        outcome: &ProcessOutcome<'_>,
+    ) -> Result<(), Status> {
+        if !matches!(
+            outcome.state,
+            ProcessState::Exited | ProcessState::Killed | ProcessState::Expired
+        ) {
+            return Err(Status::invalid_argument(
+                "an exit must report a terminal state",
+            ));
+        }
+        if outcome.end_reason.trim().is_empty() {
+            return Err(Status::invalid_argument("end_reason is required"));
+        }
+        self.update_process_state(
+            bearer,
+            fence,
+            update_process_state_request::Transition::Exited(ProcessExited {
+                state: outcome.state as i32,
+                exit_code: outcome.exit_code,
+                end_reason: outcome.end_reason.to_owned(),
+                cleanup_done: outcome.cleanup_done,
+            }),
+            "exited",
+        )
+        .await
+    }
+
+    async fn update_process_state(
+        &self,
+        bearer: &str,
+        fence: &ProcessFence<'_>,
+        transition: update_process_state_request::Transition,
+        label: &'static str,
+    ) -> Result<(), Status> {
+        fence.validate()?;
+        let message = UpdateProcessStateRequest {
+            process_id: fence.process_id.to_owned(),
+            backend_id: fence.backend_id.to_owned(),
+            host_epoch: fence.host_epoch.to_owned(),
+            transition: Some(transition),
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().update_process_state(wire))
+            .await
+            .map_err(|_| {
+                Status::deadline_exceeded(format!(
+                    "sandbox-manager UpdateProcessState({label}) timed out"
+                ))
+            })?;
+        outcome?;
+        Ok(())
+    }
+
+    /// Appends output and refreshes the process's heartbeat. An empty
+    /// `chunks` slice is a pure heartbeat, which is what keeps silence
+    /// distinguishable from a dead host — so this is safe, and expected, to
+    /// call with nothing to say.
+    ///
+    /// Re-sending a batch after an ambiguous failure is a no-op: the
+    /// registry keys output on `(process_id, seq)`, and the host owns the
+    /// seq counter.
+    ///
+    /// # Errors
+    /// As [`Self::mark_process_started`].
+    pub async fn append_process_output(
+        &self,
+        bearer: &str,
+        fence: &ProcessFence<'_>,
+        chunks: Vec<ProcessOutputChunk>,
+        stdin_bytes_delta: i64,
+    ) -> Result<AppendProcessOutputResponse, Status> {
+        fence.validate()?;
+        if stdin_bytes_delta < 0 {
+            return Err(Status::invalid_argument(
+                "stdin_bytes_delta must not be negative",
+            ));
+        }
+        let message = AppendProcessOutputRequest {
+            process_id: fence.process_id.to_owned(),
+            backend_id: fence.backend_id.to_owned(),
+            host_epoch: fence.host_epoch.to_owned(),
+            chunks,
+            stdin_bytes_delta,
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().append_process_output(wire))
+            .await
+            .map_err(|_| {
+                Status::deadline_exceeded("sandbox-manager AppendProcessOutput timed out")
+            })?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Declares every live process this backend owns under a DIFFERENT host
+    /// epoch lost. A restarted host calls this once before serving: its
+    /// predecessor's children died with it, so the registry must say so
+    /// rather than leave rows claiming to be running.
+    ///
+    /// # Errors
+    /// `invalid_argument` for a blank backend id or epoch;
+    /// `deadline_exceeded` past [`RPC_TIMEOUT`].
+    pub async fn reconcile_processes(
+        &self,
+        bearer: &str,
+        backend_id: &str,
+        host_epoch: &str,
+    ) -> Result<ReconcileProcessesResponse, Status> {
+        if backend_id.trim().is_empty() || host_epoch.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "backend_id and host_epoch are required",
+            ));
+        }
+        let message = ReconcileProcessesRequest {
+            backend_id: backend_id.to_owned(),
+            host_epoch: host_epoch.to_owned(),
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().reconcile_processes(wire))
+            .await
+            .map_err(|_| {
+                Status::deadline_exceeded("sandbox-manager ReconcileProcesses timed out")
+            })?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Reads one process's metadata. Descriptive: a terminal process's
+    /// record stays readable.
+    ///
+    /// # Errors
+    /// `invalid_argument` for a blank id; `not_found` outside the bearer's
+    /// own organization; `deadline_exceeded` past [`RPC_TIMEOUT`].
+    pub async fn get_process(
+        &self,
+        bearer: &str,
+        process_id: &str,
+    ) -> Result<GetProcessResponse, Status> {
+        if process_id.trim().is_empty() {
+            return Err(Status::invalid_argument("process_id is required"));
+        }
+        let message = GetProcessRequest {
+            process_id: process_id.to_owned(),
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().get_process(wire))
+            .await
+            .map_err(|_| Status::deadline_exceeded("sandbox-manager GetProcess timed out"))?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Pages a Space's processes, newest first.
+    ///
+    /// # Errors
+    /// `invalid_argument` for a blank `space_id`; `deadline_exceeded` past
+    /// [`RPC_TIMEOUT`].
+    pub async fn list_processes(
+        &self,
+        bearer: &str,
+        space_id: &str,
+        include_terminal: bool,
+        limit: i32,
+        after_process_id: &str,
+    ) -> Result<ListProcessesResponse, Status> {
+        if space_id.trim().is_empty() {
+            return Err(Status::invalid_argument("space_id is required"));
+        }
+        let message = ListProcessesRequest {
+            space_id: space_id.to_owned(),
+            include_terminal,
+            limit,
+            after_process_id: after_process_id.to_owned(),
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().list_processes(wire))
+            .await
+            .map_err(|_| Status::deadline_exceeded("sandbox-manager ListProcesses timed out"))?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Reads output after a cursor. A drained terminal process returns an
+    /// empty page carrying its outcome rather than a not-found, so a reader
+    /// can always distinguish "nothing new" from "gone".
+    ///
+    /// # Errors
+    /// `invalid_argument` for a blank id; `not_found` outside the bearer's
+    /// own organization; `deadline_exceeded` past [`RPC_TIMEOUT`].
+    pub async fn read_process_output(
+        &self,
+        bearer: &str,
+        process_id: &str,
+        after_seq: i64,
+        max_bytes: i64,
+    ) -> Result<ReadProcessOutputResponse, Status> {
+        if process_id.trim().is_empty() {
+            return Err(Status::invalid_argument("process_id is required"));
+        }
+        let message = ReadProcessOutputRequest {
+            process_id: process_id.to_owned(),
+            after_seq,
+            max_bytes,
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().read_process_output(wire))
+            .await
+            .map_err(|_| {
+                Status::deadline_exceeded("sandbox-manager ReadProcessOutput timed out")
+            })?;
         Ok(outcome?.into_inner())
     }
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 
 	"google.golang.org/grpc/codes"
@@ -36,8 +37,43 @@ func mapErr(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, snapshot.ErrInvalidLease):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, process.ErrProcessNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, process.ErrProcessesNotPermitted):
+		// An authority answer, not a state one: retrying changes nothing
+		// until Control grants the Space space:processes.
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, process.ErrLeaseNotEligible):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, process.ErrProcessFenced):
+		// The caller is no longer the host that owns this process. It must
+		// stop writing and drop its handle rather than retry.
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, process.ErrProcessLimit):
+		return status.Error(codes.ResourceExhausted, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
+	}
+}
+
+// processOutcome classifies a process-registry error for the
+// telemetry.ProcessDecisionsTotal counter.
+func processOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "ok"
+	case errors.Is(err, process.ErrProcessNotFound):
+		return "not_found"
+	case errors.Is(err, process.ErrProcessesNotPermitted):
+		return "not_permitted"
+	case errors.Is(err, process.ErrLeaseNotEligible):
+		return "lease_not_eligible"
+	case errors.Is(err, process.ErrProcessFenced):
+		return "fenced"
+	case errors.Is(err, process.ErrProcessLimit):
+		return "limit_reached"
+	default:
+		return "internal_error"
 	}
 }
 

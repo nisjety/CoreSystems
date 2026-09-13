@@ -56,6 +56,8 @@ func setupLeaseDB(t *testing.T) string {
 	for _, migration := range []string{
 		"0001_workspace_manifest.up.sql",
 		"0002_lease_and_snapshot_store.up.sql",
+		// 0003 adds leases.processes_permitted, which scanLease now reads.
+		"0003_process_registry.up.sql",
 	} {
 		sqlBytes, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", migration))
 		if readErr != nil {
@@ -88,7 +90,7 @@ func TestLeaseStore_FullLifecycle(t *testing.T) {
 	store := newPoolStore(t, dsn)
 	ctx := context.Background()
 
-	l, err := store.Create(ctx, "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	l, err := store.Create(ctx, "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", false, time.Minute)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -142,7 +144,7 @@ func TestLeaseStore_GetAnyResolvesALeaseAfterItIsReleased(t *testing.T) {
 	store := newPoolStore(t, dsn)
 	ctx := context.Background()
 
-	l, err := store.Create(ctx, "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	l, err := store.Create(ctx, "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", false, time.Minute)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -177,7 +179,7 @@ func TestLeaseStore_GetAnyResolvesALeaseAfterItIsReleased(t *testing.T) {
 func TestLeaseStore_SurvivesAFreshPoolAgainstTheSameDatabase(t *testing.T) {
 	dsn := setupLeaseDB(t)
 	before := newPoolStore(t, dsn)
-	created, err := before.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", time.Minute)
+	created, err := before.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", false, time.Minute)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -205,7 +207,7 @@ func TestLeaseStore_ConcurrentCreateIsRaceFree(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			l, err := store.Create(context.Background(), "scope-a", "agent", "org-a", "user-a", "", "", time.Minute)
+			l, err := store.Create(context.Background(), "scope-a", "agent", "org-a", "user-a", "", "", false, time.Minute)
 			errs[i] = err
 			if l != nil {
 				ids[i] = l.ID

@@ -2537,3 +2537,89 @@ clean on every new file. The pre-existing CRLF `gofmt` noise on untouched
 files is unchanged and was verified as line-endings-only, not content drift.
 
 Full detail: design doc §2 and §10 step 1.
+## S4.2 step 2 implemented — the process RPCs, and the Space stops being a parameter (2026-09-13)
+
+**State:** `implemented` (design doc §4 sandbox-manager half, §5, §10 step 2).
+Seven RPCs, their authz cases and interceptor rows, `Verify` returning the
+decision's permissions, `AcquireLease` persisting `processes_permitted`, and
+the Rust client methods. Still no host: nothing calls any of it.
+
+**The Space is no longer a parameter anywhere.** Step 1's `RegisterRequest`
+carried a `SpaceID`; it is gone. sandbox-manager reads the Space from the
+lease row inside the same statement that inserts the process, so a caller
+cannot name a Space at all — which means it cannot name the wrong one. Same
+move as the write fence and the live-count limits, and the same one
+`workspace.Store.Promote` made after a review found its lost-update window:
+when a check and the write it guards are separable, eventually something
+separates them. A non-Space lease is now refused by that join rather than by
+a predicate someone could forget to write.
+
+**All seven are service-principal only, and the reads say why.** The four
+writes are permanently service-only: the caller is an execution host
+reporting what an OS process it owns actually did, and a user bearer cannot
+observe any of it. The three reads are service-only *for now*, returning
+`FailedPrecondition` that names the missing Space read decision rather than a
+generic denial. Admitting a user bearer before step 6 wires that decision
+would let any member of an organization read any process's output in it; the
+alternative to refusing was shipping the hole and writing it down, which is
+how holes survive. Step 6 replaces the refusal with verification, not with
+nothing.
+
+**`ErrProcessesNotPermitted` split out of `ErrLeaseNotEligible`.** "This
+Space was never granted `space:processes`" is `PermissionDenied`; "the lease
+is expired, SCRATCH, or on another backend" is `FailedPrecondition`. One
+sentinel would have collapsed retry-never and retry-later into the same
+answer, and the caller that has to choose between them is a background host
+with no human watching.
+
+**`Verify` now returns `VerifiedCapability{Claims, Permissions}`** rather
+than claims alone, and `AllowsBackgroundProcesses()` requires both halves:
+the backend must claim `processes: "background_registry"` AND Control must
+have granted `space:processes`. Deliberately NOT a refusal when the backend
+claims the capability and the Space is not entitled — unlike `egress`, where
+an egress-capable backend must not serve a non-entitled Space at all, a
+process-capable backend is still a perfectly good one-shot substrate. The
+lease is granted; only the process RPCs are refused. The answer is persisted
+on the lease row because a process RPC arrives later on execution-core's own
+service token with no decision in hand, and `leases` otherwise keeps nothing
+from the decision but `backend_id`.
+
+**Still no `MemoryProcessStore`.** Step 1 deferred it to "when the handlers
+need it"; the handlers turned out not to. Their tests use a recording stub,
+because the registry's real semantics are already proven against Postgres and
+a second hand-written copy would be a thing that can disagree with the
+original rather than extra assurance — the opposite of what
+`MemoryWorkspaceStore` is for, which is a runtime fallback with a real
+consumer. `cmd/main.go` passes no registry in ephemeral-development mode, and
+every process RPC fails closed there rather than serving state a restart
+discards.
+
+**A contract test for the enum numbering.** The handlers cast
+`process.State` ↔ `mpv1.ProcessState` directly, which is sound only because
+both are the numbers migration 0003 stores. Three declarations, three files,
+and drift would surface as a process silently reported in the wrong state —
+so `process_test.go` asserts every pairing explicitly, the same
+cross-boundary-invariant-as-a-test shape `cross_service_loop_contract.rs`
+established.
+
+**The proto additions are lint-clean.** buf's config here wants a doc comment
+on every field, message, enum value and oneof, plus an enum-name prefix on
+every value. The first draft added 105 new violations to a file that had 31;
+the shipped one adds zero, and `buf breaking` against the baseline is clean
+(new RPCs, messages and enums only). Go regeneration used
+`buf.gen.go-only.yaml` with `--path`, so exactly two generated files changed
+and the Python/TS outputs were untouched — the usual ~90-unrelated-files
+churn avoided rather than reverted afterwards. Per-field docs earn their
+place on a cross-plane contract surface even where this repo's general style
+discourages narration.
+
+Verification: the full sandbox-manager suite plus 14 new interceptor rows
+(one valid + one wrong-scope per new method — the `ActivateLease` bug is why
+that is a rule, not a habit), handler tests covering identity, validation,
+conversion and every error mapping, the enum contract test, and the
+real-Postgres integration suite including a new non-Space-lease refusal.
+`cargo check`/`clippy`/`rustfmt` clean on the Rust client; its one clippy hit
+(`result_large_err` on `Result<_, Status>`) fires on the pre-existing
+`authorize` in the same file and is the crate-wide pattern.
+
+Full detail: design doc §5 and §10 step 2.

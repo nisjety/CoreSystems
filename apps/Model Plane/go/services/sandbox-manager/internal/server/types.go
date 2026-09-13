@@ -18,3 +18,22 @@ type PromoteWorkspaceRequest = mpv1.PromoteWorkspaceRequest
 type PromoteWorkspaceResponse = mpv1.PromoteWorkspaceResponse
 type SandboxHealthRequest = mpv1.SandboxHealthRequest
 type SandboxHealthResponse = mpv1.SandboxHealthResponse
+
+// S4.2 process registry.
+type RegisterProcessRequest = mpv1.RegisterProcessRequest
+type RegisterProcessResponse = mpv1.RegisterProcessResponse
+type UpdateProcessStateRequest = mpv1.UpdateProcessStateRequest
+type UpdateProcessStateResponse = mpv1.UpdateProcessStateResponse
+type AppendProcessOutputRequest = mpv1.AppendProcessOutputRequest
+type AppendProcessOutputResponse = mpv1.AppendProcessOutputResponse
+type ReconcileProcessesRequest = mpv1.ReconcileProcessesRequest
+type ReconcileProcessesResponse = mpv1.ReconcileProcessesResponse
+type GetProcessRequest = mpv1.GetProcessRequest
+type GetProcessResponse = mpv1.GetProcessResponse
+type ListProcessesRequest = mpv1.ListProcessesRequest
+type ListProcessesResponse = mpv1.ListProcessesResponse
+type ReadProcessOutputRequest = mpv1.ReadProcessOutputRequest
+type ReadProcessOutputResponse = mpv1.ReadProcessOutputResponse
+type Process = mpv1.Process
+type ProcessOutputChunk = mpv1.ProcessOutputChunk
+type RedactedCommand = mpv1.RedactedCommand

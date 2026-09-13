@@ -65,9 +65,22 @@ type Lease struct {
 	// Create time — empty for a non-Space lease, where there is nothing to
 	// pin.
 	BackendID string
-	State     mpv1.SandboxLifecycleState
-	ExpiresAt time.Time
-	CreatedAt time.Time
+	// ProcessesPermitted records whether this lease may host S4.2 background
+	// processes: the backend claimed the capability AND Control granted
+	// space:processes, both decided once at AcquireLease from the verified
+	// capability decision.
+	//
+	// It is persisted rather than re-derived because the decision itself is
+	// not kept: the leases row otherwise retains nothing from it but
+	// BackendID. A process RPC arrives later on execution-core's own service
+	// token, with no user-bound bearer and therefore no decision in hand, so
+	// without this column there would be nothing for it to check against.
+	// Defaults to false, so every lease acquired before Control could grant
+	// the permission reads as not permitted rather than grandfathered in.
+	ProcessesPermitted bool
+	State              mpv1.SandboxLifecycleState
+	ExpiresAt          time.Time
+	CreatedAt          time.Time
 }
 
 // IsExpired reports whether the lease has passed its TTL relative to now.
@@ -104,29 +117,32 @@ func NewStore(pool *pgxpool.Pool) (*Store, error) {
 // backendID are empty for the pre-existing thread/agent-scoped acquisition
 // path; a Space-scoped caller supplies both, and the lease starts in
 // SCRATCH — credential-free by construction until ActivateLease promotes it.
-func (s *Store) Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, ttl time.Duration) (*Lease, error) {
+// processesPermitted comes from the verified capability decision and is false
+// for every non-Space lease, which has no decision at all.
+func (s *Store) Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, processesPermitted bool, ttl time.Duration) (*Lease, error) {
 	id, err := s.newID()
 	if err != nil {
 		return nil, err
 	}
 	now := s.nowFn()
 	l := &Lease{
-		ID:        id,
-		ScopeID:   scopeID,
-		ScopeType: scopeType,
-		OrgID:     orgID,
-		OwnerID:   ownerID,
-		Endpoint:  "sandbox://" + id,
-		SpaceID:   spaceID,
-		BackendID: backendID,
-		State:     mpv1.SandboxLifecycleState_SCRATCH,
-		ExpiresAt: now.Add(ttl),
-		CreatedAt: now,
+		ID:                 id,
+		ScopeID:            scopeID,
+		ScopeType:          scopeType,
+		OrgID:              orgID,
+		OwnerID:            ownerID,
+		Endpoint:           "sandbox://" + id,
+		SpaceID:            spaceID,
+		BackendID:          backendID,
+		ProcessesPermitted: processesPermitted,
+		State:              mpv1.SandboxLifecycleState_SCRATCH,
+		ExpiresAt:          now.Add(ttl),
+		CreatedAt:          now,
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, state, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-	`, l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint, l.SpaceID, l.BackendID, int32(l.State), l.ExpiresAt, l.CreatedAt)
+		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, state, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`, l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint, l.SpaceID, l.BackendID, l.ProcessesPermitted, int32(l.State), l.ExpiresAt, l.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create lease: %w", err)
 	}
@@ -143,7 +159,7 @@ func (s *Store) Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, 
 // may see any owner's lease within its org).
 func (s *Store) lookup(ctx context.Context, id, orgID, ownerID, backendID string) (*Lease, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, state, expires_at, created_at
+		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, state, expires_at, created_at
 		FROM leases
 		WHERE id = $1 AND org_id = $2 AND ($3 = '' OR owner_id = $3) AND state <> $4
 	`, id, orgID, ownerID, int32(mpv1.SandboxLifecycleState_DESTROYED))
@@ -244,7 +260,7 @@ func (s *Store) EndSnapshot(ctx context.Context, id string) {
 // after the lease itself has been released).
 func (s *Store) lookupIgnoringDestroyedState(ctx context.Context, id, orgID, ownerID string) (*Lease, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, state, expires_at, created_at
+		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, state, expires_at, created_at
 		FROM leases
 		WHERE id = $1 AND org_id = $2 AND ($3 = '' OR owner_id = $3)
 	`, id, orgID, ownerID)
@@ -299,7 +315,7 @@ func scanLease(row pgx.Row) (*Lease, error) {
 	var l Lease
 	var state int32
 	if err := row.Scan(&l.ID, &l.ScopeID, &l.ScopeType, &l.OrgID, &l.OwnerID, &l.Endpoint,
-		&l.SpaceID, &l.BackendID, &state, &l.ExpiresAt, &l.CreatedAt); err != nil {
+		&l.SpaceID, &l.BackendID, &l.ProcessesPermitted, &state, &l.ExpiresAt, &l.CreatedAt); err != nil {
 		return nil, err
 	}
 	l.State = mpv1.SandboxLifecycleState(state)

@@ -35,10 +35,14 @@ type Server struct {
 	// a real Ed25519 keypair — the same pattern as principal above. Nil
 	// means "not configured": any AcquireLease request naming a space_id is
 	// then refused, never served unverified.
-	capabilityVerify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error)
+	capabilityVerify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.VerifiedCapability, error)
 	// backendID is this instance's own SANDBOX_MANAGER_BACKEND_ID. Empty
 	// only when capabilityVerify is also nil (an unconfigured instance).
 	backendID string
+	// processes is the S4.2 background process registry. Nil means this
+	// instance has none (no durable database), in which case every process
+	// RPC is refused rather than served against state a restart discards.
+	processes ProcessStore
 }
 
 // NewServer constructs a Server with the given stores. Space capability
@@ -49,9 +53,16 @@ func NewServer(leases LeaseStore, snaps SnapshotStore, workspace WorkspaceStore)
 
 // WithCapabilityVerifier wires Space capability-decision verification and
 // this instance's own backend id into AcquireLease.
-func (s *Server) WithCapabilityVerifier(verify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.SpaceCapabilityClaims, error), backendID string) *Server {
+func (s *Server) WithCapabilityVerifier(verify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.VerifiedCapability, error), backendID string) *Server {
 	s.capabilityVerify = verify
 	s.backendID = backendID
+	return s
+}
+
+// WithProcessStore wires the S4.2 background process registry. Without it
+// every process RPC fails closed; see the processes field.
+func (s *Server) WithProcessStore(processes ProcessStore) *Server {
+	s.processes = processes
 	return s
 }
 
@@ -87,25 +98,34 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 
 	spaceID := strings.TrimSpace(req.GetSpaceId())
 	backendID := ""
+	processesPermitted := false
 	if spaceID != "" {
 		if s.capabilityVerify == nil {
 			return nil, status.Error(codes.FailedPrecondition, "Space capability verification is not configured")
 		}
-		claims, err := s.capabilityVerify(req.GetCapabilityDecision(), req.GetCapabilityClaimsJson(), authz.CapabilityExpectation{
+		verified, err := s.capabilityVerify(req.GetCapabilityDecision(), req.GetCapabilityClaimsJson(), authz.CapabilityExpectation{
 			OrgID: principal.OrganizationID, SpaceRef: spaceID, SubjectID: principal.ActorID, Now: time.Now().UTC(),
 		})
 		if err != nil {
 			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "capability_denied")))
 			return nil, status.Error(codes.PermissionDenied, err.Error())
 		}
-		if claims.BackendID != s.backendID {
+		if verified.Claims.BackendID != s.backendID {
 			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "backend_mismatch")))
 			return nil, mapErr(lease.ErrLeaseBackendMismatch)
 		}
-		backendID = claims.BackendID
+		backendID = verified.Claims.BackendID
+		// Decided once, here, and persisted on the lease: a process RPC
+		// arrives later on execution-core's own service token with no
+		// decision in hand, so the lease row is the only thing it can check.
+		// Deliberately NOT a refusal when the backend claims the capability
+		// but the Space is not entitled — unlike egress, a process-capable
+		// backend is still a perfectly good one-shot substrate, so the lease
+		// is granted and only the process RPCs are refused.
+		processesPermitted = verified.AllowsBackgroundProcesses()
 	}
 
-	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, ttl)
+	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, processesPermitted, ttl)
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -134,6 +154,18 @@ func (s *Server) ReleaseLease(ctx context.Context, req *ReleaseLeaseRequest) (*R
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
+	}
+	// A released lease must leave no row claiming to still be running. This
+	// is the registry half only — the host does the actual killing on its
+	// own release path — so a failure here is logged as an outcome and never
+	// fails the release itself: the lease IS gone, and the sweeper will
+	// catch any row this missed once its host stops heartbeating.
+	if s.processes != nil {
+		if killed, killErr := s.processes.KillForLease(ctx, principal.OrganizationID, req.GetLeaseId()); killErr != nil {
+			processDecision(ctx, processOutcome(killErr))
+		} else if killed > 0 {
+			processDecision(ctx, "killed_with_lease")
+		}
 	}
 	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "released")))
 	return &ReleaseLeaseResponse{Released: ok}, nil

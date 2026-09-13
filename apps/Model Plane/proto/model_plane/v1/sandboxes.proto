@@ -43,6 +43,49 @@ service SandboxManager {
   // already-merged path is a no-op, not a false conflict.
   rpc PromoteWorkspace(PromoteWorkspaceRequest) returns (PromoteWorkspaceResponse);
 
+  // --- S4.2 durable process registry (design doc §5) ---
+  //
+  // The registry half of background processes: sandbox-manager owns the rows,
+  // execution-core owns the OS process. Nothing here spawns, signals or reaps
+  // anything — the host reports, and this service records.
+  //
+  // Every one of these is also a case in internal/authz/authz.go's method
+  // switch and a row in authz_test.go's interceptor table. A method missing
+  // from that switch is refused for EVERY principal with "unknown
+  // sandbox-manager method" — which is exactly how ActivateLease shipped
+  // unreachable (see its own comment there) — so an RPC added here changes
+  // both in the same commit.
+
+  // Reserve a process row before the host spawns, so lease eligibility, the
+  // TTL clamp and the live-count limits are all decided before anything runs.
+  rpc RegisterProcess(RegisterProcessRequest) returns (RegisterProcessResponse);
+
+  // Report a host-driven lifecycle transition: spawned, signal requested, or
+  // a terminal outcome.
+  rpc UpdateProcessState(UpdateProcessStateRequest) returns (UpdateProcessStateResponse);
+
+  // Append output chunks and refresh the heartbeat. A batch with no chunks is
+  // a pure heartbeat, which is what keeps silence distinguishable from a dead
+  // host.
+  rpc AppendProcessOutput(AppendProcessOutputRequest) returns (AppendProcessOutputResponse);
+
+  // Mark every live process this backend owns under a DIFFERENT host epoch as
+  // LOST. A restarted host calls it once before serving: its predecessor's
+  // children died with it (bwrap --die-with-parent), so the registry must say
+  // so rather than leave rows claiming to be RUNNING.
+  rpc ReconcileProcesses(ReconcileProcessesRequest) returns (ReconcileProcessesResponse);
+
+  // Read one process's metadata. Descriptive, not an operational grant: a
+  // terminal process's record stays readable.
+  rpc GetProcess(GetProcessRequest) returns (GetProcessResponse);
+
+  // Page a Space's processes, newest first.
+  rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+
+  // Read output after a cursor. A terminal process with nothing left after the
+  // cursor returns an empty page carrying its outcome — never a not-found.
+  rpc ReadProcessOutput(ReadProcessOutputRequest) returns (ReadProcessOutputResponse);
+
   // Health check.
   rpc Health(SandboxHealthRequest) returns (SandboxHealthResponse);
 }
@@ -223,4 +266,343 @@ message SandboxHealthRequest {}
 message SandboxHealthResponse {
   // "ok" when service is healthy.
   string status = 1;
+}
+
+// --- S4.2 durable process registry (design doc §2, §5) ---
+
+// Lifecycle of one background process. The numeric values are stored directly
+// in sandbox_processes.state (migration 0003), the same way
+// SandboxLifecycleState's are stored in leases.state.
+enum ProcessState {
+  // Never sent; a zero value means the field was not set.
+  PROCESS_STATE_UNSPECIFIED = 0;
+  // Slot reserved, nothing spawned yet. Exists so lease eligibility, the TTL
+  // clamp and the live-count limits are decided BEFORE the host spawns; a
+  // spawn failure moves straight to EXITED with end_reason "spawn_failed".
+  PROCESS_STATE_STARTING = 1;
+  // The host has spawned the process and is appending its output.
+  PROCESS_STATE_RUNNING = 2;
+  // The process ran to completion on its own.
+  PROCESS_STATE_EXITED = 3;
+  // The process was terminated: a requested signal, or its lease's release.
+  PROCESS_STATE_KILLED = 4;
+  // The host that owned the process stopped heartbeating or was superseded by
+  // a newer boot. The children died with it; the rows say so.
+  PROCESS_STATE_LOST = 5;
+  // The process outlived its TTL and the host stopped it.
+  PROCESS_STATE_EXPIRED = 6;
+}
+
+// The strongest termination signal a caller has asked for. Ordered so an
+// escalation to KILL can never be downgraded back to TERM.
+enum ProcessSignal {
+  // No signal has been requested.
+  PROCESS_SIGNAL_UNSPECIFIED = 0;
+  // Ask the process to stop, with a grace period before escalation.
+  PROCESS_SIGNAL_TERM = 1;
+  // Stop the process now, with no grace period.
+  PROCESS_SIGNAL_KILL = 2;
+}
+
+// Which stream an output chunk came from.
+enum ProcessStream {
+  // Never sent; a zero value means the field was not set.
+  PROCESS_STREAM_UNSPECIFIED = 0;
+  // The process's standard output.
+  PROCESS_STREAM_STDOUT = 1;
+  // The process's standard error.
+  PROCESS_STREAM_STDERR = 2;
+  // A registry-authored marker ("process started", "SIGTERM requested",
+  // "output trimmed"), never process content.
+  PROCESS_STREAM_SYSTEM = 3;
+}
+
+// A process's argv, ALREADY REDACTED by the host before it is sent. The
+// registry never receives the plaintext; command_digest is what lets a caller
+// recognize "the same command" without it.
+message RedactedCommand {
+  // The program, redacted.
+  string program = 1;
+  // The arguments, redacted — including the value after a secret-bearing flag
+  // such as `--token`, which no text pattern can reach because they all key on
+  // a ':' or '=' separator.
+  repeated string args = 2;
+}
+
+// One registered background process.
+message Process {
+  // ULID minted by the host.
+  string process_id = 1;
+  // Tenant this process belongs to, derived from the registering principal.
+  string org_id = 2;
+  // Space whose workspace and authority the process runs under.
+  string space_id = 3;
+  // Lease that admitted this process; its expiry bounds the process's own.
+  string lease_id = 4;
+  // The execution-core instance hosting the process. With host_epoch below,
+  // this is the write fence: only the exact instance and boot that registered
+  // a process may append to it or move its state.
+  string backend_id = 5;
+  // The hosting instance's boot identity. A restarted host mints a new one, so
+  // its predecessor's rows become unwritable rather than interleaved.
+  string host_epoch = 6;
+  // Agent run that started the process.
+  string run_id = 7;
+  // Step within that run, when the caller had one.
+  string step_id = 8;
+  // The Space member whose capability decision the lease carries.
+  string subject_id = 9;
+  // The redacted argv.
+  RedactedCommand command = 10;
+  // sha256 over the UNREDACTED argv, computed by the host.
+  string command_digest = 11;
+  // Current lifecycle state.
+  ProcessState state = 12;
+  // Absent unless the process actually exited with a code.
+  optional int32 exit_code = 13;
+  // Why the process ended. A closed vocabulary, mirrored by a CHECK constraint
+  // in migration 0003: a free-form reason would eventually carry command
+  // output. Empty while the process is live.
+  string end_reason = 14;
+  // The strongest signal requested so far.
+  ProcessSignal signal_requested = 15;
+  // When TERM was first requested, which is when the grace period started.
+  google.protobuf.Timestamp term_requested_at = 16;
+  // Whether the host has finished tearing down the process's pipes and scratch
+  // directory.
+  bool cleanup_done = 17;
+  // The TTL the caller asked for, recorded as requested.
+  int32 ttl_seconds = 18;
+  // Clamped to the lease's own expiry: a process never outlives the lease
+  // whose workspace and authority it runs under.
+  google.protobuf.Timestamp expires_at = 19;
+  // When the host reported the process spawned.
+  google.protobuf.Timestamp started_at = 20;
+  // When the process reached a terminal state.
+  google.protobuf.Timestamp ended_at = 21;
+  // Last time the host reported anything about this process. Staleness here is
+  // what the registry's sweeper uses to declare a host lost.
+  google.protobuf.Timestamp last_heartbeat_at = 22;
+  // The next output seq the host will use.
+  int64 next_seq = 23;
+  // The first seq still readable. A reader compares its cursor against this to
+  // detect output trimmed away by retention.
+  int64 retained_from_seq = 24;
+  // Bytes of output currently stored.
+  int64 retained_bytes = 25;
+  // Bytes of output deleted by retention over this process's lifetime.
+  int64 dropped_bytes = 26;
+  // Bytes written to the process's stdin. A count only; stdin content is never
+  // stored anywhere.
+  int64 stdin_bytes = 27;
+  // When the row was created.
+  google.protobuf.Timestamp created_at = 28;
+  // When the row last changed.
+  google.protobuf.Timestamp updated_at = 29;
+}
+
+// One append-only slice of a process's output.
+message ProcessOutputChunk {
+  // Assigned by the host, which the fence makes the single writer for its own
+  // process. The (process_id, seq) primary key is what turns a retried batch
+  // into a no-op instead of a duplicate.
+  int64 seq = 1;
+  // Which stream this came from.
+  ProcessStream stream = 2;
+  // Already redacted at a line boundary by the host: a secret split across two
+  // fixed-size chunks would no longer match any scrub pattern.
+  bytes content = 3;
+  // Whether the chunk ends on a complete line. S4.3's process-output watch
+  // adapter needs this before it can emit the last line as an event.
+  bool ends_with_newline = 4;
+  // When the host read these bytes.
+  google.protobuf.Timestamp captured_at = 5;
+}
+
+// Reserve a process row before spawning.
+message RegisterProcessRequest {
+  // Minted by the host (a ULID), so an ambiguous retry re-registers the same
+  // id rather than creating a second process.
+  string process_id = 1;
+  // Lease to run under. Must be ACTIVE, unexpired, pinned to this backend, and
+  // carry the space:processes permission Control grants.
+  string lease_id = 2;
+  // The registering host's backend id.
+  string backend_id = 3;
+  // The registering host's boot identity.
+  string host_epoch = 4;
+  // Agent run starting the process.
+  string run_id = 5;
+  // Step within that run, if any.
+  string step_id = 6;
+  // The Space member the lease's capability decision names.
+  string subject_id = 7;
+  // The redacted argv. The registry must never receive the plaintext.
+  RedactedCommand command = 8;
+  // sha256 over the unredacted argv.
+  string command_digest = 9;
+  // Requested lifetime; the registry clamps the resulting expiry to the
+  // lease's own.
+  int32 ttl_seconds = 10;
+}
+
+// The reserved row.
+message RegisterProcessResponse {
+  // The row, in STARTING, with expires_at already clamped.
+  Process process = 1;
+}
+
+// The host observed the process start.
+message ProcessStarted {}
+
+// A caller asked the process to stop. Recorded here; the host is what actually
+// delivers the signal.
+message ProcessSignalRequested {
+  // The signal requested. An escalation to KILL is never downgraded.
+  ProcessSignal signal = 1;
+}
+
+// The process reached a terminal state.
+message ProcessExited {
+  // EXITED, KILLED or EXPIRED.
+  ProcessState state = 1;
+  // Present only when the process exited with a code.
+  optional int32 exit_code = 2;
+  // Why it ended, from the closed vocabulary migration 0003 enforces.
+  string end_reason = 3;
+  // Whether the host has finished its own teardown.
+  bool cleanup_done = 4;
+}
+
+// Report a host-driven lifecycle transition.
+message UpdateProcessStateRequest {
+  // Process to move.
+  string process_id = 1;
+  // Reporting host's backend id; part of the write fence.
+  string backend_id = 2;
+  // Reporting host's boot identity; part of the write fence.
+  string host_epoch = 3;
+  // Which transition is being reported.
+  oneof transition {
+    // The process spawned.
+    ProcessStarted started = 4;
+    // A signal was requested.
+    ProcessSignalRequested signal = 5;
+    // The process ended.
+    ProcessExited exited = 6;
+  }
+}
+
+// Empty: the transition either applied or was refused by the fence.
+message UpdateProcessStateResponse {}
+
+// Append output and refresh the heartbeat.
+message AppendProcessOutputRequest {
+  // Process the output belongs to.
+  string process_id = 1;
+  // Reporting host's backend id; part of the write fence.
+  string backend_id = 2;
+  // Reporting host's boot identity; part of the write fence.
+  string host_epoch = 3;
+  // May be empty: that makes this call a pure heartbeat, which is what keeps
+  // silence distinguishable from a dead host.
+  repeated ProcessOutputChunk chunks = 4;
+  // Bytes written to the process's stdin since the last call. A count only.
+  int64 stdin_bytes_delta = 5;
+}
+
+// Output bookkeeping after the append.
+message AppendProcessOutputResponse {
+  // The next seq the host should use.
+  int64 next_seq = 1;
+  // First seq still readable after any retention trimming this append caused.
+  int64 retained_from_seq = 2;
+  // Bytes of output currently stored.
+  int64 retained_bytes = 3;
+  // Bytes deleted by retention over this process's lifetime.
+  int64 dropped_bytes = 4;
+}
+
+// Declare a superseded host's processes lost.
+message ReconcileProcessesRequest {
+  // Backend whose rows to reconcile.
+  string backend_id = 1;
+  // This host's CURRENT boot identity. Every live row on this backend under a
+  // different epoch is marked lost; this epoch's own rows are untouched.
+  string host_epoch = 2;
+}
+
+// How much was reconciled.
+message ReconcileProcessesResponse {
+  // Rows moved to LOST.
+  int64 lost_count = 1;
+}
+
+// Read one process's metadata.
+message GetProcessRequest {
+  // Process to resolve, within the caller's own organization.
+  string process_id = 1;
+}
+
+// The resolved process.
+message GetProcessResponse {
+  // The process, terminal or live.
+  Process process = 1;
+}
+
+// Page a Space's processes.
+message ListProcessesRequest {
+  // Space to list within.
+  string space_id = 1;
+  // Terminal processes are hidden unless asked for.
+  bool include_terminal = 2;
+  // Page size; clamped by the server.
+  int32 limit = 3;
+  // Keyset cursor: the last process_id of the previous page. Ids are ULIDs, so
+  // id order is creation order — the same shape ListRuns uses.
+  string after_process_id = 4;
+}
+
+// One page of processes.
+message ListProcessesResponse {
+  // Newest first.
+  repeated Process processes = 1;
+  // Whether another page follows.
+  bool has_more = 2;
+}
+
+// Read a process's output after a cursor.
+message ReadProcessOutputRequest {
+  // Process to read.
+  string process_id = 1;
+  // Exclusive: chunks strictly after this seq. Zero starts from the beginning
+  // of whatever is still retained.
+  int64 after_seq = 2;
+  // Byte budget for this page; clamped by the server. A single chunk larger
+  // than the budget is still returned, so a reader can never be wedged.
+  int64 max_bytes = 3;
+}
+
+// One page of output.
+message ReadProcessOutputResponse {
+  // The chunks, in seq order.
+  repeated ProcessOutputChunk chunks = 1;
+  // Cursor to pass as after_seq next time.
+  int64 next_cursor = 2;
+  // Output between the caller's cursor and the first chunk here was trimmed
+  // and will never be returned. Because retention protects the head, the hole
+  // a trim leaves is in the MIDDLE of the stream, so this is computed from the
+  // first returned chunk's seq and not only from retained_from_seq.
+  bool gap_before = 3;
+  // First seq still readable at all.
+  int64 retained_from_seq = 4;
+  // The process's state, carried on every page so a drained terminal stream is
+  // an empty page with an outcome rather than a not-found.
+  ProcessState state = 5;
+  // Present only when the process exited with a code.
+  optional int32 exit_code = 6;
+  // Why the process ended; empty while it is live.
+  string end_reason = 7;
+  // Whether more chunks follow this page.
+  bool has_more = 8;
 }
