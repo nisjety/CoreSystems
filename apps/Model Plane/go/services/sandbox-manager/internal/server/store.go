@@ -25,7 +25,7 @@ import (
 // every other method here already uses. It was real and tested on
 // *lease.Store itself well before this, just unused by Server until now.
 type LeaseStore interface {
-	Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, processesPermitted bool, ttl time.Duration) (*lease.Lease, error)
+	Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, grant lease.SpaceGrant, ttl time.Duration) (*lease.Lease, error)
 	Activate(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
 	BeginSnapshot(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
 	EndSnapshot(ctx context.Context, id string)
@@ -76,8 +76,8 @@ type ProcessStore interface {
 	AppendOutput(ctx context.Context, f process.Fence, chunks []process.Chunk, stdinBytesDelta int64) (*process.AppendResult, error)
 	Reconcile(ctx context.Context, backendID, hostEpoch string) (int64, error)
 	Get(ctx context.Context, orgID, processID string) (*process.Process, error)
-	List(ctx context.Context, orgID, spaceID string, includeTerminal bool, limit int32, afterID string) ([]process.Process, bool, error)
-	ReadOutput(ctx context.Context, orgID, processID string, afterSeq, maxBytes int64) (*process.OutputPage, error)
+	List(ctx context.Context, orgID, spaceID string, includeTerminal bool, limit int32, afterID string, ceiling *process.AudienceCeiling) ([]process.Process, bool, error)
+	ReadOutput(ctx context.Context, orgID, processID string, afterSeq, maxBytes int64, ceiling *process.AudienceCeiling) (*process.OutputPage, error)
 	// KillForLease is called from ReleaseLease so a released lease leaves no
 	// row claiming to be running. The registry half only: the host does the
 	// actual killing on its own release path.

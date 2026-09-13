@@ -71,6 +71,18 @@ pub struct SandboxLease {
     /// The backend this lease is pinned to; `SnapshotSandbox`/`ReleaseLease`
     /// must present the same value back (S3.2's own backend-pin invariant).
     pub backend_id: String,
+    /// Whether this lease may host S4.2 background processes, as
+    /// `AcquireLease` reported it.
+    ///
+    /// Cached rather than re-derived because the authority it reflects is not
+    /// re-readable from here: sandbox-manager decided it once, from a Control
+    /// decision this process no longer holds, and every later process RPC
+    /// travels on execution-core's own service token with no decision in hand.
+    /// So this is a copy of the row's answer, kept for one purpose — refusing
+    /// `process_start` with the real reason instead of preparing a spawn the
+    /// registry would deny. `RegisterProcess` checks the row again and that
+    /// check, not this one, is authoritative.
+    pub processes_permitted: bool,
 }
 
 /// A run's Space-scoped `code_interpreter` workspace, hydrated once onto
@@ -355,6 +367,7 @@ mod tests {
         let lease = SandboxLease {
             lease_id: "lease-1".to_owned(),
             backend_id: "backend-1".to_owned(),
+            processes_permitted: false,
         };
         store.cache_sandbox_lease("run-1", lease.clone());
         assert_eq!(store.sandbox_lease("run-1"), Some(lease));
@@ -367,6 +380,7 @@ mod tests {
         let lease = SandboxLease {
             lease_id: "lease-1".to_owned(),
             backend_id: "backend-1".to_owned(),
+            processes_permitted: false,
         };
         store.cache_sandbox_lease("run-1", lease.clone());
         assert_eq!(store.take_sandbox_lease("run-1"), Some(lease));

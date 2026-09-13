@@ -27,7 +27,9 @@ use mp_contracts::model_plane::v1::{
     GetVerificationMetricsRequest, GetVideoGenerationJobRequest, ListApprovalsRequest,
     ListMcpServersRequest, ListModelsRequest, ListPlansRequest, ListRunsRequest,
     ListSpeechVoicesRequest, ListSystemRunsRequest, ListTodosRequest,
-    ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep, PlanStepState,
+    ListProcessesRequest, ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep,
+    PlanStepState, Process as MpProcess, ProcessState as MpProcessState,
+    ProcessStream as MpProcessStream, ReadProcessOutputRequest,
     RegisterMcpServerRequest, ReplayThreadRequest, ResumeRunRequest, ResumeRunResponse, RunDetail,
     RunProofBundle, StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole,
     SynthesizeSpeechRequest, Todo, TodoPriority, TodoState, TranscribeSpeechRequest,
@@ -45,7 +47,8 @@ use crate::{
     auth::{
         self, Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
-        VerifiedInferenceBearer, VerifiedSessionBearer as VerifiedModelBearer,
+        VerifiedInferenceBearer, VerifiedSandboxBearer,
+        VerifiedSessionBearer as VerifiedModelBearer,
     },
     gateway_metrics, normalize, rate_limit,
     readiness::GrpcReadiness,
@@ -304,6 +307,8 @@ fn proxy_routes() -> Router<AppState> {
         .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
         .route("/v1/tasks/:id/cancel", post(cancel_task_proxy))
         // Cron
+        .route("/v1/processes", get(list_processes))
+        .route("/v1/processes/:id/output", get(read_process_output))
         .route("/v1/cron", get(list_cron_proxy).post(create_cron_proxy))
         .route(
             "/v1/cron/:id",
@@ -5074,6 +5079,197 @@ async fn cancel_task_proxy(
 #[derive(Debug, Default, Deserialize)]
 struct CronListQuery {
     space_ref: Option<String>,
+}
+
+/// Query for both process routes. `space_ref` and the two decision fields
+/// travel together: sandbox-manager verifies the decision against the Space
+/// the CALLER names, never against whatever the row says, so omitting the
+/// Space would leave the verifier comparing a token to itself.
+#[derive(Debug, Deserialize)]
+struct ProcessesQuery {
+    space_ref: Option<String>,
+    space_read_decision_ref: Option<String>,
+    space_read_decision_token: Option<String>,
+    include_finished: Option<bool>,
+    limit: Option<i32>,
+    after: Option<String>,
+    after_seq: Option<i64>,
+    max_bytes: Option<i64>,
+}
+
+/// `GET /v1/processes?space_ref=&space_read_decision_ref=&space_read_decision_token=`
+/// — a Space's background processes (S4.2 §7).
+///
+/// This is the FIRST caller of `state.sandbox_client`, which has been
+/// constructed and unused since `state.rs:122`; S3.3's §3.5 amendment flagged
+/// it and S4.2 is what finally gives it a job.
+///
+/// The bearer is the user-bound `aud=sandbox-manager` credential the V3
+/// gateway mints per `/work` request — not the chat path's `sandbox_token`
+/// helper, which only fires inside a Control-injected turn, and the Work tab
+/// is not a turn. It is forwarded upstream as plain `authorization`, exactly
+/// as `list_runs` forwards its session bearer.
+async fn list_processes(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+    bearer: VerifiedSandboxBearer,
+    Query(query): Query<ProcessesQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let space_ref = require_url_safe_space_ref(query.space_ref.as_deref())?;
+    let response = state
+        .sandbox_client
+        .clone()
+        .list_processes(authenticated_sandbox_request(
+            ListProcessesRequest {
+                space_id: space_ref,
+                include_terminal: query.include_finished.unwrap_or(false),
+                limit: query.limit.unwrap_or(0),
+                after_process_id: query.after.unwrap_or_default(),
+                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "processes": response.processes.iter().map(process_value).collect::<Vec<_>>(),
+        "has_more": response.has_more,
+    })))
+}
+
+/// `GET /v1/processes/{id}/output?space_ref=&after_seq=&max_bytes=` — one page
+/// of a process's durable output.
+///
+/// `gap_before` is forwarded rather than smoothed over: output that was
+/// produced and then trimmed by retention is not the same as output that never
+/// existed, and a reader summarising a log needs to know it is looking at a
+/// hole.
+async fn read_process_output(
+    State(state): State<AppState>,
+    Extension(_claims): Extension<Claims>,
+    bearer: VerifiedSandboxBearer,
+    Path(process_id): Path<String>,
+    Query(query): Query<ProcessesQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let space_ref = require_url_safe_space_ref(query.space_ref.as_deref())?;
+    let response = state
+        .sandbox_client
+        .clone()
+        .read_process_output(authenticated_sandbox_request(
+            ReadProcessOutputRequest {
+                process_id,
+                after_seq: query.after_seq.unwrap_or(0),
+                max_bytes: query.max_bytes.unwrap_or(0),
+                space_id: space_ref,
+                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "state": process_state_name(response.state),
+        "exit_code": response.exit_code,
+        "chunks": response.chunks.iter().map(|chunk| json!({
+            "seq": chunk.seq,
+            "stream": process_stream_name(chunk.stream),
+            "text": String::from_utf8_lossy(&chunk.content),
+            "ends_with_newline": chunk.ends_with_newline,
+        })).collect::<Vec<_>>(),
+        "next_cursor": response.next_cursor,
+        "gap_before": response.gap_before,
+        "retained_from_seq": response.retained_from_seq,
+    })))
+}
+
+/// The same URL-safety rule `/v1/cron` applies, and for the same reason: this
+/// crate has no URL-encoder, and half of one is worse than none — a
+/// `space_ref` carrying `&` or `=` would silently become different parameters.
+/// Space refs are Convex ids, so refusing anything outside the URL-safe set
+/// costs nothing real.
+fn require_url_safe_space_ref(raw: Option<&str>) -> Result<String, HttpJsonError> {
+    let space_ref = raw.unwrap_or_default().trim();
+    if space_ref.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "space_ref is required" })),
+        ));
+    }
+    if !space_ref
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "space_ref must be URL-safe" })),
+        ));
+    }
+    Ok(space_ref.to_owned())
+}
+
+fn authenticated_sandbox_request<T>(
+    value: T,
+    bearer: &VerifiedSandboxBearer,
+) -> Result<tonic::Request<T>, HttpJsonError> {
+    let mut request = tonic::Request::new(value);
+    let authorization = format!("Bearer {}", bearer.as_str()).parse().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "verified sandbox credential is not forwardable"})),
+        )
+    })?;
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    Ok(request)
+}
+
+/// One process, as the Work tab sees it. The command is the REDACTED argv the
+/// registry stored — the host scrubs before it registers, so no unredacted
+/// form exists here to leak by mistake.
+fn process_value(process: &MpProcess) -> Value {
+    json!({
+        "process_id": process.process_id,
+        "space_ref": process.space_id,
+        "state": process_state_name(process.state),
+        "exit_code": process.exit_code,
+        "end_reason": process.end_reason,
+        "command": process.command.as_ref().map(|command| {
+            let mut parts = vec![command.program.clone()];
+            parts.extend(command.args.iter().cloned());
+            parts.join(" ")
+        }),
+        "started_at": process.started_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "ended_at": process.ended_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "expires_at": process.expires_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "next_seq": process.next_seq,
+    })
+}
+
+fn process_state_name(state: i32) -> &'static str {
+    match MpProcessState::try_from(state) {
+        Ok(MpProcessState::Starting) => "STARTING",
+        Ok(MpProcessState::Running) => "RUNNING",
+        Ok(MpProcessState::Exited) => "EXITED",
+        Ok(MpProcessState::Killed) => "KILLED",
+        Ok(MpProcessState::Expired) => "EXPIRED",
+        Ok(MpProcessState::Lost) => "LOST",
+        _ => "UNSPECIFIED",
+    }
+}
+
+fn process_stream_name(stream: i32) -> &'static str {
+    match MpProcessStream::try_from(stream) {
+        Ok(MpProcessStream::Stdout) => "stdout",
+        Ok(MpProcessStream::Stderr) => "stderr",
+        _ => "unspecified",
+    }
 }
 
 async fn list_cron_proxy(

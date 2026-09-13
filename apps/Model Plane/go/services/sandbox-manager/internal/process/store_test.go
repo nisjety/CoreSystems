@@ -569,7 +569,7 @@ func TestListClampsItsLimitAndOverFetchesForHasMore(t *testing.T) {
 	database := &processDatabaseStub{rows: &emptyRows{}}
 	store := &Store{pool: database, limits: DefaultLimits()}
 
-	if _, _, err := store.List(context.Background(), "org-a", "space-1", false, 100000, ""); err != nil {
+	if _, _, err := store.List(context.Background(), "org-a", "space-1", false, 100000, "", nil); err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	if got := database.args[0][4]; got != int64(DefaultLimits().MaxListLimit)+1 {
@@ -587,10 +587,10 @@ func TestListRequiresIdentifiers(t *testing.T) {
 	t.Parallel()
 	database := &processDatabaseStub{}
 	store := &Store{pool: database, limits: DefaultLimits()}
-	if _, _, err := store.List(context.Background(), "", "space-1", false, 10, ""); err == nil {
+	if _, _, err := store.List(context.Background(), "", "space-1", false, 10, "", nil); err == nil {
 		t.Fatal("missing org_id unexpectedly accepted")
 	}
-	if _, _, err := store.List(context.Background(), "org-a", "", false, 10, ""); err == nil {
+	if _, _, err := store.List(context.Background(), "org-a", "", false, 10, "", nil); err == nil {
 		t.Fatal("missing space_id unexpectedly accepted")
 	}
 }

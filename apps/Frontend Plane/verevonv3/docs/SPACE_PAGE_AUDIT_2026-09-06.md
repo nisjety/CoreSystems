@@ -798,7 +798,14 @@ rather than mangling it. Space refs are Convex ids, so this costs nothing real.
   Console and belong here eventually, but they are writes against runs the room
   may not own, which is a separate authority question from reading them.
 - **Monitors and delivery rows remain absent**, as the cockpit's unavailable
-  state says: nothing publishes them per Space yet (S4.2, S4.3, S4.4).
+  state says: nothing publishes them per Space yet (S4.3, S4.4).
+  **Updated 2026-09-13:** S4.2 landed, so the Work tab now carries a third
+  section — `processes`, the Space's background processes — alongside runs and
+  schedules. It follows the schedules precedent (a missing credential degrades
+  to a named gap row rather than failing the page) and is READ-ONLY for the
+  same reason the bullet above gives for runs: signalling or writing to a
+  process is a write against work the room may not own. Monitors (S4.3) and
+  delivery (S4.4) are still absent.
 
 ## 13. Item 7 implementation, 2026-09-07
 

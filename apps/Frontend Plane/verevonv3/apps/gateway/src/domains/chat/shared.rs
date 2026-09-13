@@ -262,6 +262,23 @@ pub(crate) async fn required_capability_token(
     required_token(state, user, headers, ModelServiceAudience::CapabilityCore).await
 }
 
+/// The user-bound `aud=sandbox-manager` credential, minted PER REQUEST for
+/// the Work tab (S4.2 §7).
+///
+/// Deliberately not `sandbox_token` below, which only fires inside a
+/// Control-injected turn (`is_space_scoped_turn`) — the Work tab is not a
+/// turn, so that helper would return nothing and the section would degrade to
+/// a gap row forever. This mints the same audience the chat path does, on the
+/// same per-user basis, for a caller that has a room open rather than a
+/// message in flight.
+pub(crate) async fn required_sandbox_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    required_token(state, user, headers, ModelServiceAudience::SandboxManager).await
+}
+
 pub(crate) async fn required_cost_token(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -450,6 +467,37 @@ pub(crate) async fn proxy_model_json_with_capability(
         None,
         None,
         None,
+        None,
+        user,
+    )
+    .await
+}
+
+/// Proxy to model-gateway carrying the sandbox-manager delegation, for the
+/// Work tab's process reads. The same slot the chat path's Space-scoped turn
+/// uses; the difference is only which caller fills it.
+pub(crate) async fn proxy_model_json_with_sandbox(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    sandbox_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        sandbox_bearer,
         None,
         user,
     )

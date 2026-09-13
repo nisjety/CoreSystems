@@ -48,7 +48,7 @@ func NewMemoryLeaseStore() *MemoryLeaseStore {
 	}
 }
 
-func (s *MemoryLeaseStore) Create(_ context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, processesPermitted bool, ttl time.Duration) (*lease.Lease, error) {
+func (s *MemoryLeaseStore) Create(_ context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, grant lease.SpaceGrant, ttl time.Duration) (*lease.Lease, error) {
 	id, err := s.newID()
 	if err != nil {
 		return nil, err
@@ -57,7 +57,8 @@ func (s *MemoryLeaseStore) Create(_ context.Context, scopeID, scopeType, orgID, 
 	l := &lease.Lease{
 		ID: id, ScopeID: scopeID, ScopeType: scopeType, OrgID: orgID, OwnerID: ownerID,
 		Endpoint: "sandbox://" + id, SpaceID: spaceID, BackendID: backendID,
-		ProcessesPermitted: processesPermitted,
+		ProcessesPermitted: grant.ProcessesPermitted,
+		AudienceRevision:   grant.RecipientAudienceRevision,
 		State: mpv1.SandboxLifecycleState_SCRATCH, ExpiresAt: now.Add(ttl), CreatedAt: now,
 	}
 	s.mu.Lock()

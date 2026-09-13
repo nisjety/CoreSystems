@@ -82,6 +82,8 @@ func (r leaseRow) Scan(dest ...any) error {
 			*target = r.values[i].(string)
 		case *int32:
 			*target = r.values[i].(int32)
+		case *int64:
+			*target = r.values[i].(int64)
 		case *time.Time:
 			*target = r.values[i].(time.Time)
 		case *bool:
@@ -98,7 +100,7 @@ func notFoundRow() leaseRow { return leaseRow{err: pgx.ErrNoRows} }
 func rowFor(l *Lease) leaseRow {
 	return leaseRow{values: []any{
 		l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint,
-		l.SpaceID, l.BackendID, l.ProcessesPermitted, int32(l.State), l.ExpiresAt, l.CreatedAt,
+		l.SpaceID, l.BackendID, l.ProcessesPermitted, l.AudienceRevision, int32(l.State), l.ExpiresAt, l.CreatedAt,
 	}}
 }
 
@@ -130,7 +132,7 @@ func TestNewStoreRejectsNilPool(t *testing.T) {
 
 func TestCreateInsertsAScratchLease(t *testing.T) {
 	store, database := newTestStore(nil)
-	l, err := store.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", false, time.Minute)
+	l, err := store.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", SpaceGrant{}, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +146,38 @@ func TestCreateInsertsAScratchLease(t *testing.T) {
 	if args[8] != false {
 		t.Fatalf("processes_permitted arg = %v, want false", args[8])
 	}
-	if args[9] != int32(mpv1.SandboxLifecycleState_SCRATCH) {
-		t.Fatalf("state arg = %v, want SCRATCH", args[9])
+	// The audience ceiling sits between processes_permitted and state (0004),
+	// and both come from the same verified decision — asserting the position
+	// keeps a future column insert from silently shifting one of them into the
+	// other's slot, which Postgres would accept for two adjacent values it can
+	// coerce.
+	if args[9] != int64(0) {
+		t.Fatalf("recipient_audience_revision arg = %v, want 0 for a grant that carried none", args[9])
+	}
+	if args[10] != int32(mpv1.SandboxLifecycleState_SCRATCH) {
+		t.Fatalf("state arg = %v, want SCRATCH", args[10])
+	}
+}
+
+// TestCreatePersistsTheAudienceCeiling: the revision a Space decision was
+// signed under is the last thing anyone can honestly record about who the
+// work belongs to — a process registers later on a service token with no
+// decision at all, and inherits this value through the lease. Losing it here
+// would make every process in the Space readable by any member holding any
+// valid decision, which is precisely the ceiling migration 0004 exists to
+// impose.
+func TestCreatePersistsTheAudienceCeiling(t *testing.T) {
+	store, database := newTestStore(nil)
+	l, err := store.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a",
+		SpaceGrant{ProcessesPermitted: true, RecipientAudienceRevision: 7}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.AudienceRevision != 7 {
+		t.Fatalf("returned lease audience revision = %d, want 7", l.AudienceRevision)
+	}
+	if got := database.lastArgs()[9]; got != int64(7) {
+		t.Fatalf("bound recipient_audience_revision = %v, want 7", got)
 	}
 }
 
@@ -155,7 +187,7 @@ func TestCreateInsertsAScratchLease(t *testing.T) {
 // hand — can read it back from.
 func TestCreatePersistsTheProcessesPermittedDecision(t *testing.T) {
 	store, database := newTestStore(nil)
-	l, err := store.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", true, time.Minute)
+	l, err := store.Create(context.Background(), "scope-1", "agent", "org-a", "user-a", "space-a", "backend-a", SpaceGrant{ProcessesPermitted: true}, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -18,6 +18,8 @@
 //! * `cap.command.sandbox` — the `code_interpreter` runtime (bubblewrap + the
 //!   Python interpreter it invokes).
 //! * `cap.command.shell` — the `shell` runtime (bubblewrap).
+//! * `cap.process.background` — the S4.2 `process_*` family, which needs the
+//!   same two probes AND the process host to be enabled on this instance.
 //!
 //! # Measure, then attest — never attest blind
 //!
@@ -57,6 +59,9 @@ pub const MEMORY_INDEX_CAPABILITY: &str = "cap.memory.index";
 
 /// Governed delegation (`subagent.*`).
 pub const AGENT_SPAWN_CAPABILITY: &str = "cap.agent.spawn";
+
+/// The S4.2 background-process family (`process_*`).
+pub const PROCESS_CAPABILITY: &str = "cap.process.background";
 
 /// Scope required to attest a `global` capability row. capability-core's handler
 /// looks the row up with `GetGlobal` only for a service principal holding this
@@ -231,6 +236,15 @@ fn interpreter_available() -> bool {
 /// * `cap.command.shell` needs only the sandbox: it runs no interpreter.
 /// * `cap.command.sandbox` needs both, because `code_interpreter` is useless
 ///   without the interpreter even when the sandbox is fine.
+/// * `cap.process.background` needs both AND the process host to be enabled
+///   here. That third condition is not a probe of a dependency — it is a
+///   property of THIS deployment, and it is the one that makes the attestation
+///   honest. Every execution-core instance can run bubblewrap; only an
+///   instance an operator opted in can keep a process alive past the call, and
+///   an instance that cannot must not tell capability-core that it can. The
+///   same flag decides what `sandbox::capability_profile` advertises, so the
+///   profile a Space's decision is signed against and the capability row's
+///   health say the same thing about the same instance.
 ///
 /// A capability whose runtime did not probe healthy is simply absent from the
 /// result — it is never attested as unhealthy either, because "we could not
@@ -254,6 +268,14 @@ pub fn attestable(outcome: ProbeOutcome) -> Vec<Attestation> {
             "code_runtime_probed",
             "Bubblewrap sandbox and interpreter probes succeeded.",
         ));
+        if crate::sandbox::process_host_enabled() {
+            planned.push(attestation(
+                PROCESS_CAPABILITY,
+                "process_host_enabled_and_runtime_probed",
+                "Bubblewrap sandbox and interpreter probes succeeded and the background \
+                 process host is enabled on this instance.",
+            ));
+        }
     }
     planned
 }
@@ -585,6 +607,7 @@ mod tests {
             MEMORY_SEARCH_CAPABILITY,
             MEMORY_INDEX_CAPABILITY,
             AGENT_SPAWN_CAPABILITY,
+            PROCESS_CAPABILITY,
         ] {
             if !allowlist.contains(&format!("\"{capability}\"")) {
                 missing.push(capability);

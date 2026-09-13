@@ -287,6 +287,16 @@ export type SpaceWork = {
   readonly membership: SpaceMembership
   readonly runs: readonly Record<string, unknown>[]
   readonly schedules: readonly Record<string, unknown>[]
+  /**
+   * Background processes started in this Space (S4.2). Read-only here: the
+   * room can see what is running, but signalling or writing to a process is a
+   * separate authority question this slice does not answer.
+   *
+   * Absent from a gateway that predates S4.2, which `workRows` turns into the
+   * empty list rather than `undefined` — a Work tab that crashes on an older
+   * gateway is worse than one that shows no processes.
+   */
+  readonly processes: readonly Record<string, unknown>[]
   readonly unavailable: readonly SpaceWorkGap[]
 }
 
@@ -316,6 +326,7 @@ export async function getSpaceWork(spaceRef: string): Promise<SpaceWork> {
     membership: SpaceMembership
     runs?: unknown
     schedules?: unknown
+    processes?: unknown
     unavailable?: unknown
   }>(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/work`)
   return {
@@ -323,6 +334,7 @@ export async function getSpaceWork(spaceRef: string): Promise<SpaceWork> {
     membership: response.membership,
     runs: workRows(response.runs),
     schedules: workRows(response.schedules),
+    processes: workRows(response.processes),
     unavailable: workGaps(response.unavailable),
   }
 }

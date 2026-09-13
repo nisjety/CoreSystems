@@ -57,6 +57,7 @@ func setupProcessDB(t *testing.T) string {
 	for _, migration := range []string{
 		"0002_lease_and_snapshot_store.up.sql",
 		"0003_process_registry.up.sql",
+		"0004_audience_revision_ceiling.up.sql",
 	} {
 		sqlBytes, readErr := os.ReadFile(filepath.Join("..", "..", "migrations", migration))
 		if readErr != nil {
@@ -309,7 +310,7 @@ func TestProcessStore_CursorResumeReturnsOnlyWhatFollowsTheCursor(t *testing.T) 
 		t.Fatalf("AppendOutput: %v", err)
 	}
 
-	all, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 0)
+	all, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput: %v", err)
 	}
@@ -320,7 +321,7 @@ func TestProcessStore_CursorResumeReturnsOnlyWhatFollowsTheCursor(t *testing.T) 
 		t.Fatal("a complete stream must not report a gap")
 	}
 
-	after2, err := store.ReadOutput(ctx, "org-a", "proc-001", 2, 0)
+	after2, err := store.ReadOutput(ctx, "org-a", "proc-001", 2, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput: %v", err)
 	}
@@ -335,7 +336,7 @@ func TestProcessStore_CursorResumeReturnsOnlyWhatFollowsTheCursor(t *testing.T) 
 	if err := store.MarkEnded(ctx, fenceFor("proc-001"), StateExited, &exitCode, EndExited, true); err != nil {
 		t.Fatalf("MarkEnded: %v", err)
 	}
-	drained, err := store.ReadOutput(ctx, "org-a", "proc-001", 3, 0)
+	drained, err := store.ReadOutput(ctx, "org-a", "proc-001", 3, 0, nil)
 	if err != nil {
 		t.Fatalf("a fully acknowledged terminal stream must still read: %v", err)
 	}
@@ -373,7 +374,7 @@ func TestProcessStore_AReplayedBatchIsANoOp(t *testing.T) {
 		t.Fatalf("a replay moved next_seq: %d -> %d", first.NextSeq, second.NextSeq)
 	}
 
-	page, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 0)
+	page, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput: %v", err)
 	}
@@ -403,7 +404,7 @@ func TestProcessStore_ASupersededHostCannotWrite(t *testing.T) {
 		t.Fatal("a superseded host was allowed to request a signal")
 	}
 
-	page, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 0)
+	page, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput: %v", err)
 	}
@@ -601,7 +602,7 @@ func TestProcessStore_RetentionKeepsHeadAndTailAndReportsTheHole(t *testing.T) {
 		t.Fatalf("retained %d bytes, well past head+tail", p.RetainedBytes)
 	}
 
-	page, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 0)
+	page, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput: %v", err)
 	}
@@ -618,7 +619,7 @@ func TestProcessStore_RetentionKeepsHeadAndTailAndReportsTheHole(t *testing.T) {
 
 	// There is a hole between the head and the tail, and a reader resuming
 	// from inside the head must be told.
-	resumed, err := store.ReadOutput(ctx, "org-a", "proc-001", 1, 0)
+	resumed, err := store.ReadOutput(ctx, "org-a", "proc-001", 1, 0, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput: %v", err)
 	}
@@ -650,7 +651,7 @@ func TestProcessStore_ReadOutputPagesByByteBudget(t *testing.T) {
 		}
 	}
 
-	page, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 15)
+	page, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 15, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput: %v", err)
 	}
@@ -658,7 +659,7 @@ func TestProcessStore_ReadOutputPagesByByteBudget(t *testing.T) {
 		t.Fatalf("byte budget not applied: %d chunks, hasMore=%v", len(page.Chunks), page.HasMore)
 	}
 
-	tiny, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 1)
+	tiny, err := store.ReadOutput(ctx, "org-a", "proc-001", 0, 1, nil)
 	if err != nil {
 		t.Fatalf("ReadOutput: %v", err)
 	}
@@ -860,7 +861,7 @@ func TestProcessStore_ListPagesNewestFirstAndHidesTerminalByDefault(t *testing.T
 		t.Fatalf("MarkEnded: %v", err)
 	}
 
-	live, hasMore, err := store.List(ctx, "org-a", "space-1", false, 10, "")
+	live, hasMore, err := store.List(ctx, "org-a", "space-1", false, 10, "", nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -876,7 +877,7 @@ func TestProcessStore_ListPagesNewestFirstAndHidesTerminalByDefault(t *testing.T
 		}
 	}
 
-	all, _, err := store.List(ctx, "org-a", "space-1", true, 10, "")
+	all, _, err := store.List(ctx, "org-a", "space-1", true, 10, "", nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -884,14 +885,14 @@ func TestProcessStore_ListPagesNewestFirstAndHidesTerminalByDefault(t *testing.T
 		t.Fatalf("full listing = %d rows, want 5", len(all))
 	}
 
-	first, hasMore, err := store.List(ctx, "org-a", "space-1", true, 2, "")
+	first, hasMore, err := store.List(ctx, "org-a", "space-1", true, 2, "", nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	if len(first) != 2 || !hasMore {
 		t.Fatalf("paged listing = %d rows, hasMore=%v", len(first), hasMore)
 	}
-	next, _, err := store.List(ctx, "org-a", "space-1", true, 2, first[len(first)-1].ID)
+	next, _, err := store.List(ctx, "org-a", "space-1", true, 2, first[len(first)-1].ID, nil)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

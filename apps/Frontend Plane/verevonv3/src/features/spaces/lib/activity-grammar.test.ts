@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  activityFromProcess,
   activityFromThread,
   activitySentence,
   buildSpaceActivity,
   buildSpaceRecord,
+  buildSpaceWork,
   orderActivity,
   type SpaceActivityItem,
   type ThreadLikeActivitySource,
@@ -215,5 +217,60 @@ describe('run cost detail — a zero is not a figure', () => {
   it('has no detail at all when nothing is known', () => {
     const [item] = buildSpaceRecord({ runs: [run({})] })
     expect(item?.detail).toBeUndefined()
+  })
+})
+
+describe('activityFromProcess', () => {
+  it('reads a live process by when it will stop, not when it started', () => {
+    const item = activityFromProcess({
+      process_id: 'p1',
+      state: 'RUNNING',
+      command: 'python3 build.py',
+      started_at: '2026-09-13T10:00:00Z',
+      expires_at: '2026-09-13T10:30:00Z',
+    })
+    expect(item?.renderClass).toBe('process')
+    expect(item?.object).toBe('python3 build.py')
+    expect(item?.outcome.live).toBe(true)
+    // The deadline, not the start: "what needs me" is answered by when this
+    // stops, and a start time hours ago is not actionable.
+    expect(item?.at).toBe('2026-09-13T10:30:00Z')
+  })
+
+  it('splits EXITED on its code rather than calling every finish a success', () => {
+    const clean = activityFromProcess({ process_id: 'p1', state: 'EXITED', exit_code: 0 })
+    expect(clean?.outcome.tone).toBe('success')
+    const failed = activityFromProcess({ process_id: 'p2', state: 'EXITED', exit_code: 2 })
+    expect(failed?.outcome.tone).toBe('failure')
+    expect(failed?.outcome.label).toContain('2')
+    expect(failed?.salience).toBe('attention')
+  })
+
+  it('ranks LOST above a plain failure, because the outcome is unknown', () => {
+    const lost = activityFromProcess({ process_id: 'p1', state: 'LOST' })
+    const failed = activityFromProcess({ process_id: 'p2', state: 'EXITED', exit_code: 1 })
+    expect(lost?.salience).toBe('critical')
+    expect(failed?.salience).toBe('attention')
+  })
+
+  it('names an unrecognized state as it came instead of flattening it', () => {
+    const item = activityFromProcess({ process_id: 'p1', state: 'QUARANTINED' })
+    expect(item?.outcome.label).toBe('quarantined')
+    expect(item?.outcome.tone).toBe('neutral')
+  })
+
+  it('drops a row with no id, and survives a row with no command', () => {
+    expect(activityFromProcess({ state: 'RUNNING' })).toBeNull()
+    expect(activityFromProcess({ process_id: 'p1', state: 'RUNNING' })?.object).toBe(
+      'Bakgrunnsprosess',
+    )
+  })
+
+  it('is optional in buildSpaceWork, so an older gateway still renders', () => {
+    const withoutProcesses = buildSpaceWork([], [])
+    expect(withoutProcesses).toEqual([])
+    const withProcesses = buildSpaceWork([], [], [{ process_id: 'p1', state: 'RUNNING' }])
+    expect(withProcesses).toHaveLength(1)
+    expect(withProcesses[0]?.renderClass).toBe('process')
   })
 })

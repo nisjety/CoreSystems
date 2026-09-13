@@ -588,6 +588,11 @@ async fn execute_step_inner(
             None
         };
         execute_code_interpreter(tool_input, run_id, step_id, workspace_root.as_deref()).await
+    } else if crate::process_tools::is_process_tool(tool_name) {
+        execute_process_tool(
+            tool_name, tool_input, org_id, user_id, run_id, step_id, state, sandbox,
+        )
+        .await
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
         execute_web_search(tool_input, org_id).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
@@ -845,6 +850,105 @@ async fn execute_code_interpreter(
     workspace_root: Option<&Path>,
 ) -> tool_bridge::ToolExecution {
     match crate::code_interpreter::run(tool_input, run_id, step_id, workspace_root).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(error) => tool_error(error),
+    }
+}
+
+/// The S4.2 `process_*` family ([`crate::process_tools`]). Space-scoped by
+/// construction: a background process runs in a Space's hydrated workspace
+/// under a lease Control granted, so there is nothing coherent to do for a run
+/// without one.
+///
+/// Only `process_start` acquires a lease and hydrates a workspace. Reading,
+/// listing, signalling and writing stdin deliberately do not — forcing a lease
+/// acquisition just to LIST would create sandbox state as a side effect of a
+/// read, and every process those calls can name exists only because an earlier
+/// `process_start` already passed the gate.
+///
+/// Note what is NOT re-checked here: `processes_permitted`. That is
+/// `process_start`'s gate alone, because the other four cannot reach a process
+/// the Space was never allowed to start.
+#[allow(clippy::too_many_arguments)]
+async fn execute_process_tool(
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    state: Option<&crate::state::StateStore>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+) -> tool_bridge::ToolExecution {
+    let Some(sandbox) = sandbox else {
+        return tool_error(
+            "background processes are available only on a Space-scoped run".to_owned(),
+        );
+    };
+    // Unreachable through the agent loop, which does not offer the family
+    // without a host — but the direct `ExecuteStep` RPC takes a tool name from
+    // its caller, so this refuses rather than unwrapping.
+    let Some(host) = sandbox.process_host else {
+        return tool_error(
+            "this execution backend does not host background processes".to_owned(),
+        );
+    };
+    let token = match sandbox.sandbox_tokens.token(org_id).await {
+        Ok(token) => token,
+        Err(error) => {
+            return tool_error(format!("process registry unavailable: {error}"))
+        }
+    };
+
+    let (lease, workspace) = if tool_name == crate::process_tools::PROCESS_START {
+        let Some(state) = state else {
+            return tool_error(
+                "Space-scoped process_start requires run state tracking".to_owned(),
+            );
+        };
+        let lease = match crate::sandbox_lease::ensure_sandbox_lease(
+            sandbox, state, run_id, org_id, user_id,
+        )
+        .await
+        {
+            Ok(lease) => lease,
+            Err(status) => return tool_error(status.message().to_owned()),
+        };
+        let workspace = match crate::sandbox_lease::ensure_hydrated_workspace(
+            sandbox, state, run_id, org_id, &lease,
+        )
+        .await
+        {
+            Ok(path) => path,
+            Err(status) => return tool_error(status.message().to_owned()),
+        };
+        (Some(lease), Some(workspace))
+    } else {
+        (None, None)
+    };
+
+    let start = lease.as_ref().zip(workspace.as_ref()).map(|(lease, path)| {
+        crate::process_tools::StartContext {
+            lease_id: &lease.lease_id,
+            workspace: path.as_path(),
+            processes_permitted: lease.processes_permitted,
+        }
+    });
+    let ctx = crate::process_tools::ProcessToolContext {
+        org_id,
+        space_id: sandbox.space_id,
+        run_id,
+        step_id,
+        subject_id: user_id,
+        host,
+        client: sandbox.sandbox_manager_client,
+        token: &token,
+        start,
+    };
+    match crate::process_tools::execute(tool_name, tool_input, &ctx).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,

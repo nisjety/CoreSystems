@@ -83,6 +83,12 @@ pub struct SandboxLeaseContext<'a> {
     /// `SnapshotSandbox`/`ReleaseLease` at run end — never `AcquireLease`,
     /// which needs the delegated user-bound bearer instead.
     pub sandbox_tokens: &'a SandboxManagerTokenProvider,
+    /// Absent when this instance does not host background processes
+    /// (`EXECUTION_CORE_PROCESS_HOST` unset — the default), which is also
+    /// exactly when its capability profile advertises `bounded_oneshot`. The
+    /// `process_*` tools are not offered without it, so a run cannot reach a
+    /// dispatch arm that would find it missing.
+    pub process_host: Option<&'a crate::process_host::ProcessHost>,
 }
 
 /// Returns this run's sandbox lease, acquiring one from sandbox-manager if
@@ -151,6 +157,7 @@ pub async fn ensure_sandbox_lease(
     let lease = SandboxLease {
         lease_id: response.lease_id,
         backend_id: response.backend_id,
+        processes_permitted: response.processes_permitted,
     };
     state.cache_sandbox_lease(run_id, lease.clone());
     Ok(lease)
@@ -578,6 +585,7 @@ mod tests {
             SandboxLease {
                 lease_id: "lease-1".to_owned(),
                 backend_id: "backend-1".to_owned(),
+                processes_permitted: false,
             },
         );
         // A `SandboxManagerClient` that would fail any real RPC (unroutable
@@ -593,6 +601,7 @@ mod tests {
             backend_id: "backend-1",
             cas_client: None,
             sandbox_tokens: &tokens,
+            process_host: None,
         };
 
         let lease = ensure_sandbox_lease(&ctx, &state, "run-1", "org-a", "user-a")
@@ -616,6 +625,7 @@ mod tests {
             backend_id: "backend-1",
             cas_client: None,
             sandbox_tokens: &tokens,
+            process_host: None,
         };
 
         let error = ensure_sandbox_lease(&ctx, &state, "run-1", "org-a", "user-a")
@@ -658,6 +668,7 @@ mod tests {
             SandboxLease {
                 lease_id: "lease-1".to_owned(),
                 backend_id: "backend-1".to_owned(),
+                processes_permitted: false,
             },
         );
         let sandbox_manager_client = unroutable_sandbox_manager_client();
@@ -703,10 +714,12 @@ mod tests {
             backend_id: "backend-1",
             cas_client: None,
             sandbox_tokens: &tokens,
+            process_host: None,
         };
         let lease = SandboxLease {
             lease_id: "lease-1".to_owned(),
             backend_id: "backend-1".to_owned(),
+                processes_permitted: false,
         };
 
         let path = ensure_hydrated_workspace(&ctx, &state, "run-1", "org-a", &lease)
@@ -729,10 +742,12 @@ mod tests {
             backend_id: "backend-1",
             cas_client: None,
             sandbox_tokens: &tokens,
+            process_host: None,
         };
         let lease = SandboxLease {
             lease_id: "lease-1".to_owned(),
             backend_id: "backend-1".to_owned(),
+                processes_permitted: false,
         };
 
         let error = ensure_hydrated_workspace(&ctx, &state, "run-1", "org-a", &lease)
@@ -751,6 +766,7 @@ mod tests {
             SandboxLease {
                 lease_id: "lease-1".to_owned(),
                 backend_id: "backend-1".to_owned(),
+                processes_permitted: false,
             },
         );
         let dir = std::env::temp_dir().join("verevon-sandbox-lease-test-no-cas");

@@ -160,6 +160,11 @@ func main() {
 	server := sbxserver.NewServer(leaseStore, snapStore, workspaceStore).WithProcessStore(processStore)
 	if capabilityVerifier != nil {
 		server = server.WithCapabilityVerifier(capabilityVerifier.Verify, backendID)
+		// The same Control key verifies both envelopes, so human read
+		// authority arrives with capability verification or not at all —
+		// there is no configuration in which one is trustworthy and the
+		// other is not.
+		server = server.WithSpaceReadVerifier(capabilityVerifier.VerifySpaceRead)
 	}
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
 	sbxserver.Register(grpcServer, server)

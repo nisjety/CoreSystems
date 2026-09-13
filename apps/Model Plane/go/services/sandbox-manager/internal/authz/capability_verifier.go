@@ -122,6 +122,11 @@ const ProcessesBackgroundRegistry = "background_registry"
 type VerifiedCapability struct {
 	Claims      SpaceCapabilityClaims
 	Permissions []string
+	// RecipientAudienceRevision is the Space's audience revision the decision
+	// was signed under. Surfaced for the same reason Permissions is: the lease
+	// row has to keep it, because a later reader arrives with its own decision
+	// and something has to say which audience the recorded work belongs to.
+	RecipientAudienceRevision int64
 }
 
 // HasPermission reports whether the decision granted permission.
@@ -174,25 +179,51 @@ func (v *SpaceCapabilityVerifier) Verify(token, claimsJSON string, expect Capabi
 	if claims.Egress != "disabled_by_default" && !hasPermission(decision.Permissions, "space:egress") {
 		return VerifiedCapability{}, fmt.Errorf("Space capability decision does not grant egress for the claimed profile")
 	}
-	return VerifiedCapability{Claims: claims, Permissions: decision.Permissions}, nil
+	return VerifiedCapability{
+		Claims:                    claims,
+		Permissions:               decision.Permissions,
+		RecipientAudienceRevision: decision.RecipientAudienceRevision,
+	}, nil
 }
 
-func (v *SpaceCapabilityVerifier) verify(token string) (spaceCapabilityDecision, error) {
+// verifyEnvelope checks the parts every Control Space decision shares —
+// version prefix, trusted key id, and the Ed25519 signature over
+// `version.keyid.payload` — and returns the decoded payload for the caller to
+// interpret.
+//
+// Shared by the capability decision (AcquireLease) and the read decision
+// (S4.2 §7's human process reads) because the envelope genuinely is one
+// format. Only what the payload MEANS differs between them, so only that is
+// written twice; duplicating base64url-and-ed25519 would be two chances to
+// get the same thing subtly wrong.
+//
+// Note the RawURLEncoding: these tokens are base64URL, and a std-base64
+// decoder silently fails on every token containing `-` or `_`, which disables
+// the whole decision lane rather than rejecting one token loudly.
+func (v *SpaceCapabilityVerifier) verifyEnvelope(token string) ([]byte, error) {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 4 || parts[0] != spaceCapabilityDecisionVersion {
-		return spaceCapabilityDecision{}, fmt.Errorf("invalid Space capability decision envelope")
+		return nil, fmt.Errorf("invalid Space decision envelope")
 	}
 	encodedKeyID, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil || string(encodedKeyID) != v.keyID {
-		return spaceCapabilityDecision{}, fmt.Errorf("untrusted Space capability decision key")
+		return nil, fmt.Errorf("untrusted Space decision key")
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[3])
 	if err != nil || !ed25519.Verify(v.public, []byte(strings.Join(parts[:3], ".")), signature) {
-		return spaceCapabilityDecision{}, fmt.Errorf("invalid Space capability decision signature")
+		return nil, fmt.Errorf("invalid Space decision signature")
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return spaceCapabilityDecision{}, fmt.Errorf("invalid Space capability decision payload")
+		return nil, fmt.Errorf("invalid Space decision payload")
+	}
+	return payload, nil
+}
+
+func (v *SpaceCapabilityVerifier) verify(token string) (spaceCapabilityDecision, error) {
+	payload, err := v.verifyEnvelope(token)
+	if err != nil {
+		return spaceCapabilityDecision{}, err
 	}
 	var decision spaceCapabilityDecision
 	if err := json.Unmarshal(payload, &decision); err != nil {

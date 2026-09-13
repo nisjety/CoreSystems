@@ -854,6 +854,7 @@ impl ExecutionCore for ExecutionService {
                 backend_id: &self.backend_id,
                 cas_client: self.cas_client.as_ref(),
                 sandbox_tokens: &self.sandbox_tokens,
+                process_host: self.process_host.as_deref(),
             }
         });
 
@@ -1198,6 +1199,7 @@ impl ExecutionCore for ExecutionService {
             &self.backend_id,
             self.cas_client.as_ref(),
             &self.sandbox_tokens,
+            self.process_host.as_deref(),
         )
         .await?;
         Ok(Response::new(response))

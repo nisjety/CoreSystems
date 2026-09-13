@@ -171,6 +171,14 @@ type Process struct {
 	DroppedBytes    int64
 	StdinBytes      int64
 
+	// AudienceRevision is the Space's recipient-audience revision this
+	// process's lease was granted under, inherited through the same join that
+	// gives the row its Space. It is the ceiling the human read path compares
+	// a reader's own decision against (migration 0004). Zero means "recorded
+	// before the ceiling existed", which reads as visible — the same meaning
+	// Session Core gives a NULL revision on a thread.
+	AudienceRevision int64
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -339,7 +347,7 @@ const processColumns = `id, org_id, space_id, lease_id, backend_id, host_epoch, 
 	`state, exit_code, end_reason, signal_requested, term_requested_at, cleanup_state, ` +
 	`ttl_seconds, expires_at, started_at, ended_at, last_heartbeat_at, ` +
 	`next_seq, retained_from_seq, retained_bytes, dropped_bytes, stdin_bytes, ` +
-	`created_at, updated_at`
+	`recipient_audience_revision, created_at, updated_at`
 
 // Register reserves a STARTING row for a process the host is about to spawn.
 //
@@ -375,10 +383,12 @@ func (s *Store) Register(ctx context.Context, req RegisterRequest) (*Process, er
 		INSERT INTO sandbox_processes (
 			id, org_id, space_id, lease_id, backend_id, host_epoch,
 			run_id, step_id, subject_id, command_redacted, command_digest,
-			state, ttl_seconds, expires_at, last_heartbeat_at, created_at, updated_at)
+			state, ttl_seconds, expires_at, recipient_audience_revision,
+			last_heartbeat_at, created_at, updated_at)
 		SELECT $1, $2, l.space_id, $3, $4, $5,
 		       $6, $7, $8, $9::jsonb, $10,
 		       $11, $12, LEAST(now() + ($15::bigint * interval '1 second'), l.expires_at),
+		       l.recipient_audience_revision,
 		       now(), now(), now()
 		FROM leases l
 		WHERE l.id = $3
@@ -728,12 +738,40 @@ func (s *Store) Get(ctx context.Context, orgID, processID string) (*Process, err
 // List pages a Space's processes newest-first. The cursor is the process id
 // itself (a ULID, so id order is creation order), the same keyset shape
 // ListRuns uses. hasMore is computed by over-fetching one row.
-func (s *Store) List(ctx context.Context, orgID, spaceID string, includeTerminal bool, limit int32, afterID string) ([]Process, bool, error) {
+// AudienceCeiling bounds a read to records produced under an audience the
+// reader's own Control decision covers. A nil ceiling means no bound, which is
+// what execution-core's service token gets: the host is not a disclosure
+// recipient, it is the thing that produced the record.
+//
+// Modelled as a pointer rather than a plain int64 because zero is a real and
+// DIFFERENT answer from absent — a decision whose revision parsed as zero must
+// never be silently promoted to "unbounded". The verifier refuses such a
+// decision outright, and this type makes that refusal impossible to bypass by
+// forgetting to check.
+type AudienceCeiling struct {
+	RecipientAudienceRevision int64
+}
+
+func (s *Store) List(ctx context.Context, orgID, spaceID string, includeTerminal bool, limit int32, afterID string, ceiling *AudienceCeiling) ([]Process, bool, error) {
 	if orgID == "" || spaceID == "" {
 		return nil, false, fmt.Errorf("org_id and space_id are required")
 	}
 	if limit <= 0 || limit > s.limits.MaxListLimit {
 		limit = s.limits.MaxListLimit
+	}
+	// The ceiling is folded into the statement rather than applied after the
+	// fact, so it cannot be defeated by paging: filtering in Go would let a
+	// page fill with rows the reader may not see and then return fewer than
+	// `limit`, which a caller reads as "end of list" rather than "some were
+	// withheld". Session Core puts the same predicate in its own SELECT.
+	//
+	// A nil ceiling binds -1, which no stored revision can be below, so the
+	// predicate is inert rather than absent — one query plan, one code path,
+	// and no branch that could accidentally drop the bound.
+	bound := int64(-1)
+	unbounded := ceiling == nil
+	if !unbounded {
+		bound = ceiling.RecipientAudienceRevision
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT `+processColumns+`
@@ -741,9 +779,10 @@ func (s *Store) List(ctx context.Context, orgID, spaceID string, includeTerminal
 		WHERE org_id = $1 AND space_id = $2
 		  AND ($3 OR state IN (1, 2))
 		  AND ($4 = '' OR id < $4)
+		  AND ($6 OR recipient_audience_revision <= $7)
 		ORDER BY id DESC
 		LIMIT $5
-	`, orgID, spaceID, includeTerminal, afterID, int64(limit)+1)
+	`, orgID, spaceID, includeTerminal, afterID, int64(limit)+1, unbounded, bound)
 	if err != nil {
 		return nil, false, fmt.Errorf("list processes: %w", err)
 	}
@@ -773,10 +812,17 @@ func (s *Store) List(ctx context.Context, orgID, spaceID string, includeTerminal
 // page carrying its terminal state — never a not-found. A fully
 // acknowledged stream is still a known stream, the same rule
 // model-gateway's own resume buffer holds.
-func (s *Store) ReadOutput(ctx context.Context, orgID, processID string, afterSeq, maxBytes int64) (*OutputPage, error) {
+func (s *Store) ReadOutput(ctx context.Context, orgID, processID string, afterSeq, maxBytes int64, ceiling *AudienceCeiling) (*OutputPage, error) {
 	p, err := s.Get(ctx, orgID, processID)
 	if err != nil {
 		return nil, err
+	}
+	// Refused as NOT FOUND, not as forbidden. Distinguishing the two would let
+	// a reader probe which process ids exist in a Space whose records their
+	// decision does not cover, which is the disclosure the ceiling exists to
+	// prevent. The reader learns nothing either way.
+	if ceiling != nil && p.AudienceRevision > ceiling.RecipientAudienceRevision {
+		return nil, ErrProcessNotFound
 	}
 	if afterSeq < 0 {
 		afterSeq = 0
@@ -930,7 +976,7 @@ func scanProcess(row rowScanner) (*Process, error) {
 		&state, &exitCode, &endReason, &signal, &termAt, &cleanup,
 		&ttlSeconds, &p.ExpiresAt, &startedAt, &endedAt, &p.LastHeartbeatAt,
 		&p.NextSeq, &p.RetainedFromSeq, &p.RetainedBytes, &p.DroppedBytes, &p.StdinBytes,
-		&p.CreatedAt, &p.UpdatedAt,
+		&p.AudienceRevision, &p.CreatedAt, &p.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}

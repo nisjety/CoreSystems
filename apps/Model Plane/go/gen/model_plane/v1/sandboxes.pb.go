@@ -387,9 +387,20 @@ type AcquireLeaseResponse struct {
 	// whichever instance answered.
 	BackendId string `protobuf:"bytes,4,opt,name=backend_id,json=backendId,proto3" json:"backend_id,omitempty"`
 	// Initial lifecycle state (always SCRATCH on a fresh acquire).
-	State         SandboxLifecycleState `protobuf:"varint,5,opt,name=state,proto3,enum=model_plane.v1.SandboxLifecycleState" json:"state,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	State SandboxLifecycleState `protobuf:"varint,5,opt,name=state,proto3,enum=model_plane.v1.SandboxLifecycleState" json:"state,omitempty"`
+	// Whether this lease may host background processes: true only when the
+	// Space capability decision both claimed a process-capable backend and
+	// carried the `space:processes` permission Control grants on entitlement.
+	//
+	// Decided once at acquire and persisted on the lease row, because a later
+	// process RPC arrives on execution-core's own service token with no
+	// decision in hand. Reported back here so the host can refuse
+	// `process_start` with an honest reason instead of preparing a spawn that
+	// `RegisterProcess` will deny; the registry's own check remains the
+	// authoritative one. Always false for a non-Space lease.
+	ProcessesPermitted bool `protobuf:"varint,6,opt,name=processes_permitted,json=processesPermitted,proto3" json:"processes_permitted,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *AcquireLeaseResponse) Reset() {
@@ -455,6 +466,13 @@ func (x *AcquireLeaseResponse) GetState() SandboxLifecycleState {
 		return x.State
 	}
 	return SandboxLifecycleState_LIFECYCLE_UNSPECIFIED
+}
+
+func (x *AcquireLeaseResponse) GetProcessesPermitted() bool {
+	if x != nil {
+		return x.ProcessesPermitted
+	}
+	return false
 }
 
 type ReleaseLeaseRequest struct {
@@ -2516,8 +2534,17 @@ type ListProcessesRequest struct {
 	// Keyset cursor: the last process_id of the previous page. Ids are ULIDs, so
 	// id order is creation order — the same shape ListRuns uses.
 	AfterProcessId string `protobuf:"bytes,4,opt,name=after_process_id,json=afterProcessId,proto3" json:"after_process_id,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Control decision reference for a HUMAN caller (S4.2 step 6). Ignored for a
+	// service principal, which is the producer of these records rather than a
+	// disclosure recipient.
+	SpaceReadDecisionRef string `protobuf:"bytes,5,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	// The signed model.thread.read decision addressed to this service. It both
+	// admits the caller and carries the recipient-audience revision every row
+	// returned is filtered against, so it is required rather than optional for a
+	// user identity.
+	SpaceReadDecisionToken string `protobuf:"bytes,6,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ListProcessesRequest) Reset() {
@@ -2574,6 +2601,20 @@ func (x *ListProcessesRequest) GetLimit() int32 {
 func (x *ListProcessesRequest) GetAfterProcessId() string {
 	if x != nil {
 		return x.AfterProcessId
+	}
+	return ""
+}
+
+func (x *ListProcessesRequest) GetSpaceReadDecisionRef() string {
+	if x != nil {
+		return x.SpaceReadDecisionRef
+	}
+	return ""
+}
+
+func (x *ListProcessesRequest) GetSpaceReadDecisionToken() string {
+	if x != nil {
+		return x.SpaceReadDecisionToken
 	}
 	return ""
 }
@@ -2643,9 +2684,17 @@ type ReadProcessOutputRequest struct {
 	AfterSeq int64 `protobuf:"varint,2,opt,name=after_seq,json=afterSeq,proto3" json:"after_seq,omitempty"`
 	// Byte budget for this page; clamped by the server. A single chunk larger
 	// than the budget is still returned, so a reader can never be wedged.
-	MaxBytes      int64 `protobuf:"varint,3,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	MaxBytes int64 `protobuf:"varint,3,opt,name=max_bytes,json=maxBytes,proto3" json:"max_bytes,omitempty"`
+	// Space the caller claims this process belongs to. Required for a human
+	// caller and checked against the process's own Space, because the read
+	// decision authorizes one Space and the process id alone names none.
+	SpaceId string `protobuf:"bytes,4,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Control decision reference for a human caller (S4.2 step 6).
+	SpaceReadDecisionRef string `protobuf:"bytes,5,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	// The signed model.thread.read decision addressed to this service.
+	SpaceReadDecisionToken string `protobuf:"bytes,6,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ReadProcessOutputRequest) Reset() {
@@ -2697,6 +2746,27 @@ func (x *ReadProcessOutputRequest) GetMaxBytes() int64 {
 		return x.MaxBytes
 	}
 	return 0
+}
+
+func (x *ReadProcessOutputRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ReadProcessOutputRequest) GetSpaceReadDecisionRef() string {
+	if x != nil {
+		return x.SpaceReadDecisionRef
+	}
+	return ""
+}
+
+func (x *ReadProcessOutputRequest) GetSpaceReadDecisionToken() string {
+	if x != nil {
+		return x.SpaceReadDecisionToken
+	}
+	return ""
 }
 
 // One page of output.
@@ -2825,7 +2895,7 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x19\n" +
 	"\bspace_id\x18\x05 \x01(\tR\aspaceId\x12/\n" +
 	"\x13capability_decision\x18\x06 \x01(\tR\x12capabilityDecision\x124\n" +
-	"\x16capability_claims_json\x18\a \x01(\tR\x14capabilityClaimsJson\"\xe4\x01\n" +
+	"\x16capability_claims_json\x18\a \x01(\tR\x14capabilityClaimsJson\"\x95\x02\n" +
 	"\x14AcquireLeaseResponse\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -2833,7 +2903,8 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x1d\n" +
 	"\n" +
 	"backend_id\x18\x04 \x01(\tR\tbackendId\x12;\n" +
-	"\x05state\x18\x05 \x01(\x0e2%.model_plane.v1.SandboxLifecycleStateR\x05state\"O\n" +
+	"\x05state\x18\x05 \x01(\x0e2%.model_plane.v1.SandboxLifecycleStateR\x05state\x12/\n" +
+	"\x13processes_permitted\x18\x06 \x01(\bR\x12processesPermitted\"O\n" +
 	"\x13ReleaseLeaseRequest\x12\x19\n" +
 	"\blease_id\x18\x01 \x01(\tR\aleaseId\x12\x1d\n" +
 	"\n" +
@@ -3004,20 +3075,25 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\n" +
 	"process_id\x18\x01 \x01(\tR\tprocessId\"G\n" +
 	"\x12GetProcessResponse\x121\n" +
-	"\aprocess\x18\x01 \x01(\v2\x17.model_plane.v1.ProcessR\aprocess\"\x9c\x01\n" +
+	"\aprocess\x18\x01 \x01(\v2\x17.model_plane.v1.ProcessR\aprocess\"\x8e\x02\n" +
 	"\x14ListProcessesRequest\x12\x19\n" +
 	"\bspace_id\x18\x01 \x01(\tR\aspaceId\x12)\n" +
 	"\x10include_terminal\x18\x02 \x01(\bR\x0fincludeTerminal\x12\x14\n" +
 	"\x05limit\x18\x03 \x01(\x05R\x05limit\x12(\n" +
-	"\x10after_process_id\x18\x04 \x01(\tR\x0eafterProcessId\"i\n" +
+	"\x10after_process_id\x18\x04 \x01(\tR\x0eafterProcessId\x125\n" +
+	"\x17space_read_decision_ref\x18\x05 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
+	"\x19space_read_decision_token\x18\x06 \x01(\tR\x16spaceReadDecisionToken\"i\n" +
 	"\x15ListProcessesResponse\x125\n" +
 	"\tprocesses\x18\x01 \x03(\v2\x17.model_plane.v1.ProcessR\tprocesses\x12\x19\n" +
-	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"s\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x80\x02\n" +
 	"\x18ReadProcessOutputRequest\x12\x1d\n" +
 	"\n" +
 	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x1b\n" +
 	"\tafter_seq\x18\x02 \x01(\x03R\bafterSeq\x12\x1b\n" +
-	"\tmax_bytes\x18\x03 \x01(\x03R\bmaxBytes\"\xe1\x02\n" +
+	"\tmax_bytes\x18\x03 \x01(\x03R\bmaxBytes\x12\x19\n" +
+	"\bspace_id\x18\x04 \x01(\tR\aspaceId\x125\n" +
+	"\x17space_read_decision_ref\x18\x05 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
+	"\x19space_read_decision_token\x18\x06 \x01(\tR\x16spaceReadDecisionToken\"\xe1\x02\n" +
 	"\x19ReadProcessOutputResponse\x12:\n" +
 	"\x06chunks\x18\x01 \x03(\v2\".model_plane.v1.ProcessOutputChunkR\x06chunks\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\x03R\n" +

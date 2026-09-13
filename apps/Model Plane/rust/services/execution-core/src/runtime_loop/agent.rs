@@ -363,6 +363,10 @@ struct LoopContext<'a> {
     backend_id: &'a str,
     cas_client: Option<&'a crate::workspace_cas::CasClient>,
     sandbox_tokens: &'a crate::sandbox_lease::SandboxManagerTokenProvider,
+    /// Absent unless this instance hosts background processes. Read by the
+    /// `process_*` dispatch arm and by the run-end lease release, which must
+    /// stop a lease's children BEFORE the workspace is diffed and uploaded.
+    process_host: Option<&'a crate::process_host::ProcessHost>,
     agent_model: String,
     permission_wire: &'static str,
     /// Nesting depth: 0 is the user-facing run, 1 a delegated subagent. Bounds
@@ -443,6 +447,7 @@ pub(crate) async fn run_agent(
     backend_id: &str,
     cas_client: Option<&crate::workspace_cas::CasClient>,
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
+    process_host: Option<&crate::process_host::ProcessHost>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let tools = merged_tool_defs(
         &req.run_id,
@@ -450,6 +455,7 @@ pub(crate) async fn run_agent(
         &req.user_id,
         &req.tools,
         capability_policy,
+        !req.space_id.trim().is_empty(),
     )
     .await;
     run_agent_with_tools(
@@ -469,6 +475,7 @@ pub(crate) async fn run_agent(
         backend_id,
         cas_client,
         sandbox_tokens,
+        process_host,
     )
     .await
 }
@@ -485,8 +492,22 @@ async fn merged_tool_defs(
     user_id: &str,
     client_tools: &[pb::ToolDefinition],
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    space_scoped: bool,
 ) -> Vec<pb::ToolDefinition> {
     let mut tools = offered_tool_defs();
+    // The S4.2 process family is conditional where everything else above is
+    // unconditional, and on BOTH halves of the condition for different
+    // reasons. Without a Space there is no lease, no hydrated workspace and no
+    // authority to run under, so the tools could only fail. Without the host
+    // enabled this instance genuinely cannot keep a process alive past the
+    // call — and it says so in its capability profile, so offering the family
+    // anyway would advertise something the profile Control signs denies.
+    //
+    // Offering is not the authority gate; `process_start` is (§4). This is
+    // about not showing a model a tool that cannot work for it.
+    if space_scoped && crate::sandbox::process_host_enabled() {
+        tools.extend(process_tool_defs());
+    }
     if let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() {
         for tool in client.list_tools(org_id, user_id).await {
             append_untrusted_tool_defs(&mut tools, &[tool]);
@@ -589,6 +610,7 @@ async fn run_agent_with_tools(
     backend_id: &str,
     cas_client: Option<&crate::workspace_cas::CasClient>,
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
+    process_host: Option<&crate::process_host::ProcessHost>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
@@ -656,6 +678,7 @@ async fn run_agent_with_tools(
         backend_id,
         cas_client,
         sandbox_tokens,
+        process_host,
         agent_model,
         permission_wire,
         depth: 0,
@@ -700,18 +723,16 @@ async fn run_agent_with_tools(
     // subagent's `LoopContext.req` is `parent.req` verbatim, never its own),
     // so `state.sandbox_lease` was cached under the one key this run has
     // ever used.
-    // `None`, and provably harmless today: no tool can start a background
-    // process until S4.2 step 5 adds them, so a RunAgent lease cannot have
-    // children for this to kill. Step 5 threads the real host through
-    // `LoopContext` — the same seam it needs anyway to let a tool reach it —
-    // and MUST replace this argument when it does, or a lease's processes
-    // would keep writing into the workspace while it is being uploaded.
+    // The real host, as of S4.2 step 5 — this argument was `None` until the
+    // `process_*` tools existed to give a lease children. It must stay real:
+    // release diffs and uploads the workspace, and a process still writing
+    // into it would make the promoted snapshot a picture of a moving target.
     crate::sandbox_lease::release_sandbox_lease_if_any(
         state,
         sandbox_manager_client,
         sandbox_tokens,
         cas_client,
-        None,
+        process_host,
         &req.run_id,
         &req.org_id,
     )
@@ -1387,14 +1408,16 @@ async fn run_rounds(
                     // becomes two — and for any non-transient failure, where a
                     // second identical attempt can only fail identically.
                     // Present only when this run is Space-scoped AND the call
-                    // about to dispatch is code_interpreter — the only tool
-                    // that reads it. Built fresh per call rather than once per
-                    // round: `ctx.req.space_id`/`ctx.sandbox_bearer` never
-                    // change within a run, but constructing the borrow only
-                    // where it is used keeps the "absent unless relevant"
-                    // invariant visible at the one call site that cares.
-                    let sandbox = if call.name == "code_interpreter" && !ctx.req.space_id.is_empty()
-                    {
+                    // about to dispatch is one of the tools that reads it:
+                    // `code_interpreter`, and since S4.2 step 5 the
+                    // `process_*` family. Built fresh per call rather than
+                    // once per round: `ctx.req.space_id`/`ctx.sandbox_bearer`
+                    // never change within a run, but constructing the borrow
+                    // only where it is used keeps the "absent unless relevant"
+                    // invariant visible at the call sites that care.
+                    let reads_sandbox = call.name == "code_interpreter"
+                        || crate::process_tools::is_process_tool(&call.name);
+                    let sandbox = if reads_sandbox && !ctx.req.space_id.is_empty() {
                         ctx.sandbox_bearer.map(|sandbox_bearer| {
                             crate::sandbox_lease::SandboxLeaseContext {
                                 space_id: &ctx.req.space_id,
@@ -1404,6 +1427,7 @@ async fn run_rounds(
                                 backend_id: ctx.backend_id,
                                 cas_client: ctx.cas_client,
                                 sandbox_tokens: ctx.sandbox_tokens,
+                                process_host: ctx.process_host,
                             }
                         })
                     } else {
@@ -2115,6 +2139,7 @@ async fn run_subagent(
         backend_id: parent.backend_id,
         cas_client: parent.cas_client,
         sandbox_tokens: parent.sandbox_tokens,
+        process_host: parent.process_host,
         agent_model: parent.agent_model.clone(),
         permission_wire: parent.permission_wire,
         depth: parent.depth + 1,
@@ -2703,7 +2728,7 @@ mod system_prompt_composition {
 
 #[cfg(test)]
 mod capability_binding_contract {
-    use super::offered_tool_defs;
+    use super::{offered_tool_defs, pb, process_tool_defs};
     use crate::capability_policy::trusted_capability_id;
     use std::path::Path;
 
@@ -2712,9 +2737,19 @@ mod capability_binding_contract {
     /// use through this mapping.
     const EXPECTED_UNBOUND: &[&str] = &[];
 
+    /// Both sets, because the conditional one is exactly where an unbound
+    /// tool would hide: the process family is offered only for a Space-scoped
+    /// run on a host with the flag set, so a missing binding would surface in
+    /// production for a subset of deployments and never in a default one.
+    fn every_offerable_tool_def() -> Vec<pb::ToolDefinition> {
+        let mut all = offered_tool_defs();
+        all.extend(process_tool_defs());
+        all
+    }
+
     #[test]
     fn every_offered_tool_has_a_capability_binding() {
-        let unbound: Vec<String> = offered_tool_defs()
+        let unbound: Vec<String> = every_offerable_tool_def()
             .into_iter()
             .map(|def| def.name)
             .filter(|name| trusted_capability_id(name).is_none())
@@ -2853,7 +2888,7 @@ mod capability_binding_contract {
         ];
 
         let mut unattested = Vec::new();
-        for def in offered_tool_defs() {
+        for def in every_offerable_tool_def() {
             let Some(capability) = trusted_capability_id(&def.name) else {
                 continue; // covered by the binding test above
             };
@@ -2929,7 +2964,7 @@ mod capability_binding_contract {
 
         // Every offered tool's id, plus the two reachable only through
         // special-cased paths rather than a plain match arm.
-        let mut ids: Vec<String> = offered_tool_defs()
+        let mut ids: Vec<String> = every_offerable_tool_def()
             .into_iter()
             .filter_map(|def| trusted_capability_id(&def.name))
             .collect();
@@ -2957,6 +2992,49 @@ mod capability_binding_contract {
              call is refused with nothing to evaluate: {missing:?}"
         );
     }
+}
+
+/// The S4.2 background-process family, offered only for a Space-scoped run on
+/// a host that can actually host one (see [`merged_tool_defs`]).
+///
+/// Kept separate from [`offered_tool_defs`] rather than folded in behind a
+/// flag because these are the only conditional tools in the loop, and the
+/// conditional set is exactly the thing worth being able to name in a test.
+/// All three contract tests below iterate BOTH, so the family gets the same
+/// advertised -> bound -> seeded -> attested chain everything else does.
+///
+/// The descriptions state the real contract, for the same reason
+/// `code_interpreter`'s does: a model that assumes it will be handed output as
+/// the process produces it writes a plan that silently never completes. It has
+/// to know that reading is a pull with a cursor.
+fn process_tool_defs() -> Vec<pb::ToolDefinition> {
+    vec![
+        pb::ToolDefinition {
+            name: "process_start".to_owned(),
+            description: "Start a LONG-RUNNING background process in this Space's persistent workspace and return immediately with a process_id. Use it for work that outlives one tool call - a build, a test suite, a watcher, a server, a long computation - where code_interpreter's per-call timeout would kill it. The program is Python (or POSIX sh), same sandbox as code_interpreter: NO NETWORK, read-only system, and it can only write this Space's workspace. Unlike code_interpreter the workspace PERSISTS, so files it writes are still there for later calls. It does NOT stream output to you: collect output with process_read using the returned process_id. The process is killed at its TTL (30 minutes by default, 1 hour maximum, and never past this Space's sandbox lease), so treat it as bounded work, not a permanent service.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Defaults to python"},"code":{"type":"string","description":"The complete program to run in the background"},"args":{"type":"array","items":{"type":"string"},"description":"Optional arguments passed to the program"},"ttl_secs":{"type":"integer","description":"Seconds before the process is stopped; default 1800, max 3600"},"stdin":{"type":"boolean","description":"Keep stdin open so process_stdin can write to it later; default false"}},"required":["code"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "process_read".to_owned(),
+            description: "Read a background process's output, from a cursor. Returns the chunks after after_seq plus next_cursor to pass next time, and the process's current state and exit_code - so a finished process answers with its outcome rather than an error. Call it again with next_cursor to follow a running process. If gap_before is true, output between your cursor and the first chunk was dropped by retention and is gone: say so rather than summarising the log as if it were complete.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"process_id":{"type":"string","description":"From process_start or process_list"},"after_seq":{"type":"integer","description":"Exclusive cursor; omit or 0 to read from the beginning of what is retained"},"max_bytes":{"type":"integer","description":"Byte budget for this page; default 32768, max 262144"}},"required":["process_id"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "process_stdin".to_owned(),
+            description: "Write to a running background process's standard input - for a program that prompts, or one waiting on a command stream. Only works if the process was started with stdin: true, and only on a process this backend is hosting. Set close: true to send end-of-input when there is nothing more to write; a program blocked on reading stdin will wait forever without it.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"process_id":{"type":"string","description":"From process_start or process_list"},"data":{"type":"string","description":"Text to write to the process's stdin"},"close":{"type":"boolean","description":"Close stdin after writing, signalling end-of-input; default false"}},"required":["process_id","data"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "process_signal".to_owned(),
+            description: "Stop a running background process. \"term\" asks it to shut down and gives it a grace period to clean up - prefer it, because a program that writes files or holds a lock should get the chance to finish. \"kill\" stops it immediately with no chance to clean up; use it only when term did not work. This is a REQUEST: it returns as soon as the signal is sent, so call process_read afterwards to see the process's actual state rather than assuming it stopped.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"process_id":{"type":"string","description":"From process_start or process_list"},"signal":{"type":"string","enum":["term","kill"],"description":"term asks it to stop cleanly; kill stops it immediately"}},"required":["process_id","signal"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "process_list".to_owned(),
+            description: "List this Space's background processes with their state, exit code and redacted command. Use it to find a process_id you no longer have - processes survive the turn that started them, so one may have been started by an earlier conversation in this Space. Finished processes are hidden unless include_finished is true.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"include_finished":{"type":"boolean","description":"Include processes that have already ended; default false"},"limit":{"type":"integer","description":"Max processes to return; default 20, max 100"},"after_process_id":{"type":"string","description":"Cursor: the last process_id of the previous page"}},"required":[]}"#.to_owned(),
+        },
+    ]
 }
 
 fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
@@ -4071,7 +4149,7 @@ mod tests {
 
     #[tokio::test]
     async fn merged_tool_defs_accepts_ticket_only_from_the_run_bound_policy_view() {
-        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &TicketViewPolicy).await;
+        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &TicketViewPolicy, false).await;
         assert!(tools
             .iter()
             .any(|tool| tool.name == crate::ticket_tools::TOOL_NAME));
@@ -5554,6 +5632,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("ordinary agent run should succeed");
@@ -5641,6 +5720,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("ZDR agent run should succeed");
@@ -5713,6 +5793,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("tier-constrained agent run should succeed");
@@ -5750,6 +5831,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("inference failure should be finalized as a response");
@@ -5820,6 +5902,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect_err("a missing durable terminal receipt must fail the agent run");
@@ -5889,6 +5972,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("multi-tool agent run should succeed");
@@ -5983,6 +6067,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("duplicate retrieval run should succeed");
@@ -6049,6 +6134,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("durable approval should pause the run");
@@ -6119,6 +6205,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect_err("an unpersisted approval must fail the agent HITL path");
@@ -6200,6 +6287,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("provider write run should succeed");
@@ -6330,6 +6418,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -6412,6 +6501,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a ZDR delegation still runs");
@@ -6476,6 +6566,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -6554,6 +6645,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a delegating agent run should succeed");
@@ -6788,6 +6880,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused nested delegation must not fail the run");
@@ -6935,6 +7028,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused record read inside a subagent must not fail the run");
@@ -7017,6 +7111,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused rung must not fail the run");
@@ -7099,6 +7194,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused risky tool inside a subagent must not fail the run");
@@ -7178,6 +7274,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a truncated round must not fail the run");
@@ -7257,6 +7354,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused plan-mode tool call must not fail the run");
@@ -7321,6 +7419,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a failed delegation must not fail the parent run");
@@ -7393,6 +7492,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -7486,6 +7586,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a resumed delegation completes the run");
@@ -7566,6 +7667,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused replay must not fail the run");
@@ -7631,6 +7733,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("an in-flight replay must not fail the run");
@@ -7702,6 +7805,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused delegation must not fail the run");
@@ -7782,6 +7886,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -7870,6 +7975,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("durable approval should pause the run");
@@ -7945,6 +8051,7 @@ mod tests {
             "test-backend",
             None,
             &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("durable approval should pause the run");

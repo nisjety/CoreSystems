@@ -49,6 +49,8 @@ export type ActivityRenderClass =
   | 'run'
   /** A standing schedule that will fire in this Space. */
   | 'schedule'
+  /** A background process running in this Space's sandbox workspace. */
+  | 'process'
   /** An owner-plane effect performed under this Space's authority. */
   | 'operation'
   /** A grant of an effect in this Space, or its withdrawal. */
@@ -392,6 +394,87 @@ export function activityFromSchedule(
 }
 
 /**
+ * One background process as the Work tab sees it (S4.2).
+ *
+ * A process is neither a run nor a schedule, and the difference matters to the
+ * reader. A run belongs to a turn somebody took; a schedule is something that
+ * will happen. A process is something that is happening NOW, started by a turn
+ * that may be long over — which is exactly why it earns a row: it is the one
+ * kind of work in a room that nobody is currently watching.
+ *
+ * `LOST` is `critical`, above a plain failure, for the same reason the
+ * operation grammar makes `unknown` critical: it means the host that owned the
+ * process went away and we cannot say what happened to it. A supervisor who
+ * reads past that has been misled.
+ *
+ * The command is already redacted upstream — the host scrubs before it
+ * registers — so there is no unredacted form to leak into the room.
+ */
+export interface ProcessLikeActivitySource {
+  readonly process_id?: string
+  readonly state?: string
+  readonly exit_code?: number | null
+  readonly end_reason?: string
+  readonly command?: string | null
+  readonly started_at?: string | number | null
+  readonly expires_at?: string | number | null
+  readonly space_ref?: string
+}
+
+const PROCESS_STATE: Readonly<
+  Record<string, { label: string; tone: ActivityTone; salience: ActivitySalience; live: boolean }>
+> = {
+  STARTING: { label: 'starter', tone: 'pending', salience: 'normal', live: true },
+  RUNNING: { label: 'kjører', tone: 'pending', salience: 'normal', live: true },
+  KILLED: { label: 'stoppet', tone: 'failure', salience: 'attention', live: false },
+  EXPIRED: { label: 'tidsavbrutt', tone: 'failure', salience: 'attention', live: false },
+  LOST: { label: 'verten forsvant — utfall ukjent', tone: 'failure', salience: 'critical', live: false },
+}
+
+export function activityFromProcess(
+  source: ProcessLikeActivitySource,
+): SpaceActivityItem | null {
+  const id = (source.process_id ?? '').trim()
+  if (!id) return null
+  const state = (source.state ?? '').trim().toUpperCase()
+  const object = source.command?.trim() || 'Bakgrunnsprosess'
+
+  // EXITED is the only state whose meaning depends on a second field, so it is
+  // resolved here rather than in the table: exit 0 is a success and anything
+  // else is a failure the reader should see, not a neutral "finished".
+  let outcome = PROCESS_STATE[state]
+  if (state === 'EXITED') {
+    const code = source.exit_code ?? 0
+    outcome =
+      code === 0
+        ? { label: 'ferdig', tone: 'success', salience: 'muted', live: false }
+        : { label: `avsluttet med kode ${code}`, tone: 'failure', salience: 'attention', live: false }
+  }
+
+  return {
+    id: `work-process:${id}`,
+    renderClass: 'process',
+    verb: 'Bakgrunnsprosess',
+    object,
+    outcome: outcome
+      ? { label: outcome.label, tone: outcome.tone, live: outcome.live }
+      : // Honesty over guessing, as everywhere else in this grammar: a state
+        // this build has not been taught is named as it came rather than
+        // flattened into "finished".
+        { label: state.toLowerCase() || 'ukjent tilstand', tone: 'neutral', live: false },
+    salience: outcome ? outcome.salience : 'normal',
+    // A live process is shown by when it will STOP, not when it started: "what
+    // needs me" is answered by the deadline, and a start time three hours ago
+    // tells a supervisor nothing actionable.
+    ...(asIsoTime(source.expires_at ?? undefined)
+      ? { at: asIsoTime(source.expires_at ?? undefined) as string }
+      : asIsoTime(source.started_at ?? undefined)
+        ? { at: asIsoTime(source.started_at ?? undefined) as string }
+        : {}),
+  }
+}
+
+/**
  * The Work tab's feed: what is running, then what is scheduled.
  *
  * Ordered by the same consequence rule as Activity, so a failed run outranks a
@@ -400,10 +483,12 @@ export function activityFromSchedule(
 export function buildSpaceWork(
   runs: readonly RunLikeActivitySource[],
   schedules: readonly ScheduleLikeActivitySource[],
+  processes: readonly ProcessLikeActivitySource[] = [],
 ): SpaceActivityItem[] {
   const items = [
     ...runs.map(activityFromRun),
     ...schedules.map(activityFromSchedule),
+    ...processes.map(activityFromProcess),
   ].filter((item): item is SpaceActivityItem => item !== null)
   return orderActivity(items)
 }

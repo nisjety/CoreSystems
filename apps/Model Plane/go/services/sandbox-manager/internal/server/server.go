@@ -36,6 +36,12 @@ type Server struct {
 	// means "not configured": any AcquireLease request naming a space_id is
 	// then refused, never served unverified.
 	capabilityVerify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.VerifiedCapability, error)
+	// spaceReadVerify verifies a Control model.thread.read decision addressed
+	// to this service, admitting a HUMAN to a Space's processes (S4.2 §7). A
+	// func field for the same reason as capabilityVerify: tests inject a fake
+	// rather than an Ed25519 keypair. Nil means "not configured", and a user
+	// identity is then refused rather than served unverified.
+	spaceReadVerify func(token string, expect authz.SpaceReadExpectation) (authz.VerifiedSpaceRead, error)
 	// backendID is this instance's own SANDBOX_MANAGER_BACKEND_ID. Empty
 	// only when capabilityVerify is also nil (an unconfigured instance).
 	backendID string
@@ -56,6 +62,14 @@ func NewServer(leases LeaseStore, snaps SnapshotStore, workspace WorkspaceStore)
 func (s *Server) WithCapabilityVerifier(verify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.VerifiedCapability, error), backendID string) *Server {
 	s.capabilityVerify = verify
 	s.backendID = backendID
+	return s
+}
+
+// WithSpaceReadVerifier wires human read authority for the process registry.
+// Without it a user identity cannot read processes at all, which is the
+// correct fail-closed state — it is not the same as reading without a ceiling.
+func (s *Server) WithSpaceReadVerifier(verify func(token string, expect authz.SpaceReadExpectation) (authz.VerifiedSpaceRead, error)) *Server {
+	s.spaceReadVerify = verify
 	return s
 }
 
@@ -99,6 +113,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 	spaceID := strings.TrimSpace(req.GetSpaceId())
 	backendID := ""
 	processesPermitted := false
+	var grant lease.SpaceGrant
 	if spaceID != "" {
 		if s.capabilityVerify == nil {
 			return nil, status.Error(codes.FailedPrecondition, "Space capability verification is not configured")
@@ -123,9 +138,15 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		// backend is still a perfectly good one-shot substrate, so the lease
 		// is granted and only the process RPCs are refused.
 		processesPermitted = verified.AllowsBackgroundProcesses()
+		// The audience the decision was signed under. Captured here for the
+		// same reason as the line above — this is the last point at which a
+		// Control decision is in hand — and it becomes the ceiling the human
+		// read path applies to every process this lease admits (0004).
+		grant.RecipientAudienceRevision = verified.RecipientAudienceRevision
 	}
+	grant.ProcessesPermitted = processesPermitted
 
-	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, processesPermitted, ttl)
+	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, grant, ttl)
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -137,6 +158,14 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		ExpiresAt: timestamppb.New(l.ExpiresAt),
 		BackendId: l.BackendID,
 		State:     l.State,
+		// Read back off the created lease, which is the same value every
+		// later process RPC checks: false for a non-Space lease (the local
+		// above is only ever set inside the Space branch), and otherwise
+		// whatever the verified decision allowed. Telling the host this here
+		// lets it refuse `process_start` with the real reason instead of
+		// preparing a spawn `RegisterProcess` would deny; that denial remains
+		// the authoritative one.
+		ProcessesPermitted: l.ProcessesPermitted,
 	}, nil
 }
 

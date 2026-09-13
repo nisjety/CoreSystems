@@ -149,6 +149,18 @@ message AcquireLeaseResponse {
 
   // Initial lifecycle state (always SCRATCH on a fresh acquire).
   SandboxLifecycleState state = 5;
+
+  // Whether this lease may host background processes: true only when the
+  // Space capability decision both claimed a process-capable backend and
+  // carried the `space:processes` permission Control grants on entitlement.
+  //
+  // Decided once at acquire and persisted on the lease row, because a later
+  // process RPC arrives on execution-core's own service token with no
+  // decision in hand. Reported back here so the host can refuse
+  // `process_start` with an honest reason instead of preparing a spawn that
+  // `RegisterProcess` will deny; the registry's own check remains the
+  // authoritative one. Always false for a non-Space lease.
+  bool processes_permitted = 6;
 }
 
 message ReleaseLeaseRequest {
@@ -561,6 +573,17 @@ message ListProcessesRequest {
   // Keyset cursor: the last process_id of the previous page. Ids are ULIDs, so
   // id order is creation order — the same shape ListRuns uses.
   string after_process_id = 4;
+
+  // Control decision reference for a HUMAN caller (S4.2 step 6). Ignored for a
+  // service principal, which is the producer of these records rather than a
+  // disclosure recipient.
+  string space_read_decision_ref = 5;
+
+  // The signed model.thread.read decision addressed to this service. It both
+  // admits the caller and carries the recipient-audience revision every row
+  // returned is filtered against, so it is required rather than optional for a
+  // user identity.
+  string space_read_decision_token = 6;
 }
 
 // One page of processes.
@@ -581,6 +604,17 @@ message ReadProcessOutputRequest {
   // Byte budget for this page; clamped by the server. A single chunk larger
   // than the budget is still returned, so a reader can never be wedged.
   int64 max_bytes = 3;
+
+  // Space the caller claims this process belongs to. Required for a human
+  // caller and checked against the process's own Space, because the read
+  // decision authorizes one Space and the process id alone names none.
+  string space_id = 4;
+
+  // Control decision reference for a human caller (S4.2 step 6).
+  string space_read_decision_ref = 5;
+
+  // The signed model.thread.read decision addressed to this service.
+  string space_read_decision_token = 6;
 }
 
 // One page of output.

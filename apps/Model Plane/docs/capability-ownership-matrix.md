@@ -64,6 +64,8 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 | Secret scrub / redaction | **execution-core** (`scrub.rs`) | — | called at output/error/checkpoint boundary | — | ✅ single owner (extend regexes — §5) |
 | Sandbox lease lifecycle | **sandbox-manager** (Go) | in-mem + Redis target | execution-core requests lease | — | ✅ owner; **no real isolation yet (gap §5)** |
 | Real OS isolation (bwrap/Landlock/seccomp/egress) | **execution-core** (NEW) + sandbox-manager (provisioning) | — | — | — | ❌ **GENUINE GAP** — nothing exists |
+| Background process registry (rows) | **sandbox-manager** (Go, `internal/process`) | Postgres (`sandbox_processes`, `sandbox_process_output`) | execution-core registers/appends; model-gateway `/v1/processes` reads for the Work tab | — | ✅ owner as of S4.2 (2026-09-13) |
+| Background process lifecycle (the OS process) | **execution-core** (`process_host.rs`) | — | spawns, supervises, signals; NEVER writes registry rows except through the RPCs | — | ✅ split is deliberate: sandbox-manager owns the ROWS, execution-core owns the PROCESS, and neither crosses |
 | Subagent spawn / message / coordinate | **orchestrator-core** (Temporal) | session-core lineage | execution-core `subagent/` = **exec**; gateway `coordinator.rs` TeamWorkerStore = **cache** | NATS | ⚠️ **CONSOLIDATE**: 3 locations → orchestrator owns lifecycle (see §4.1) |
 | Channels (Slack/Discord/…) / voice | **bridge-core** (Go) | session-core | gateway ingress | NATS | ✅ (`channel/`,`voice/` exist) |
 | IDE bridge / remote sessions | **bridge-core** (`session/`) | — | gateway WS | — | 🟡 partial; reuse Verevon JWT |

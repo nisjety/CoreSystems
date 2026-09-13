@@ -8,6 +8,7 @@ import (
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -64,6 +65,8 @@ type stubProcessStore struct {
 	listTerminal bool
 	listLimit    int32
 	listAfter    string
+	listCeiling  *process.AudienceCeiling
+	readCeiling  *process.AudienceCeiling
 	listResp     []process.Process
 	listHasMore  bool
 
@@ -136,13 +139,15 @@ func (s *stubProcessStore) Get(_ context.Context, orgID, processID string) (*pro
 	return &process.Process{ID: processID, OrgID: orgID, State: process.StateRunning}, nil
 }
 
-func (s *stubProcessStore) List(_ context.Context, orgID, spaceID string, includeTerminal bool, limit int32, afterID string) ([]process.Process, bool, error) {
+func (s *stubProcessStore) List(_ context.Context, orgID, spaceID string, includeTerminal bool, limit int32, afterID string, ceiling *process.AudienceCeiling) ([]process.Process, bool, error) {
 	s.listOrg, s.listSpace, s.listTerminal, s.listLimit, s.listAfter = orgID, spaceID, includeTerminal, limit, afterID
+	s.listCeiling = ceiling
 	return s.listResp, s.listHasMore, nil
 }
 
-func (s *stubProcessStore) ReadOutput(_ context.Context, orgID, processID string, afterSeq, maxBytes int64) (*process.OutputPage, error) {
+func (s *stubProcessStore) ReadOutput(_ context.Context, orgID, processID string, afterSeq, maxBytes int64, ceiling *process.AudienceCeiling) (*process.OutputPage, error) {
 	s.readOrg, s.readID, s.readSeq, s.readMax = orgID, processID, afterSeq, maxBytes
+	s.readCeiling = ceiling
 	if s.readErr != nil {
 		return nil, s.readErr
 	}
@@ -273,26 +278,64 @@ func TestProcessWritesRefuseAUserIdentity(t *testing.T) {
 	}
 }
 
-// TestProcessReadsRefuseAUserIdentityUntilStep6: admitting a user bearer
-// without a Space read decision would let any member of an organization read
-// any process's output in it. FailedPrecondition rather than PermissionDenied
-// because the missing piece is wiring, not the caller's authority.
-func TestProcessReadsRefuseAUserIdentityUntilStep6(t *testing.T) {
+// admittedReadServer is a user-principal server whose Space read verifier
+// always succeeds with the given ceiling — standing in for a Control decision
+// the authz package already tests for real.
+func admittedReadServer(store ProcessStore, revision int64) *Server {
+	return userServer(store).WithSpaceReadVerifier(
+		func(string, authz.SpaceReadExpectation) (authz.VerifiedSpaceRead, error) {
+			return authz.VerifiedSpaceRead{RecipientAudienceRevision: revision}, nil
+		},
+	)
+}
+
+// refusedReadServer is a user-principal server whose verifier always refuses,
+// standing in for an expired, mismatched or wrong-audience decision.
+func refusedReadServer(store ProcessStore) *Server {
+	return userServer(store).WithSpaceReadVerifier(
+		func(string, authz.SpaceReadExpectation) (authz.VerifiedSpaceRead, error) {
+			return authz.VerifiedSpaceRead{}, errors.New("decision does not authorize this read")
+		},
+	)
+}
+
+// TestProcessReadsRefuseAUserIdentityWithoutAConfiguredVerifier: an instance
+// with no Control key cannot tell an authorized reader from an unauthorized
+// one, so it serves neither. FailedPrecondition rather than PermissionDenied
+// because the missing piece is deployment wiring, not the caller's authority —
+// and the distinction matters to whoever has to debug it.
+func TestProcessReadsRefuseAUserIdentityWithoutAConfiguredVerifier(t *testing.T) {
 	t.Parallel()
 	store := &stubProcessStore{}
 	s := userServer(store)
 	ctx := context.Background()
 
-	if _, err := s.GetProcess(ctx, &GetProcessRequest{ProcessId: "proc-1"}); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("GetProcess code = %v, want FailedPrecondition", status.Code(err))
-	}
 	if _, err := s.ListProcesses(ctx, &ListProcessesRequest{SpaceId: "space-1"}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("ListProcesses code = %v, want FailedPrecondition", status.Code(err))
 	}
-	if _, err := s.ReadProcessOutput(ctx, &ReadProcessOutputRequest{ProcessId: "proc-1"}); status.Code(err) != codes.FailedPrecondition {
+	if _, err := s.ReadProcessOutput(ctx, &ReadProcessOutputRequest{ProcessId: "proc-1", SpaceId: "space-1"}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("ReadProcessOutput code = %v, want FailedPrecondition", status.Code(err))
 	}
-	if store.getOrg != "" || store.listOrg != "" || store.readOrg != "" {
+	if store.listOrg != "" || store.readOrg != "" {
+		t.Fatal("a refused read still reached the registry")
+	}
+}
+
+// TestGetProcessStaysServiceOnly: resolving one process by bare id is an
+// execution host's operation — it is how execution-core checks a
+// model-supplied id against its own Space before reading it. The human path
+// pages a Space's list, so admitting a user here would add an authority path
+// with no caller and the shape most useful for probing which ids exist.
+func TestGetProcessStaysServiceOnly(t *testing.T) {
+	t.Parallel()
+	store := &stubProcessStore{}
+	// Even fully configured for human reads, GetProcess refuses.
+	s := admittedReadServer(store, 4)
+
+	if _, err := s.GetProcess(context.Background(), &GetProcessRequest{ProcessId: "proc-1"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("GetProcess code = %v, want FailedPrecondition", status.Code(err))
+	}
+	if store.getOrg != "" {
 		t.Fatal("a refused read still reached the registry")
 	}
 }
@@ -693,5 +736,97 @@ func TestReleaseLeaseSucceedsEvenIfTerminatingItsProcessesFails(t *testing.T) {
 	}
 	if !released.GetReleased() {
 		t.Fatal("lease was not reported released")
+	}
+}
+
+// TestListProcessesAppliesTheReadersAudienceCeiling: the decision does not
+// merely admit the caller, it bounds what they see. A member holding a valid
+// decision must not read work recorded under an audience their decision
+// predates, which is the same rule Session Core applies to runs.
+func TestListProcessesAppliesTheReadersAudienceCeiling(t *testing.T) {
+	t.Parallel()
+	store := &stubProcessStore{}
+	s := admittedReadServer(store, 4)
+
+	if _, err := s.ListProcesses(context.Background(), &ListProcessesRequest{
+		SpaceId: "space-1", SpaceReadDecisionRef: "read-1", SpaceReadDecisionToken: "token",
+	}); err != nil {
+		t.Fatalf("ListProcesses: %v", err)
+	}
+	if store.listCeiling == nil {
+		t.Fatal("a human read reached the registry with no ceiling at all; every process in the Space would be returned")
+	}
+	if store.listCeiling.RecipientAudienceRevision != 4 {
+		t.Fatalf("ceiling = %d, want the decision's own revision 4", store.listCeiling.RecipientAudienceRevision)
+	}
+}
+
+// TestServiceReadsStayUnbounded: execution-core is not a disclosure recipient
+// — it is the thing that produced these records, and it applies its own Space
+// check before showing anything to a model. Giving it a ceiling it has no
+// decision to derive would break the model-facing tools for no gain.
+func TestServiceReadsStayUnbounded(t *testing.T) {
+	t.Parallel()
+	store := &stubProcessStore{}
+	s := testServerFor(NewMemoryLeaseStore(), NewMemorySnapshotStore(), authctx.Principal{
+		OrganizationID: "org-1", ActorID: "execution-core", PrincipalType: "service",
+	}).WithProcessStore(store)
+
+	if _, err := s.ListProcesses(context.Background(), &ListProcessesRequest{SpaceId: "space-1"}); err != nil {
+		t.Fatalf("ListProcesses: %v", err)
+	}
+	if store.listCeiling != nil {
+		t.Fatalf("a service read was bounded at %d; it has no decision to derive one from", store.listCeiling.RecipientAudienceRevision)
+	}
+}
+
+// TestProcessReadsRefuseARejectedDecision: PermissionDenied, and the registry
+// is never touched. An expired, mismatched, or wrong-audience decision is a
+// statement about the caller's authority, unlike the unconfigured case above.
+func TestProcessReadsRefuseARejectedDecision(t *testing.T) {
+	t.Parallel()
+	store := &stubProcessStore{}
+	s := refusedReadServer(store)
+	ctx := context.Background()
+
+	if _, err := s.ListProcesses(ctx, &ListProcessesRequest{
+		SpaceId: "space-1", SpaceReadDecisionRef: "read-1", SpaceReadDecisionToken: "token",
+	}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("ListProcesses code = %v, want PermissionDenied", status.Code(err))
+	}
+	if _, err := s.ReadProcessOutput(ctx, &ReadProcessOutputRequest{
+		ProcessId: "proc-1", SpaceId: "space-1", SpaceReadDecisionRef: "read-1", SpaceReadDecisionToken: "token",
+	}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("ReadProcessOutput code = %v, want PermissionDenied", status.Code(err))
+	}
+	if store.listOrg != "" || store.readOrg != "" {
+		t.Fatal("a refused read still reached the registry")
+	}
+}
+
+// TestReadProcessOutputRefusesAProcessOutsideTheDecisionsSpace: the decision
+// authorizes ONE Space and a process id names none, so the Space comes from
+// the request and the row is checked against it. Reading the Space off the row
+// and verifying the decision against THAT would let a caller present a
+// decision for a Space they belong to and have it checked against itself.
+//
+// NotFound rather than PermissionDenied on purpose: distinguishing "exists
+// elsewhere" from "does not exist" is exactly the probe this prevents.
+func TestReadProcessOutputRefusesAProcessOutsideTheDecisionsSpace(t *testing.T) {
+	t.Parallel()
+	store := &stubProcessStore{
+		getResp: &process.Process{ID: "proc-1", OrgID: "org-1", SpaceID: "other-space"},
+	}
+	s := admittedReadServer(store, 4)
+
+	_, err := s.ReadProcessOutput(context.Background(), &ReadProcessOutputRequest{
+		ProcessId: "proc-1", SpaceId: "space-1",
+		SpaceReadDecisionRef: "read-1", SpaceReadDecisionToken: "token",
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("code = %v, want NotFound — a different code tells the caller the id exists somewhere", status.Code(err))
+	}
+	if store.readOrg != "" {
+		t.Fatal("output was read for a process outside the decision's Space")
 	}
 }

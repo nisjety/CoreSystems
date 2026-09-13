@@ -183,3 +183,101 @@ func TestConversationTicketActionStartsUnavailableAndKeepsOwnerBoundFields(t *te
 		}
 	}
 }
+
+// 0015 seed: cap.process.background exists as its own low-risk row that starts
+// unavailable, and — unlike every capability before it — carries in the row
+// itself the fact that the capability is NOT the whole gate.
+//
+// That last part is why this test asserts more than the 0010 one it mirrors. A
+// `low` row for something that outlives its call reads permissive on its own,
+// and it is only defensible because a per-Space, deny-by-default authority sits
+// behind it. If that second gate is ever dropped, the honest response is to
+// re-argue the risk level — so the migration has to keep naming it, and this
+// test is what makes dropping it visible.
+func TestBackgroundProcessCapabilityStaysLowRiskBehindASecondGate(t *testing.T) {
+	t.Parallel()
+
+	const name = "0015_background_process_capability.up.sql"
+	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"'cap.process.background'",
+		"'process_start'",
+		"'low'",
+		"'global'",
+		"ARRAY['global']",
+		"ARRAY['execution-dispatch']",
+		"'execution-dispatch:cap.process.background:v1'",
+		"'unavailable'",
+		"'health_not_attested'",
+		"health_checked_at",
+		"ON CONFLICT (id) DO UPDATE SET",
+		"'migration:0015_background_process_capability'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+	if strings.Contains(sql, "availability_state = 'available'") {
+		t.Fatal("migration must not fabricate a live health attestation")
+	}
+	// The whole family maps to this one row, so the row has to say so. Five
+	// separate capabilities would make "may start but may not stop" reachable
+	// by operator error; if that decision is ever reversed, it should break
+	// here rather than ship as a silent posture change.
+	for _, member := range []string{
+		"'process_start'",
+		"'process_read'",
+		"'process_stdin'",
+		"'process_signal'",
+		"'process_list'",
+	} {
+		if !strings.Contains(sql, member) {
+			t.Fatalf("migration must declare the whole tool family, missing %q", member)
+		}
+	}
+	// The second gate, named in the row rather than only in a design doc.
+	// `space:processes` is granted by Control only to a Space carrying
+	// process_registry_entitled (user-core migration 028, default FALSE), and
+	// sandbox-manager refuses every process RPC on a lease that did not get it.
+	if !strings.Contains(sql, "'space:processes'") {
+		t.Fatal("migration must record the per-Space authority this capability still requires")
+	}
+	// risk_level='low' is inherited from cap.command.sandbox's constraints plus
+	// bounds on the two axes this capability widens. Losing any of them means
+	// the classification has to be re-argued, not silently kept.
+	for _, constraint := range []string{
+		"read-only root filesystem",
+		"networking disabled",
+		"secret-scrubbed",
+		"never a named host command",
+		"TTL-bounded",
+		"count-limited concurrency",
+	} {
+		if !strings.Contains(sql, constraint) {
+			t.Fatalf("migration must justify risk_level='low' with %q", constraint)
+		}
+	}
+	// Re-running the entrypoint must not clobber a live attestation.
+	upsert := sql[strings.Index(sql, "ON CONFLICT (id) DO UPDATE SET"):]
+	for _, forbidden := range []string{
+		"availability_state = EXCLUDED",
+		"availability_reason_code = EXCLUDED",
+		"execution_mode = EXCLUDED",
+		"health_checked_at = EXCLUDED",
+	} {
+		if strings.Contains(upsert, forbidden) {
+			t.Fatalf("upsert must not overwrite a live attestation via %q", forbidden)
+		}
+	}
+	// Registering a new capability must not reach into the 0008/0010 rows —
+	// cap.command.shell's high-risk gate above all.
+	for _, forbidden := range []string{"UPDATE capabilities", "DELETE FROM capabilities"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("migration must not mutate existing capability rows via %q", forbidden)
+		}
+	}
+}

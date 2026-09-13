@@ -750,6 +750,22 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // capability-core governs it as a LOW-risk capability while arbitrary
         // host commands stay behind the high-risk shell capability.
         "code_interpreter" => "cap.command.sandbox",
+        // The S4.2 background-process family, all five names on ONE capability
+        // because they are one authority over one object: a caller that may
+        // start a process may read what it printed, feed it stdin, stop it,
+        // and list its own Space's processes. Five ids would make "may start
+        // but may not stop" reachable by operator error.
+        //
+        // `cap.process.background` is seeded LOW by capability-core's
+        // migration 0015 for the same reasons `cap.command.sandbox` above is:
+        // same code-body-only sandbox, same read-only rootfs, same disabled
+        // network. What it adds is bounded on both axes — a TTL that never
+        // outlives the lease, and a count-limited number of them. The
+        // capability is not the whole gate either: the lease must separately
+        // carry `space:processes`, which Control grants only to an entitled
+        // Space.
+        "process_start" | "process_read" | "process_stdin" | "process_signal"
+        | "process_list" => "cap.process.background",
         // The granular MCP facade never creates raw browser authority. It is
         // governed by the same browser capability as the agent loop, while
         // BrowserBroker separately binds its opaque run grant.

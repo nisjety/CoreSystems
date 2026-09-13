@@ -6,6 +6,7 @@ import (
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
 	"go.opentelemetry.io/otel/attribute"
@@ -17,15 +18,24 @@ import (
 
 // S4.2 background process registry handlers (design doc §5).
 //
-// Every one of these is service-principal only today. For the four write
-// RPCs that is permanent: the "caller" is always execution-core's own host,
-// reporting what an OS process it owns actually did, and a user bearer has
-// no business asserting any of it. For the three reads it is temporary —
-// step 6 admits a human by requiring the Control-signed model.thread.read
-// decision the Work tab already obtains, verified here the way session-core
-// verifies it for ListRuns. Until that exists, admitting a user bearer would
-// mean any member of an organization could read any process's output in it,
-// so this fails closed instead.
+// The four WRITE RPCs are service-principal only, permanently: the "caller"
+// is always execution-core's own host reporting what an OS process it owns
+// actually did, and a user bearer has no business asserting any of it.
+//
+// Two of the three reads — ListProcesses and ReadProcessOutput — admit a human
+// as of S4.2 step 6, but only behind a Control-signed model.thread.read
+// decision addressed to this service, verified here the way session-core
+// verifies its own for ListRuns. The decision is not merely an admission
+// ticket: it carries the recipient-audience revision every returned row is
+// filtered against, so a member cannot read work recorded under an audience
+// their current decision does not cover.
+//
+// GetProcess stays service-only, and that is a decision rather than an
+// oversight. It resolves one process by id, which is what execution-core needs
+// to check a model-named id against its own Space before reading it. The human
+// path pages a Space's list and reads output; nothing in it resolves a bare
+// id, so admitting a human here would add an authority path with no caller —
+// and the one shape most useful for probing which ids exist.
 
 // requireProcessHost admits only a service principal. Used by the four RPCs
 // a host calls about its own processes.
@@ -37,15 +47,48 @@ func requireProcessHost(principal authctx.Principal) error {
 	return nil
 }
 
-// requireProcessReader admits only a service principal, for now. See the
-// package comment above: step 6 replaces this with Space read-decision
-// verification rather than simply dropping it.
-func requireProcessReader(principal authctx.Principal) error {
+// requireProcessHostRead admits only a service principal. Used by GetProcess,
+// which has no human caller — see the package comment.
+func requireProcessHostRead(principal authctx.Principal) error {
 	if principal.PrincipalType == "user" {
 		return status.Error(codes.FailedPrecondition,
-			"reading the process registry with a user identity requires a Space read decision, which is not wired yet")
+			"resolving a single process by id is an execution host's operation; a human reads a Space's processes through ListProcesses")
 	}
 	return nil
+}
+
+// resolveReadCeiling decides what a caller may see.
+//
+// A service principal reads unbounded, because it is not a disclosure
+// recipient: execution-core is the thing that PRODUCED the record, and it
+// applies its own Space check before showing anything to a model
+// (execution-core's process_tools). A human reads under the audience ceiling
+// carried by their own decision, and only with one.
+//
+// A user principal that supplies no decision is refused rather than silently
+// downgraded to an empty result — "you did not bring authority" and "there is
+// nothing here" are different answers and a caller acts differently on each.
+func (s *Server) resolveReadCeiling(
+	principal authctx.Principal, spaceID, decisionRef, decisionToken string,
+) (*process.AudienceCeiling, error) {
+	if principal.PrincipalType != "user" {
+		return nil, nil
+	}
+	if s.spaceReadVerify == nil {
+		return nil, status.Error(codes.FailedPrecondition, "Space read decision verification is not configured")
+	}
+	verified, err := s.spaceReadVerify(decisionToken, authz.SpaceReadExpectation{
+		OrgID:       principal.OrganizationID,
+		SpaceRef:    spaceID,
+		SubjectID:   principal.ActorID,
+		DecisionRef: decisionRef,
+		Now:         time.Now().UTC(),
+	})
+	if err != nil {
+		processDecision(context.Background(), "read_decision_denied")
+		return nil, status.Error(codes.PermissionDenied, err.Error())
+	}
+	return &process.AudienceCeiling{RecipientAudienceRevision: verified.RecipientAudienceRevision}, nil
 }
 
 // processStore returns the configured registry, or an error explaining that
@@ -251,7 +294,7 @@ func (s *Server) GetProcess(ctx context.Context, req *GetProcessRequest) (*GetPr
 	if err != nil {
 		return nil, err
 	}
-	if err := requireProcessReader(principal); err != nil {
+	if err := requireProcessHostRead(principal); err != nil {
 		return nil, err
 	}
 	store, err := s.processStore()
@@ -275,9 +318,6 @@ func (s *Server) ListProcesses(ctx context.Context, req *ListProcessesRequest) (
 	if err != nil {
 		return nil, err
 	}
-	if err := requireProcessReader(principal); err != nil {
-		return nil, err
-	}
 	store, err := s.processStore()
 	if err != nil {
 		return nil, err
@@ -285,8 +325,13 @@ func (s *Server) ListProcesses(ctx context.Context, req *ListProcessesRequest) (
 	if req.GetSpaceId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "space_id is required")
 	}
+	ceiling, err := s.resolveReadCeiling(principal, req.GetSpaceId(),
+		req.GetSpaceReadDecisionRef(), req.GetSpaceReadDecisionToken())
+	if err != nil {
+		return nil, err
+	}
 	found, hasMore, err := store.List(ctx, principal.OrganizationID, req.GetSpaceId(),
-		req.GetIncludeTerminal(), req.GetLimit(), req.GetAfterProcessId())
+		req.GetIncludeTerminal(), req.GetLimit(), req.GetAfterProcessId(), ceiling)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -304,9 +349,6 @@ func (s *Server) ReadProcessOutput(ctx context.Context, req *ReadProcessOutputRe
 	if err != nil {
 		return nil, err
 	}
-	if err := requireProcessReader(principal); err != nil {
-		return nil, err
-	}
 	store, err := s.processStore()
 	if err != nil {
 		return nil, err
@@ -314,7 +356,29 @@ func (s *Server) ReadProcessOutput(ctx context.Context, req *ReadProcessOutputRe
 	if req.GetProcessId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "process_id is required")
 	}
-	page, err := store.ReadOutput(ctx, principal.OrganizationID, req.GetProcessId(), req.GetAfterSeq(), req.GetMaxBytes())
+	// The Space comes from the REQUEST, and the store then refuses any process
+	// whose own Space does not match what the decision covers. Reading the
+	// Space off the process row first and verifying the decision against that
+	// would let a caller present a decision for Space A and have it checked
+	// against Space B — the verifier would compare the token to whatever the
+	// row said and pass.
+	ceiling, err := s.resolveReadCeiling(principal, req.GetSpaceId(),
+		req.GetSpaceReadDecisionRef(), req.GetSpaceReadDecisionToken())
+	if err != nil {
+		return nil, err
+	}
+	if principal.PrincipalType == "user" {
+		resolved, getErr := store.Get(ctx, principal.OrganizationID, req.GetProcessId())
+		if getErr != nil {
+			return nil, mapErr(getErr)
+		}
+		if resolved.SpaceID != req.GetSpaceId() {
+			// Not found, not forbidden: telling a caller that the id exists in
+			// a different Space is the disclosure this check exists to stop.
+			return nil, mapErr(process.ErrProcessNotFound)
+		}
+	}
+	page, err := store.ReadOutput(ctx, principal.OrganizationID, req.GetProcessId(), req.GetAfterSeq(), req.GetMaxBytes(), ceiling)
 	if err != nil {
 		return nil, mapErr(err)
 	}

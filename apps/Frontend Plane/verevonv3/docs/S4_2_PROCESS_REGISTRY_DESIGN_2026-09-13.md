@@ -955,12 +955,125 @@ the step that needs it — the S3.2/S3.3 precedent.
      absent.
 5. **Tools + capability** (§6): `cap.process.background` (migration `0015`,
    allowlist, seed, attestation), dispatch arms, offering, contract test,
-   ZDR gate. First point at which a model can start a process.
+   ZDR gate. First point at which a model can start a process. **DONE
+   2026-09-13.** What differed from this list, and why:
+   - **The five tools live in their own module, `process_tools.rs`**, rather
+     than as five arms of `execute_step_inner`. The dispatch stays one branch;
+     what the branch calls is a module that owns the family's JSON contract,
+     its authority checks, and its output shape — the same separation
+     `code_interpreter` and `ticket_tools` already have.
+   - **The Space check is in execution-core, and it is the load-bearing one.**
+     Every call this module makes to sandbox-manager travels on execution-core's
+     own service token, which is ORG-WIDE: the registry will resolve any
+     process id in the organization for it. So `process_read`, `process_stdin`
+     and `process_signal` resolve the row first and refuse unless its
+     `space_id` equals the run's own. Without that, a model naming an
+     arbitrary ULID could read another Space's output — and nothing in
+     sandbox-manager would have refused it, because the caller genuinely is
+     the service that owns the registry. `process_list` needs no such check:
+     the Space is a parameter of the RPC rather than a property of the answer,
+     and the id comes from the run, not the model.
+   - **The refusal for an unknown id and for another Space's id is
+     identical.** Distinguishing them would make the tool an oracle for which
+     ULIDs exist in the organization, which is the same leak the check closes.
+   - **`AcquireLeaseResponse` gained `processes_permitted`.** The design had
+     the host read it "on the cached `SandboxLease`", but nothing put it
+     there — the field existed only on the Go row. Now the lease response
+     carries it and `state::SandboxLease` caches it, so `process_start`
+     refuses with the real reason ("this Space was not granted
+     `space:processes`") instead of preparing a spawn `RegisterProcess` would
+     deny. The registry's refusal stays authoritative; this one is for the
+     model's benefit.
+   - **`offered_tool_defs` stayed unconditional; the family is a separate
+     `process_tool_defs`** appended only for a Space-scoped run on a host with
+     the flag set. These are the only conditional tools in the loop, and the
+     conditional set is exactly the thing worth naming in a test — all three
+     contract tests (advertised → bound → seeded → attested) iterate both, so
+     the family gets the same chain everything else does. A conditional tool
+     with a missing binding would otherwise surface in production for a subset
+     of deployments and never in a default one.
+   - **`cap.process.background` is attested only when the host is ENABLED.**
+     The other capabilities in that allowlist are attested on a probe of a
+     dependency; this one adds a property of the deployment, because every
+     execution-core can run bubblewrap but only an opted-in one can keep a
+     process alive past the call. The same flag decides what the capability
+     profile advertises, so the profile Control signs and the capability row's
+     health say the same thing about the same instance.
+   - **No `is_risky_tool` entry, deliberately.** None of the five names trips
+     the substring gate, and a test asserts that — `process_stdin` is not
+     `process_write` for exactly this reason. Leaving the family out of the
+     risky list is the same call 0010 made for `code_interpreter`: a
+     background process is that sandbox with a clock on it, and putting an
+     approval prompt in front of every line fed to a process the same human
+     approved starting is the approval-fatigue failure, not a safeguard.
+   - **No ZDR gate was added, and that needs stating rather than passing
+     over.** The design listed one. `process_start` writes no durable content
+     of its own beyond output the registry retains, and the ZDR posture for
+     that retention is the same question as the workspace's — which S3.3
+     already answers at the lease. A gate here would have been a second,
+     narrower answer to a question already answered elsewhere. If that
+     reading is wrong, the fix belongs at `RegisterProcess` where the Space is
+     known, not in the tool.
 6. **Human read path** (§7): Control audience parameter, sandbox-manager
    read verifier, model-gateway `/v1/processes`, V3 `/work` `processes`
    section, frontend adapter — read-only. This is S4.5's consumption of S4.2
    and may be tracked there; it is specified here so the registry's read
-   API is shaped for it from step 2, not retrofitted.
+   API is shaped for it from step 2, not retrofitted. **DONE 2026-09-13.**
+   What differed from this list, and why:
+   - **The default audience is `model-plane`, not
+     `model-plane-session-core`.** This doc named the latter; the live
+     constant is the former, and Session Core's verifier pins it. Renaming
+     would have invalidated every decision in flight for a cosmetic gain, so
+     the vocabulary is `{"model-plane" (default),
+     "model-plane-sandbox-manager"}` and a test asserts the literal.
+   - **The audience is NOT a payload-digest input.** Adding it would change
+     the digest for every existing Session Core decision, which that service
+     recomputes independently and would then reject. The audience is a signed
+     field of the decision, so a tampered one fails the signature before any
+     digest is recomputed — a formula two services must agree on is not the
+     place to record something the signature already covers.
+   - **The `/work` request mints TWO decisions, not one.** Each recipient's
+     verifier pins its own audience, so a decision Session Core accepts is
+     refused by sandbox-manager and vice versa. That is the point — a token
+     leaked from one path cannot be replayed against the other — and the cost
+     is one extra Control call on a page that already makes several.
+   - **The audience ceiling needed a migration, and this resolves the open
+     question narrowly.** `sandbox-manager/migrations/0004` adds
+     `recipient_audience_revision` to `leases` and to `sandbox_processes`; the
+     lease captures it at `AcquireLease` (the last point at which a Control
+     decision is in hand) and every process inherits it through the same join
+     that already gives it its Space. Only this one revision, not the whole
+     `Permissions` list and all five revisions the open question offered: it
+     is the only value §7's read path consumes, and a column nothing reads is
+     a column that drifts out of meaning.
+   - **The ceiling is a POINTER, not an int64.** Zero is a real and different
+     answer from absent, and a decision whose revision parsed as zero must
+     never be silently promoted to "unbounded". The verifier refuses such a
+     decision outright; the type makes bypassing that impossible by
+     forgetting a check. A service principal reads unbounded because it is
+     not a disclosure recipient — it is the thing that produced the record.
+   - **The ceiling is folded into the SQL, not applied after the fact.**
+     Filtering in Go would let a page fill with rows the reader may not see
+     and then return fewer than `limit`, which a caller reads as "end of
+     list" rather than "some were withheld". Session Core puts the same
+     predicate in its own SELECT.
+   - **`GetProcess` stays service-only**, where the design implied all three
+     reads would admit a human. It resolves one process by bare id, which is
+     what execution-core needs for its own Space check; the human path pages a
+     list and reads output. Admitting a human would add an authority path with
+     no caller — and the one shape most useful for probing which ids exist.
+   - **`ReadProcessOutput` gained a `space_id`.** A process id names no Space,
+     and the decision authorizes exactly one. Reading the Space off the row
+     and verifying the decision against THAT would let a caller present a
+     decision for a Space they belong to and have it checked against itself.
+     So the Space comes from the request and the row is checked against it,
+     refused as NOT FOUND rather than forbidden.
+   - **The processes section follows the SCHEDULES precedent, as specified,
+     and it matters:** a missing credential degrades to a gap row rather than
+     taking the whole Work tab down the way the runs section's 503 would.
+   - **Read-only in the room, as specified.** No `ActionDescriptor`s, no
+     signal or stdin controls. The audit's own framing stands — writes
+     against work the room may not own is a separate authority question.
 
 ## Non-goals
 

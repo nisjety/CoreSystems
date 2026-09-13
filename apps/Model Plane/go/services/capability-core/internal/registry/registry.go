@@ -81,6 +81,41 @@ func (staticSeedSource) Load() ([]*models.Capability, error) {
 		// scope) — that divergence between seed and migration is pre-existing
 		// and deliberate on both sides.
 		{ID: "cap.command.sandbox", Name: "Sandboxed Code Execution", Kind: models.KindCommand, Version: "1.0.0", Description: "Run a code body in a hermetic per-call sandbox: read-only root filesystem, networking disabled, wall-clock timeout, throwaway workspace discarded after the call, and secret-scrubbed output. Cannot execute a named host command and cannot persist between calls.", RiskLevel: models.RiskLow, LazyLoad: true, Scope: "workspace", Enabled: true, IdempotencyKey: idempotencyPrefix + "cap.command.sandbox", OrgID: "triodelab", EnabledForScopes: []string{"workspace"}},
+		// cap.process.background is the S4.2 background-process family
+		// (process_start/read/stdin/signal/list), and it is RiskLow for the
+		// same reasons the row directly above is — not as a separate judgement
+		// call. A background process runs the same code body, never a named
+		// host command, under the same bubblewrap argv: read-only root
+		// filesystem, networking disabled, secret-scrubbed output, no path to
+		// a host command.
+		//
+		// What it adds over cap.command.sandbox is bounded on both axes it
+		// widens: duration (a TTL of at most an hour, and never past the
+		// owning lease's own expiry) and concurrency (a registry-enforced
+		// count limit per Space). Its workspace is the Space's hydrated
+		// workspace rather than a per-call throwaway, which is more
+		// persistence but strictly less reach — it still cannot touch the
+		// image.
+		//
+		// The capability is deliberately NOT the only gate, which is what
+		// makes RiskLow safe to state plainly: a call also needs a Space lease
+		// whose processes_permitted column is true, and sandbox-manager sets
+		// that only from a Control decision carrying `space:processes`, which
+		// Control grants only to a Space explicitly entitled to it. This row
+		// governs whether the tool loop can reach the family at all; per-Space
+		// authority is a separate deny-by-default decision.
+		//
+		// One row for five dispatch names on purpose: they are one authority
+		// over one object. "May start but may not stop" is not a posture
+		// anyone wants, and five rows is what makes it reachable by accident.
+		//
+		// Kind and scope mirror cap.command.sandbox's declaration here. The
+		// durable row is seeded by
+		// migrations/0015_background_process_capability.up.sql, which mirrors
+		// the live cap.command.sandbox row instead (kind 'tool', global scope)
+		// — that divergence between seed and migration is pre-existing and
+		// deliberate on both sides.
+		{ID: "cap.process.background", Name: "Background Process", Kind: models.KindCommand, Version: "1.0.0", Description: "Start and manage a background process in a Space's hydrated sandbox workspace: read-only root filesystem, networking disabled, TTL-bounded lifetime that never outlives the lease, count-limited concurrency, and secret-scrubbed durable output. Accepts a code body, never a named host command, and requires a Space lease Control separately granted background-process authority.", RiskLevel: models.RiskLow, LazyLoad: true, Scope: "workspace", Enabled: true, IdempotencyKey: idempotencyPrefix + "cap.process.background", OrgID: "triodelab", EnabledForScopes: []string{"workspace"}},
 	}, nil
 }
 
