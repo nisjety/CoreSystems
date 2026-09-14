@@ -224,3 +224,52 @@ func TestValidateEmissionClosesItsVocabularies(t *testing.T) {
 		}
 	}
 }
+
+// A chunk is a flush of MANY lines, so several matching lines commonly share
+// one cursor — and the event key is (watch_id, cursor_value, kind). Emitting
+// one event per line would make the second collide with the first and be
+// silently dropped by ON CONFLICT DO NOTHING, which loses a match rather than
+// deduplicating a replay.
+//
+// This is the constraint step 2's adapter made concrete: it attributes every
+// line to its chunk's seq, which is exactly when the collision becomes
+// reachable.
+func TestAtMostOneMatchEventPerCursorPosition(t *testing.T) {
+	t.Parallel()
+	w := activeWatch(Predicate{Kind: PredicateContains, Value: "ERROR"}, TriggerContinuous, 0)
+	events, _ := testSweeper().decide(w, PollResult{
+		Cursor: 7,
+		Lines: []Line{
+			// Three matching lines, all from the same flush.
+			{Cursor: 7, Text: "ERROR: first"},
+			{Cursor: 7, Text: "ERROR: second"},
+			{Cursor: 7, Text: "ERROR: third"},
+		},
+	})
+	if len(events) != 1 {
+		t.Fatalf("emitted %d events at one cursor; all but the first would be silently dropped by the unique index", len(events))
+	}
+	if events[0].Summary != "ERROR: first" {
+		t.Fatalf("the event names %q, want the first matching line", events[0].Summary)
+	}
+}
+
+// Distinct cursors are distinct events, so a continuous watch still reports
+// every chunk that matched.
+func TestMatchesAtDifferentCursorsAreSeparateEvents(t *testing.T) {
+	t.Parallel()
+	w := activeWatch(Predicate{Kind: PredicateContains, Value: "ERROR"}, TriggerContinuous, 0)
+	events, _ := testSweeper().decide(w, PollResult{
+		Cursor: 9,
+		Lines: []Line{
+			{Cursor: 7, Text: "ERROR: first flush"},
+			{Cursor: 9, Text: "ERROR: second flush"},
+		},
+	})
+	if len(events) != 2 {
+		t.Fatalf("emitted %d events, want one per chunk", len(events))
+	}
+	if events[0].Cursor == events[1].Cursor {
+		t.Fatal("two events share a cursor; the unique index would drop one")
+	}
+}

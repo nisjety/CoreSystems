@@ -30,12 +30,14 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
+	"github.com/triodelab/model-plane/services/capability-core/internal/processwatch"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
 	"github.com/triodelab/model-plane/services/capability-core/internal/runwatch"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
+	"github.com/triodelab/model-plane/services/capability-core/internal/watch"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -309,6 +311,36 @@ func main() {
 		} else {
 			go cron.NewSweeper(pool, cronAuthorizer).Start(ctx)
 			slog.Info("cron sweeper started with fresh Control authorization")
+		}
+	}
+
+	// Watch sweeper (S4.3): claims due space_watches, polls each one's source
+	// adapter, and commits what it saw. Single-flight across replicas via the
+	// same FOR UPDATE SKIP LOCKED claim the cron sweeper uses — except the claim
+	// commits BEFORE the poll, so no transaction is held open across an RPC.
+	//
+	// Started only when the process-output adapter can be built, because that is
+	// the only source this binary knows: a sweeper with no adapters claims rows
+	// and backs every one of them off, which is cost without work.
+	//
+	// It cannot emit anything yet regardless. Step 3 supplies the Reauthorizer,
+	// and until it does the sweeper REFUSES to observe — the record is not the
+	// authority, and a poll without a fresh authority check is the one thing
+	// this loop must never do. There is also no create path yet, so there are no
+	// rows to claim in the first place.
+	if os.Getenv("WATCH_SWEEPER_ENABLED") != "false" {
+		if adapters, adapterErr := processWatchAdaptersFromEnv(os.Getenv); adapterErr != nil {
+			slog.Warn("watch sweeper not started; the process-output source is unavailable", "error", adapterErr)
+		} else if watchStore, storeErr := watch.NewStore(pool); storeErr != nil {
+			slog.Warn("watch sweeper not started", "error", storeErr)
+		} else if sweeper, sweepErr := watch.NewSweeper(watchStore, adapters, nil); sweepErr != nil {
+			slog.Warn("watch sweeper not started", "error", sweepErr)
+		} else {
+			go sweeper.Run(ctx)
+			slog.Info("watch sweeper started",
+				"sources", len(adapters),
+				"observing", false,
+				"reason", "a reauthorizer is required before any watch may observe (S4.3 step 3)")
 		}
 	}
 
@@ -804,6 +836,40 @@ func newBackendCredential(backend, tokenEnv string, scopes []string, reason stri
 
 // dialOption returns the unary interceptor that authenticates every outbound RPC
 // on the connection.
+// processWatchAdaptersFromEnv builds the S4.3 source adapters this binary can
+// serve.
+//
+// Today that is exactly one: background process output, read from
+// sandbox-manager's registry. It needs a gRPC target and capability-core's own
+// `aud=sandbox-manager` credential — which Auth Core will only issue if
+// capability-core's entry in plane-service-principals.json grants that audience
+// with `sandbox:read`. That grant is part of S4.3 step 2; without it every poll
+// is refused at sandbox-manager's interceptor, and the error says so.
+func processWatchAdaptersFromEnv(getenv func(string) string) (watch.AdapterSet, error) {
+	target := strings.TrimSpace(getenv("SANDBOX_MANAGER_GRPC_ADDR"))
+	if target == "" {
+		return nil, fmt.Errorf("SANDBOX_MANAGER_GRPC_ADDR is required to watch process output")
+	}
+	serviceID := strings.TrimSpace(getenv("CAPABILITY_CORE_SERVICE_ID"))
+	if serviceID == "" {
+		serviceID = "capability-core"
+	}
+	tokens, err := processwatch.NewAuthCoreTokens(
+		getenv("AUTH_CORE_URL"), serviceID, getenv("CAPABILITY_CORE_SERVICE_API_KEY"), nil)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("dial sandbox-manager: %w", err)
+	}
+	adapter, err := processwatch.NewAdapter(mpv1.NewSandboxManagerClient(conn), tokens)
+	if err != nil {
+		return nil, err
+	}
+	return watch.NewAdapterSet(adapter)
+}
+
 func (b *backendCredential) dialOption() grpc.DialOption {
 	return grpc.WithChainUnaryInterceptor(b.intercept)
 }

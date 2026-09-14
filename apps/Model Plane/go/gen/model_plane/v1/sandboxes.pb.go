@@ -1347,9 +1347,23 @@ type Process struct {
 	// When the row was created.
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,28,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// When the row last changed.
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,29,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,29,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// The Space's recipient-audience revision this process's lease was granted
+	// under (migration 0004), inherited through the same join that gives the row
+	// its Space.
+	//
+	// Exposed because sandbox-manager is not the only reader that has to apply
+	// the ceiling. Its own human read path filters on this column internally, but
+	// S4.3's watch sweeper resolves a process through GetProcess on a service
+	// credential and must refuse to surface content recorded under an audience
+	// its watch's own decision predates. A ceiling that only one reader can see
+	// is a ceiling the next reader silently does not have.
+	//
+	// Zero means "recorded before the ceiling existed", which reads as visible —
+	// the same meaning Session Core gives a NULL revision on a thread.
+	RecipientAudienceRevision int64 `protobuf:"varint,30,opt,name=recipient_audience_revision,json=recipientAudienceRevision,proto3" json:"recipient_audience_revision,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *Process) Reset() {
@@ -1583,6 +1597,13 @@ func (x *Process) GetUpdatedAt() *timestamppb.Timestamp {
 		return x.UpdatedAt
 	}
 	return nil
+}
+
+func (x *Process) GetRecipientAudienceRevision() int64 {
+	if x != nil {
+		return x.RecipientAudienceRevision
+	}
+	return 0
 }
 
 // One append-only slice of a process's output.
@@ -2954,7 +2975,8 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"?\n" +
 	"\x0fRedactedCommand\x12\x18\n" +
 	"\aprogram\x18\x01 \x01(\tR\aprogram\x12\x12\n" +
-	"\x04args\x18\x02 \x03(\tR\x04args\"\xdc\t\n" +
+	"\x04args\x18\x02 \x03(\tR\x04args\"\x9c\n" +
+	"\n" +
 	"\aProcess\x12\x1d\n" +
 	"\n" +
 	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x15\n" +
@@ -2996,7 +3018,8 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x1c \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\x1d \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAtB\f\n" +
+	"updated_at\x18\x1d \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12>\n" +
+	"\x1brecipient_audience_revision\x18\x1e \x01(\x03R\x19recipientAudienceRevisionB\f\n" +
 	"\n" +
 	"_exit_code\"\xe0\x01\n" +
 	"\x12ProcessOutputChunk\x12\x10\n" +

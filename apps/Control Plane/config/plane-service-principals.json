@@ -2,21 +2,24 @@
   "capability-core": {
     "allowAnyOrg": true,
     "audiences": [
-      "session-core",
       "inference-core",
-      "orchestrator-core"
+      "orchestrator-core",
+      "sandbox-manager",
+      "session-core"
     ],
     "consumerEnv": "CAPABILITY_CORE_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
       "inference-core": "zdr",
       "orchestrator-core": "persistent",
+      "sandbox-manager": "persistent",
       "session-core": "persistent"
     },
     "scopes": [
       "inference:invoke",
       "orchestration:workflow:start",
       "orchestration:workflow:start:global",
+      "sandbox:read",
       "session:read",
       "session:skills:write"
     ],
@@ -27,6 +30,9 @@
       "orchestrator-core": [
         "orchestration:workflow:start",
         "orchestration:workflow:start:global"
+      ],
+      "sandbox-manager": [
+        "sandbox:read"
       ],
       "session-core": [
         "session:read",

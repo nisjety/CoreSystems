@@ -3223,3 +3223,110 @@ The migration was separately proven to apply, re-apply idempotently, and
 actually refuse each of the twelve things its constraints claim to refuse.
 
 Full detail: design doc §3 and §9 step 1.
+
+## S4.3 step 2 implemented — the process-output adapter, and a ceiling only one reader could see (2026-09-14)
+
+**State:** `implemented` (design doc §7, §9 step 2). `capability-core/internal/processwatch`, the service-principal grant, and one proto field. The sweeper is wired and still cannot observe anything: step 3 supplies the reauthorizer, and until it does the loop refuses.
+
+**S4.2 exposed a ceiling it could not share.** Step 6 put
+`recipient_audience_revision` on the process row and enforced it INSIDE
+sandbox-manager's own read path — but never put it on the wire. The watch
+sweeper resolves a process through `GetProcess` on a service credential and has
+to refuse content recorded under an audience its watch's decision predates;
+without the field that refusal was not expressible at all.
+
+A ceiling only one reader can see is a ceiling the next reader silently does not
+have. `Process` now carries it, and the field's own doc comment says why it is
+exposed rather than internal, so the next service to read the registry finds the
+rule instead of rediscovering the gap.
+
+**The deployment dependency §8.1 named is in this commit, not in a runbook.**
+capability-core's entry in `plane-service-principals.json` now grants the
+`sandbox-manager` audience with `sandbox:read` and `persistent` retention.
+`sandbox:read` ONLY — the sweeper never writes to the registry, and
+`sandbox:write` would let a bug in a poller move a process's state. The token
+provider's failure message names that file, because a 403 from Auth Core reads
+as a sandbox-manager problem and is not one. Still owed, and said plainly rather
+than treated as done: a real token minted and presented end to end. No Go unit
+test can see that file.
+
+**At most ONE match event per cursor position — a correctness requirement, not
+a throttle.** A chunk is a flush of many lines, so several matching lines
+commonly share one seq, and the event key is `(watch_id, cursor_value, kind)`.
+One event per line makes the second collide with the first and be silently
+dropped by `ON CONFLICT DO NOTHING` — which LOSES a match rather than
+deduplicating a replay, and loses it in the direction nobody notices. Step 1
+could not see this; attributing lines to chunk seqs is what made it reachable,
+which is the argument for building the adapter before trusting the core.
+
+**The committed cursor waits for EVERY stream to be clean.** stdout and stderr
+interleave in one seq sequence, so a stderr fragment opened at seq 1 holds the
+cursor at 0 even while stdout advances — because chunks at or below the cursor
+are never re-read and the fragment's continuation arrives later. Fragments are
+tracked per stream for a sharper reason: joining a stdout fragment to a stderr
+chunk would fabricate a line neither stream ever emitted, and with a `contains`
+predicate could manufacture a match out of two innocent halves.
+
+**A `system` chunk is consumed but never surfaced.** S4.2's registry writes its
+own "host lost" marker on that stream. An `any` watch firing on it would report
+the REGISTRY as the thing that spoke, and a `contains` watch could be matched by
+text the process never wrote — payload and owner metadata swapping places, which
+is the failure the trust column exists to prevent, arriving through a door the
+trust column does not cover. The cursor still advances past the marker so it
+cannot stall a watch, and nothing is lost: what it means is already carried by
+the process's state.
+
+**A terminal process is only DRAINED once a read comes back empty.** Reporting
+terminal while output remains ends the watch before its last lines, which is
+exactly where a failing build says why it failed.
+
+**An unterminated fragment is cut at 64 KiB.** Without a bound a program writing
+megabytes with no newline stalls the cursor forever — the watch never consumes
+anything and never progresses. S4.2's host already made the same compromise on
+the writing side and recorded the residual risk; this is the reader's half.
+
+**`ErrSourceGone` moved into the core**, because the sweeper acts on it and the
+core cannot import an adapter. It is the ONLY adapter error that ends a watch:
+everything else backs off, because terminating on an unreachable service would
+silently cancel a person's watch over an outage. The two conditions it covers —
+"no such process" and "a process in another Space" — are one indistinguishable
+error, so a watch cannot become an oracle for which ids exist in an
+organization.
+
+**A missing reauthorizer now REFUSES rather than skips**, correcting step 1.
+That code checked `authz != nil` and fell through to observing when it was —
+the kind of default that ships and is then forgotten, and what it defaults past
+is the check that stops a watch created weeks ago under a membership since
+revoked. The sweeper is wired into `cmd/main.go` in this step and, correctly,
+observes nothing until step 3.
+
+Verification: 24 new unit tests across line assembly and the adapter — partial
+lines held back and rejoined, fragments never crossing streams, the cursor
+waiting on every stream, the system stream dropped but consumed, CRLF trimmed,
+blank lines kept, the endless-fragment bound, the Space refusal, the audience
+ceiling, indistinguishable refusals, drain-then-terminate, and transient errors
+never reading as gone. Plus 7 new sweeper integration tests against a throwaway
+Postgres covering the loop itself: no reauthorizer never observes, revoked
+authority ends without observing, a match emits and commits with the right
+trust label, source-gone terminates, a transient error only backs off, an
+unadapted kind backs off, and a drained source records its last match AND its
+terminal event.
+
+**A regression this step found and fixed, recorded because the lesson is
+general: `96eecbef` shipped an execution-core that did not compile.** S4.2 step
+6 added `space_read_decision_ref`/`space_read_decision_token` to
+`ListProcessesRequest` and those plus `space_id` to `ReadProcessOutputRequest`.
+prost generates Rust structs with no defaults, so every struct literal of a
+changed message must be updated — and `sandbox_manager_client.rs` builds both by
+literal. The Go side, model-gateway, the V3 gateway and the frontend were all
+re-verified after that proto change; execution-core was verified BEFORE it and
+never again, so a green result from earlier in the same session was reported as
+if it still held.
+
+The rule that would have caught it: a proto change invalidates every consumer in
+every language, and "it passed earlier in this session" is not the same claim as
+"it passed after the change". The fix also improved the call — `read_process_output`
+now takes the Space it is reading for and states it in the request, rather than
+relying on sandbox-manager ignoring the field for service principals.
+
+Full detail: design doc §7, §8.1 and §9 step 2.

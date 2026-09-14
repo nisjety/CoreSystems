@@ -411,6 +411,21 @@ message Process {
   google.protobuf.Timestamp created_at = 28;
   // When the row last changed.
   google.protobuf.Timestamp updated_at = 29;
+
+  // The Space's recipient-audience revision this process's lease was granted
+  // under (migration 0004), inherited through the same join that gives the row
+  // its Space.
+  //
+  // Exposed because sandbox-manager is not the only reader that has to apply
+  // the ceiling. Its own human read path filters on this column internally, but
+  // S4.3's watch sweeper resolves a process through GetProcess on a service
+  // credential and must refuse to surface content recorded under an audience
+  // its watch's own decision predates. A ceiling that only one reader can see
+  // is a ceiling the next reader silently does not have.
+  //
+  // Zero means "recorded before the ceiling existed", which reads as visible —
+  // the same meaning Session Core gives a NULL revision on a thread.
+  int64 recipient_audience_revision = 30;
 }
 
 // One append-only slice of a process's output.

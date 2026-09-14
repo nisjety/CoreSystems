@@ -266,7 +266,9 @@ The exact edit, modelled on execution-core's own entry (`audiences: [..., "sandb
 
 `sandbox:read` only — the watch sweeper never writes to the registry, and granting `sandbox:write` would let a bug in a poller move a process's state. `persistent` retention matches execution-core's, because the output a watch reads is the same content under the same posture.
 
-**This belongs to the step that first reads, and the step is not done until a real token has been minted and presented.** A Go unit test cannot see this file; the check that can is an integration test that mints through Auth Core, in the shape S3.3's postmortem asked for and nobody has built yet.
+**DONE in step 2 (2026-09-14):** the grant is in the file, `sandbox:read` only, `persistent` retention. The token provider's failure message names this file explicitly, because a 403 from Auth Core reads as a sandbox-manager problem and is not one.
+
+**Still owed:** a real token minted and presented end to end. A Go unit test cannot see that file, and the check that could is an integration test that mints through Auth Core — the shape S3.3's postmortem asked for and nobody has built. Until then the grant is reviewed but not exercised, which is worth saying plainly rather than treating the edit as proof.
 
 **Open question, flagged not resolved:** whether capability-core should instead read through a user-bound bearer it does not currently hold. That would make the ceiling structural rather than enforced, but capability-core has no user bearer at sweep time — the member who created the watch is not present — which is the same problem the cron sweeper has and solves with a per-fire Control decision. The recommendation is to keep the service read plus the explicit Space check, and to revisit if S4.4 gives sweepers a delegated credential.
 
@@ -327,7 +329,63 @@ Each step is independently testable and ships with no caller ahead of the step t
      planner performs. A 25-parameter INSERT, a `FOR UPDATE SKIP LOCKED` claim,
      and an UPDATE fenced on state are all in that category, so they are
      exercised against a throwaway container under `-tags integration`.
-2. **Process-output adapter.** The `SourceAdapter` seam and its first implementation: poll, evaluate, emit, commit cursor, drain-then-terminate. The cursor/partial-line/gap proofs live here. Still no caller — the sweeper runs, but nothing can create a watch.
+2. **Process-output adapter.** The `SourceAdapter` seam and its first implementation: poll, evaluate, emit, commit cursor, drain-then-terminate. The cursor/partial-line/gap proofs live here. Still no caller — the sweeper runs, but nothing can create a watch. **DONE 2026-09-14.** What differed from this list, and why:
+
+   - **§8.1's deployment dependency is part of this commit, not a note.**
+     `apps/Control Plane/config/plane-service-principals.json` now grants
+     capability-core the `sandbox-manager` audience with `sandbox:read` and
+     `persistent` retention. `sandbox:read` only — the sweeper never writes, and
+     `sandbox:write` would let a bug in a poller move a process's state. The
+     token provider's own error message names this file, because a 403 there
+     looks like a sandbox-manager problem and is not one.
+   - **`Process` gained `recipient_audience_revision` on the wire, and this was
+     a real gap in S4.2.** Step 6 put the ceiling on the row and enforced it
+     *inside* sandbox-manager's own read path, but never exposed it — so a
+     SECOND reader could not apply it. The watch sweeper resolves a process
+     through `GetProcess` on a service credential and has to refuse content
+     recorded under an audience its watch's decision predates; without the field
+     that refusal was not expressible. A ceiling only one reader can see is a
+     ceiling the next reader silently does not have.
+   - **At most ONE match event per cursor position, which is a correctness
+     requirement rather than a throttle.** A chunk is a flush of many lines, so
+     several matching lines commonly share one seq — and the event key is
+     `(watch_id, cursor_value, kind)`. Emitting one event per line makes the
+     second collide with the first and be silently dropped by `ON CONFLICT DO
+     NOTHING`, which LOSES a match rather than deduplicating a replay. Step 1
+     could not see this; attributing lines to chunk seqs is what made it
+     reachable.
+   - **The committed cursor waits for EVERY stream to be clean.** stdout and
+     stderr interleave in one seq sequence, so a stderr fragment opened at seq 1
+     holds the cursor at 0 even while stdout advances — because chunks at or
+     below the cursor are never re-read and the fragment's continuation arrives
+     later. Fragments are also tracked per stream: joining a stdout fragment to
+     a stderr chunk would fabricate a line neither stream emitted, and with a
+     `contains` predicate could manufacture a match out of two innocent halves.
+   - **A `system` chunk is consumed but never surfaced.** S4.2's registry writes
+     its own "host lost" marker on that stream. An `any` watch firing on it
+     would report the REGISTRY as the thing that spoke, and a `contains` watch
+     could be matched by text the process never wrote. The cursor still advances
+     past it so a marker cannot stall a watch, and nothing is lost — what the
+     marker means is already carried by the process's state.
+   - **A terminal process is only DRAINED once a read comes back empty.**
+     Reporting terminal while output remains ends the watch before its last
+     lines, which is exactly where a failing build says why it failed.
+   - **`ErrSourceGone` moved into the core**, because the sweeper is what acts
+     on it and the core cannot import an adapter. It is the ONLY adapter error
+     that ends a watch; everything else — an unreachable service, a refused
+     credential — backs off, because terminating on transient failure would
+     silently cancel a person's watch over an outage.
+   - **A missing reauthorizer now REFUSES rather than skips.** Step 1 left
+     `authz == nil` falling through to "observe anyway", which is the kind of
+     default that ships and is then forgotten — and what it defaults past is the
+     check that stops a watch created weeks ago under a membership since
+     revoked. The sweeper is wired in this step and cannot observe anything
+     until step 3 supplies the reauthorizer, which is the honest state.
+   - **An unterminated fragment is cut at 64 KiB.** Without a bound, a program
+     writing megabytes with no newline stalls the cursor forever — the watch
+     never consumes anything and never progresses. S4.2's host already made the
+     same compromise on the writing side and recorded the residual risk; this is
+     the reader's half of it.
 3. **Create/cancel + authority.** Control `watch-create-decision`, capability-core HTTP surface, the per-emission reauthorization, the Space check on `source_ref`. First point at which a watch can exist.
 4. **Read path.** model-gateway `/v1/watches`, the V3 gateway's `/work` fourth section, `activityFromWatch`. A watch becomes visible in the room.
 5. **Model-runs adapter, and the `run_watch_subscriptions` retirement path** (§2.1).

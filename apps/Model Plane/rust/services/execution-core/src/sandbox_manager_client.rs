@@ -651,6 +651,14 @@ impl SandboxManagerClient {
             include_terminal,
             limit,
             after_process_id: after_process_id.to_owned(),
+            // Empty on purpose: these carry a HUMAN's Control read decision
+            // (S4.2 step 6), and this client is execution-core's own service
+            // principal. sandbox-manager ignores them for a service caller and
+            // reads unbounded, which is correct — execution-core produced these
+            // records, and the Space check for a model-facing read is applied
+            // in `process_tools` before the id ever reaches here.
+            space_read_decision_ref: String::new(),
+            space_read_decision_token: String::new(),
         };
         let wire = Self::authorize(bearer, message)?;
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().list_processes(wire))
@@ -670,6 +678,7 @@ impl SandboxManagerClient {
         &self,
         bearer: &str,
         process_id: &str,
+        space_id: &str,
         after_seq: i64,
         max_bytes: i64,
     ) -> Result<ReadProcessOutputResponse, Status> {
@@ -680,6 +689,15 @@ impl SandboxManagerClient {
             process_id: process_id.to_owned(),
             after_seq,
             max_bytes,
+            // The Space the caller claims. Ignored by sandbox-manager for a
+            // service principal, and sent anyway so the request states what it
+            // means — a future tightening of that RPC must not silently start
+            // refusing this caller.
+            space_id: space_id.to_owned(),
+            // See list_processes: a human's decision, which a service caller
+            // does not hold.
+            space_read_decision_ref: String::new(),
+            space_read_decision_token: String::new(),
         };
         let wire = Self::authorize(bearer, message)?;
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().read_process_output(wire))

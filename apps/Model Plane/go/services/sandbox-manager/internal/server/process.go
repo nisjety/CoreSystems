@@ -493,6 +493,12 @@ func processToProto(p *process.Process) *Process {
 		StdinBytes:      p.StdinBytes,
 		CreatedAt:       timestamppb.New(p.CreatedAt),
 		UpdatedAt:       timestamppb.New(p.UpdatedAt),
+		// Exposed so a reader other than this service can apply the ceiling —
+		// S4.3's watch sweeper resolves a process on a service credential and
+		// has to refuse content recorded under an audience its own decision
+		// predates. A ceiling only one reader can see is a ceiling the next
+		// reader silently does not have.
+		RecipientAudienceRevision: p.AudienceRevision,
 	}
 }
 

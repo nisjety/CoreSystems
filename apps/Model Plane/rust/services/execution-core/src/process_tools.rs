@@ -255,6 +255,10 @@ async fn read(tool_input: &str, ctx: &ProcessToolContext<'_>) -> Result<String, 
         .read_process_output(
             ctx.token,
             &input.process_id,
+            // The Space this run belongs to. `authorize_in_space` above already
+            // proved the process is in it, so this states the same fact to the
+            // registry rather than asking it to be taken on trust.
+            ctx.space_id,
             input.after_seq.unwrap_or(0).max(0),
             max_bytes,
         )

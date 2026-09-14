@@ -129,7 +129,22 @@ func (s *Sweeper) pollOne(ctx context.Context, w Watch) {
 	}
 
 	// Authority BEFORE observation, always. The record is not the authority.
-	if s.authz != nil {
+	//
+	// An unconfigured reauthorizer REFUSES rather than skips. A nil check that
+	// falls through to "observe anyway" is the kind of default that ships and is
+	// then forgotten, and what it would be defaulting past is the check that
+	// stops a watch created weeks ago under a membership since revoked. Backed
+	// off rather than terminated, because this is a deployment gap and not a
+	// statement about the watch.
+	if s.authz == nil {
+		slog.Warn("refusing to poll a watch: no reauthorizer is configured",
+			"watch", w.ID, "space", w.SpaceRef)
+		if err := s.store.RecordFailure(ctx, w); err != nil {
+			slog.Warn("backing off an unauthorizable watch failed", "watch", w.ID, "error", err)
+		}
+		return
+	}
+	{
 		if err := s.authz.AuthorizeObserve(ctx, w); err != nil {
 			slog.Info("terminating a watch whose authority no longer holds",
 				"watch", w.ID, "space", w.SpaceRef, "error", err)
@@ -143,6 +158,18 @@ func (s *Sweeper) pollOne(ctx context.Context, w Watch) {
 
 	result, err := adapter.Poll(ctx, w)
 	if err != nil {
+		// ErrSourceGone is the ONLY adapter error that ends a watch. Everything
+		// else — an unreachable service, a refused credential — is transient,
+		// and terminating on those would silently cancel a person's watch over
+		// an outage.
+		if errors.Is(err, ErrSourceGone) {
+			slog.Info("terminating a watch whose source is gone", "watch", w.ID, "source", w.SourceRef)
+			if termErr := s.store.Terminate(ctx, w.OrgID, w.ID, StateSourceGone,
+				"the watched source is no longer available"); termErr != nil {
+				slog.Warn("terminating a gone-source watch failed", "watch", w.ID, "error", termErr)
+			}
+			return
+		}
 		slog.Debug("watch poll failed", "watch", w.ID, "kind", w.SourceKind, "error", err)
 		if failErr := s.store.RecordFailure(ctx, w); failErr != nil {
 			slog.Warn("recording a watch failure failed", "watch", w.ID, "error", failErr)
@@ -186,6 +213,17 @@ func (s *Sweeper) decide(w Watch, result PollResult) ([]Emission, int64) {
 		})
 	}
 
+	// At most ONE match event per cursor position, which for a line-oriented
+	// source means one per chunk.
+	//
+	// This is not a throttle, it is a correctness requirement. A chunk is a
+	// flush of many lines, so several matching lines commonly share one seq —
+	// and the event key is (watch_id, cursor_value, kind). Emitting one event
+	// per line would make the second collide with the first and be silently
+	// dropped by ON CONFLICT DO NOTHING, which loses a match rather than
+	// deduplicating a replay. Recording one event that names the first matching
+	// line is honest and idempotent; recording several is neither.
+	matchedCursors := map[int64]bool{}
 	for _, line := range result.Lines {
 		if w.TriggerMode == TriggerOnce && hasKind(events, EventMatch) {
 			// A `once` watch answers once. Continuing to scan would record
@@ -193,9 +231,10 @@ func (s *Sweeper) decide(w Watch, result PollResult) ([]Emission, int64) {
 			// re-watch would then never see.
 			break
 		}
-		if !w.Predicate.MatchLine(line) {
+		if !w.Predicate.MatchLine(line) || matchedCursors[line.Cursor] {
 			continue
 		}
+		matchedCursors[line.Cursor] = true
 		events = append(events, Emission{
 			ID:   s.newID(),
 			Kind: EventMatch,

@@ -2,6 +2,7 @@ package watch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -158,6 +159,19 @@ type PollResult struct {
 	// never carry source payload.
 	TerminalSummary string
 }
+
+// ErrSourceGone means a source no longer exists, or no longer belongs to the
+// watching Space.
+//
+// The two are deliberately ONE error, everywhere. Distinguishing "no such
+// resource" from "a resource in another Space" would make a watch an oracle for
+// which ids exist in an organization.
+//
+// An adapter returns this to END a watch rather than back it off, and it is the
+// only adapter error that does. Everything else — an unreachable service, a
+// refused credential — is transient, and terminating on transient failure would
+// silently cancel a person's watch over an outage.
+var ErrSourceGone = errors.New("the watched source is not available to this Space")
 
 // SourceAdapter is what a watchable source must be able to do.
 //
