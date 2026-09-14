@@ -173,6 +173,16 @@ type PollResult struct {
 // silently cancel a person's watch over an outage.
 var ErrSourceGone = errors.New("the watched source is not available to this Space")
 
+// ErrAuthorityUnavailable means Control could not ANSWER, as distinct from
+// answering no.
+//
+// The distinction is the whole point. A refusal means the member's authority no
+// longer covers this watch and the watch should end. Control being briefly
+// unreachable means nothing about the member at all — and terminating on it
+// would cancel every watch in the fleet during one deployment of the identity
+// plane. Wrapped errors carrying this back off; everything else refuses.
+var ErrAuthorityUnavailable = errors.New("current authority could not be determined")
+
 // SourceAdapter is what a watchable source must be able to do.
 //
 // Deliberately narrow. An adapter reads and reports; it does not decide whether

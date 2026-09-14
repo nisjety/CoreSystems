@@ -124,6 +124,64 @@ func (s *Store) Get(ctx context.Context, orgID, id string) (*Watch, error) {
 	return w, nil
 }
 
+// CountActiveForSpace reports how many watches are currently ACTIVE in a Space.
+//
+// Read separately from Create rather than folded into its INSERT, and that is a
+// deliberate loosening: two concurrent creates can each see 7 and both land,
+// putting a Space at 9. Acceptable here in a way it was not for S4.2's process
+// limits, because a watch consumes a poll slot rather than an OS process —
+// being one over the bound costs a little sweeper time, not a resource the host
+// has to find. Folding it into the statement would mean a counting subquery on
+// every create for a bound nobody is racing to exceed.
+func (s *Store) CountActiveForSpace(ctx context.Context, orgID, spaceRef string) (int, error) {
+	if orgID == "" || spaceRef == "" {
+		return 0, fmt.Errorf("org_id and space_ref are required")
+	}
+	var count int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM space_watches
+		WHERE org_id = $1 AND space_ref = $2 AND state = $3 AND deleted_at IS NULL
+	`, orgID, spaceRef, int16(StateActive)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count active watches: %w", err)
+	}
+	return count, nil
+}
+
+// ListForSpace returns a Space's watches, newest first.
+//
+// Terminal watches are hidden unless asked for: "what am I being told about" is
+// the question a person opens this list with, and a month of finished watches
+// buries the answer.
+func (s *Store) ListForSpace(ctx context.Context, orgID, spaceRef string, includeFinished bool) ([]Watch, error) {
+	if orgID == "" || spaceRef == "" {
+		return nil, fmt.Errorf("org_id and space_ref are required")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+watchColumns+`
+		FROM space_watches
+		WHERE org_id = $1 AND space_ref = $2 AND deleted_at IS NULL
+		  AND ($3 OR state = $4)
+		ORDER BY id DESC
+		LIMIT 200
+	`, orgID, spaceRef, includeFinished, int16(StateActive))
+	if err != nil {
+		return nil, fmt.Errorf("list watches: %w", err)
+	}
+	defer rows.Close()
+	var out []Watch
+	for rows.Next() {
+		w, scanErr := scanWatch(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan watch: %w", scanErr)
+		}
+		out = append(out, *w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list watches: %w", err)
+	}
+	return out, nil
+}
+
 // ClaimDue takes up to limit watches whose next_poll_at has passed and advances
 // each one's next_poll_at before returning it.
 //

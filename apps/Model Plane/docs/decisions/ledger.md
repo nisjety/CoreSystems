@@ -3330,3 +3330,124 @@ now takes the Space it is reading for and states it in the request, rather than
 relying on sandbox-manager ignoring the field for service principals.
 
 Full detail: design doc §7, §8.1 and §9 step 2.
+
+## S4.3 step 3 implemented — a watch can exist, and the authority check moved from the read to the disclosure (2026-09-14)
+
+**State:** `implemented` (design doc §8, §9 step 3). Control's watch decision pair, capability-core's create/list/cancel surface, both authorizers, and the create-time source resolver. This is the first point at which a watch can exist and observe.
+
+**The reauthorization moved from the READ to the DISCLOSURE, correcting step 1.**
+That code checked authority before every poll. At a two-second cadence that is
+one Control call per watch per two seconds — where the cron sweeper it copies
+makes one per FIRE, roughly once a minute. The difference is three orders of
+magnitude, against an identity plane that is on the critical path for every
+other service in the fleet.
+
+The check belongs where the disclosure is. A poll that matches nothing reads
+into the sweeper's memory on capability-core's own service credential, bound to
+the watch's Space by the adapter, and discards it: nothing durable is written
+and no human sees anything. What needs fresh human authority is turning that
+read into a RECORDED, readable event — so the check sits immediately before the
+commit, and a quiet watch costs Control nothing.
+
+The cost of that placement is stated rather than hidden: a member whose
+membership was revoked keeps polling until their watch's first would-be event,
+rather than until its next poll. Nothing is disclosed meanwhile and `expires_at`
+bounds it in the worst case. If that window ever needs closing, the fix is a
+periodic revalidation sweep — not moving this check back in front of every read,
+which would trade a real cost for a theoretical one.
+
+**`ErrAuthorityUnavailable` separates "Control said no" from "Control could not
+answer", and the distinction is load-bearing.** A refusal means the member's
+authority no longer covers this watch and it should end. Control being briefly
+unreachable means nothing about the member at all — and terminating on it would
+cancel every watch in the fleet during one deployment of the identity plane.
+
+An unavailable authority backs off WITHOUT committing the cursor. The adapter is
+idempotent in the cursor, so the pending events are re-derived and recorded once
+Control is reachable; committing there would skip a match permanently, which is
+the failure mode nobody notices.
+
+**Two Control actions, not one.** `model.watch.create` runs with a human present
+— Control resolves the subject from the verified delegation rather than being
+told who it is — and its answer is RECORDED on the row as the authority binding
+the sweeper will later compare against. `model.watch.observe` runs with nobody
+present, names its subject in the intent for Control to check against its own
+store, and its answer is used once and discarded. The action id and schema hash
+are digest inputs, so a create token cannot satisfy an observe check even when
+every other bound fact is identical.
+
+**The predicate is bound as a digest, never sent as a rule.** Control does not
+need the matching rule to enforce Space policy, and binding the digest is what
+stops a watch approved for "tell me when it says ERROR" from becoming "tell me
+everything" — which, for a watch, is the difference between a notification and a
+transcript. The matched CONTENT is absent from both requests for a sharper
+reason: Control authorizes the disclosure, it does not review it, and sending a
+program's output to the identity plane would put unscreened payload somewhere it
+has no business being.
+
+**A viewer may watch, where schedule creation requires editor.** A watch
+observes and creates no effect in the Space; reading the shared record is what a
+viewer role is for, and the thread-read decision already says so in as many
+words. A test asserts the contrast against schedule creation directly, because a
+rule this surface-level is exactly the kind that gets "tidied" into consistency
+with the wrong neighbour.
+
+**No new entitlement — the open question, answered narrowly.** A shared-Space
+watch reuses `ThreadReadEntitled`: a standing read of a room is still a read of
+that room, so a Space not entitled to shared reads should not get standing ones.
+And the thing that genuinely needed its own switch already has one — a
+background process cannot exist without `process_registry_entitled`, so a watch
+on a process a Space may not run has nothing to watch. A second switch for the
+same disclosure would be a setting nobody could explain against the first. The
+per-Space count stays a quota rather than an authority.
+
+**Create checks authority BEFORE the source**, and the order is the point: a
+caller who may not watch a Space at all must not be able to use the source check
+as a probe for which resources exist in it. The resolver's refusals are one
+indistinguishable error — missing, foreign, and above the audience ceiling all
+read alike — for the same no-oracle reason the adapter already uses.
+
+**Creating a watch resolves a STARTING cursor rather than beginning at zero.** A
+watch created on a process that has been running an hour must not replay that
+hour: the person asked what happens next, and dumping the backlog into the room
+as events would bury the thing they were waiting for. The cost is that output
+produced before the watch existed is never matched, which is intended — a watch
+is not a search.
+
+**Only the creator may cancel, reported as not-found.** A watch is one person's
+standing intent addressed to that person. Cancelling someone else's is a write
+against their intent, a different authority question this slice does not answer;
+not-found rather than forbidden because the id belongs to someone and saying
+which is a disclosure of its own. Cancelling is idempotent, because the caller's
+intent is already satisfied and a failure would invite a retry that can never
+succeed.
+
+**`authctx` gained `ContextWithPrincipal`.** The package exported a principal
+READER and no writer, which made every downstream handler untestable without
+standing up the verifier and a signed token — an asymmetry in a package whose
+whole job is carrying a principal through a context. The exported counterpart
+performs no verification and its doc says so: production code uses the
+middleware, tests use this.
+
+**Two mistakes made and corrected while building this, recorded because one has
+a general lesson.** A Python edit script called `nl.join()` on a plain string
+instead of a list, which joins its CHARACTERS with newlines — it destroyed
+`store.go`, restored from HEAD with the day's 58 added lines re-applied. And
+`git checkout` restored that file as CRLF while the rest of the package is LF,
+per `.gitattributes`; the committed bytes are identical either way, but the
+worktree file then failed `gofmt -l` for reasons that have nothing to do with
+its content. Normalised back. The general lesson is the first one: a scripted
+edit that can silently produce syntactically valid garbage needs its output
+checked, not just its exit code.
+
+Verification: 11 new handler integration tests against a throwaway Postgres —
+authority before source, an unresolvable source refused at create, an unservable
+kind refused, invalid predicates refused with their reason, the per-Space limit,
+duplicates, creator-only cancel, idempotent cancel, service identities refused,
+and terminal watches hidden from the default list. Plus 10 new Control decision
+tests covering the create/observe separation, the viewer contrast, ZDR, digest
+binding of both predicate and source, and intent-versus-current-authority
+mismatch. capability-core and user-core build, vet and test green apart from
+capability-core's one known pre-existing CRLF failure in `internal/registry`.
+
+Full detail: design doc §8 and §9 step 3.

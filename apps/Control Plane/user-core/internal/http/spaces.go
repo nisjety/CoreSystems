@@ -751,6 +751,118 @@ type scheduleCreateDecisionRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
+type watchCreateDecisionRequest struct {
+	SpaceRef        string `json:"space_ref"`
+	WatchID         string `json:"watch_id"`
+	SourceKind      string `json:"source_kind"`
+	SourceRef       string `json:"source_ref"`
+	PredicateDigest string `json:"predicate_digest"`
+	IdempotencyKey  string `json:"idempotency_key"`
+}
+
+// issueWatchCreateDecision authorizes exactly one durable S4.3 watch.
+//
+// The predicate travels as a DIGEST, never as the matching rule itself: Control
+// does not need it to enforce Space policy, and binding the digest is what stops
+// a watch approved for "tell me when it says ERROR" from becoming "tell me
+// everything" after approval — which, for a watch, is the difference between a
+// notification and a transcript.
+func (s *Server) issueWatchCreateDecision(c *gin.Context) {
+	if !s.spaceRepoAvailable(c) {
+		return
+	}
+	var request watchCreateDecisionRequest
+	if !bindSpaceDecisionBody(c, &request,
+		"space_ref, watch_id, source_kind, source_ref, predicate_digest, and idempotency_key are required",
+		request.SpaceRef, request.WatchID, request.SourceKind, request.SourceRef,
+		request.PredicateDigest, request.IdempotencyKey) {
+		return
+	}
+	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "Space watch authority unavailable")
+	if !ok {
+		return
+	}
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
+		return
+	}
+	decision, err := spaces.IssueWatchCreateDecision(evidence, spaces.WatchCreateRequest{
+		DecisionRef: decisionRef, WatchID: request.WatchID,
+		SourceKind: request.SourceKind, SourceRef: request.SourceRef,
+		PredicateDigest: request.PredicateDigest,
+		IdempotencyKey:  request.IdempotencyKey, Nonce: nonce,
+	}, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space watch creation is not authorized"})
+		return
+	}
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
+type watchObserveDecisionRequest struct {
+	Intent struct {
+		OrgID           string `json:"org_id"`
+		SpaceRef        string `json:"space_ref"`
+		SubjectID       string `json:"subject_id"`
+		WatchID         string `json:"watch_id"`
+		SourceKind      string `json:"source_kind"`
+		SourceRef       string `json:"source_ref"`
+		PredicateDigest string `json:"predicate_digest"`
+		IdempotencyKey  string `json:"idempotency_key"`
+	} `json:"intent"`
+}
+
+// issueWatchObserveDecision is service-delegated: capability-core's sweeper
+// presents an immutable view of a watch record immediately before it records
+// anything a human can read.
+//
+// Unlike the create path there is no browser here, so the SUBJECT comes from
+// the intent and is checked against Control's own current membership rather
+// than taken on trust — the same shape the scheduled-run decision uses. The
+// matched content is deliberately absent: Control authorizes the disclosure, it
+// does not review it, and sending a program's output to the identity plane
+// would put unscreened payload somewhere it has no business being.
+func (s *Server) issueWatchObserveDecision(c *gin.Context) {
+	if !s.spaceRepoAvailable(c) {
+		return
+	}
+	var request watchObserveDecisionRequest
+	if !bindSpaceDecisionBody(c, &request,
+		"intent.org_id, intent.space_ref, intent.subject_id, intent.watch_id, and intent.idempotency_key are required",
+		request.Intent.OrgID, request.Intent.SpaceRef, request.Intent.SubjectID,
+		request.Intent.WatchID, request.Intent.IdempotencyKey) {
+		return
+	}
+	evidence, ok := s.resolvePersonalThreadEvidence(c, request.Intent.SpaceRef, request.Intent.OrgID, request.Intent.SubjectID, "Space watch authority unavailable")
+	if !ok {
+		return
+	}
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
+		return
+	}
+	decision, err := spaces.IssueWatchObserveDecision(evidence, spaces.WatchObserveIntent{
+		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef,
+		SubjectID: request.Intent.SubjectID, WatchID: request.Intent.WatchID,
+		SourceKind: request.Intent.SourceKind, SourceRef: request.Intent.SourceRef,
+		PredicateDigest: request.Intent.PredicateDigest,
+		IdempotencyKey:  request.Intent.IdempotencyKey,
+	}, decisionRef, nonce, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space watch observation is not authorized"})
+		return
+	}
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
 // issueScheduleCreateDecision is gateway-delegated. The authenticated user is
 // resolved from the verified delegation; the browser cannot select a creator,
 // authority revision, audience, privacy policy, or model service audience.

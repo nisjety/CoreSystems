@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -328,19 +329,42 @@ func main() {
 	// authority, and a poll without a fresh authority check is the one thing
 	// this loop must never do. There is also no create path yet, so there are no
 	// rows to claim in the first place.
-	if os.Getenv("WATCH_SWEEPER_ENABLED") != "false" {
-		if adapters, adapterErr := processWatchAdaptersFromEnv(os.Getenv); adapterErr != nil {
-			slog.Warn("watch sweeper not started; the process-output source is unavailable", "error", adapterErr)
-		} else if watchStore, storeErr := watch.NewStore(pool); storeErr != nil {
-			slog.Warn("watch sweeper not started", "error", storeErr)
-		} else if sweeper, sweepErr := watch.NewSweeper(watchStore, adapters, nil); sweepErr != nil {
-			slog.Warn("watch sweeper not started", "error", sweepErr)
+	if watchStore, storeErr := watch.NewStore(pool); storeErr != nil {
+		slog.Warn("watches unavailable", "error", storeErr)
+	} else if sources, sourcesErr := watchSourcesFromEnv(os.Getenv); sourcesErr != nil {
+		// One construction for both the sweeper's adapters and the create-time
+		// resolvers, because they must agree about which kinds exist. A
+		// deployment that can create a watch it cannot poll would hand a person
+		// a watch that never reports.
+		slog.Warn("watches unavailable; no source is configured", "error", sourcesErr)
+	} else {
+		createAuthz, createErr := watchControlAuthorizerFromEnv(os.Getenv)
+		if createErr != nil {
+			// Fail closed and loudly: without Control there is no authority to
+			// create a watch under, and a surface that accepted one anyway
+			// would be recording standing intents nobody approved.
+			slog.Warn("watch creation unavailable; fresh Control authorization is required", "error", createErr)
+		} else if handler, handlerErr := watch.NewHandler(watchStore, createAuthz, sources.resolvers, newWatchID); handlerErr != nil {
+			slog.Warn("watch creation unavailable", "error", handlerErr)
 		} else {
-			go sweeper.Run(ctx)
-			slog.Info("watch sweeper started",
-				"sources", len(adapters),
-				"observing", false,
-				"reason", "a reauthorizer is required before any watch may observe (S4.3 step 3)")
+			handler.Register(protectedMux)
+			slog.Info("watch surface registered")
+		}
+
+		if os.Getenv("WATCH_SWEEPER_ENABLED") != "false" {
+			observeAuthz, observeErr := watchObserveAuthorizerFromEnv(os.Getenv)
+			if observeErr != nil {
+				// The sweeper is NOT started without one. It would claim rows,
+				// refuse every poll for want of a reauthorizer, and back them
+				// off — cost without work, and a log line per watch per minute
+				// saying so.
+				slog.Warn("watch sweeper not started; fresh Control authorization is required", "error", observeErr)
+			} else if sweeper, sweepErr := watch.NewSweeper(watchStore, sources.adapters, observeAuthz); sweepErr != nil {
+				slog.Warn("watch sweeper not started", "error", sweepErr)
+			} else {
+				go sweeper.Run(ctx)
+				slog.Info("watch sweeper started with fresh Control authorization", "sources", len(sources.adapters))
+			}
 		}
 	}
 
@@ -836,19 +860,27 @@ func newBackendCredential(backend, tokenEnv string, scopes []string, reason stri
 
 // dialOption returns the unary interceptor that authenticates every outbound RPC
 // on the connection.
-// processWatchAdaptersFromEnv builds the S4.3 source adapters this binary can
-// serve.
+// watchSources is the pair every watch kind must supply: a poll-time adapter
+// and a create-time resolver. Built together so the two can never disagree
+// about which kinds exist — a deployment that could create a watch it cannot
+// poll would hand a person a watch that never reports.
+type watchSources struct {
+	adapters  watch.AdapterSet
+	resolvers map[string]watch.SourceResolver
+}
+
+// watchSourcesFromEnv builds the S4.3 sources this binary can serve.
 //
 // Today that is exactly one: background process output, read from
 // sandbox-manager's registry. It needs a gRPC target and capability-core's own
 // `aud=sandbox-manager` credential — which Auth Core will only issue if
 // capability-core's entry in plane-service-principals.json grants that audience
-// with `sandbox:read`. That grant is part of S4.3 step 2; without it every poll
-// is refused at sandbox-manager's interceptor, and the error says so.
-func processWatchAdaptersFromEnv(getenv func(string) string) (watch.AdapterSet, error) {
+// with `sandbox:read`. Without that grant every poll is refused at
+// sandbox-manager's interceptor, and the token provider's error says so.
+func watchSourcesFromEnv(getenv func(string) string) (watchSources, error) {
 	target := strings.TrimSpace(getenv("SANDBOX_MANAGER_GRPC_ADDR"))
 	if target == "" {
-		return nil, fmt.Errorf("SANDBOX_MANAGER_GRPC_ADDR is required to watch process output")
+		return watchSources{}, fmt.Errorf("SANDBOX_MANAGER_GRPC_ADDR is required to watch process output")
 	}
 	serviceID := strings.TrimSpace(getenv("CAPABILITY_CORE_SERVICE_ID"))
 	if serviceID == "" {
@@ -857,18 +889,54 @@ func processWatchAdaptersFromEnv(getenv func(string) string) (watch.AdapterSet, 
 	tokens, err := processwatch.NewAuthCoreTokens(
 		getenv("AUTH_CORE_URL"), serviceID, getenv("CAPABILITY_CORE_SERVICE_API_KEY"), nil)
 	if err != nil {
-		return nil, err
+		return watchSources{}, err
 	}
 	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return nil, fmt.Errorf("dial sandbox-manager: %w", err)
+		return watchSources{}, fmt.Errorf("dial sandbox-manager: %w", err)
 	}
-	adapter, err := processwatch.NewAdapter(mpv1.NewSandboxManagerClient(conn), tokens)
+	client := mpv1.NewSandboxManagerClient(conn)
+	adapter, err := processwatch.NewAdapter(client, tokens)
 	if err != nil {
-		return nil, err
+		return watchSources{}, err
 	}
-	return watch.NewAdapterSet(adapter)
+	resolver, err := processwatch.NewResolver(client, tokens)
+	if err != nil {
+		return watchSources{}, err
+	}
+	adapters, err := watch.NewAdapterSet(adapter)
+	if err != nil {
+		return watchSources{}, err
+	}
+	return watchSources{
+		adapters:  adapters,
+		resolvers: map[string]watch.SourceResolver{adapter.Kind(): resolver},
+	}, nil
 }
+
+// The two Control authorizers. Separate constructors rather than one, because
+// they address different endpoints for different reasons and a deployment can
+// legitimately have one working and the other not.
+func watchControlAuthorizerFromEnv(getenv func(string) string) (*watch.ControlCreateAuthorizer, error) {
+	return watch.NewControlCreateAuthorizer(
+		getenv("USER_CORE_URL"), watchServiceID(getenv), getenv("USER_CORE_SERVICE_TOKEN"), nil)
+}
+
+func watchObserveAuthorizerFromEnv(getenv func(string) string) (*watch.ControlObserveAuthorizer, error) {
+	return watch.NewControlObserveAuthorizer(
+		getenv("USER_CORE_URL"), watchServiceID(getenv), getenv("USER_CORE_SERVICE_TOKEN"), nil)
+}
+
+func watchServiceID(getenv func(string) string) string {
+	if id := strings.TrimSpace(getenv("CAPABILITY_CORE_SERVICE_ID")); id != "" {
+		return id
+	}
+	return "capability-core"
+}
+
+// newWatchID mints a watch id. ULID-shaped so the read path's id-ordered
+// listing is creation-ordered, the same property S4.2 relies on.
+func newWatchID() string { return "wch_" + strings.ReplaceAll(uuid.NewString(), "-", "") }
 
 func (b *backendCredential) dialOption() grpc.DialOption {
 	return grpc.WithChainUnaryInterceptor(b.intercept)

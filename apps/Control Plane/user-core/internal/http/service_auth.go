@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -110,7 +111,7 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "spaces:audience:publish"
 	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/membership"):
 		return "spaces:resolve"
-	case path == "/api/v1/internal/spaces/personal-thread-decision" || path == "/api/v1/internal/spaces/thread-decision" || path == "/api/v1/internal/spaces/thread-append-decision" || path == "/api/v1/internal/spaces/thread-read-decision" || path == "/api/v1/internal/spaces/personal-retrieval-decision" || path == "/api/v1/internal/spaces/personal-import-decision" || path == "/api/v1/internal/spaces/schedule-create-decision" || path == "/api/v1/internal/spaces/owner-grant-decision":
+	case path == "/api/v1/internal/spaces/personal-thread-decision" || path == "/api/v1/internal/spaces/thread-decision" || path == "/api/v1/internal/spaces/thread-append-decision" || path == "/api/v1/internal/spaces/thread-read-decision" || path == "/api/v1/internal/spaces/personal-retrieval-decision" || path == "/api/v1/internal/spaces/personal-import-decision" || path == "/api/v1/internal/spaces/schedule-create-decision" || path == "/api/v1/internal/spaces/watch-create-decision" || path == "/api/v1/internal/spaces/watch-observe-decision" || path == "/api/v1/internal/spaces/owner-grant-decision":
 		return "spaces:issue"
 	case path == "/api/v1/internal/spaces/import-execution-decision":
 		return "spaces:import:reauthorize"
@@ -227,10 +228,5 @@ func hasServiceScope(c *gin.Context, required string) bool {
 	if !ok {
 		return false
 	}
-	for _, scope := range scopes {
-		if scope == required {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(scopes, required)
 }

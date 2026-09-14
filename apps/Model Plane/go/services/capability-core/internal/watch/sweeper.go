@@ -128,8 +128,6 @@ func (s *Sweeper) pollOne(ctx context.Context, w Watch) {
 		return
 	}
 
-	// Authority BEFORE observation, always. The record is not the authority.
-	//
 	// An unconfigured reauthorizer REFUSES rather than skips. A nil check that
 	// falls through to "observe anyway" is the kind of default that ships and is
 	// then forgotten, and what it would be defaulting past is the check that
@@ -143,17 +141,6 @@ func (s *Sweeper) pollOne(ctx context.Context, w Watch) {
 			slog.Warn("backing off an unauthorizable watch failed", "watch", w.ID, "error", err)
 		}
 		return
-	}
-	{
-		if err := s.authz.AuthorizeObserve(ctx, w); err != nil {
-			slog.Info("terminating a watch whose authority no longer holds",
-				"watch", w.ID, "space", w.SpaceRef, "error", err)
-			if termErr := s.store.Terminate(ctx, w.OrgID, w.ID, StateSourceGone,
-				"authority for this watch is no longer current"); termErr != nil {
-				slog.Warn("terminating an unauthorized watch failed", "watch", w.ID, "error", termErr)
-			}
-			return
-		}
 	}
 
 	result, err := adapter.Poll(ctx, w)
@@ -178,6 +165,39 @@ func (s *Sweeper) pollOne(ctx context.Context, w Watch) {
 	}
 
 	events, cursor := s.decide(w, result)
+
+	// Authority immediately BEFORE the disclosure, not before the read.
+	//
+	// A poll that matched nothing read into this process's memory on
+	// capability-core's own service credential — bound to the watch's Space by
+	// the adapter — and discarded it. Nothing durable, nothing a human can see.
+	// What needs fresh human authority is turning a read into a RECORDED event,
+	// so the check sits here, and a quiet watch costs Control nothing.
+	if len(events) > 0 {
+		if err := s.authz.AuthorizeObserve(ctx, w); err != nil {
+			if errors.Is(err, ErrAuthorityUnavailable) {
+				// Control could not answer, which says nothing about the member.
+				// The cursor is deliberately NOT committed: the adapter is
+				// idempotent in it, so re-reading recovers exactly these events
+				// once Control is reachable. Committing here would skip a match
+				// permanently.
+				slog.Warn("deferring a watch observation; current authority is unavailable",
+					"watch", w.ID, "error", err)
+				if failErr := s.store.RecordFailure(ctx, w); failErr != nil {
+					slog.Warn("backing off a watch failed", "watch", w.ID, "error", failErr)
+				}
+				return
+			}
+			slog.Info("terminating a watch whose authority no longer holds",
+				"watch", w.ID, "space", w.SpaceRef, "error", err)
+			if termErr := s.store.Terminate(ctx, w.OrgID, w.ID, StateSourceGone,
+				"authority for this watch is no longer current"); termErr != nil {
+				slog.Warn("terminating an unauthorized watch failed", "watch", w.ID, "error", termErr)
+			}
+			return
+		}
+	}
+
 	terminal := StateActive
 	if result.SourceTerminal {
 		terminal = StateSourceGone

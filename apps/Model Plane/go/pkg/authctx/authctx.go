@@ -249,6 +249,22 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	return principal, true
 }
 
+// ContextWithPrincipal places a verified identity on a context.
+//
+// The exported counterpart to [PrincipalFromContext], which existed alone: this
+// package's whole job is carrying a principal through a context, and being able
+// to read one but not write one made every downstream handler untestable
+// without standing up the full verifier and a signed token.
+//
+// It performs NO verification, which is exactly why production code must not
+// call it — the middleware and interceptor above are the only things that
+// should, and they do so through the unexported form. Its use is test setup:
+// an in-package handler test that needs "a request from this member" rather
+// than a round trip through Auth Core.
+func ContextWithPrincipal(ctx context.Context, principal Principal) context.Context {
+	return withPrincipal(ctx, principal)
+}
+
 func withPrincipal(ctx context.Context, principal Principal) context.Context {
 	copy := principal
 	copy.Scopes = append([]string(nil), principal.Scopes...)

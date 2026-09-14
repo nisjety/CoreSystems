@@ -386,7 +386,85 @@ Each step is independently testable and ships with no caller ahead of the step t
      never consumes anything and never progresses. S4.2's host already made the
      same compromise on the writing side and recorded the residual risk; this is
      the reader's half of it.
-3. **Create/cancel + authority.** Control `watch-create-decision`, capability-core HTTP surface, the per-emission reauthorization, the Space check on `source_ref`. First point at which a watch can exist.
+3. **Create/cancel + authority.** Control `watch-create-decision`, capability-core HTTP surface, the per-emission reauthorization, the Space check on `source_ref`. First point at which a watch can exist. **DONE 2026-09-14.** What differed from this list, and why:
+
+   - **TWO Control actions, not one.** `model.watch.create` runs with a human
+     present; `model.watch.observe` runs later with nobody present. Separating
+     them is the schedule pair's own rule: a creator's token must not serve as a
+     standing worker grant after a role, audience or policy change. The action
+     id and schema hash are digest inputs, so a create token cannot satisfy an
+     observe check even when every other bound fact is identical.
+   - **The predicate is bound as a DIGEST.** Control does not need the matching
+     rule to enforce Space policy, and binding the digest is what stops a watch
+     approved for "tell me when it says ERROR" from becoming "tell me
+     everything" — which, for a watch, is the difference between a notification
+     and a transcript. The same reasoning the task template already uses.
+   - **A viewer may watch**, where schedule creation needs editor. A watch
+     OBSERVES and creates no effect in the Space, and reading the shared record
+     is what a viewer role is for — §7's own thread-read decision says so in as
+     many words. A test asserts the contrast directly, because a rule this
+     surface-level is exactly the kind that gets "tidied" into consistency with
+     the wrong neighbour.
+   - **No new entitlement, and a shared-Space watch reuses `ThreadReadEntitled`.**
+     §11 left this open with a recommendation; this is the answer. A standing
+     read of a room is still a read of that room, so a Space not entitled to
+     shared reads should not get standing ones — and the thing that genuinely
+     needed its own switch (background processes) already has
+     `process_registry_entitled`, so a watch on a process a Space may not run has
+     nothing to watch. A second switch for the same disclosure would be
+     unexplainable against the first.
+   - **The reauthorization moved from the READ to the DISCLOSURE**, correcting
+     step 1. Checking before every poll is one Control call per watch per two
+     seconds, where the cron sweeper this copies makes one per FIRE. A poll that
+     matches nothing reads into the sweeper's memory on capability-core's own
+     service credential, bound to the watch's Space by the adapter, and discards
+     it: nothing durable, nothing anyone can see. What needs fresh human
+     authority is turning a read into a recorded event, so the check sits
+     immediately before the commit and a quiet watch costs Control nothing.
+
+     The cost, stated rather than hidden: a member whose membership was revoked
+     keeps polling until their watch's first would-be event rather than until
+     its next poll. Nothing is disclosed meanwhile and `expires_at` bounds it. If
+     that window ever needs closing the fix is a periodic revalidation sweep,
+     not moving the check back in front of every read.
+   - **`ErrAuthorityUnavailable` separates "Control said no" from "Control could
+     not answer".** Terminating on the second would cancel every watch in the
+     fleet during one deployment of the identity plane. An unavailable authority
+     backs off WITHOUT committing the cursor — the adapter is idempotent in it,
+     so the pending events are recovered rather than skipped. Committing there
+     would lose a match permanently.
+   - **Create checks authority BEFORE the source.** A caller who may not watch a
+     Space at all must not be able to use the source check as a probe for which
+     resources exist in it. The source resolver's refusals are also one
+     indistinguishable error — missing, foreign, and above the audience ceiling
+     all read the same — for the same no-oracle reason the adapter uses.
+   - **Creating a watch resolves a STARTING cursor** rather than beginning at
+     zero. A watch created on a process that has been running for an hour must
+     not replay that hour: the person asked what happens next, and dumping the
+     backlog into the room would bury the thing they were waiting for. The cost
+     is that output produced before the watch existed is never matched — intended
+     behaviour, because a watch is not a search.
+   - **The create path refuses a source kind this deployment cannot poll.**
+     Adapters and resolvers are constructed together for that reason: a
+     deployment able to create a watch it cannot serve would hand a person a
+     watch that never reports.
+   - **Only the creator may cancel, reported as not-found.** A watch is one
+     person's standing intent addressed to that person; cancelling someone
+     else's is a write against their intent, which is a different authority
+     question this slice does not answer. Not-found rather than forbidden
+     because the id belongs to someone, and saying which is a disclosure of its
+     own. Cancelling is idempotent — the caller's intent is already satisfied,
+     and a failure would invite a retry that can never succeed.
+   - **`authctx` gained `ContextWithPrincipal`.** The package exported a reader
+     and no writer, so every downstream handler was untestable without standing
+     up the verifier and a signed token. The exported counterpart performs no
+     verification and says so: production code uses the middleware, tests use
+     this.
+   - **The per-Space limit is counted, not fenced.** Two concurrent creates can
+     each see 7 and both land. Acceptable here where it was not for S4.2's
+     process limits, because a watch consumes a poll slot rather than an OS
+     process — one over the bound costs a little sweeper time, not a resource
+     the host has to find.
 4. **Read path.** model-gateway `/v1/watches`, the V3 gateway's `/work` fourth section, `activityFromWatch`. A watch becomes visible in the room.
 5. **Model-runs adapter, and the `run_watch_subscriptions` retirement path** (§2.1).
 
@@ -414,7 +492,7 @@ Later slices, out of this pass: Ingestion jobs, Data document/source changes, de
 
 - **Should a model be able to create a watch?** A `watch_start`/`watch_list`/`watch_cancel` tool family is the obvious parallel to S4.2's tools, and the strongest use case is model-created ("I started the build; watch it"). But a watch outlives the run and is *addressed to a human*, which is a different authority class from anything a tool has created so far. **Recommendation: not in this pass.** Ship human-created watches through the Work tab first, see what people actually watch, and give the model the tool when the destination question (S4.4) is settled — a model creating a standing intent that delivers to a person, before delivery has semantics, is the wrong order.
 - **`trigger_mode='continuous'`** is in the schema and not in slice 2's adapter. A continuous watch on a chatty process is a delivery-rate problem, which is S4.4's. Recommend shipping `once` only and leaving the column.
-- **Watch count limits per Space** are stated (8) but not yet tied to an entitlement the way `process_registry_entitled` is. If watches turn out to need an entitlement, it is a Control migration of the shape step 3 of S4.2 already established.
+- **Watch count limits per Space** are stated (8) but not tied to an entitlement. **RESOLVED in step 3 (2026-09-14): no new entitlement.** A shared-Space watch reuses `ThreadReadEntitled` — a standing read of a room is still a read of that room — and the thing that needed its own switch already has `process_registry_entitled`. The count stays a quota rather than an authority, enforced by a plain count at create.
 - **The 2s base interval is a guess.** It is the one number here with no evidence behind it; the first real watch on a real build should be used to correct it.
 
 ---

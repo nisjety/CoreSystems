@@ -147,25 +147,25 @@ func (s *Server) setupRoutes() {
 	v1 := s.router.Group("/api/v1")
 	{
 		// User profile endpoints (frontend-facing)
-		users := v1.Group("/users")
+		usersGroup := v1.Group("/users")
 		{
 			// Operator-only delivery recovery. Static route is registered before
 			// the :id catch-all and never performs a destructive purge.
-			users.POST("/gdpr/operator/requeue", s.requeueGDPRDeliveries)
+			usersGroup.POST("/gdpr/operator/requeue", s.requeueGDPRDeliveries)
 			// GET /api/v1/users/me - Get current user profile
-			users.GET("/me", s.getCurrentUserProfile)
+			usersGroup.GET("/me", s.getCurrentUserProfile)
 
 			// GET /api/v1/users/current - Alias used by the frontend proxy
-			users.GET("/current", s.getCurrentUserProfile)
+			usersGroup.GET("/current", s.getCurrentUserProfile)
 
 			// PATCH /api/v1/users/me - Update current user profile
-			users.PATCH("/me", s.updateCurrentUserProfile)
+			usersGroup.PATCH("/me", s.updateCurrentUserProfile)
 
 			// DELETE /api/v1/users/me - Delete current user account
-			users.DELETE("/me", s.deleteCurrentUser)
+			usersGroup.DELETE("/me", s.deleteCurrentUser)
 
 			// POST /api/v1/users/onboarding/complete - Mark onboarding as complete (BEFORE :id route)
-			users.POST("/onboarding/complete", s.markOnboardingComplete)
+			usersGroup.POST("/onboarding/complete", s.markOnboardingComplete)
 
 			// G3 + G16: server-side onboarding state for multi-device resume.
 			// GET returns { step, state } for the authenticated user; PUT
@@ -173,22 +173,22 @@ func (s *Server) setupRoutes() {
 			// `users.onboarding_complete` boolean (migration 004) remains the
 			// authoritative "done?" flag; these endpoints describe in-flight
 			// state. Registered BEFORE :id so the path doesn't collide.
-			users.GET("/me/onboarding-state", s.getOnboardingState)
-			users.PUT("/me/onboarding-state", s.putOnboardingState)
+			usersGroup.GET("/me/onboarding-state", s.getOnboardingState)
+			usersGroup.PUT("/me/onboarding-state", s.putOnboardingState)
 
 			// GET /api/v1/users/by-email/:email - Look up a user by email address (BEFORE :id catch-all)
-			users.GET("/by-email/:email", s.getUserByEmail)
+			usersGroup.GET("/by-email/:email", s.getUserByEmail)
 
 			// GET /api/v1/users/:id - Get user by ID (admin) (AFTER specific routes)
-			users.GET("/:id", s.getUserByID)
+			usersGroup.GET("/:id", s.getUserByID)
 
 			// GDPR erasure + DSAR (admin or self-gated; call the
 			// gdpr_hard_delete_user / gdpr_anonymize_user stored procedures on
 			// the auth_service DB). Hard erasure is irreversible and requires
 			// { "confirm": true }. DSAR export is GDPR Art. 15.
-			users.DELETE("/:id/gdpr/erase", s.hardEraseUser)
-			users.POST("/:id/gdpr/anonymize", s.anonymizeUser)
-			users.GET("/:id/gdpr/export", s.dsarExport)
+			usersGroup.DELETE("/:id/gdpr/erase", s.hardEraseUser)
+			usersGroup.POST("/:id/gdpr/anonymize", s.anonymizeUser)
+			usersGroup.GET("/:id/gdpr/export", s.dsarExport)
 		}
 
 		// Session context for post-login routing
@@ -309,40 +309,45 @@ func (s *Server) setupRoutes() {
 			internal.POST("/memberships/ensure", s.ensureMembership)
 			internal.POST("/users/enrich-from-provider", s.enrichUserFromProvider)
 
-			spaces := internal.Group("/spaces")
+			spacesGroup := internal.Group("/spaces")
 			{
-				spaces.POST("/register", s.requireSpaceLifecycleRegistrar, s.registerSpace)
-				spaces.POST("/deletion-authorizations", s.requireSpaceDeletionAuthorizer, s.authorizeSpaceDeletion)
-				spaces.PUT("/deletion-policy", s.requireSpacePolicyWriter, s.upsertSpaceDeletionPolicy)
-				spaces.PUT("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.applySpaceLegalHold)
-				spaces.DELETE("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.releaseSpaceLegalHold)
-				spaces.GET("", s.requireVerifiedSpaceResolver, s.listSpacesForSubject)
-				spaces.GET("/:space_ref/roster", s.requireVerifiedSpaceResolver, s.spaceRoster)
-				spaces.PUT("/:space_ref/memberships", s.requireSpaceMembershipWriter, s.replaceSpaceMemberships)
-				spaces.POST("/recipient-audiences", s.requireSpaceAudiencePublisher, s.registerRecipientAudience)
-				spaces.PUT("/effect-policy", s.requireSpacePolicyWriter, s.upsertSpaceEffectPolicy)
-				spaces.GET("/:space_ref/membership", s.requireVerifiedSpaceResolver, s.resolveCurrentSpaceMembership)
-				spaces.POST("/personal-thread-decision", s.requireVerifiedSpaceResolver, s.issuePersonalThreadDecision)
-				spaces.POST("/thread-decision", s.requireVerifiedSpaceResolver, s.issueThreadDecision)
-				spaces.POST("/thread-append-decision", s.requireVerifiedSpaceResolver, s.issueThreadAppendDecision)
-				spaces.POST("/thread-read-decision", s.requireVerifiedSpaceResolver, s.issueThreadReadDecision)
-				spaces.POST("/personal-retrieval-decision", s.requireVerifiedSpaceResolver, s.issuePersonalRetrievalDecision)
-				spaces.POST("/retrieval-decision", s.requireVerifiedSpaceResolver, s.issueRetrievalDecision)
-				spaces.POST("/personal-import-decision", s.requireVerifiedSpaceResolver, s.issuePersonalImportDecision)
-				spaces.POST("/schedule-create-decision", s.requireVerifiedSpaceResolver, s.issueScheduleCreateDecision)
-				spaces.POST("/import-execution-decision", s.requireSpaceImportReauthorizer, s.issuePersonalImportExecutionDecision)
-				spaces.POST("/schedule-fire-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduleFireDecision)
-				spaces.POST("/sandbox-capability-decision", s.requireSpaceSandboxCapabilityReauthorizer, s.issueSpaceCapabilityDecision)
-				spaces.POST("/scheduled-run-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduledRunDecision)
-				spaces.POST("/scheduled-run-execution-decision", s.requireSpaceScheduledRunExecutor, s.issueScheduledRunExecutionDecision)
-				spaces.POST("/scheduled-step-decision", s.requireSpaceScheduledStepExecutor, s.issueScheduledStepDecision)
-				spaces.POST("/owner-grant-decision", s.requireVerifiedSpaceResolver, s.issueOwnerGrantDecision)
-				spaces.POST("/model-action-view", s.requireSpaceAgentActionViewer, s.issueModelActionView)
-				spaces.POST("/run-action-decision", s.requireSpaceAgentActionAuthorizer, s.issueRunActionDecision)
-				spaces.POST("/run-action-authority-check", s.requireCurrentRunActionAuthorityChecker, s.checkCurrentRunActionAuthority)
-				spaces.POST("/owner-effect-reservations/reserve", s.requireOwnerEffectReservationCoordinator, s.reserveOwnerEffect)
-				spaces.POST("/owner-effect-reservations/:reservation_id/commit", s.requireOwnerEffectReservationCoordinator, s.commitOwnerEffectReservation)
-				spaces.GET("/owner-effect-reservations/:reservation_id", s.requireOwnerEffectReservationCoordinator, s.getOwnerEffectReservation)
+				spacesGroup.POST("/register", s.requireSpaceLifecycleRegistrar, s.registerSpace)
+				spacesGroup.POST("/deletion-authorizations", s.requireSpaceDeletionAuthorizer, s.authorizeSpaceDeletion)
+				spacesGroup.PUT("/deletion-policy", s.requireSpacePolicyWriter, s.upsertSpaceDeletionPolicy)
+				spacesGroup.PUT("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.applySpaceLegalHold)
+				spacesGroup.DELETE("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.releaseSpaceLegalHold)
+				spacesGroup.GET("", s.requireVerifiedSpaceResolver, s.listSpacesForSubject)
+				spacesGroup.GET("/:space_ref/roster", s.requireVerifiedSpaceResolver, s.spaceRoster)
+				spacesGroup.PUT("/:space_ref/memberships", s.requireSpaceMembershipWriter, s.replaceSpaceMemberships)
+				spacesGroup.POST("/recipient-audiences", s.requireSpaceAudiencePublisher, s.registerRecipientAudience)
+				spacesGroup.PUT("/effect-policy", s.requireSpacePolicyWriter, s.upsertSpaceEffectPolicy)
+				spacesGroup.GET("/:space_ref/membership", s.requireVerifiedSpaceResolver, s.resolveCurrentSpaceMembership)
+				spacesGroup.POST("/personal-thread-decision", s.requireVerifiedSpaceResolver, s.issuePersonalThreadDecision)
+				spacesGroup.POST("/thread-decision", s.requireVerifiedSpaceResolver, s.issueThreadDecision)
+				spacesGroup.POST("/thread-append-decision", s.requireVerifiedSpaceResolver, s.issueThreadAppendDecision)
+				spacesGroup.POST("/thread-read-decision", s.requireVerifiedSpaceResolver, s.issueThreadReadDecision)
+				spacesGroup.POST("/personal-retrieval-decision", s.requireVerifiedSpaceResolver, s.issuePersonalRetrievalDecision)
+				spacesGroup.POST("/retrieval-decision", s.requireVerifiedSpaceResolver, s.issueRetrievalDecision)
+				spacesGroup.POST("/personal-import-decision", s.requireVerifiedSpaceResolver, s.issuePersonalImportDecision)
+				spacesGroup.POST("/schedule-create-decision", s.requireVerifiedSpaceResolver, s.issueScheduleCreateDecision)
+				// S4.3 watches. Create is gateway-delegated (a member asks);
+				// observe is service-delegated (the sweeper asks, immediately
+				// before it records anything a human can read).
+				spacesGroup.POST("/watch-create-decision", s.requireVerifiedSpaceResolver, s.issueWatchCreateDecision)
+				spacesGroup.POST("/watch-observe-decision", s.requireVerifiedSpaceResolver, s.issueWatchObserveDecision)
+				spacesGroup.POST("/import-execution-decision", s.requireSpaceImportReauthorizer, s.issuePersonalImportExecutionDecision)
+				spacesGroup.POST("/schedule-fire-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduleFireDecision)
+				spacesGroup.POST("/sandbox-capability-decision", s.requireSpaceSandboxCapabilityReauthorizer, s.issueSpaceCapabilityDecision)
+				spacesGroup.POST("/scheduled-run-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduledRunDecision)
+				spacesGroup.POST("/scheduled-run-execution-decision", s.requireSpaceScheduledRunExecutor, s.issueScheduledRunExecutionDecision)
+				spacesGroup.POST("/scheduled-step-decision", s.requireSpaceScheduledStepExecutor, s.issueScheduledStepDecision)
+				spacesGroup.POST("/owner-grant-decision", s.requireVerifiedSpaceResolver, s.issueOwnerGrantDecision)
+				spacesGroup.POST("/model-action-view", s.requireSpaceAgentActionViewer, s.issueModelActionView)
+				spacesGroup.POST("/run-action-decision", s.requireSpaceAgentActionAuthorizer, s.issueRunActionDecision)
+				spacesGroup.POST("/run-action-authority-check", s.requireCurrentRunActionAuthorityChecker, s.checkCurrentRunActionAuthority)
+				spacesGroup.POST("/owner-effect-reservations/reserve", s.requireOwnerEffectReservationCoordinator, s.reserveOwnerEffect)
+				spacesGroup.POST("/owner-effect-reservations/:reservation_id/commit", s.requireOwnerEffectReservationCoordinator, s.commitOwnerEffectReservation)
+				spacesGroup.GET("/owner-effect-reservations/:reservation_id", s.requireOwnerEffectReservationCoordinator, s.getOwnerEffectReservation)
 			}
 
 			// Per-user authz facade — the single internal surface Data Plane
@@ -391,7 +396,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // healthCheck returns service health status. Deep check: round-trips the DB so
 // an unreachable/unauthenticated database (e.g. a stale DB password) reports
-// unhealthy instead of silently serving stale reads — the docker healthcheck
+// unhealthy instead of silently serving stale reads — the Docker health check
 // hits this endpoint, so a 503 marks the container unhealthy.
 func (s *Server) healthCheck(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
@@ -427,7 +432,7 @@ func (s *Server) healthCheck(c *gin.Context) {
 
 // Middleware
 
-// correlationMiddleware honours an inbound X-Correlation-Id, mints one if
+// correlationMiddleware honors an inbound X-Correlation-Id, mints one if
 // absent, exposes it as `correlation_id` on the gin context, and echoes it
 // back in the response so verevon/operator can correlate logs cross-plane.
 // G15 in verevon-gap.md.
@@ -443,7 +448,7 @@ func correlationMiddleware() gin.HandlerFunc {
 	}
 }
 
-// newCorrelationID returns a UUID-v4 string without adding a uuid dep.
+// newCorrelationID returns a v4 UUID string without adding a uuid dep.
 func newCorrelationID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -503,7 +508,7 @@ func isAllowedOrigin(origin string) bool {
 	if allowed == "" {
 		allowed = "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,https://tools.coresystem.com"
 	}
-	for _, value := range strings.Split(allowed, ",") {
+	for value := range strings.SplitSeq(allowed, ",") {
 		if strings.TrimSpace(value) == origin {
 			return true
 		}
@@ -538,7 +543,7 @@ type cachedIdentity struct {
 }
 
 // resolveIdentityCached wraps resolveIdentityFromBearer with a Dragonfly
-// cache keyed by a SHA-256 of the token (the raw token is never stored). Only
+// cache keyed by an SHA-256 of the token (the raw token is never stored). Only
 // successful resolutions are cached, and only for a short TTL, so this removes
 // the per-request (and, on /users/me, double) Auth Core round-trip on the hot
 // path without weakening verification. Cache-less and cache-error paths fall
@@ -582,7 +587,10 @@ func resolveIdentityFromBearer(ctx context.Context, token, authServiceURL string
 		log.Warn().Err(err).Msg("resolveUserIDFromBearer: auth-service request failed")
 		return bearerIdentity{}
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Body is fully read below before use; close errors are not actionable.
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return bearerIdentity{}
