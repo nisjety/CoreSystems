@@ -707,7 +707,7 @@ export function PromptSection() {
 
 					<div className="fade-out-top" data-fade-out-top>
 						<div
-							className="relative mt-[clamp(30px,3.6vw,54px)] h-[min(42svh,430px)] min-h-[300px] overflow-hidden [mask-image:linear-gradient(transparent,#000_14%,#000_86%,transparent)] [-webkit-mask-image:linear-gradient(transparent,#000_14%,#000_86%,transparent)] motion-reduce:h-auto motion-reduce:overflow-visible motion-reduce:[mask-image:none] motion-reduce:[-webkit-mask-image:none] max-[1023px]:h-[340px] max-[1023px]:min-h-[300px]"
+							className="relative mt-[clamp(30px,3.6vw,54px)] h-[min(42svh,430px)] min-h-[300px] overflow-hidden [mask-image:linear-gradient(transparent,#000_14%,#000_86%,transparent)] [-webkit-mask-image:linear-gradient(transparent,#000_14%,#000_86%,transparent)] max-[1023px]:h-[340px] max-[1023px]:min-h-[300px]"
 							ref={promptWindowRef}
 						>
 							<div

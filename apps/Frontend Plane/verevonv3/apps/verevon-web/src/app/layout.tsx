@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Script from "next/script";
 import { RouteTransition } from "@/components/core/RouteTransition";
 import { siteDescription, siteName, siteUrl } from "@/shared/seo/site";
 import "./globals.css";
@@ -17,7 +18,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
 	metadataBase: siteUrl,
 	title: {
-		default: "Verevon — Fra kundesignal til godkjent handling",
+		default: "Verevon — Én arbeidsflate for mennesker og AI",
 		template: "%s — Verevon",
 	},
 	description: siteDescription,
@@ -25,15 +26,14 @@ export const metadata: Metadata = {
 		canonical: "/",
 	},
 	openGraph: {
-		title: "Verevon — Fra kundesignal til godkjent handling",
-		description:
-			"Norsk AI-arbeidsbenk for kundearbeid: kilder, svarforslag, godkjenning og revisjonsspor i én flate.",
+		title: "Verevon — Én arbeidsflate for mennesker og AI",
+		description: siteDescription,
 		locale: "nb_NO",
 		type: "website",
 		url: "/",
 		images: [
 			{
-				alt: "Verevon — Fra kundesignal til godkjent handling",
+				alt: "Verevon — Én arbeidsflate for mennesker og AI",
 				height: 630,
 				url: "/opengraph-image",
 				width: 1200,
@@ -43,7 +43,7 @@ export const metadata: Metadata = {
 	twitter: {
 		card: "summary_large_image",
 		description: siteDescription,
-		title: "Verevon — Fra kundesignal til godkjent handling",
+		title: "Verevon — Én arbeidsflate for mennesker og AI",
 		images: ["/opengraph-image"],
 	},
 };
@@ -80,18 +80,41 @@ const structuredData = {
 	],
 };
 
+const fullMotionPreferenceScript = `
+(() => {
+	const nativeMatchMedia = window.matchMedia.bind(window);
+
+	window.matchMedia = (query) => {
+		const fullMotionQuery = query
+			.replace(/\\(\\s*prefers-reduced-motion\\s*:\\s*no-preference\\s*\\)/gi, "(min-width: 0px)")
+			.replace(/\\(\\s*prefers-reduced-motion(?:\\s*:\\s*reduce)?\\s*\\)/gi, "(max-width: 0px)");
+
+		return nativeMatchMedia(fullMotionQuery);
+	};
+})();
+`;
+
 export default function RootLayout({
 	children,
 }: Readonly<{
 	children: React.ReactNode;
 }>) {
 	return (
-		<html data-scroll-behavior="smooth" lang="nb">
+		<html data-motion="full" data-scroll-behavior="smooth" lang="nb">
+			<head>
+				<Script
+					dangerouslySetInnerHTML={{ __html: fullMotionPreferenceScript }}
+					id="verevon-full-motion-preference"
+					strategy="beforeInteractive"
+				/>
+			</head>
 			<body className={`${geistSans.variable} ${geistMono.variable}`}>
-				<script
+				<Script
 					dangerouslySetInnerHTML={{
 						__html: JSON.stringify(structuredData).replace(/</g, "\\u003c"),
 					}}
+					id="verevon-structured-data"
+					strategy="beforeInteractive"
 					type="application/ld+json"
 				/>
 				<RouteTransition />

@@ -5,6 +5,7 @@ import { FeaturesSection } from "./sections/FeaturesSection";
 import { HeroSection } from "./sections/HeroSection";
 import { LayerSection } from "./sections/layer-section";
 import { PreFooterStatementSection } from "./sections/PreFooterStatementSection";
+import { ProblemCardsSection } from "./sections/ProblemCardsSection";
 import { ProblemSection } from "./sections/ProblemSection";
 import { ProductLoopSection } from "./sections/ProductLoopSection";
 import { SensesSection } from "./sections/SensesSection";
@@ -20,6 +21,7 @@ export function VerevonHome() {
 				<>
 					<BrandLogosSection />
 					<ProblemSection />
+					<ProblemCardsSection />
 					<ProductLoopSection />
 					<SensesSection />
 					<FeaturesSection />

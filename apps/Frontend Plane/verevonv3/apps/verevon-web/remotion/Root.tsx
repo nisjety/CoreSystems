@@ -1,4 +1,6 @@
 import { Composition } from "remotion";
+import { SenseScene } from "../src/components/home/senses/SenseScene";
+import { VerevonProductShowcase } from "./VerevonProductShowcase";
 import {
 	type FeatureFilmKind,
 	VerevonFeatureFilm,
@@ -23,6 +25,10 @@ const compositions: Array<{
 export function RemotionRoot() {
 	return (
 		<>
+			<Composition component={SenseScene} id="Senses-Delegering" defaultProps={{ kind: "delegate" }} durationInFrames={540} fps={30} width={720} height={640} />
+			<Composition component={SenseScene} id="Senses-Laering" defaultProps={{ kind: "learn" }} durationInFrames={540} fps={30} width={720} height={640} />
+			<Composition component={SenseScene} id="Senses-Oversikt" defaultProps={{ kind: "oversee" }} durationInFrames={540} fps={30} width={720} height={640} />
+			<Composition component={VerevonProductShowcase} id="Verevon-Product" durationInFrames={240} fps={30} width={1280} height={800} />
 			{compositions.map(({ id, kind }) => (
 				<Composition
 					component={VerevonFeatureFilm}

@@ -84,7 +84,7 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 		<div
 			aria-label="Verevon meny"
 			aria-modal="true"
-			className="fixed inset-0 z-[100] flex min-h-0 flex-col overflow-y-auto bg-[linear-gradient(115deg,rgba(121,56,25,0.78),transparent_52%),linear-gradient(135deg,var(--verevon-a-earth),var(--verevon-h-ink-warm)_68%,#080707)] px-[clamp(24px,4vw,56px)] pb-14 pt-[54px] text-verevon-c-white animate-[verevon-menu-enter_420ms_ease_both] max-[760px]:pb-[34px] max-[760px]:pt-[34px]"
+			className="fixed inset-0 z-[100] flex min-h-0 flex-col overflow-y-auto verevon-menu-surface px-[clamp(24px,4vw,56px)] pb-14 pt-[54px] text-verevon-j-text animate-[verevon-menu-enter_420ms_ease_both] max-[760px]:pb-[34px] max-[760px]:pt-[34px]"
 			onKeyDown={handleKeyDown}
 			ref={dialogRef}
 			role="dialog"
@@ -124,18 +124,18 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 				{menuItems.map((item, index) => {
 					const itemContent = (
 						<>
-							<span className="font-arbeit text-[0.98rem] text-[color-mix(in_srgb,var(--verevon-c-white)_72%,transparent)]">
+							<span className="font-arbeit text-[0.98rem] text-[color-mix(in_srgb,var(--verevon-j-text)_72%,transparent)]">
 								{item.number}
 							</span>
 
-							<strong className="font-arbeit text-[2.2rem] font-normal leading-none text-[color-mix(in_srgb,var(--verevon-c-white)_78%,transparent)] max-[760px]:text-[1.72rem]">
+							<strong className="font-arbeit text-[2.2rem] font-normal leading-none text-[color-mix(in_srgb,var(--verevon-j-text)_78%,transparent)] max-[760px]:text-[1.72rem]">
 								{item.label}
 							</strong>
 						</>
 					);
 					const itemProps = {
 						className:
-							"grid translate-y-[26px] gap-[38px] border-t border-white/20 pt-2 opacity-0 animate-[verevon-menu-item-enter_560ms_ease_forwards] [animation-delay:var(--delay)] transition-colors hover:text-white motion-reduce:translate-y-0 motion-reduce:opacity-100 motion-reduce:animate-none max-[760px]:gap-[18px]",
+							"grid translate-y-[26px] gap-[38px] border-t border-black/15 pt-2 opacity-0 animate-[verevon-menu-item-enter_560ms_ease_forwards] [animation-delay:var(--delay)] transition-colors hover:text-black max-[760px]:gap-[18px]",
 						href: item.href,
 						onClick: onClose,
 						style: { "--delay": `${index * 80}ms` } as CSSProperties,
@@ -155,13 +155,13 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 
 			<div
 				aria-label="Kontaktlenker"
-				className="grid shrink-0 justify-items-start gap-2 font-arbeit text-base text-[color-mix(in_srgb,var(--verevon-c-white)_74%,transparent)]"
+				className="grid shrink-0 justify-items-start gap-2 font-arbeit text-base text-[color-mix(in_srgb,var(--verevon-j-text)_74%,transparent)]"
 			>
 				<span>Kontakt:</span>
 
 				{contactLinks.map((link) => (
 					<a
-						className="transition-colors hover:text-verevon-c-white"
+						className="transition-colors hover:text-verevon-j-text"
 						href={link.href}
 						key={link.href}
 						onClick={onClose}

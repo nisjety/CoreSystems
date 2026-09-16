@@ -62,109 +62,82 @@ export const workflowCards: WorkflowCard[] = [
 ];
 
 /**
- * The public platform carousel names the six modules a visitor buys into.
- *
- * Naming note — this six-module set is a *proposal*, not documented product
- * truth. Only "Verevon Support" and the "Verevon Proof Bundle" appear in the
- * platform docs today; Knowledge / Research / Chat / Agents / Trust are new
- * names for surfaces that already exist and ship. A seventh proposed name,
- * "Verevon Cloud", is deliberately left out: Verevon runs on Azure and is not
- * sold as infrastructure, so the name would overclaim exactly the way the
- * trust docs warn against. Connections/integrations stay a capability of
- * Knowledge and Agents rather than a module of their own.
- *
- * The three groups map onto the brand promise: Finn → Forstå → Få gjort.
+ * The public carousel organizes the work a first-time visitor can recognize.
+ * These are navigation areas, not separate product packages or promises of
+ * features that have not been documented elsewhere on the site.
  */
 export type ModuleCard = {
-	features: string[];
 	href: string;
-	/**
-	 * Finn / Forstå / Få gjort — the promise beat this module serves.
-	 * Two modules share the FINN stage and two share FÅ GJORT, so each of
-	 * those four carries a distinguishing second word (grounded in that
-	 * card's own title) — otherwise the carousel shows the exact same label
-	 * twice in a row, which reads as a bug, not a grouping.
-	 */
-	beat: string;
-	image: string;
-	imageAlt: string;
-	/** Object-position for the crop, since these are editorial photographs. */
-	imagePosition?: string;
-	module: string;
+	linkLabel: string;
+	area: string;
 	title: string;
 	text: string;
+	image: string;
+	imageAlt: string;
+	imagePosition?: string;
+	imageWidth: number;
+	imageHeight: number;
 };
 
 export const moduleCards: ModuleCard[] = [
 	{
-		beat: "FINN",
-		module: "Verevon Knowledge",
-		title: "Kunnskapen deres, søkbar og sporbar.",
-		text: "Dokumenter, nettsteder og forretningssystemer blir til én kontekst — der hvert svar peker tilbake på kilden det kom fra.",
-		features: ["Søk", "Kildespor", "Dokumenter", "ERP / CRM"],
-		href: "#kunnskap",
-		image: "/verevon-mood/module-knowledge.jpg",
-		imageAlt:
-			"Struktur og målepunkter lagt over noe levende — kunnskap hentet ut av materialet dere allerede har.",
-		imagePosition: "center 50%",
+		area: "Kunnskap",
+		title: "Finn grunnlaget. Se sammenhengen.",
+		text: "Kilder, dokumenter og innsikt samlet rundt arbeidet dere skal gjøre.",
+		linkLabel: "Se kunnskapsgrunnlaget",
+		href: "/plattform/felles-kontekst",
+		image: "https://images.pexels.com/photos/7190383/pexels-photo-7190383.jpeg",
+		imageAlt: "En hånd over arbeidstegninger på et bord i varmt sidelys",
+		imagePosition: "50% center",
+		imageWidth: 4000,
+		imageHeight: 5000,
 	},
 	{
-		beat: "FINN · UTENFOR",
-		module: "Verevon Research",
-		title: "Følg det som endrer seg utenfor huset.",
-		text: "Web, norske registre og kilder dere velger selv — undersøkt, sammenlignet og fulgt over tid, ikke bare slått opp én gang.",
-		features: ["Web", "Norske data", "Overvåking", "Sammenligning"],
-		href: "#kunnskap",
-		image: "/verevon-mood/module-research-v2.jpg",
-		imageAlt:
-			"En person arbeider ved et vindu, med verden utenfor synlig i samme blikk.",
-		imagePosition: "center 40%",
+		area: "AI og agenter",
+		title: "Spør én gang. Deleger neste steg.",
+		text: "Fra en enkelt forespørsel til gjentakende oppgaver, innenfor avtalte rammer.",
+		linkLabel: "Se arbeidsflyten",
+		href: "/produkt/arbeidsflyten",
+		image: "https://images.pexels.com/photos/12585842/pexels-photo-12585842.jpeg",
+		imageAlt: "En person sitter rolig med en bærbar datamaskin mens en kollega passerer i bevegelse",
+		imagePosition: "50% center",
+		imageWidth: 5158,
+		imageHeight: 3434,
 	},
 	{
-		beat: "FORSTÅ",
-		module: "Verevon Chat",
-		title: "Spør på norsk. Få et grunnlag, ikke en gjetning.",
-		text: "Still spørsmålet som det faktisk stilles internt, og få tilbake sammenhengen, tallene og kildene beslutningen skal hvile på.",
-		features: ["Analyse", "Sammenheng", "Kilder", "Bokmål"],
-		href: "#plattform",
-		image: "/verevon-mood/module-chat-v2.jpg",
-		imageAlt:
-			"To personer i samtale ved et bord, med byen synlig i vinduet bak.",
-		imagePosition: "center 42%",
+		area: "Verktøy for arbeidet",
+		title: "Arbeidet skjer her.",
+		text: "Samtaler, innhold og oppfølging på samme arbeidsflate.",
+		linkLabel: "Se arbeidet i flyt",
+		href: "/produkt/arbeidsflyten",
+		image: "https://images.unsplash.com/photo-1511376979163-f804dff7ad7b?auto=format&fit=max&fm=jpg&q=90&w=3565",
+		imageAlt: "To kollegaer i samtale ved et bord, sett gjennom glass i varmt ettermiddagslys",
+		imagePosition: "50% center",
+		imageWidth: 3565,
+		imageHeight: 5347,
 	},
 	{
-		beat: "FÅ GJORT",
-		module: "Verevon Agents",
-		title: "Arbeidet går videre mens dere holder styringen.",
-		text: "Sett mål, grenser og verktøy. Agenten utfører stegene, viser hva den gjør underveis, og stopper der dere har bedt den stoppe.",
-		features: ["Agent runs", "Verktøy", "MCP", "Tilbakerulling"],
-		href: "#plattform",
-		image: "/verevon-mood/module-agents.jpg",
-		imageAlt:
-			"En person står stille mens arbeidet passerer i bevegelse rundt.",
-		imagePosition: "center 45%",
+		area: "Datamaskiner og support",
+		title: "Hjelpen kan gå videre.",
+		text: "Undersøk problemer og følg opp arbeidet der det skjer.",
+		linkLabel: "Se et oppfølgingsløp",
+		href: "/produkt/svartid",
+		image: "https://images.pexels.com/photos/8837372/pexels-photo-8837372.jpeg",
+		imageAlt: "En kollega lener seg inn for å hjelpe en annen med arbeidet ved en dataskjerm",
+		imagePosition: "50% 75%",
+		imageWidth: 4000,
+		imageHeight: 6000,
 	},
 	{
-		beat: "FÅ GJORT · KUNDER",
-		module: "Verevon Support",
-		title: "Kundearbeidet samlet på ett sted.",
-		text: "Innboks, tickets og AI-utkast i samme flyt — med et menneske som leser gjennom og sender, ikke en bot som svarer på egen hånd.",
-		features: ["Innboks", "Tickets", "AI-utkast", "Widget"],
-		href: "#plattform",
-		image: "/verevon-mood/module-support-v2.jpg",
-		imageAlt:
-			"En kollega leser gjennom skjermene til teamet før noe sendes videre.",
-		imagePosition: "center 45%",
-	},
-	{
-		beat: "KONTROLL",
-		module: "Verevon Trust",
-		title: "Hva ble brukt, hvem godkjente, hva skjedde.",
-		text: "Policy før handling, godkjenning på det som betyr noe, og et spor i etterkant som viser kilde, tilgang og kostnad.",
-		features: ["Policy", "Godkjenning", "Audit", "Kostnad"],
-		href: "/trust",
-		image: "/verevon-mood/module-trust.jpg",
-		imageAlt: "En hånd som signerer et dokument på et rolig skrivebord.",
-		imagePosition: "center 50%",
+		area: "Tilgang og kontroll",
+		title: "Deleger med tydelige grenser.",
+		text: "Bestem tilganger, se hva som skjer og følg opp handlingene.",
+		linkLabel: "Se kontrollert arbeid",
+		href: "/plattform/kontrollert-arbeid",
+		image: "https://images.unsplash.com/photo-1603796846097-bee99e4a601f?auto=format&fit=max&fm=jpg&q=90&w=5973",
+		imageAlt: "En person i rustfarget skjorte signerer et dokument sammen med en kollega",
+		imagePosition: "50% center",
+		imageWidth: 5973,
+		imageHeight: 4480,
 	},
 ];

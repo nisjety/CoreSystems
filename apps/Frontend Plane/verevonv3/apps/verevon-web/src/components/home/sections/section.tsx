@@ -38,8 +38,7 @@ export const Section = forwardRef<HTMLElement, SectionProps>(
 						.join(" ");
 				case "full-bleed-tight":
 					return [
-						"relative left-1/2 right-1/2 w-screen",
-						"-ml-[50vw] -mr-[50vw]",
+						"relative w-full",
 						"p-0",
 						containerClassName,
 					]

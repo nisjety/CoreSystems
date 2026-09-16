@@ -50,7 +50,7 @@ export function HeroSection() {
 				data-hero-parallax-media=""
 			>
 				<video
-					className="size-full object-cover object-center max-[760px]:object-left"
+					className="size-full object-cover object-[91%_center] max-[760px]:object-[76%_center]"
 					loop
 					muted
 					playsInline
@@ -58,10 +58,11 @@ export function HeroSection() {
 					ref={videoRef}
 				>
 					<source
-						src="/verevon-vibe/verevon-hero-premiere-light.mp4"
+						src="/verevon-vibe/hero-candidate-01-silhouette-4k.mp4"
 						type="video/mp4"
 					/>
 				</video>
+				<div className="pointer-events-none absolute inset-0 bg-black/15" />
 			</div>
 
 			<div className="pointer-events-none absolute left-[70%] top-[50%] z-[1] w-[min(62vw,760px)] -translate-x-1/2 -translate-y-1/2 text-[color-mix(in_srgb,var(--verevon-c-white)_13%,transparent)] mix-blend-screen max-[760px]:left-[66%] max-[760px]:top-[43%] max-[760px]:w-[128vw]">
@@ -72,20 +73,20 @@ export function HeroSection() {
 			<HeroParallax />
 
 			<div
-				className="relative z-[1] mx-auto flex w-full max-w-[1680px] flex-col px-[var(--verevon-edge)] pb-[clamp(260px,29vh,380px)] pt-[clamp(150px,18vh,220px)] max-[760px]:px-[var(--verevon-page-pad)] max-[760px]:pb-[180px]"
+				className="relative z-[1] mx-auto flex min-h-svh w-full flex-col justify-center px-[var(--verevon-edge)] py-[clamp(72px,10vh,120px)] max-[760px]:px-[var(--verevon-page-pad)]"
 				data-hero-parallax-copy=""
 			>
-				<div className="max-w-[50rem]">
-					<h1 className="verevon-hero-text-shadow max-w-none font-arbeit text-[clamp(2.3rem,3.9vw,4.7rem)] font-normal leading-[0.98] tracking-[-0.045em] text-verevon-c-white text-balance">
-							<span className="block whitespace-nowrap max-[760px]:whitespace-normal">AI-plattformen for</span>
-							<span className="block whitespace-nowrap max-[760px]:whitespace-normal">kunnskap og handling</span>
+				<div className="max-w-[40rem] -translate-x-[17%] translate-y-[10%] max-[760px]:translate-x-0 max-[760px]:translate-y-0">
+					<h1 className="verevon-home-heading verevon-hero-heading verevon-hero-text-shadow max-w-none text-verevon-c-white text-balance">
+							<span className="block whitespace-nowrap max-[760px]:whitespace-normal">Én arbeidsflate.</span>
+							<span className="block whitespace-nowrap max-[760px]:whitespace-normal">For mennesker og AI.</span>
 					</h1>
 
-							<p className="ml-[clamp(0rem,4.5vw,4rem)] mt-6 max-w-[38rem] font-protokoll text-[clamp(0.9rem,0.9vw,1.03rem)] font-light leading-[1.42] text-[color-mix(in_srgb,var(--verevon-c-white)_80%,transparent)] text-pretty max-[760px]:ml-0">
-							Verevon kobler virksomhetens kunnskap og systemer til agenter som finner, forstår og får arbeidet gjort — med synlige kilder og kontroll.
+							<p className="ml-[clamp(0rem,3.6vw,3.2rem)] mt-6 max-w-[30.4rem] font-protokoll text-[clamp(0.9rem,0.9vw,1.03rem)] font-light leading-[1.42] text-[color-mix(in_srgb,var(--verevon-c-white)_80%,transparent)] text-pretty max-[760px]:ml-0">
+							Verevon samler kunnskap, verktøy og oppgaver. Jobb selv, eller la Verevon ta neste steg — innenfor rammene dere setter.
 						</p>
 
-						<div className="ml-[clamp(0rem,4.5vw,4rem)] mt-7 flex flex-wrap items-center gap-x-10 gap-y-4 max-[760px]:ml-0">
+						<div className="ml-[clamp(0rem,3.6vw,3.2rem)] mt-7 flex flex-wrap items-center gap-x-10 gap-y-4 max-[760px]:ml-0">
 							<ArrowButton className="verevon-hero-button-shadow" href="#produkt" variant="light">
 								Se arbeidsflyten
 							</ArrowButton>
@@ -106,18 +107,6 @@ export function HeroSection() {
 			>
 				Kilder <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Kunnskap <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Søk <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Agenter <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Systemer <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Kontroll
 			</div>
-
-			<a
-				aria-label="Scroll til produktseksjonen"
-				className="verevon-hero-scroll-cue absolute bottom-[clamp(28px,4vh,48px)] right-[var(--verevon-edge)] z-[2] inline-flex items-end gap-3 font-protokoll text-[0.72rem] font-light leading-none text-[color-mix(in_srgb,var(--verevon-c-white)_64%,transparent)] max-[760px]:right-[var(--verevon-page-pad)]"
-				href="#produkt"
-			>
-				<span
-					aria-hidden="true"
-					className="verevon-hero-scroll-cue__line h-[42px] w-px"
-				/>
-				<span className="pb-0.5">Scroll</span>
-			</a>
 		</section>
 	);
 }

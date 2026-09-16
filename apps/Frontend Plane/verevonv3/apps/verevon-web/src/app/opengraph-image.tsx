@@ -1,6 +1,6 @@
 import { ImageResponse } from "next/og";
 
-export const alt = "Verevon — Fra kundesignal til godkjent handling";
+export const alt = "Verevon — Én arbeidsflate for mennesker og AI";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -50,7 +50,7 @@ export default function OpenGraphImage() {
 							lineHeight: 0.94,
 						}}
 					>
-						Fra kundesignal til godkjent handling.
+						Én arbeidsflate for mennesker og AI.
 					</div>
 				</div>
 				<div

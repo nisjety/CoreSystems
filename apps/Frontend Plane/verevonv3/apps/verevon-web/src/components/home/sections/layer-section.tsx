@@ -2,7 +2,8 @@
 
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
-import { motion, useInView, useReducedMotion } from "framer-motion";
+import { motion, useInView } from "framer-motion";
+import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion";
 
 type LayerId =
 	| "management"
@@ -351,7 +352,12 @@ export function LayerSection() {
 	});
 
 	const [activeLayerId, setActiveLayerId] = useState<LayerId>("management");
-	const prefersReducedMotion = useReducedMotion();
+	// Keep the server and the first client render identical. Framer Motion's
+	// useReducedMotion can resolve the browser preference during hydration,
+	// while the server has no media-query value, which changes the layer's
+	// opacity and transform before React attaches. The shared hook starts in a
+	// conservative reduced-motion state on both sides, then syncs after mount.
+	const prefersReducedMotion = usePrefersReducedMotion();
 	const offsetScale = useLayerOffsetScale();
 
 	const activeLayout = stackLayouts[activeLayerId];
@@ -372,18 +378,18 @@ export function LayerSection() {
 				className="absolute inset-0 bg-[radial-gradient(circle_at_50%_54%,rgba(255,255,255,0.94),rgba(248,248,247,0.54)_35%,transparent_72%)]"
 			/>
 
-			<div className="relative z-[1] mx-auto w-full max-w-[1540px] px-[clamp(24px,4.2vw,112px)]">
+			<div className="relative z-[1] mx-auto w-full px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
 				<header className="grid grid-cols-1 gap-x-8 gap-y-6 md:grid-cols-3">
 					<p className="pt-1 font-protokoll text-[12px] font-light leading-none text-verevon-text-muted">
 						04 / Plattform
 					</p>
 
 					<div className="md:col-span-2">
-						<h2 className="font-arbeit text-[clamp(2.25rem,2.9vw,3.8rem)] font-light leading-[0.96] tracking-[-0.068em] text-verevon-j-text">
+						<h2 className="verevon-home-heading text-verevon-j-text">
 							Fire lag. Ingen av dem skjuler de andre.
 						</h2>
 
-						<p className="mt-4 max-w-[580px] font-protokoll text-[clamp(1rem,1vw,1.16rem)] font-light leading-[1.42] text-verevon-text-muted">
+						<p className="mt-4 max-w-[522px] font-protokoll text-[clamp(1rem,1vw,1.16rem)] font-light leading-[1.42] text-verevon-text-muted">
 							Kontroll øverst, kilder nederst, arbeidet i mellom. Velg et lag for å
 							se det løftet ut av stabelen — og hvordan et svar kan følges hele
 							veien ned til grunnlaget det kom fra.

@@ -1119,7 +1119,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.shortOverlay {
+	:global(html:not([data-motion="full"])) .shortOverlay {
 		opacity: 0;
 	}
 }

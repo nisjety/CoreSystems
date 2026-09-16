@@ -29,6 +29,8 @@ export function HeroParallax() {
 		}
 
 		const matchMedia = gsap.matchMedia();
+		const fullMotionIsEnabled =
+			document.documentElement.dataset.motion === "full";
 		let refreshFrame: number | null = null;
 
 		matchMedia.add(
@@ -38,7 +40,7 @@ export function HeroParallax() {
 					reduceMotion: boolean;
 				};
 
-				if (reduceMotion) {
+				if (reduceMotion && !fullMotionIsEnabled) {
 					gsap.set([media, copy], { clearProps: "transform" });
 					return;
 				}
