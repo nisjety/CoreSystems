@@ -445,23 +445,23 @@ export function FeaturesSection() {
 
 			<div className="relative z-10 w-full px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
 				<header
-					className="mx-auto mb-[clamp(48px,8vh,104px)] max-w-[760px] text-center md:invisible"
+					className="mx-auto mb-[clamp(48px,8vh,104px)] max-w-[684px] text-center md:invisible"
 					data-features-intro=""
 				>
-					<p className="verevon-eyebrow text-verevon-coral">04 / Modulene</p>
+					<p className="verevon-eyebrow text-verevon-coral">04 / Områder</p>
 					<h2
-						className="mt-4 font-arbeit text-[clamp(2.75rem,5vw,6.1rem)] font-light leading-[0.9] tracking-[-0.07em] text-verevon-j-text text-balance"
+						className="verevon-home-heading mt-4 text-verevon-j-text text-balance"
 						id="features-title"
 					>
-						Finn. Forstå. Få gjort.
+						Én arbeidsflate. Flere måter å få gjort på.
 					</h2>
-					<p className="mx-auto mt-5 max-w-[600px] font-protokoll text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
-						Seks moduler, én sammenheng. Dere kan starte med én og ta resten
-						når arbeidet krever det.
+					<p className="mx-auto mt-5 max-w-[540px] font-protokoll text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
+						Fra kunnskapsgrunnlag til oppgaver, verktøy og oppfølging. Utforsk
+						det som er relevant for dere.
 					</p>
 				</header>
 
-				<div className="mx-auto w-full max-w-[1680px] [perspective:1400px]">
+				<div className="mx-auto w-full max-w-[var(--verevon-content-max)] [perspective:1400px]">
 					<div
 						className="relative w-full cursor-none"
 						ref={viewportRef}
@@ -469,7 +469,7 @@ export function FeaturesSection() {
 						<div className="relative w-full">
 							<div
 								className="relative flex w-full snap-x snap-mandatory gap-x-[var(--feature-card-gap)] overflow-x-auto overscroll-x-contain pb-4 pt-2 [--feature-card-gap:clamp(20px,2vw,36px)] [--feature-card-width:clamp(250px,22vw,280px)] lg:[--feature-card-width:calc((100%_-_3*var(--feature-card-gap))/4)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden touch-pan-x"
-								aria-label="Verevon-modulene"
+								aria-label="Verevons arbeidsområder"
 								data-features-cards-stage=""
 								ref={carouselRef}
 								onClickCapture={handleViewportClick}
@@ -486,7 +486,7 @@ export function FeaturesSection() {
 										card={card}
 										className="w-[var(--feature-card-width)] shrink-0 snap-start"
 										index={index}
-										key={card.module}
+										key={card.area}
 										total={moduleCards.length}
 									/>
 								))}

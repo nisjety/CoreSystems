@@ -286,7 +286,7 @@ export function ControlledWorkPage() {
 											<button
 												aria-pressed={isSelected}
 												className={[
-													"group min-h-[124px] rounded-[17px] border p-4 text-left transition-[background-color,border-color,color,transform] duration-300 ease-out motion-reduce:transform-none motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-j-text",
+											"group min-h-[124px] rounded-[17px] border p-4 text-left transition-[background-color,border-color,color,transform] duration-300 ease-out focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-verevon-j-text",
 													isSelected
 														? "border-verevon-j-text bg-verevon-j-text text-white"
 														: "border-verevon-j-text/12 bg-white text-verevon-j-text hover:-translate-y-0.5 hover:border-verevon-j-text/30 hover:bg-verevon-surface-soft",
@@ -297,7 +297,7 @@ export function ControlledWorkPage() {
 											>
 												<span className="flex items-center justify-between gap-3 font-arbeit text-[1.15rem] font-normal tracking-[-0.035em]">
 													{option.label}
-													<ArrowMark className="size-4 transition-transform duration-300 group-hover:translate-x-1 motion-reduce:transition-none" />
+											<ArrowMark className="size-4 transition-transform duration-300 group-hover:translate-x-1" />
 												</span>
 												<span className={[
 													"mt-2 block font-protokoll text-[0.78rem] font-light leading-[1.42]",
@@ -311,7 +311,7 @@ export function ControlledWorkPage() {
 								<div aria-live="polite" className="mt-4 min-h-[96px]">
 									{outcome ? (
 										<div className={[
-											"flex items-start gap-3 rounded-[17px] border px-4 py-4 motion-safe:animate-[fade-in_280ms_ease-out] motion-reduce:animate-none",
+											"flex items-start gap-3 rounded-[17px] border px-4 py-4 animate-[fade-in_280ms_ease-out]",
 											outcome.className,
 										].join(" ")}>
 											<StatusMark className="mt-0.5 size-5 shrink-0" />

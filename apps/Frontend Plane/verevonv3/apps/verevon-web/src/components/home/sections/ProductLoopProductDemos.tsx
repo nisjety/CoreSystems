@@ -1,4 +1,7 @@
+"use client";
+
 import Image from "next/image";
+import { useEffect, useRef } from "react";
 import {
 	Check,
 	ChevronRight,
@@ -18,6 +21,31 @@ export type ProductLoopMedia = {
 	src?: string;
 };
 
+function ProductLoopVideo({ media }: { media: ProductLoopMedia }) {
+	const videoRef = useRef<HTMLVideoElement>(null);
+	useEffect(() => {
+		const video = videoRef.current;
+		if (!video) return;
+		const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+		const layer = video.closest<HTMLElement>("[data-product-loop-layer]");
+		let isVisible = false;
+		const update = () => {
+			const layerVisible = !layer || (getComputedStyle(layer).visibility !== "hidden" && Number(getComputedStyle(layer).opacity) > 0.1);
+			if (isVisible && layerVisible && !preference.matches && !document.hidden) {
+				void video.play().catch(() => {});
+			} else video.pause();
+		};
+		const observer = new IntersectionObserver(([entry]) => { isVisible = entry.isIntersecting; update(); });
+		const layerObserver = new MutationObserver(update);
+		observer.observe(video);
+		if (layer) layerObserver.observe(layer, { attributes: true, attributeFilter: ["style"] });
+		preference.addEventListener("change", update);
+		document.addEventListener("visibilitychange", update);
+		return () => { observer.disconnect(); layerObserver.disconnect(); preference.removeEventListener("change", update); document.removeEventListener("visibilitychange", update); video.pause(); };
+	}, []);
+	return <video ref={videoRef} aria-label={media.alt} className="h-full w-full object-contain" muted playsInline poster={media.poster} preload="none" style={{ objectPosition: media.objectPosition ?? "center" }}><source src={media.src} type="video/mp4" /></video>;
+}
+
 export function ProductLoopMediaContent({
 	media,
 	priority = false,
@@ -34,20 +62,7 @@ export function ProductLoopMediaContent({
 	}
 
 	if (media.kind === "video" && media.src) {
-		return (
-			<video
-				autoPlay
-				className="h-full w-full object-cover"
-				loop
-				muted
-				playsInline
-				poster={media.poster}
-				preload="metadata"
-				style={{ objectPosition: media.objectPosition ?? "center" }}
-			>
-				<source src={media.src} type="video/mp4" />
-			</video>
-		);
+		return <ProductLoopVideo media={media} />;
 	}
 
 	if (!media.src) {
@@ -59,7 +74,7 @@ export function ProductLoopMediaContent({
 			alt={media.alt}
 			className="object-cover saturate-[0.88] contrast-[1.02]"
 			fill
-			priority={priority}
+			loading={priority ? "eager" : "lazy"}
 			sizes="(max-width: 899px) 92vw, 72vw"
 			src={media.src}
 			style={{ objectPosition: media.objectPosition ?? "center" }}

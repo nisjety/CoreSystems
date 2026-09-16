@@ -1,0 +1,39 @@
+.section { --senses-original-edge: clamp(56px, 5.55vw, 208px); position: relative; overflow: clip; background: color-mix(in srgb, var(--background) 92%, var(--verevon-bg-soft)); color: var(--verevon-j-text); padding: 112px var(--senses-original-edge) 100px; }
+.header { max-width: var(--verevon-content-max); margin: 0 auto 100px; }
+.intro { max-width: 558px; margin: 28px 0 0; font: 300 clamp(1.04rem, 1.53vw, 1.4rem)/1.42 Arbeit, sans-serif; letter-spacing: -.025em; color: color-mix(in srgb, var(--verevon-j-text) 66%, transparent); text-wrap: pretty; }
+.chapters { list-style: none; padding: 0; margin: 0 auto; max-width: var(--verevon-content-max); }
+.chapter { display: grid; grid-template-columns: minmax(0, .78fr) minmax(0, 1.22fr); align-items: center; gap: clamp(42px, 5vw, 96px); padding: 62px 0 90px; }
+.chapter + .chapter { border-top: 1px solid rgb(26 26 26 / 10%); }
+.chapter:nth-child(2) { grid-template-columns: minmax(0, 1.22fr) minmax(0, .78fr); }
+.chapter:nth-child(2) .media { grid-row: 1; grid-column: 1; }
+.chapter:nth-child(2) .copyClip { grid-row: 1; grid-column: 2; }
+.copyClip { min-width: 0; }
+.copy { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: clamp(22px, 2.5vw, 42px); }
+.eyebrow { margin: 0; font: 300 .68rem/1 Protokoll, sans-serif; letter-spacing: .26em; text-transform: uppercase; font-variant-numeric: tabular-nums; color: var(--verevon-j-muted); }
+.title { max-width: 14ch; margin: 0; padding: 8px 0; }
+.title span { display: block; }
+.body { max-width: 540px; margin: 0; font: 300 clamp(1rem, 1.06vw, 1.22rem)/1.62 Arbeit, sans-serif; letter-spacing: -.02em; color: color-mix(in srgb, var(--verevon-j-text) 66%, transparent); text-wrap: pretty; }
+.link { display: inline-flex; gap: 12px; align-items: center; min-height: 44px; margin-top: 4px; font-family: Protokoll, sans-serif; font-size: .88rem; font-weight: 300; color: color-mix(in srgb, var(--verevon-j-text) 58%, transparent); text-decoration: none; text-underline-offset: 4px; }
+.link:hover { text-decoration: underline; }
+.link:focus-visible { outline: 2px solid var(--verevon-coral-deep); outline-offset: 5px; }
+.media { position: relative; min-width: 0; }
+.guideline { display: none; }
+.closing { max-width: var(--verevon-content-max); margin: clamp(52px, 6vw, 96px) auto 0; text-align: right; }
+.closing p { max-width: 540px; margin: 0 0 0 auto; font: 300 clamp(1rem, 1.06vw, 1.22rem)/1.62 Arbeit, sans-serif; letter-spacing: -.02em; color: color-mix(in srgb, var(--verevon-j-text) 66%, transparent); }
+@media (min-width: 1024px) {
+  .section[data-senses-scroll="active"] .chapters { position: relative; z-index: 1; max-width: none; }
+  .section[data-senses-scroll="active"] .chapter { position: relative; min-height: 75svh; grid-template-columns: minmax(0,1fr) minmax(0,2fr) minmax(0,1fr); align-items: stretch; gap: 0; padding: 0; border-top: 0; border-bottom: 1px solid rgb(26 26 26 / 10%); }
+  .section[data-senses-scroll="active"] .copyClip { position: relative; grid-column: 2; grid-row: 1; clip-path: inset(0); }
+  .section[data-senses-scroll="active"] .copy { position: fixed; inset: 0; padding: 0 16px; align-items: center; justify-content: center; text-align: center; pointer-events: none; }
+  .section[data-senses-scroll="active"] .body { max-width: min(540px,40vw); }
+  .section[data-senses-scroll="active"] .link { pointer-events: auto; }
+  .section[data-senses-scroll="active"] .media { display: flex; grid-row: 1; grid-column: 3; justify-content: flex-start; }
+  /* Preserve the original four-column geometry: the card occupies one
+     side column, with the same responsive gutter as the Git version. */
+  .section[data-senses-scroll="active"] .media > figure { width: min(100%, calc((100vw - 2 * var(--senses-original-edge)) / 4)); }
+  .section[data-senses-scroll="active"] .chapter:nth-child(2) .media { grid-row: 1; grid-column: 1; justify-content: flex-end; }
+  .section[data-senses-scroll="active"] .guideline { display: block; position: absolute; pointer-events: none; top: -20%; bottom: -20%; left: 0; width: 1px; z-index: 1; }
+  .section[data-senses-scroll="active"] .chapter:nth-child(2) .guideline { left: auto; right: 0; }
+}
+@media (max-width: 1023px) { .section { padding: 88px var(--verevon-page-pad) 88px; } .header { margin-bottom: 58px; } .chapter, .chapter:nth-child(2) { grid-template-columns: minmax(0,1fr); gap: 35px; padding: 45px 0 65px; max-width: 700px; margin: auto; } .chapter:nth-child(2) .media, .chapter:nth-child(2) .copyClip { grid-column: auto; grid-row: auto; } .media > figure { width: min(100%, 560px); margin-inline: auto; } .copy { max-width: 580px; } .title { max-width: 11ch; } }
+@media (max-width: 480px) { .section { padding-top: 72px; } .header { margin-bottom: 40px; } .chapter { gap: 28px; } }

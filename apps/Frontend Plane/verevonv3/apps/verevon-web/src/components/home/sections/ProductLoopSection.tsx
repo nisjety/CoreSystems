@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import { useLayoutEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
@@ -77,9 +76,10 @@ const loopStages: LoopStage[] = [
 		state: "Plattform",
 		kind: "media",
 		media: {
-			kind: "image",
-			src: "/verevon-product-shots/dashboard-live-overview.png",
-			alt: "Verevon-oversikten med søk, arbeidsflater og innganger til teamets daglige arbeid.",
+			kind: "video",
+			src: "/verevon-product-shots/product-showcase.mp4",
+			poster: "/verevon-product-shots/product-showcase-poster.jpg",
+			alt: "Verevons faktiske norske composer med et eksempelspørsmål om beslutninger, kilder og neste steg.",
 			objectPosition: "center 42%",
 		},
 	},
@@ -93,23 +93,7 @@ function LoopComposerContent() {
 	const activeComposerCopy = getProductLoopComposerCopy(activeComposerMode);
 
 	return (
-		<div className="relative h-full w-full overflow-visible bg-transparent text-verevon-j-text">
-			<div
-				className="absolute inset-0 opacity-70"
-				data-product-loop-composer-background=""
-			>
-				<Image
-					alt=""
-					className="object-cover"
-					fill
-					sizes="90vw"
-					src="/verevon-mood/peach-wash.jpg"
-				/>
-			</div>
-			<div
-				className="absolute inset-0 bg-[radial-gradient(circle_at_50%_42%,rgba(255,255,255,0.82),transparent_44%),linear-gradient(180deg,rgba(250,249,246,0.16),rgba(250,249,246,0.72))]"
-				data-product-loop-composer-overlay=""
-			/>
+		<div className="relative h-full w-full text-verevon-j-text">
 			<div className="relative flex h-full w-full flex-col items-center justify-center overflow-visible px-[clamp(16px,2vw,28px)] py-[clamp(18px,2.4vh,30px)] text-center">
 				<div className="shrink-0" data-product-loop-composer-copy="">
 					<p
@@ -118,9 +102,9 @@ function LoopComposerContent() {
 					>
 						{activeComposerCopy.label}
 					</p>
-					<h2 className="mt-4 min-h-[1.8em] max-w-[14ch] font-arbeit text-[clamp(2.8rem,5vw,6.2rem)] font-light leading-[0.9] tracking-[-0.075em] text-verevon-j-text text-balance">
+					<h2 className="verevon-home-heading mt-4 min-h-[1.8em] max-w-[14ch] text-verevon-j-text text-balance">
 						<span
-							className="block motion-safe:animate-[fade-in_300ms_ease-out]"
+							className="block animate-[fade-in_300ms_ease-out]"
 							data-product-loop-composer-title=""
 							key={activeComposerMode}
 						>
@@ -128,7 +112,7 @@ function LoopComposerContent() {
 						</span>
 					</h2>
 				</div>
-				<div className="mt-[clamp(24px,4vh,48px)] w-full max-w-[820px] shrink-0">
+				<div className="mt-[clamp(24px,4vh,48px)] w-full max-w-[656px] shrink-0">
 					<FeatureComposerCycle
 						id="product-loop-composer"
 						onModeChange={setActiveComposerMode}
@@ -139,7 +123,7 @@ function LoopComposerContent() {
 					data-product-loop-composer-copy=""
 				>
 					<span
-						className="block motion-safe:animate-[fade-in_300ms_ease-out]"
+						className="block animate-[fade-in_300ms_ease-out]"
 						data-product-loop-composer-body=""
 						key={activeComposerMode}
 					>
@@ -183,7 +167,7 @@ function LoopMediaLayer({
 function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
 	return (
 		<div
-			className="absolute left-0 top-0 max-w-[640px] text-left"
+			className="absolute left-0 top-0 max-w-[512px] text-left"
 			data-product-loop-copy-panel={index}
 			style={{
 				opacity: index === 0 ? 1 : 0,
@@ -194,10 +178,10 @@ function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
 			<p className="verevon-eyebrow mb-5 text-[color-mix(in_srgb,var(--verevon-a-earth)_78%,var(--verevon-j-text))]">
 				{stage.step} / {stage.state}
 			</p>
-			<h2 className="m-0 max-w-[10.5ch] font-arbeit text-[clamp(3rem,5.4vw,7.4rem)] font-light leading-[0.9] tracking-[-0.07em] text-verevon-j-text text-balance">
+			<h2 className="verevon-home-heading m-0 max-w-[10.5ch] text-verevon-j-text text-balance">
 				{stage.title}
 			</h2>
-			<p className="mt-[clamp(22px,2.4vw,36px)] max-w-[520px] font-protokoll text-[clamp(1rem,1.02vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
+			<p className="mt-[clamp(22px,2.4vw,36px)] max-w-[416px] font-protokoll text-[clamp(1rem,1.02vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
 				{stage.body}
 			</p>
 		</div>
@@ -226,16 +210,19 @@ function ProductLoopMobileFallback() {
 
 	return (
 		<div
-			className="hidden motion-reduce:grid motion-reduce:gap-12 max-[899px]:grid max-[899px]:gap-12"
+			className="hidden max-[899px]:grid max-[899px]:gap-12"
 			data-product-loop-mobile-fallback=""
 		>
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
 				<p className="verevon-eyebrow text-verevon-coral">03 / Produkt</p>
-				<h2 className="max-w-[11ch] font-arbeit text-[clamp(2.8rem,13vw,5rem)] font-light leading-[0.9] tracking-[-0.07em] text-verevon-j-text">
+				<h2 className="verevon-home-heading max-w-[11ch] text-verevon-j-text">
 					Fra kunnskap til handling
 				</h2>
 				<div className="relative aspect-[1.12] overflow-hidden rounded-[22px] bg-[#f4f3f0]">
-					<ProductLoopMediaContent media={loopStages[0].media as ProductLoopMedia} />
+					<ProductLoopMediaContent
+						media={loopStages[0].media as ProductLoopMedia}
+						priority
+					/>
 				</div>
 			</div>
 
@@ -319,10 +306,7 @@ export function ProductLoopSection() {
 					const header = section.querySelector<HTMLElement>(
 						"[data-product-loop-header]",
 					);
-					const copyPosition = section.querySelector<HTMLElement>(
-						"[data-product-loop-copy-position]",
-					);
-					const copyMotion = section.querySelector<HTMLElement>(
+					const copyFloat = section.querySelector<HTMLElement>(
 						"[data-product-loop-copy]",
 					);
 					const frameMarkers = Array.from(
@@ -345,28 +329,11 @@ export function ProductLoopSection() {
 							"[data-product-loop-copy-panel]",
 						),
 					);
-					const stateCards = Array.from(
-						section.querySelectorAll<HTMLElement>(
-							"[data-product-loop-state]",
-						),
-					);
-					const stateAccents = Array.from(
-						section.querySelectorAll<HTMLElement>(
-							"[data-product-loop-state-accent]",
-						),
-					);
 					const composerCopy = Array.from(
 						section.querySelectorAll<HTMLElement>(
 							"[data-product-loop-composer-copy]",
 						),
 					);
-					const composerBackground = section.querySelector<HTMLElement>(
-						"[data-product-loop-composer-background]",
-					);
-					const composerOverlay = section.querySelector<HTMLElement>(
-						"[data-product-loop-composer-overlay]",
-					);
-
 					if (
 						!viewport ||
 						!frame ||
@@ -374,17 +341,12 @@ export function ProductLoopSection() {
 						!connector ||
 						!chrome ||
 						!header ||
-						!copyPosition ||
-						!copyMotion ||
+						!copyFloat ||
 						frameMarkers.length !== 4 ||
 						copyMarkers.length !== copyStages.length ||
 						layers.length !== loopStages.length ||
 						panels.length !== copyStages.length ||
-						stateCards.length !== loopStages.length ||
-						stateAccents.length !== loopStages.length ||
-						composerCopy.length !== 2 ||
-						!composerBackground ||
-						!composerOverlay
+						composerCopy.length !== 2
 					) {
 						return;
 					}
@@ -411,83 +373,66 @@ export function ProductLoopSection() {
 					const placeFrame = (index: number) =>
 						boxFromMarker(frameMarkers[index]);
 					const placeCopy = (index: number) => boxFromMarker(copyMarkers[index]);
-					const dynamicTransform = (
-						base: () => {
-							height: number;
-							left: number;
-							top: number;
-							width: number;
-						},
-						target: () => {
-							height: number;
-							left: number;
-							top: number;
-							width: number;
-						},
-					) => ({
-						scaleX: () => {
-							const baseBox = base();
-							return target().width / baseBox.width;
-						},
-						scaleY: () => {
-							const baseBox = base();
-							return target().height / baseBox.height;
-						},
-						x: () => {
-							const baseBox = base();
-							return target().left - baseBox.left;
-						},
-						y: () => {
-							const baseBox = base();
-							return target().top - baseBox.top;
-						},
-					});
-					const dynamicFrameTransform = (target: () => {
-						height: number;
-						left: number;
-						top: number;
-						width: number;
-					}) => dynamicTransform(() => placeFrame(0), target);
 					const dynamicFramePosition = (index: number) => ({
-						...dynamicFrameTransform(() => placeFrame(index)),
+						height: () => placeFrame(index).height,
+						left: () => placeFrame(index).left,
+						top: () => placeFrame(index).top,
+						width: () => placeFrame(index).width,
 					});
-					const dynamicFullFrame = () => ({
-						...dynamicFrameTransform(() => {
-							const viewportRect = viewport.getBoundingClientRect();
-
-							return {
-								height: viewportRect.height,
-								left: 0,
-								top: 0,
-								width: viewportRect.width,
-							};
-						}),
-					});
-					const dynamicCopyPosition = (index: number) =>
-						dynamicTransform(() => placeCopy(0), () => placeCopy(index));
-					const entranceFrame = () => {
+					const entranceStartFrame = () => {
 						const viewportRect = viewport.getBoundingClientRect();
+						const markerRect = placeFrame(0);
 
 						return {
-							height: viewportRect.height * 0.9,
-							left: viewportRect.width * 0.05,
-							top: viewportRect.height * 0.05,
-							width: viewportRect.width * 0.9,
+							...markerRect,
+							left: (viewportRect.width - markerRect.width) / 2,
 						};
 					};
-					const dynamicEntranceFrame = () => ({
-						...dynamicFrameTransform(entranceFrame),
+					const dynamicEntranceStartFrame = () => ({
+						height: () => entranceStartFrame().height,
+						left: () => entranceStartFrame().left,
+						top: () => entranceStartFrame().top,
+						width: () => entranceStartFrame().width,
 					});
-					// A single ring grows and rotates behind the frame. Its base square
-					// is CSS-sized at 62vh; every scroll-time update below is therefore
-					// a composited translate/scale/rotate instead of a layout resize.
-					const CIRCLE_BASE_SIZE_RATIO = 0.62;
+					const contentFrame = () => {
+						const rect = viewport.getBoundingClientRect();
+						const inset = Math.max(Math.min(rect.width * 0.077, 100), (rect.width - 1512) / 2);
+						const width = rect.width - inset * 2;
+						const height = Math.min(rect.height - 160, width * 0.625);
+						return { width, height, left: inset, top: Math.max(96, (rect.height - height) / 2) };
+					};
+					const dynamicFullFrame = () => ({
+						height: () => contentFrame().height,
+						left: () => contentFrame().left,
+						top: () => contentFrame().top,
+						width: () => contentFrame().width,
+					});
+					const dynamicCopyPosition = (index: number) => ({
+						height: () => placeCopy(index).height,
+						left: () => placeCopy(index).left,
+						top: () => placeCopy(index).top,
+						width: () => placeCopy(index).width,
+					});
+					const entranceFrame = contentFrame;
+					const dynamicEntranceFrame = () => ({
+						height: () => entranceFrame().height,
+						left: () => entranceFrame().left,
+						top: () => entranceFrame().top,
+						width: () => entranceFrame().width,
+					});
+					// A single ring that grows and rotates behind the frame as the
+					// timeline moves through each stage — the section's own "loop"
+					// motif (lightweight.info-style morphing circle), independent of
+					// SignalPathLayer. Sized as a ratio of the viewport's own height
+					// (kept square) and offset as a ratio of viewport width/height, so
+					// it stays responsive the same way dynamicFramePosition does.
 					const dynamicCircleGeometry = (
 						sizeRatio: number,
 						xRatio: number,
 						yRatio: number,
 					) => ({
-						scale: sizeRatio / CIRCLE_BASE_SIZE_RATIO,
+						height: () => viewport.getBoundingClientRect().height * sizeRatio,
+						width: () => viewport.getBoundingClientRect().height * sizeRatio,
 						x: () => viewport.getBoundingClientRect().width * xRatio,
 						y: () => viewport.getBoundingClientRect().height * yRatio,
 					});
@@ -496,15 +441,10 @@ export function ProductLoopSection() {
 
 					const animationContext = gsap.context(() => {
 						gsap.set(frame, {
-							...placeFrame(0),
+							...entranceStartFrame(),
 							autoAlpha: 1,
 							bottom: "auto",
-							force3D: true,
 							right: "auto",
-							scaleX: 1,
-							scaleY: 1,
-							transformOrigin: "0% 0%",
-							willChange: "transform, opacity",
 							x: 0,
 							y: 0,
 						});
@@ -514,25 +454,15 @@ export function ProductLoopSection() {
 							autoAlpha: 0.5,
 							force3D: true,
 							rotation: -20,
-							willChange: "transform, opacity",
 							xPercent: -50,
 							yPercent: -50,
 							...dynamicCircleGeometry(0.3, 0, 0.15),
 						});
 						gsap.set(connector, { autoAlpha: 1 });
-						gsap.set(copyPosition, {
+						gsap.set(copyFloat, {
 							...placeCopy(0),
-							pointerEvents: "none",
-							scaleX: 1,
-							scaleY: 1,
-							transformOrigin: "0% 0%",
-							willChange: "transform",
-							x: 0,
-							y: 0,
-						});
-						gsap.set(copyMotion, {
 							autoAlpha: 0,
-							force3D: true,
+							pointerEvents: "none",
 							y: 28,
 						});
 						gsap.set(layers, {
@@ -549,17 +479,7 @@ export function ProductLoopSection() {
 							y: 16,
 							pointerEvents: "none",
 						});
-						gsap.set(stateCards, {
-							autoAlpha: (index) => (index === 0 ? 1 : 0.42),
-							y: (index) => (index === 0 ? 0 : 8),
-							force3D: true,
-						});
-						gsap.set(stateAccents, {
-							scaleX: (index) => (index === 0 ? 1 : 0.12),
-							transformOrigin: "0% 50%",
-						});
-					gsap.set(composerCopy, { autoAlpha: 1, y: 0 });
-					gsap.set([composerBackground, composerOverlay], { autoAlpha: 1 });
+						gsap.set(composerCopy, { autoAlpha: 1, y: 0 });
 
 						const loopTimeline = gsap.timeline({
 							defaults: { ease: "none" },
@@ -572,7 +492,6 @@ export function ProductLoopSection() {
 							toLayer: number,
 							frameIndex: number,
 							copyIndex: number | null,
-							toStage: number,
 							at: number,
 						) => {
 							loopTimeline
@@ -598,57 +517,31 @@ export function ProductLoopSection() {
 										duration: 0.38,
 									},
 									at + 0.16,
-									)
-								.to(
-									stateCards,
-									{
-										autoAlpha: (index) =>
-											index === toStage ? 1 : 0.42,
-										y: (index) => (index === toStage ? 0 : 8),
-										duration: 0.28,
-									},
-									at + 0.18,
-									)
-								.to(
-									stateAccents,
-									{
-										scaleX: (index) =>
-											index === toStage ? 1 : 0.12,
-										duration: 0.28,
-									},
-									at + 0.18,
 									);
 
 							if (copyIndex === null) {
 								loopTimeline.to(
-									copyMotion,
+									copyFloat,
 									{
 										autoAlpha: 0,
+										pointerEvents: "none",
 										y: -24,
 										duration: 0.24,
 									},
-									at + 0.06,
-								)
-								.to(
-									copyPosition,
-									{ pointerEvents: "none", duration: 0 },
 									at + 0.06,
 								);
 							} else {
 								const nextPanel = panels[copyIndex];
 								loopTimeline
+									// Clear the copy before it crosses the moving image.
+									.to(copyFloat, { autoAlpha: 0, pointerEvents: "none", duration: 0.1 }, at - 0.1)
 									.to(
-										copyPosition,
+										copyFloat,
 										{
 											...dynamicCopyPosition(copyIndex),
-											pointerEvents: "auto",
+											y: 0,
 											duration: 0.52,
 										},
-										at,
-									)
-									.to(
-										copyMotion,
-										{ autoAlpha: 1, y: 0, duration: 0.52 },
 										at,
 									)
 									.to(
@@ -667,7 +560,8 @@ export function ProductLoopSection() {
 										nextPanel,
 										{ y: 0, duration: 0.28 },
 										at + 0.28,
-									);
+									)
+									.to(copyFloat, { autoAlpha: 1, pointerEvents: "auto", duration: 0.16 }, at + 0.52);
 							}
 						};
 
@@ -675,9 +569,9 @@ export function ProductLoopSection() {
 						// this expansion is already underway as the section enters view.
 						loopTimeline
 							.fromTo(
-								frame,
-								{
-									...dynamicFramePosition(0),
+							frame,
+							{
+								...dynamicEntranceStartFrame(),
 									bottom: "auto",
 									right: "auto",
 									x: 0,
@@ -686,7 +580,7 @@ export function ProductLoopSection() {
 								{
 									...dynamicEntranceFrame(),
 									duration: PRODUCT_LOOP_ENTRANCE_TIMELINE_DURATION,
-									ease: "power3.out",
+									ease: "none",
 									immediateRender: true,
 								},
 								0,
@@ -711,25 +605,9 @@ export function ProductLoopSection() {
 								{ autoAlpha: 0, y: -18, duration: 0.28, ease: "power2.in" },
 								0.5,
 							)
-							.to(chrome, { autoAlpha: 1, duration: 0.22 }, 0.52)
-							.to(
-								stateCards,
-								{
-									autoAlpha: (index) => (index === 0 ? 1 : 0.42),
-									duration: 0.22,
-								},
-								0.56,
-							)
-							.to(
-								stateAccents,
-								{
-									scaleX: (index) => (index === 0 ? 1 : 0.12),
-									duration: 0.22,
-								},
-								0.56,
-							);
+							.to(chrome, { autoAlpha: 1, duration: 0.22 }, 0.52);
 
-						transition(0, 1, 1, 0, 1, 0.92);
+						transition(0, 1, 1, 0, 0.92);
 						loopTimeline.to(
 							circle,
 							{
@@ -739,7 +617,7 @@ export function ProductLoopSection() {
 							},
 							0.92,
 						);
-						transition(1, 2, 2, 1, 2, 1.82);
+						transition(1, 2, 2, 1, 1.82);
 						loopTimeline.to(
 							circle,
 							{
@@ -785,37 +663,16 @@ export function ProductLoopSection() {
 								2.9,
 							)
 							.to(
-								copyMotion,
+								copyFloat,
 								{
 									autoAlpha: 0,
+									pointerEvents: "none",
 									y: -24,
 									duration: 0.24,
 								},
 								2.78,
 							)
-							.to(
-								copyPosition,
-								{ pointerEvents: "none", duration: 0 },
-								2.78,
-							)
 							.to(chrome, { autoAlpha: 0, duration: 0.18 }, 2.88)
-							.to(
-								stateCards,
-								{
-									autoAlpha: (index) => (index === 3 ? 1 : 0.42),
-									y: (index) => (index === 3 ? 0 : 8),
-									duration: 0.24,
-								},
-								2.94,
-							)
-							.to(
-								stateAccents,
-								{
-									scaleX: (index) => (index === 3 ? 1 : 0.12),
-									duration: 0.24,
-								},
-									2.94,
-							)
 							.to(
 								frame,
 								{
@@ -827,16 +684,8 @@ export function ProductLoopSection() {
 								},
 								2.78,
 							)
-							.to(
-								[composerBackground, composerOverlay],
-								{ autoAlpha: 0, duration: 0.3 },
-								2.82,
-							)
-							.to(
-								composerCopy,
-								{ autoAlpha: 0, y: -14, duration: 0.36, ease: "power2.in" },
-								3.62,
-							)
+							// Let the composer stand on the page itself, with its copy
+							// and controls above the loop ring until the platform crossfade.
 							.to(
 								circle,
 								{
@@ -877,23 +726,6 @@ export function ProductLoopSection() {
 									duration: 0.46,
 								},
 								3.9,
-							)
-							.to(
-								stateCards,
-								{
-									autoAlpha: (index) => (index === 4 ? 1 : 0.42),
-									y: (index) => (index === 4 ? 0 : 8),
-									duration: 0.28,
-								},
-								3.94,
-							)
-							.to(
-								stateAccents,
-								{
-									scaleX: (index) => (index === 4 ? 1 : 0.12),
-									duration: 0.28,
-								},
-								3.94,
 							);
 					}, section);
 
@@ -1029,7 +861,7 @@ export function ProductLoopSection() {
 	return (
 		<section
 			aria-labelledby="product-loop-title"
-			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible bg-background text-verevon-j-text motion-reduce:mt-0 motion-reduce:h-auto motion-reduce:overflow-hidden max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
+			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible bg-background text-verevon-j-text max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
 			data-product-loop
 			id="flyt"
 			ref={sectionRef}
@@ -1041,55 +873,54 @@ export function ProductLoopSection() {
 				style={{ scrollMarginTop: PRODUCT_LOOP_ENTRANCE_SCROLL_MARGIN }}
 			/>
 
-			<div className="sticky top-0 min-h-svh overflow-hidden motion-reduce:relative motion-reduce:min-h-0 max-[899px]:relative max-[899px]:min-h-0" data-product-loop-pin="">
+			<div className="sticky top-0 min-h-svh overflow-hidden max-[899px]:relative max-[899px]:min-h-0" data-product-loop-pin="">
 				<div
-					className="relative min-h-svh overflow-hidden motion-reduce:grid motion-reduce:min-h-0 motion-reduce:gap-12 motion-reduce:px-[var(--verevon-page-pad)] motion-reduce:py-24 max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
+					className="relative min-h-svh overflow-hidden max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
 					data-product-loop-viewport=""
 				>
 					<div aria-hidden="true" className="absolute inset-0 bg-[radial-gradient(circle_at_78%_28%,rgba(238,122,80,0.08),transparent_27%),radial-gradient(circle_at_14%_74%,rgba(41,64,74,0.07),transparent_28%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.78))]" />
 
 					<div
-						className="absolute left-[clamp(28px,7vw,140px)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(52vw,700px)] text-left motion-reduce:hidden max-[899px]:hidden"
+						className="absolute left-[var(--verevon-edge)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(46.8vw,630px)] text-left max-[899px]:hidden"
 						data-product-loop-header=""
 					>
 						<p className="verevon-eyebrow text-verevon-coral">03 / Produkt</p>
-						<h2 className="mt-4 max-w-[10ch] font-arbeit text-[clamp(2.8rem,5.4vw,7rem)] font-light leading-[0.88] tracking-[-0.075em] text-verevon-j-text text-balance">
+						<h2 className="verevon-home-heading mt-4 max-w-[10ch] text-verevon-j-text text-balance">
 							Fra kunnskap til handling
 						</h2>
 					</div>
 
-					{/* Connects down from ProblemSection's 3 cards above — fades out
-					    as the entrance plays, right as the loop circle takes over,
-					    so the line reads as becoming the circle. */}
+					{/* Continues the centered handoff from ProblemSection — fades out
+					    as the entrance plays, right as the loop circle takes over. */}
 						<div
 							aria-hidden="true"
-							className="pointer-events-none absolute left-1/2 top-0 z-10 h-[clamp(48px,9vh,140px)] w-px -translate-x-1/2 bg-[linear-gradient(180deg,transparent,color-mix(in_srgb,var(--verevon-j-text)_28%,transparent)_60%,transparent)] motion-reduce:hidden max-[899px]:hidden"
+							className="pointer-events-none absolute left-1/2 top-0 z-10 h-[clamp(48px,9vh,140px)] w-px -translate-x-1/2 bg-[linear-gradient(180deg,transparent,color-mix(in_srgb,var(--verevon-j-text)_28%,transparent)_60%,transparent)] max-[899px]:hidden"
 							data-product-loop-connector=""
 						/>
 
-					<div aria-hidden="true" className="absolute inset-0 motion-reduce:hidden max-[899px]:hidden">
-						<div className="absolute left-[22%] top-[24%] h-[clamp(260px,34vh,390px)] w-[clamp(520px,43vw,760px)]" data-product-loop-frame-marker="" />
-						<div className="absolute right-[clamp(56px,6.6vw,128px)] top-[clamp(142px,17vh,206px)] h-[clamp(344px,47vh,560px)] w-[clamp(610px,58vw,1120px)]" data-product-loop-frame-marker="" />
-						<div className="absolute left-[clamp(92px,9vw,176px)] top-[clamp(222px,34vh,350px)] h-[clamp(260px,34vh,390px)] w-[clamp(520px,43vw,760px)]" data-product-loop-frame-marker="" />
+					<div aria-hidden="true" className="absolute inset-0 max-[899px]:hidden">
+						<div className="absolute left-[22%] top-[24%] h-[clamp(260px,34vh,390px)] w-[calc((100%-2*var(--verevon-edge))*0.48)]" data-product-loop-frame-marker="" />
+						<div className="absolute right-[var(--verevon-edge)] top-[clamp(142px,17vh,206px)] h-[clamp(344px,47vh,560px)] w-[calc((100%-2*var(--verevon-edge))*0.53)]" data-product-loop-frame-marker="" />
+						<div className="absolute left-[var(--verevon-edge)] top-[clamp(222px,34vh,350px)] h-[clamp(260px,34vh,390px)] w-[clamp(520px,43vw,760px)]" data-product-loop-frame-marker="" />
 						<div
-							className="absolute left-1/2 top-1/2 h-[clamp(560px,64vh,680px)] w-[min(92vw,1040px)] -translate-x-1/2 -translate-y-1/2"
+							className="absolute left-1/2 top-1/2 h-[clamp(560px,64vh,680px)] w-[min(calc(100%-2*var(--verevon-edge)),1040px)] -translate-x-1/2 -translate-y-1/2"
 							data-product-loop-frame-marker=""
 						/>
 
-						<div className="absolute left-[clamp(72px,7vw,142px)] top-[clamp(214px,27vh,310px)] h-[360px] w-[min(38vw,620px)]" data-product-loop-copy-marker="" />
-						<div className="absolute right-[clamp(86px,8vw,168px)] top-[clamp(236px,34vh,374px)] h-[320px] w-[min(42vw,680px)]" data-product-loop-copy-marker="" />
+						<div className="absolute left-[var(--verevon-edge)] top-[clamp(214px,27vh,310px)] h-[360px] w-[calc((100%-2*var(--verevon-edge))*0.41)]" data-product-loop-copy-marker="" />
+						<div className="absolute right-[var(--verevon-edge)] top-[clamp(236px,34vh,374px)] h-[320px] w-[calc((100%-2*var(--verevon-edge))*0.43)]" data-product-loop-copy-marker="" />
 					</div>
 
 					{/* Loop motif: one ring behind the frame, growing/rotating through
 					    each stage (see the circle tweens in the timeline above). */}
 					<div
 						aria-hidden="true"
-						className="pointer-events-none absolute left-1/2 top-1/2 z-10 size-[62vh] rounded-full border border-verevon-j-text/10 motion-reduce:hidden max-[899px]:hidden"
+						className="pointer-events-none absolute left-1/2 top-1/2 z-10 aspect-square rounded-full border-2 border-verevon-j-text/25 max-[899px]:hidden"
 						data-product-loop-circle=""
 					/>
 
 					<div
-						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden rounded-[24px] border border-verevon-j-text/8 bg-[#f8f8f7] shadow-[0_28px_96px_rgba(23,23,23,0.1)] motion-reduce:hidden max-[899px]:hidden"
+						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden rounded-[24px] border border-verevon-j-text/8 bg-[#f8f8f7] shadow-[0_28px_96px_rgba(23,23,23,0.1)] max-[899px]:hidden"
 						data-product-loop-frame=""
 					>
 						<div className="relative h-full w-full">
@@ -1104,32 +935,9 @@ export function ProductLoopSection() {
 						<LoopFrameChrome />
 					</div>
 
-					<div
-						className="absolute z-30 motion-reduce:hidden max-[899px]:hidden"
-						data-product-loop-copy-position=""
-					>
-						<div data-product-loop-copy="">
-							{copyStages.map((stage, index) => (
-								<LoopCopyPanel index={index} key={stage.step} stage={stage} />
-							))}
-						</div>
-					</div>
-
-					<div
-						aria-label="Verevon arbeidssløyfe, fra inngang til plattform"
-						className="absolute bottom-[clamp(42px,6vh,70px)] left-1/2 z-30 grid w-[min(86vw,1040px)] -translate-x-1/2 grid-cols-5 gap-[clamp(8px,0.8vw,12px)] motion-reduce:hidden max-[899px]:hidden"
-					>
-						{loopStages.map((stage, index) => (
-							<div
-								className="relative overflow-hidden border border-verevon-j-text/10 bg-white/52 px-4 py-3 backdrop-blur-[14px]"
-								data-product-loop-state=""
-								key={stage.step}
-								style={{ opacity: index === 0 ? 1 : 0.42 }}
-							>
-								<span aria-hidden="true" className="absolute inset-x-0 bottom-0 h-[3px] origin-left scale-x-[0.12] bg-verevon-coral/70" data-product-loop-state-accent="" style={{ transform: index === 0 ? "scaleX(1)" : "scaleX(0.12)" }} />
-								<span className="block font-arbeit text-[0.7rem] font-normal uppercase leading-none tracking-[0.14em] text-verevon-j-text/42">{stage.step}</span>
-								<span className="mt-2 block font-protokoll text-[clamp(0.82rem,0.88vw,1rem)] font-light leading-none text-verevon-j-text/76">{stage.state}</span>
-							</div>
+					<div className="absolute z-30 max-[899px]:hidden" data-product-loop-copy="">
+						{copyStages.map((stage, index) => (
+							<LoopCopyPanel index={index} key={stage.step} stage={stage} />
 						))}
 					</div>
 

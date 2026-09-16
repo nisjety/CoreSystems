@@ -309,6 +309,16 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 		let cleanupContext: { revert: () => void } | undefined;
 		let startSignals: (() => void) | undefined;
 		let pauseSignals: (() => void) | undefined;
+		const problemRevealHasStarted = () => {
+			const activeRoot = rootRef.current;
+
+			if (!activeRoot) {
+				return false;
+			}
+
+			const rect = activeRoot.getBoundingClientRect();
+			return rect.top <= window.innerHeight * 0.78 && rect.bottom >= 0;
+		};
 
 		async function setup() {
 			const root = rootRef.current;
@@ -438,11 +448,13 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 							id: "verevon-problem-signal-routes",
 							onEnter: () => startSignals?.(),
 							onEnterBack: () => startSignals?.(),
-							onLeave: () => pauseSignals?.(),
-							onLeaveBack: () => pauseSignals?.(),
 						},
 					},
 				);
+
+				if (isVisible && problemRevealHasStarted()) {
+					startSignals();
+				}
 			});
 		}
 
@@ -461,7 +473,7 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 					return;
 				}
 
-				if (variant === "hero") {
+				if (variant === "hero" || problemRevealHasStarted()) {
 					startSignals?.();
 				}
 			},
@@ -485,7 +497,9 @@ export function SignalPathLayer({ variant }: SignalPathLayerProps) {
 				variant === "hero"
 					? "inset-0 z-[1]"
 					: "inset-0 z-0",
-				variant === "problem" ? "opacity-0" : "opacity-100",
+				variant === "problem"
+					? "opacity-0"
+					: "opacity-100",
 			].join(" ")}
 			ref={rootRef}
 			style={

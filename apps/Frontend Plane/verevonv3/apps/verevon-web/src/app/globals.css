@@ -273,9 +273,9 @@ body {
 	visibility: hidden;
 	transform: translate3d(0, 22vh, 0);
 	transition:
-		opacity 0.62s ease,
-		transform 0.62s ease,
-		visibility 0.62s ease;
+		opacity var(--verevon-dur-reveal) var(--verevon-ease-out),
+		transform var(--verevon-dur-reveal) var(--verevon-ease-out),
+		visibility var(--verevon-dur-reveal) var(--verevon-ease-out);
 	background: linear-gradient(
 		to top,
 		var(--background) 0%,
@@ -330,6 +330,83 @@ body {
 
 .verevon-hero-nav-shadow button span {
 	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.08), 0 5px 10px rgba(0, 0, 0, 0.04);
+}
+
+.verevon-site-nav-surface {
+	position: relative;
+	isolation: isolate;
+	background-color: transparent;
+	border-color: transparent;
+	box-shadow: none;
+	transition-delay: 0s;
+}
+
+[data-site-nav] {
+	height: 64px;
+}
+
+.verevon-site-nav-surface::before {
+	display: none;
+}
+
+.verevon-site-nav-surface[data-scrolled="true"],
+.verevon-menu-surface {
+	-webkit-backdrop-filter: blur(12px);
+	backdrop-filter: blur(12px);
+	background-color: rgba(255, 255, 255, 0.8);
+	border-bottom-color: rgb(217, 217, 217);
+	box-shadow: none;
+	transition-delay: var(--verevon-dur-reveal);
+}
+
+.verevon-site-nav-surface[data-scrolled="true"]::before {
+	display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:not([data-motion="full"]) [data-site-nav],
+	html:not([data-motion="full"]) .verevon-site-nav-surface,
+	html:not([data-motion="full"]) .verevon-site-nav-surface::before {
+		transition-delay: 0s !important;
+		transition-duration: 0s !important;
+	}
+}
+
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+	.verevon-site-nav-surface[data-scrolled="true"],
+	.verevon-menu-surface {
+		background-color: rgb(255, 255, 255);
+	}
+}
+
+@media (prefers-reduced-transparency: reduce) {
+	.verevon-site-nav-surface[data-scrolled="true"],
+	.verevon-menu-surface {
+		-webkit-backdrop-filter: none;
+		backdrop-filter: none;
+		background-color: rgb(255, 255, 255);
+	}
+
+	.verevon-site-nav-surface[data-scrolled="true"]::before {
+		display: none;
+	}
+}
+
+@media (prefers-contrast: more) {
+	.verevon-site-nav-surface[data-scrolled="true"],
+	.verevon-menu-surface {
+		-webkit-backdrop-filter: none;
+		backdrop-filter: none;
+		background-color: var(--verevon-c-white);
+		border-color: var(--verevon-j-text);
+		box-shadow: none;
+		transition-delay: 0s;
+		transition-duration: 0s;
+	}
+
+	.verevon-site-nav-surface[data-scrolled="true"]::before {
+		display: none;
+	}
 }
 
 .verevon-hero-scroll-cue__line {
@@ -563,13 +640,13 @@ html[data-verevon-route-transition-mode="mobile"][data-verevon-route-transition=
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.verevon-route-transition {
+	html:not([data-motion="full"]) .verevon-route-transition {
 		display: none;
 	}
 
-	::view-transition-group(root),
-	::view-transition-old(root),
-	::view-transition-new(root) {
+	html:not([data-motion="full"])::view-transition-group(root),
+	html:not([data-motion="full"])::view-transition-old(root),
+	html:not([data-motion="full"])::view-transition-new(root) {
 		animation-delay: 0s !important;
 		animation-duration: 0s !important;
 	}
@@ -616,7 +693,7 @@ canvas {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.fade-out-top {
+	html:not([data-motion="full"]) .fade-out-top {
 		mask-image: none;
 		-webkit-mask-image: none;
 	}
@@ -652,7 +729,7 @@ canvas {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.verevon-shimmer {
+	html:not([data-motion="full"]) .verevon-shimmer {
 		animation: none;
 		background: none;
 		-webkit-text-fill-color: currentColor;
@@ -785,16 +862,16 @@ canvas {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.verevon-hero-load__frame,
-	.verevon-hero-load__intro {
+	html:not([data-motion="full"]) .verevon-hero-load__frame,
+	html:not([data-motion="full"]) .verevon-hero-load__intro {
 		will-change: auto;
 	}
 
 	/* Safety net: neutralise decorative CSS keyframe loops for users who
 	 * ask for reduced motion (detail frames, ambient drift, etc.). */
-	*,
-	*::before,
-	*::after {
+	html:not([data-motion="full"]) *,
+	html:not([data-motion="full"]) *::before,
+	html:not([data-motion="full"]) *::after {
 		animation-duration: 0.001ms !important;
 		animation-iteration-count: 1 !important;
 		transition-duration: 0.001ms !important;
@@ -861,6 +938,58 @@ canvas {
 	color: var(--verevon-text-muted);
 }
 
+/* Main headings match the prefooter reference before this layout pass.
+ * Content density is independent of display typography and control sizes. */
+.verevon-home-heading {
+	font-family: var(--font-arbeit), sans-serif;
+	font-size: clamp(1.45rem, 3.6vw, 4.95rem);
+	font-weight: 300;
+	line-height: 0.88;
+	letter-spacing: -0.08em;
+	font-optical-sizing: auto;
+}
+
+.verevon-hero-heading {
+	font-size: clamp(1.38rem, 3.42vw, 4.7rem);
+}
+
+.verevon-home {
+	--text-body-lg: clamp(1rem, 0.98vw, 1.17rem);
+	--text-body: clamp(0.9rem, 0.89vw, 1.02rem);
+}
+
+.verevon-problem-text-shadow {
+	text-shadow: 0 0 2px var(--background), 0 0 12px var(--background), 0 3px 24px var(--background);
+}
+
+#problemet [data-problem-heading]::before {
+	content: "";
+	position: absolute;
+	inset: -32px -6%;
+	z-index: -1;
+	pointer-events: none;
+	background: radial-gradient(ellipse, rgba(248,248,247,0.94) 0%, rgba(248,248,247,0.8) 48%, transparent 75%);
+}
+
+.verevon-home .verevon-type-inverse .verevon-problem-card-body {
+	color: #f5f3ee;
+	font-weight: 300;
+	line-height: 1.5;
+	text-shadow: 0 1px 8px rgba(0,0,0,0.4);
+}
+
+@media (max-width: 760px) {
+	.verevon-home-heading {
+		font-size: clamp(1.75rem, 7.2vw, 2.7rem);
+		line-height: 0.98;
+		letter-spacing: -0.06em;
+	}
+
+	.verevon-hero-heading {
+		font-size: clamp(1.66rem, 6.84vw, 2.57rem);
+	}
+}
+
 .verevon-type-inverse .verevon-eyebrow {
 	color: color-mix(in srgb, var(--verevon-c-white) 70%, transparent);
 }
@@ -890,7 +1019,7 @@ canvas {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.verevon-reveal {
+	html:not([data-motion="full"]) .verevon-reveal {
 		opacity: 1;
 		transform: none;
 	}
@@ -922,7 +1051,7 @@ canvas {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.verevon-fly-card {
+	html:not([data-motion="full"]) .verevon-fly-card {
 		opacity: 1;
 		transform: none;
 		filter: none;
@@ -1028,7 +1157,7 @@ canvas {
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.verevon-senses-guideline__svg {
+	html:not([data-motion="full"]) .verevon-senses-guideline__svg {
 		animation: none;
 	}
 }

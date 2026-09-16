@@ -431,14 +431,14 @@ export function PreFooterStatementSection() {
 					))}
 				</div>
 
-				<div className="absolute inset-0 z-[3] grid place-items-center overflow-hidden px-[clamp(24px,4vw,72px)]">
+				<div className="absolute inset-0 z-[3] grid place-items-center overflow-hidden px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
 					<div
-						className="absolute left-1/2 top-[40%] grid w-[min(94vw,1280px)] -translate-x-1/2 -translate-y-1/2 justify-items-center text-center"
+						className="absolute left-1/2 top-[40%] grid w-[min(calc(100%_-_2*var(--verevon-edge)),var(--verevon-content-max))] -translate-x-1/2 -translate-y-1/2 justify-items-center text-center max-[760px]:w-[calc(100vw_-_2*var(--verevon-page-pad))]"
 						data-prefooter-first-phase
 					>
 						<h2
 							aria-label="Fra kunnskap til handling. Med kontroll underveis."
-							className="m-0 max-w-none whitespace-nowrap font-arbeit text-[clamp(1.5rem,4vw,5.5rem)] font-light leading-[0.88] tracking-[-0.08em] text-verevon-j-text max-[760px]:whitespace-normal"
+							className="verevon-home-heading m-0 max-w-none whitespace-nowrap text-verevon-j-text max-[760px]:whitespace-normal"
 						>
 							{preFooterTitleLines.map((line, index) => (
 								<AnimatedTitleLine
@@ -450,12 +450,12 @@ export function PreFooterStatementSection() {
 					</div>
 
 					<div
-						className="absolute left-1/2 top-[40%] w-[min(94vw,1280px)] -translate-x-1/2 -translate-y-1/2 text-center opacity-0"
+						className="absolute left-1/2 top-[40%] w-[min(calc(100%_-_2*var(--verevon-edge)),var(--verevon-content-max))] -translate-x-1/2 -translate-y-1/2 text-center opacity-0 max-[760px]:w-[calc(100vw_-_2*var(--verevon-page-pad))]"
 						data-prefooter-second-phase
 					>
 						<h2
 							aria-label="Finn grunnlaget. Få neste steg klart."
-							className="m-0 max-w-none whitespace-nowrap font-arbeit text-[clamp(1.5rem,4vw,5.5rem)] font-light leading-[0.88] tracking-[-0.08em] text-verevon-j-text max-[760px]:whitespace-normal"
+							className="verevon-home-heading m-0 max-w-none whitespace-nowrap text-verevon-j-text max-[760px]:whitespace-normal"
 							data-prefooter-next-title
 						>
 							{preFooterNextPhraseLines.map((line, index) => (

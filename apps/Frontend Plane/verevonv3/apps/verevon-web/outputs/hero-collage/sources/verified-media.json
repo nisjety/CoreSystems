@@ -1,0 +1,57 @@
+[
+  {
+    "file": "01-silhouette-5944870-4k.mp4",
+    "width": 3840,
+    "height": 2160,
+    "fps": "25/1",
+    "codec": "h264",
+    "durationSeconds": 18.92,
+    "bytes": 23602537,
+    "hasAudio": false,
+    "sha256": "AD1357158DCA6792249613FEACFE630284117A1425A6EE77765B7C6D2E5BDD1D"
+  },
+  {
+    "file": "02-focused-work-wide-5527782-4k.mp4",
+    "width": 3840,
+    "height": 2160,
+    "fps": "25/1",
+    "codec": "h264",
+    "durationSeconds": 14.12,
+    "bytes": 16375830,
+    "hasAudio": false,
+    "sha256": "4EE92E6AEB190A172A88DE6B0F67D45A31DAF91020C746F6DCFE5B1A8E4F6C8D"
+  },
+  {
+    "file": "03-focused-work-close-5527781-1440p.mp4",
+    "width": 2560,
+    "height": 1440,
+    "fps": "25/1",
+    "codec": "h264",
+    "durationSeconds": 11.4,
+    "bytes": 4973922,
+    "hasAudio": false,
+    "sha256": "A728B576F6EA231F03A8D43B619658B84247181848A562CA24D46F1E4643B79A"
+  },
+  {
+    "file": "04-collaboration-6700010-4k.mp4",
+    "width": 3840,
+    "height": 2160,
+    "fps": "25/1",
+    "codec": "h264",
+    "durationSeconds": 19.88,
+    "bytes": 23639794,
+    "hasAudio": false,
+    "sha256": "E9C2DC02616BECCE619CAB8E937B93A8A9374A521A8F123AB76E24CBB30FA0F8"
+  },
+  {
+    "file": "05-documents-and-laptop-6101304-4k.mp4",
+    "width": 4096,
+    "height": 2160,
+    "fps": "30/1",
+    "codec": "h264",
+    "durationSeconds": 19.071667,
+    "bytes": 16052331,
+    "hasAudio": true,
+    "sha256": "84450E692C32E9F1F478DAF792B822B712574EE0E8E8E54BCEA76986D181C4CF"
+  }
+]

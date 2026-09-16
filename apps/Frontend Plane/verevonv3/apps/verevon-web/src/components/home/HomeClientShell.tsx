@@ -60,9 +60,7 @@ export function HomeClientShell({
 				current === nextHeroFogScrolled ? current : nextHeroFogScrolled,
 			);
 			setIsScrolled((current) => {
-				const next = reduceMotion
-					? nextScrollY > fogTrigger
-					: nextHeroFogScrolled;
+				const next = nextScrollY > fogTrigger;
 				return current === next ? current : next;
 			});
 
@@ -280,7 +278,7 @@ export function HomeClientShell({
 
 	return (
 		<div
-			className="min-h-screen bg-background text-verevon-text [--verevon-edge:clamp(56px,5.55vw,208px)] [--verevon-page-pad:clamp(24px,4vw,56px)] [--verevon-section-gap:clamp(86px,8.9vw,330px)] [--verevon-section-vpad:clamp(96px,15vh,180px)]"
+			className="verevon-home min-h-screen bg-background text-verevon-text [--verevon-content-max:1512px] [--verevon-edge:max(clamp(32px,7.7vw,100px),calc((100%-var(--verevon-content-max))/2))] [--verevon-page-pad:clamp(24px,4vw,48px)] [--verevon-section-gap:clamp(86px,8.9vw,330px)] [--verevon-section-vpad:clamp(96px,15vh,180px)]"
 			ref={homeRef}
 		>
 			<div aria-hidden={isMenuOpen || undefined} inert={isMenuOpen}>

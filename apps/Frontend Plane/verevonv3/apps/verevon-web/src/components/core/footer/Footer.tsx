@@ -37,14 +37,14 @@ export function Footer() {
 			data-footer-parallax=""
 		>
 			<div
-				className="px-[clamp(24px,4vw,72px)] pb-0 pt-[clamp(24px,2.5vw,40px)] lg:h-full"
+				className="px-[var(--verevon-edge)] pb-0 pt-[clamp(24px,2.5vw,40px)] max-[760px]:px-[var(--verevon-page-pad)] lg:h-full"
 				data-footer-parallax-media=""
 			>
 				<div className="grid min-h-[calc(73svh-112px)] grid-cols-[minmax(180px,0.9fr)_minmax(0,3.1fr)] gap-[clamp(48px,6vw,112px)] max-[900px]:min-h-0 max-[900px]:grid-cols-1">
 					<div className="relative top-10 grid content-start gap-8">
 						<Link
 							aria-label="Verevon hjem"
-							className="font-arbeit text-[clamp(2rem,2.4vw,3rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text"
+							className="font-arbeit text-[clamp(1.8rem,2.16vw,2.7rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text"
 							href="/#top"
 						>
 							VEREVON
