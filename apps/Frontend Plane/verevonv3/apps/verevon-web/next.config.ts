@@ -1,5 +1,4 @@
 import type { NextConfig } from "next";
-import path from "node:path";
 
 const nextConfig: NextConfig = {
 	images: {
@@ -17,8 +16,8 @@ const nextConfig: NextConfig = {
 			},
 		],
 	},
-	// Vercel resolves traced files from the Git repository root.
-	outputFileTracingRoot: path.resolve(process.cwd(), "../../../../.."),
+	// This app has its own dependencies; keep deployment paths local to it.
+	outputFileTracingRoot: process.cwd(),
 	reactCompiler: true,
 	experimental: {
 		viewTransition: true,
