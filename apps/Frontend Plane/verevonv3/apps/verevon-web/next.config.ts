@@ -17,7 +17,8 @@ const nextConfig: NextConfig = {
 			},
 		],
 	},
-	outputFileTracingRoot: path.resolve(process.cwd(), "../.."),
+	// Vercel resolves traced files from the Git repository root.
+	outputFileTracingRoot: path.resolve(process.cwd(), "../../../../.."),
 	reactCompiler: true,
 	experimental: {
 		viewTransition: true,
