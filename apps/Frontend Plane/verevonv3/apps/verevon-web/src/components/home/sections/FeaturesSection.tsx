@@ -436,10 +436,6 @@ export function FeaturesSection() {
 		>
 			<div
 				aria-hidden="true"
-				className="absolute inset-0 bg-[linear-gradient(90deg,rgba(23,23,23,0.042)_1px,transparent_1px),linear-gradient(180deg,rgba(23,23,23,0.038)_1px,transparent_1px)] bg-[length:calc(100%/4)_calc(100%/3),calc(100%/4)_calc(100%/3)] max-[899px]:bg-[length:92px_92px]"
-			/>
-			<div
-				aria-hidden="true"
 				className="absolute inset-0 bg-[radial-gradient(circle_at_74%_32%,rgba(238,122,80,0.075),transparent_29%),radial-gradient(circle_at_12%_74%,rgba(41,64,74,0.05),transparent_30%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.8))]"
 			/>
 
@@ -448,16 +444,15 @@ export function FeaturesSection() {
 					className="mx-auto mb-[clamp(48px,8vh,104px)] max-w-[684px] text-center md:invisible"
 					data-features-intro=""
 				>
-					<p className="verevon-eyebrow text-verevon-coral">04 / Områder</p>
 					<h2
-						className="verevon-home-heading mt-4 text-verevon-j-text text-balance"
+						className="verevon-home-heading text-verevon-j-text text-balance"
 						id="features-title"
 					>
-						Én arbeidsflate. Flere måter å få gjort på.
+						Fra kunnskap til handling. Med kontroll hele veien.
 					</h2>
 					<p className="mx-auto mt-5 max-w-[540px] font-protokoll text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
-						Fra kunnskapsgrunnlag til oppgaver, verktøy og oppfølging. Utforsk
-						det som er relevant for dere.
+						Fra kunnskap til handling i systemene. Se hvordan Verevon samler arbeidet
+						og holder dere i kontroll.
 					</p>
 				</header>
 
