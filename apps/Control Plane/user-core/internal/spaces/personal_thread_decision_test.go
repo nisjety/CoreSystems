@@ -150,7 +150,10 @@ func TestThreadAppendDecisionIsContentBoundAndCannotReuseCreationContract(t *tes
 	changed := request
 	changed.ContentDigest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	second, err := IssueThreadAppendDecision(evidence, changed, now)
-	if err != nil || second.PayloadDigest == decision.PayloadDigest {
-		t.Fatalf("append payload was not content-bound: first=%q second=%q err=%v", decision.PayloadDigest, second.PayloadDigest, err)
+	if err != nil {
+		t.Fatalf("second IssueThreadAppendDecision: %v", err)
+	}
+	if second.PayloadDigest == decision.PayloadDigest {
+		t.Fatalf("append payload was not content-bound: first=%q second=%q", decision.PayloadDigest, second.PayloadDigest)
 	}
 }

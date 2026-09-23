@@ -3,7 +3,10 @@ package main
 import (
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
+
+	"shipping-core/internal/carrier"
 )
 
 func silentLogger() *slog.Logger {
@@ -57,8 +60,11 @@ func TestBuildCarriers_WithBringCredentials_ReplacesMockBring(t *testing.T) {
 	t.Setenv("BRING_CUSTOMER_NUMBER", "5")
 
 	adapters := buildCarriers(silentLogger())
-	if len(adapters) != 6 {
-		t.Fatalf("got %d adapters, want 6 (5 mocks + real bring)", len(adapters))
+	// Real Bring replaces mock-bring, and the remaining mocks are dropped:
+	// once ANY real carrier is configured, invented prices must not compete
+	// in the same cheapest-first comparison. See dropMocksWhenRealCarriersExist.
+	if len(adapters) != 1 {
+		t.Fatalf("got %d adapters, want 1 (real bring only)", len(adapters))
 	}
 	codes := carrierCodes(t)
 	if codes["mock-bring"] {
@@ -66,6 +72,50 @@ func TestBuildCarriers_WithBringCredentials_ReplacesMockBring(t *testing.T) {
 	}
 	if !codes["bring"] {
 		t.Error("expected the real bring adapter to be present")
+	}
+	for code := range codes {
+		if strings.HasPrefix(code, "mock-") {
+			t.Errorf("mock carrier %q must not survive alongside a real carrier", code)
+		}
+	}
+}
+
+// The failure this encodes: on 2026-09-14 a real 66 kg quote returned
+// "DSV" 669 NOK and "PostNord" 808 NOK ahead of a real UPS quote of
+// 1 364,60 NOK. Both cheap options were mock adapters, so the two carriers
+// the customer would have been offered were fabricated.
+func TestBuildCarriers_MocksNeverCompeteWithRealCarriers(t *testing.T) {
+	clearCarrierEnv(t)
+	t.Setenv("UPS_CLIENT_ID", "id")
+	t.Setenv("UPS_CLIENT_SECRET", "secret")
+
+	for _, a := range buildCarriers(silentLogger()) {
+		if a.Info().Mode == carrier.ModeMock || strings.HasPrefix(a.Info().Code, "mock-") {
+			t.Fatalf("mock carrier %q served alongside a real one", a.Info().Code)
+		}
+	}
+}
+
+// A local stack with no credentials must still answer with something.
+func TestBuildCarriers_MocksKeptWhenNoRealCarrierExists(t *testing.T) {
+	clearCarrierEnv(t)
+
+	adapters := buildCarriers(silentLogger())
+	if len(adapters) != 6 {
+		t.Fatalf("got %d adapters, want the 6 mocks when nothing real is configured", len(adapters))
+	}
+}
+
+// Keeping mocks alongside real carriers stays possible, but only by saying so.
+func TestBuildCarriers_MocksKeptWhenExplicitlyAllowed(t *testing.T) {
+	clearCarrierEnv(t)
+	t.Setenv("UPS_CLIENT_ID", "id")
+	t.Setenv("UPS_CLIENT_SECRET", "secret")
+	t.Setenv("SHIPPING_ALLOW_MOCK_CARRIERS", "true")
+
+	codes := carrierCodes(t)
+	if !codes["mock-bring"] || !codes["ups"] {
+		t.Errorf("expected mocks and real ups together under the opt-in, got %v", codes)
 	}
 }
 
@@ -78,16 +128,19 @@ func TestBuildCarriers_WithUPSAndFedExCredentials_AppendsRealAdapters(t *testing
 	t.Setenv("FEDEX_ACCOUNT_NUMBER", "740561073")
 
 	adapters := buildCarriers(silentLogger())
-	// 6 mocks + ups + fedex; no mock-ups/mock-fedex exists to replace.
-	if len(adapters) != 8 {
-		t.Fatalf("got %d adapters, want 8 (6 mocks + ups + fedex)", len(adapters))
+	// ups + fedex only: the mocks are dropped now that real carriers exist,
+	// including mock-bring even though Bring itself has no credentials. A
+	// carrier with no integration is absent from the comparison rather than
+	// represented by an invented price.
+	if len(adapters) != 2 {
+		t.Fatalf("got %d adapters, want 2 (ups + fedex)", len(adapters))
 	}
 	codes := carrierCodes(t)
 	if !codes["ups"] || !codes["fedex"] {
 		t.Errorf("expected real ups and fedex adapters, got %v", codes)
 	}
-	if !codes["mock-bring"] {
-		t.Error("mock-bring should still be present (no Bring credentials)")
+	if codes["mock-bring"] {
+		t.Error("mock-bring must not be served once real carriers are configured")
 	}
 }
 

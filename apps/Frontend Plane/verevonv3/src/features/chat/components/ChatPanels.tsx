@@ -12,6 +12,7 @@ import {
   Square,
 } from '@/shared/icons'
 import type { ThreadContext } from '@/shared/api/chat-client'
+import { OPEN_FEEDBACK_EVENT } from '@/features/core/components/FeedbackWidget'
 import {
   getRunProofBundle,
   type ProofApproval,
@@ -35,15 +36,18 @@ import {
   imageArtifactSrc,
 } from './chat-artifacts'
 import {
+  evidenceSourceSnippet,
   formatTime,
   groupTaskSteps,
   hostname,
+  partitionEvidenceSources,
 } from './chat-media-markdown'
-import { isWorkStep } from './chat-normalizers'
+import { isWorkStep, workStepLabel } from './chat-normalizers'
 import {
   type AgentTaskStep,
   type ChatArtifact,
   type ChatToolCall,
+  type ChatTurn,
   type ChatGroundingGraph,
   type ChatGroundingSource,
   type ChatKnowledgeGrounding,
@@ -73,6 +77,14 @@ export function ChatHeader(props: {
   messageCount: number
   runAvailable?: boolean
   sourceCount: number
+  /**
+   * Sources Verevon actually read, of `sourceCount`. The badge counts these:
+   * a deep-research turn that read three of twenty-four pages used to advertise
+   * "24" (F-16), which is a claim about evidence the answer does not have.
+   * Availability still follows `sourceCount`, so a turn whose every hit went
+   * unread still offers the tab — it has something to say, just not evidence.
+   */
+  readSourceCount?: number
   stepCount: number
   /** Steps that are work rather than bookkeeping; gates the Work destination. */
   workStepCount?: number
@@ -110,7 +122,7 @@ export function ChatHeader(props: {
   }
   const surfaceCount = (tab: ChatTab) => (
     tab === 'sources'
-      ? props.sourceCount
+      ? props.readSourceCount ?? props.sourceCount
       : tab === 'artifacts'
         ? props.artifactCount
         : tab === 'steps' ? props.stepCount : 0
@@ -191,6 +203,10 @@ export function ChatHeader(props: {
             </button>
             <Show when={openMenu() === 'more'}>
               <div class="verevon-chat-header-menu__popover" role="menu" aria-label={i18n.tr('Samtalehandlinger', 'Conversation actions')}>
+                <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); window.dispatchEvent(new Event(OPEN_FEEDBACK_EVENT)) }}>
+                  <MessageSquarePlus size={14} />
+                  <span>{i18n.tr('Gi tilbakemelding', 'Give feedback')}</span>
+                </button>
                 <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); props.onRegenerate() }}>
                   <RefreshCw size={14} />
                   <span>{i18n.tr('Generer siste svar på nytt', 'Regenerate latest response')}</span>
@@ -213,6 +229,8 @@ export function ChatTabs(props: {
   artifactCount: number
   runAvailable?: boolean
   sourceCount: number
+  /** Read sources, of `sourceCount` — see `ChatHeader`'s prop of the same name. */
+  readSourceCount?: number
   stepCount: number
   /** Steps that are work rather than bookkeeping; gates the Work destination. */
   workStepCount?: number
@@ -249,7 +267,7 @@ export function ChatTabs(props: {
       // The Work badge counts work, not the lifecycle rows that sit behind the
       // technical-activity disclosure (audit items 19 and 27).
       count: surface.id === 'sources'
-        ? props.sourceCount
+        ? props.readSourceCount ?? props.sourceCount
         : surface.id === 'artifacts'
           ? props.artifactCount
           : surface.id === 'steps' ? (props.workStepCount ?? props.stepCount) : 0,
@@ -318,8 +336,34 @@ export function EmptyPanel(props: { icon: JSX.Element; title: string; subtitle: 
   )
 }
 
+/**
+ * Kilder, split by whether Verevon actually read the source.
+ *
+ * A deep-research turn lists ~24 hits, fetches ~8 and reads ~3 of them, and the
+ * panel used to render all 24 as identical cards — so a reader had every reason
+ * to believe two dozen pages had been read (F-16). The unread leads are still
+ * worth showing (they say what was found and where to look next), but they are
+ * not evidence, and the difference has to be visible without opening anything.
+ *
+ * The split itself is `partitionEvidenceSources`, which reads the server's own
+ * marking rather than guessing. When every source was read — the ordinary case
+ * for a web-search or knowledge turn — the headings and the tally disappear and
+ * this renders exactly the flat list it always did.
+ */
 export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null; sources: EvidenceSource[] }) {
   const i18n = useI18n()
+  const groups = createMemo(() => partitionEvidenceSources(props.sources))
+  const hasUnread = () => groups().unread.length > 0
+  // `<For>` runs its mapper untracked in Solid 2, so the card's position is
+  // computed here rather than read off `groups()` inside the mapper — where a
+  // read source arriving later would leave the leads numbered from a stale
+  // offset. Numbering runs on across both groups: two cards labelled "1" on one
+  // screen read as two different lists.
+  const readEntries = createMemo(() => groups().read.map((source, index) => ({ source, index: index + 1 })))
+  const unreadEntries = createMemo(() => groups().unread.map((source, index) => ({
+    source,
+    index: groups().read.length + index + 1,
+  })))
   return (
     <Show
       when={props.sources.length > 0 || props.grounding}
@@ -336,13 +380,46 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
           <Show when={props.grounding}>
             {(grounding) => <GroundingOverviewCard grounding={grounding()} />}
           </Show>
-          <For each={props.sources}>
-            {(source, index) => (
-              source.kind === 'knowledge'
-                ? <KnowledgeSourceCard source={source} index={index() + 1} />
-                : <WebSourceCard source={source} index={index() + 1} />
+          <Show when={hasUnread()}>
+            {/* Both numbers, in one line, before the first card: the count in
+                the tab badge is the read one, and a reader who has just seen
+                "24 treff" in the answer needs to know which of the two the
+                list below is. */}
+            <p class="verevon-chat-source-tally" role="note">
+              {i18n.tr(
+                `${groups().read.length} av ${props.sources.length} kilder er lest`,
+                `${groups().read.length} of ${props.sources.length} sources were read`,
+              )}
+            </p>
+          </Show>
+          <Show when={hasUnread() && groups().read.length > 0}>
+            <h2 class="verevon-chat-source-group__heading">{i18n.tr('Lest og brukt', 'Read and used')}</h2>
+          </Show>
+          <For each={readEntries()}>
+            {(entry) => (
+              entry.source.kind === 'knowledge'
+                ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
+                : <WebSourceCard source={entry.source} index={entry.index} />
             )}
           </For>
+          <Show when={hasUnread()}>
+            <section class="verevon-chat-source-group verevon-chat-source-group--unread">
+              <h2 class="verevon-chat-source-group__heading">{i18n.tr('Ikke lest', 'Not read')}</h2>
+              <p class="verevon-chat-source-group__note">
+                {i18n.tr(
+                  'Funnet, men ikke hentet. Disse er ikke brukt som grunnlag for svaret.',
+                  'Found but never fetched. These were not used as evidence for the answer.',
+                )}
+              </p>
+              <For each={unreadEntries()}>
+                {(entry) => (
+                  entry.source.kind === 'knowledge'
+                    ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
+                    : <WebSourceCard source={entry.source} index={entry.index} />
+                )}
+              </For>
+            </section>
+          </Show>
         </div>
       </div>
     </Show>
@@ -410,7 +487,7 @@ export function KnowledgeSourceCard(props: { source: ChatGroundingSource; index:
         <strong>Score {props.source.score.toFixed(2)}</strong>
       </div>
       <h2>{props.source.title}</h2>
-      <p>{props.source.snippet}</p>
+      <p>{evidenceSourceSnippet(props.source)}</p>
       <a
         href={props.source.href}
         link={props.source.href.startsWith('/') ? true : undefined}
@@ -423,6 +500,11 @@ export function KnowledgeSourceCard(props: { source: ChatGroundingSource; index:
 }
 
 export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index: number }) {
+  // The `[not read: …]` marker is the grouping's input, not the reader's: under
+  // the "Ikke lest" heading it says nothing the heading has not already said,
+  // and an unread lead whose snippet was ONLY the marker must render no
+  // paragraph at all rather than an empty one.
+  const snippet = createMemo(() => evidenceSourceSnippet(props.source))
   return (
     <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">
       <div class="verevon-chat-source-card__meta">
@@ -430,7 +512,7 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
         <em>{hostname(props.source.url)}</em>
       </div>
       <h2>{props.source.title || props.source.url}</h2>
-      <Show when={props.source.snippet}><p>{props.source.snippet}</p></Show>
+      <Show when={snippet()}><p>{snippet()}</p></Show>
     </a>
   )
 }
@@ -540,6 +622,7 @@ export function ContextWindowPanel(props: {
 export function StepsPanel(props: {
   events?: readonly VerevonUiEvent[]
   runId?: string | null
+  turnStatus?: ChatTurn['status']
   steps: AgentTaskStep[]
   threadId?: string | null
   /**
@@ -555,17 +638,29 @@ export function StepsPanel(props: {
   onStopTask: () => void
 }) {
   const i18n = useI18n()
-  const activeTask = () => props.steps.some((step) => step.status === 'active' || step.status === 'waiting')
+  const activeTask = () => props.turnStatus !== 'stopped' && props.turnStatus !== 'error'
+    && props.steps.some((step) => step.status === 'active' || step.status === 'waiting')
   const sections = createMemo(() => groupTaskSteps(props.steps))
   // UX spec section 7, question 1: what is Verevon doing now, in plain language.
   const waitingStep = () => props.steps.find((step) => step.status === 'waiting')
   const activeStep = () => props.steps.find((step) => step.status === 'active')
   const failedStep = () => [...props.steps].reverse().find((step) => step.status === 'error')
   const statusLine = () => {
+    if (props.turnStatus === 'stopped') return i18n.tr('Stoppet', 'Stopped')
+    if (props.turnStatus === 'error' && !failedStep()) return i18n.tr('Arbeidet ble ikke fullført', 'The work did not finish')
     if (waitingStep()) return i18n.tr('Venter på deg', 'Waiting for you')
     const active = activeStep()
-    if (active) return active.title
-    if (failedStep()) return i18n.tr('Siste steg feilet', 'The last step failed')
+    if (active) return workStepLabel(active.title, i18n.locale())
+    // Name the step and its reason. "The last step failed" alone sent readers
+    // to the container logs to learn WHICH step and WHY (RUN-LOG finding 6).
+    const failed = failedStep()
+    if (failed) {
+      const reason = failed.detail.trim()
+      const title = workStepLabel(failed.title, i18n.locale())
+      const label = i18n.tr(`Feilet: ${title}`, `Failed: ${title}`)
+      return reason ? `${label} — ${reason}` : label
+    }
+    if (props.steps.some((step) => step.status === 'stopped')) return i18n.tr('Stoppet', 'Stopped')
     if (props.steps.length > 0) return i18n.tr('Ferdig', 'Finished')
     return i18n.tr('Ingen aktivitet nå', 'Nothing running')
   }
@@ -668,7 +763,7 @@ export function StepsPanel(props: {
                   >
                     <span class="verevon-chat-step-group__title">
                       <ChevronRight size={14} class={{ 'verevon-chat-rotate': !isCollapsed(section.id) }} />
-                      <h3>{section.title}</h3>
+                      <h3>{workStepLabel(section.title, i18n.locale())}</h3>
                     </span>
                     <span class="verevon-chat-step-group__meta">
                       <em>{section.steps.length}</em>

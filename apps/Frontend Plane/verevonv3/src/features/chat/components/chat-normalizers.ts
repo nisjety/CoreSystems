@@ -19,6 +19,7 @@ import {
   writeClientValue,
 } from '@/shared/session/client-storage'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
+import type { RunDetail } from '@/shared/api/runs-client'
 import {
   isChatArtifactVersion,
   mergeArtifactVersion,
@@ -55,9 +56,11 @@ import {
 } from './chat-types'
 
 export function messageToTurn(msg: ChatMessage): ChatTurn {
+  const source = msg.role === 'user' ? splitInlinedAttachments(msg.content) : { text: msg.content, attachments: [] }
   return {
     id: msg.id,
     role: msg.role,
+    sourceScope: msg.sourceScope,
     content: visibleTurnContent(msg.role, msg.content),
     // Keep an absent server timestamp EMPTY instead of fabricating "now":
     // session-core messages carry no timestamps, so stamping the fetch time
@@ -75,7 +78,33 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     confidence: msg.confidence,
     verification: msg.verification,
     tools: [],
-    attachments: [],
+    attachments: source.attachments.map((file, index) => {
+      // The durable message contains extracted text, not the original binary.
+      // Give PDF/DOCX text copies an honest extension for preview/download.
+      const name = /\.(pdf|docx)$/i.test(file.name) ? `${file.name}.txt` : file.name
+      const url = `data:text/plain;charset=utf-8,${encodeURIComponent(file.content)}`
+      return { id: `restored-${msg.id}-${index}`, name, type: 'text/plain', size: new TextEncoder().encode(file.content).length, url, previewUrl: url, extractedText: file.content }
+    }),
+  }
+}
+
+/** Restore a status-only tail from Model Plane's durable cancellation record.
+ * No cached answer, draft, tool result or authority is reconstructed. Require
+ * the exact full goal and an unambiguously newer run, so an older cancelled
+ * invocation cannot attach to a repeated or newly submitted question.
+ */
+export function cancelledRunTurn(threadId: string, latestRunId: string, message: ChatMessage, run: RunDetail): ChatTurn | null {
+  if (message.role !== 'user' || run.threadId !== threadId || run.runId !== latestRunId || run.status !== 'cancelled' || run.parentRunId) return null
+  const ulid = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/
+  if (!ulid.test(message.id) || !ulid.test(run.runId) || run.runId.slice(0, 10) <= message.id.slice(0, 10)) return null
+  const normalize = (value: string) => value.trim().replace(/\s+/g, ' ')
+  const goal = normalize(run.goal).replace(/ \[full-goal-blake3:[a-f0-9]{64}\]$/, '')
+  if (!goal || goal !== normalize(message.content)) return null
+  return {
+    id: `cancelled-run-${run.runId}`, role: 'assistant', content: '',
+    createdAt: run.updatedAt || run.createdAt || '', streaming: false,
+    status: 'stopped', stopReason: 'client_cancelled', runId: run.runId,
+    tools: [], attachments: [],
   }
 }
 
@@ -136,9 +165,11 @@ export function taskStepsToTranscript(steps: AgentTaskStep[]): ChatThreadTranscr
 }
 
 export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTurn {
+  const attachments = (turn.attachments ?? []).filter(isComposerAttachment)
   return {
     id: turn.id,
     role: turn.role,
+    sourceScope: turn.sourceScope === 'conversation' ? 'conversation' : 'workspace',
     content: visibleTurnContent(turn.role, turn.content),
     createdAt: turn.createdAt,
     streaming: false,
@@ -168,13 +199,34 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     recalledMemories: (turn.recalledMemories ?? []).filter(isRecalledMemory),
     stopReason: turn.stopReason,
     tools: (turn.tools ?? []).filter(isComposerToolId),
-    attachments: (turn.attachments ?? []).filter(isComposerAttachment),
+    attachments: attachments.length ? attachments : messageToTurn({ id: turn.id, role: turn.role, content: turn.content, createdAt: turn.createdAt }).attachments,
   }
 }
 
 function visibleTurnContent(role: ChatTurn['role'], content: string): string {
   if (role !== 'user') return content
-  return supportQuestionFromPrompt(content) ?? content
+  const visible = splitInlinedAttachments(content).text
+  return supportQuestionFromPrompt(visible) ?? visible
+}
+
+/** Decode only complete attachment suffixes emitted by appendInlinedAttachments. */
+export function splitInlinedAttachments(content: string): { text: string; attachments: InlinedAttachment[] } {
+  const start = content.indexOf('\n\n--- VEDLEGG: ')
+  const unchanged = { text: content, attachments: [] as InlinedAttachment[] }
+  if (start < 0) return unchanged
+  let rest = content.slice(start).trimStart()
+  const attachments: InlinedAttachment[] = []
+  while (rest) {
+    const opening = /^--- VEDLEGG: ([^\r\n]+) ---\r?\n/.exec(rest)
+    if (!opening) return unchanged
+    const name = opening[1]!
+    const closing = `\n--- SLUTT PÅ VEDLEGG: ${name} ---`
+    const end = rest.indexOf(closing, opening[0].length)
+    if (end < 0) return unchanged
+    attachments.push({ name, content: rest.slice(opening[0].length, end) })
+    rest = rest.slice(end + closing.length).trim()
+  }
+  return { text: content.slice(0, start).trimEnd(), attachments }
 }
 
 export function transcriptStepToTaskStep(step: ChatThreadTranscriptStep): AgentTaskStep {
@@ -266,7 +318,8 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
       recalledMemories: metadataArray(serverTurn.recalledMemories, cachedTurn.recalledMemories),
       stopReason: serverTurn.stopReason ?? cachedTurn.stopReason,
       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,
-      attachments: serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
+      attachments: cachedTurn.attachments.length > 0 && serverTurn.attachments.every(a => a.id.startsWith('restored-'))
+        ? cachedTurn.attachments : serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
     }
   })
 
@@ -358,6 +411,11 @@ export function isComposerToolId(value: string): value is ComposerToolId {
  * bookkeeping too: failing calm is the rule's whole point.
  */
 export function isWorkStep(step: Pick<AgentTaskStep, 'id'>): boolean {
+  // Normalized event ids are `<turn>:event-<opaque upstream id>`. Upstream
+  // ids can themselves contain colons (for example `<call>:source-check`);
+  // inspecting only the final suffix would hide that work as bookkeeping.
+  const eventMarker = step.id.indexOf(':event-')
+  if (eventMarker >= 0 && step.id.length > eventMarker + ':event-'.length) return true
   const marker = step.id.lastIndexOf(':')
   if (marker < 0) return false
   const kind = step.id.slice(marker + 1)
@@ -483,15 +541,7 @@ export function unsentAttachmentNames(
     .map((attachment) => attachment.name?.trim() || 'uten navn')
 }
 
-/**
- * Attachments whose text the browser can read, so they can be ingested through
- * `POST /api/v1/chat/documents` (a JSON route taking a `content` string).
- *
- * PDF and DOCX are deliberately absent: extracting them needs a parser the
- * browser does not have, and the chat-documents route takes text rather than
- * bytes. They keep using the per-file "Add to knowledge base" action, which
- * sends real `File` bytes to imports-core and extracts server-side.
- */
+/** Text files plus PDF/DOCX prepared by the ephemeral reader. */
 const TEXT_INGEST_EXTENSIONS = ['.txt', '.md', '.markdown', '.csv', '.json', '.html', '.htm']
 
 export function textIngestibleAttachments(
@@ -503,9 +553,78 @@ export function textIngestibleAttachments(
     // Trust the extension over the MIME type: browsers report `.md` and `.csv`
     // inconsistently (often `application/octet-stream`), and the accept list is
     // extension-based for the same reason.
-    return attachment.type.startsWith('text/')
+    return typeof attachment.extractedText === 'string' || attachment.type.startsWith('text/')
       || TEXT_INGEST_EXTENSIONS.some((extension) => name.endsWith(extension))
   })
+}
+
+/** Text attachment read in the browser, ready to travel inside the message. */
+export type InlinedAttachment = { name: string; content: string }
+
+/**
+ * Per-file and per-turn ceilings for inlining. Generous for the documents a
+ * chat turn is about (a brief, a CSV, a meeting note); a file over the ceiling
+ * is rejected before submission so the user can choose a smaller excerpt.
+ */
+export const INLINE_ATTACHMENT_MAX_CHARS = 60_000
+export const INLINE_ATTACHMENTS_TOTAL_MAX_CHARS = 120_000
+
+/**
+ * Reads the text attachments small enough to ride inside the user turn.
+ *
+ * Why inline at all: the retrieval route (`POST /api/v1/chat/documents`) is
+ * asynchronous — Data Plane accepts the row as `pending` and chunks it after
+ * the answer has started — so the turn that carried the file saw none of it,
+ * or one chunk. Measured live on 2026-09-14 (a 2 KB markdown attachment
+ * reached the model as its first line). Putting the text in the message is
+ * what "attach and ask" means to the person doing it.
+ *
+ * Reject unreadable, empty, or oversized files before the draft is cleared.
+ * PDF/DOCX arrive with text from the ephemeral extraction endpoint.
+ */
+export async function inlineTextAttachments(
+  attachments: DashboardComposerSubmitPayload['attachments'],
+): Promise<InlinedAttachment[]> {
+  const out: InlinedAttachment[] = []
+  let total = 0
+  for (const attachment of attachments.filter((file) => !file.type.startsWith('image/'))) {
+    try {
+      if (!attachment.url || !textIngestibleAttachments([attachment]).length) throw new Error('unprepared document')
+      let content = attachment.extractedText
+      if (content === undefined) {
+        const response = await fetch(attachment.url)
+        if (!response.ok) throw new Error('unreadable')
+        content = await response.text()
+      }
+      content = content.replace(/\r\n/g, '\n').trim()
+      if (!content || content.length > INLINE_ATTACHMENT_MAX_CHARS || total + content.length > INLINE_ATTACHMENTS_TOTAL_MAX_CHARS) {
+        throw new Error('empty or too large')
+      }
+      total += content.length
+      out.push({ name: attachment.name?.trim() || 'vedlegg.txt', content })
+    } catch {
+      throw new Error(`Kunne ikke lese hele «${attachment.name}». Utkastet er beholdt; prøv igjen med et lesbart, mindre vedlegg.`)
+    }
+  }
+  return out
+}
+
+/**
+ * The user's text followed by each inlined document under a labelled fence.
+ * The label names the file so the model can cite it ("ifølge kildepakke.md")
+ * and so a reader of the durable thread can see where the text came from.
+ */
+export function appendInlinedAttachments(text: string, inlined: InlinedAttachment[]): string {
+  const blocks = inlined.map((entry) => `--- VEDLEGG: ${entry.name} ---\n${entry.content}\n--- SLUTT PÅ VEDLEGG: ${entry.name} ---`)
+  return `${text.trim()}\n\n${blocks.join('\n\n')}`
+}
+
+/** Retry/edit/continue must keep sources even after the visible bubble is restored. */
+export function contentWithPreparedSources(text: string, attachments: ComposerAttachment[] = []): string {
+  if (splitInlinedAttachments(text).attachments.length > 0) return text
+  const sources = attachments.flatMap(file => typeof file.extractedText === 'string' && file.extractedText.trim()
+    ? [{ name: file.name, content: file.extractedText }] : [])
+  return sources.length ? appendInlinedAttachments(text, sources) : text
 }
 
 export async function toStreamAttachments(
@@ -513,19 +632,21 @@ export async function toStreamAttachments(
 ): Promise<StreamAttachment[]> {
   const out: StreamAttachment[] = []
   for (const attachment of attachments) {
-    // Non-image files are not dropped silently any more — see
-    // `unsentAttachmentNames`, which the submit path reports to the user.
-    if (!attachment.url || !attachment.type.startsWith('image/')) continue
+    // Documents are included by inlineTextAttachments before inference.
+    if (!attachment.type.startsWith('image/')) continue
     try {
+      if (!attachment.url) throw new Error('missing image')
       let dataUrl = attachment.url
       if (!dataUrl.startsWith('data:')) {
         const response = await fetch(dataUrl)
+        if (!response.ok) throw new Error('unreadable image')
         dataUrl = await blobToDataUrl(await response.blob())
       }
       const parsed = parseDataUrl(dataUrl)
-      if (parsed) out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
+      if (!parsed || !parsed.base64) throw new Error('invalid image encoding')
+      out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
     } catch {
-      // skip unreadable attachments
+      throw new Error(`Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`)
     }
   }
   return out
@@ -713,6 +834,19 @@ export function humanizeToolName(name: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/^\w/, (match) => match.toUpperCase()) || 'Tool'
+}
+
+export function workStepLabel(label: string, locale: string): string {
+  const tool = label.replace(/^Tool:\s*/i, '').replace(/_/g, ' ').toLowerCase()
+  const labels: Record<string, [string, string]> = {
+    'count words': ['Tell ord', 'Count words'],
+    'create artifact': ['Opprett utkast', 'Create draft'],
+    'read artifact': ['Les utkast', 'Read draft'],
+    'update artifact': ['Oppdater utkast', 'Update draft'],
+  }
+  const translated = labels[tool]
+  if (translated) return translated[locale === 'no' ? 0 : 1]
+  return locale === 'no' ? label.replace(/^Tool:\s*/, 'Verktøy: ').replace(/^Answer:\s*/, 'Svar: ') : label
 }
 
 /**

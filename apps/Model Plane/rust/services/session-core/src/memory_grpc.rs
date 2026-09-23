@@ -176,6 +176,152 @@ fn search_response(
     }
 }
 
+fn pg_row_to_entry(
+    row: crate::dreaming::MemorySearchRow,
+    owner_user_id: &str,
+) -> MemoryEntry {
+    MemoryEntry {
+        memory_id: row.id,
+        thread_id: row.thread_id,
+        topic: row.topic,
+        content: row.content,
+        score: row.score,
+        updated_at: Some(prost_types::Timestamp {
+            seconds: row.updated_at.timestamp(),
+            nanos: i32::try_from(row.updated_at.timestamp_subsec_nanos()).unwrap_or(i32::MAX),
+        }),
+        user_id: owner_user_id.to_owned(),
+        provenance: memory_provenance(row.provenance) as i32,
+    }
+}
+
+/// Standard Reciprocal Rank Fusion constant. Not tuned for this deployment —
+/// k=60 is the figure the three external systems consulted while designing
+/// this fix (supermemory, hindsight, RetainDB) all independently converged
+/// on, and using an untuned, well-established default is the honest choice
+/// until this system has enough query volume to justify tuning it against
+/// real outcomes instead of by feel.
+const RRF_K: f64 = 60.0;
+
+/// Merge pgstore's relevance-scored rows with a semantic backend's results
+/// via Reciprocal Rank Fusion (RRF), with a confidence-ordered fallback tier
+/// for whatever neither source found relevant.
+///
+/// RRF only makes sense over lists that are each independently a relevance
+/// ranking FOR THIS QUERY — it fuses rank positions, not raw scores, on the
+/// assumption that "ranks well" already means "relevant" in each input. Only
+/// two of pgstore's rows genuinely satisfy that: the ones flagged
+/// `exact_match` (a literal restatement of the query — clearly relevant, and
+/// ranked among themselves by confidence). The REST of pgstore's candidate
+/// pool is ordered by `confidence` alone, a self-reported certainty about the
+/// fact with no relationship to this query — feeding that ordering into RRF
+/// as if it were a relevance ranking would let an unrelated but
+/// high-confidence row RRF-outrank a real semantic match, exactly
+/// reproducing the "recency/confidence masks relevance" bug this fix exists
+/// to remove, just relocated into the fusion step instead of the SQL query.
+///
+/// So: `exact_match` rows and the semantic backend's results are the two
+/// genuine relevance signals and are RRF-fused together (a fact confirmed by
+/// BOTH signals earns a real, principled boost over one confirmed by only
+/// one). Everything else in pgstore's pool is confidence/recency-ordered
+/// filler, appended only to fill remaining slots below `limit` — "recency is
+/// the last resort, not the first," restored without needing recency to
+/// compete numerically against relevance at all.
+///
+/// A separate recency-weighted ranked list as a third RRF input (mirroring a
+/// temporal-strategy pattern seen in external prior art) is deliberately NOT
+/// attempted here — no reviewed source documented a concrete decay formula,
+/// so recency stays confined to the fallback tier's own ordering, which is a
+/// real gap noted for follow-up rather than papered over with an invented
+/// formula.
+///
+/// Each input is expected pre-sorted by its own relevance (pgstore rows by
+/// `score` via `search_agent_memory`; `letta_entries` by the caller); this
+/// function re-sorts defensively rather than trust that invariant silently,
+/// since a caller-ordering bug here would silently degrade back to the exact
+/// failure mode this function exists to fix.
+fn merge_memory_search_results(
+    mut pg_rows: Vec<crate::dreaming::MemorySearchRow>,
+    owner_user_id: &str,
+    mut letta_entries: Vec<MemoryEntry>,
+    limit: usize,
+) -> Vec<MemoryEntry> {
+    pg_rows.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    letta_entries
+        .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let (relevant, fallback): (Vec<_>, Vec<_>) = pg_rows.into_iter().partition(|row| row.exact_match);
+
+    // RRF-fuse the two genuine relevance signals. `order` records each
+    // content's first-seen position (pgstore's relevant rows first, in their
+    // own rank order, then letta's) so that exact score TIES break on that
+    // deterministic sequence via `sort_by`'s stability — not on a HashMap's
+    // iteration order, which is randomized per process and would otherwise
+    // make tied results silently reorder between deploys.
+    let mut rrf_score: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut representative: std::collections::HashMap<String, MemoryEntry> =
+        std::collections::HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for (rank, row) in relevant.into_iter().enumerate() {
+        let key = row.content.trim().to_owned();
+        if key.is_empty() {
+            continue;
+        }
+        if !rrf_score.contains_key(&key) {
+            order.push(key.clone());
+        }
+        *rrf_score.entry(key.clone()).or_insert(0.0) += 1.0 / (RRF_K + (rank + 1) as f64);
+        representative
+            .entry(key)
+            .or_insert_with(|| pg_row_to_entry(row, owner_user_id));
+    }
+    for (rank, entry) in letta_entries.into_iter().enumerate() {
+        let key = entry.content.trim().to_owned();
+        if key.is_empty() {
+            continue;
+        }
+        if !rrf_score.contains_key(&key) {
+            order.push(key.clone());
+        }
+        *rrf_score.entry(key.clone()).or_insert(0.0) += 1.0 / (RRF_K + (rank + 1) as f64);
+        representative.entry(key).or_insert(entry);
+    }
+
+    let mut fused: Vec<MemoryEntry> = order
+        .into_iter()
+        .map(|key| {
+            representative
+                .remove(&key)
+                .expect("every key in `order` was inserted into `representative` at the same time")
+        })
+        .collect();
+    fused.sort_by(|a, b| {
+        rrf_score[a.content.trim()]
+            .partial_cmp(&rrf_score[b.content.trim()])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .reverse()
+    });
+
+    let mut seen: std::collections::HashSet<String> =
+        fused.iter().map(|entry| entry.content.trim().to_owned()).collect();
+    for row in fallback {
+        if fused.len() >= limit {
+            break;
+        }
+        let key = row.content.trim().to_owned();
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        fused.push(pg_row_to_entry(row, owner_user_id));
+    }
+    fused.truncate(limit);
+    fused
+}
+
 fn index_response(memory_id: String, degradation_reason: Option<&str>) -> IndexMemoryResponse {
     IndexMemoryResponse {
         memory_id,
@@ -223,40 +369,50 @@ impl MemoryService for MemoryGrpc {
 
         let limit = if req.limit == 0 { 10 } else { req.limit };
         let topic_filter = req.topic_filter.clone();
-        let rows = crate::dreaming::search_agent_memory(
-            &self.pool,
-            &crate::dreaming::AgentMemorySearch {
-                org_id: req.org_id.trim(),
-                thread_id: req.thread_id.trim(),
-                owner_user_id: &owner_user_id,
-                query: &req.query,
-                topic_filter: &topic_filter,
-                limit,
-                updated_after,
-            },
-        )
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        let query_trimmed = req.query.trim();
 
-        let mut entries: Vec<MemoryEntry> = rows
-            .into_iter()
-            .map(|row| MemoryEntry {
-                memory_id: row.id,
-                thread_id: row.thread_id,
-                topic: row.topic,
-                content: row.content,
-                score: row.score,
-                updated_at: Some(prost_types::Timestamp {
-                    seconds: row.updated_at.timestamp(),
-                    nanos: i32::try_from(row.updated_at.timestamp_subsec_nanos())
-                        .unwrap_or(i32::MAX),
-                }),
-                user_id: owner_user_id.clone(),
-                provenance: memory_provenance(row.provenance) as i32,
-            })
-            .collect();
+        // pgstore and the semantic backend are independent reads — run them
+        // concurrently rather than sequentially. The semantic backend used to
+        // be queried ONLY when pgstore returned fewer than `limit` rows, which
+        // in practice was almost never, because pgstore's WHERE clause has no
+        // relevance filter and always fills up to `limit` once a user has that
+        // many memories at all — so the real semantic layer was shadowed by a
+        // ranking bug, not genuinely redundant. It now runs on every non-
+        // trivial query, bounded by the same timeout budget it already had.
+        let letta_search = async {
+            if query_trimmed.is_empty() {
+                return None;
+            }
+            let letta = self.letta.as_ref()?;
+            Some(
+                letta
+                    .search_detailed(
+                        req.org_id.trim(),
+                        req.thread_id.trim(),
+                        &owner_user_id,
+                        &req.query,
+                        &topic_filter,
+                        limit,
+                    )
+                    .await,
+            )
+        };
+        let pg_search_request = crate::dreaming::AgentMemorySearch {
+            org_id: req.org_id.trim(),
+            thread_id: req.thread_id.trim(),
+            owner_user_id: &owner_user_id,
+            query: &req.query,
+            topic_filter: &topic_filter,
+            limit,
+            updated_after,
+        };
+        let (pg_result, letta_outcome) = tokio::join!(
+            crate::dreaming::search_agent_memory(&self.pool, &pg_search_request),
+            letta_search,
+        );
+        let pg_rows = pg_result.map_err(|e| Status::internal(e.to_string()))?;
 
-        let mut degradation_reason = self
+        let health_reason = self
             .letta
             .as_ref()
             .and_then(|letta| {
@@ -264,37 +420,20 @@ impl MemoryService for MemoryGrpc {
                 (!snapshot.ready).then_some(snapshot.status)
             })
             .or_else(|| self.letta.is_none().then_some(LETTA_NOT_CONFIGURED));
-        if let Some(letta) = self.letta.as_ref() {
-            let remaining = limit.saturating_sub(u32::try_from(entries.len()).unwrap_or(u32::MAX));
-            if remaining > 0 {
-                let outcome = letta
-                    .search_detailed(
-                        req.org_id.trim(),
-                        req.thread_id.trim(),
-                        &owner_user_id,
-                        &req.query,
-                        &topic_filter,
-                        remaining,
-                    )
-                    .await;
-                degradation_reason = outcome.degradation_reason;
-                for mut entry in outcome.entries {
-                    let content = entry.content.trim();
-                    if content.is_empty()
-                        || entries
-                            .iter()
-                            .any(|existing| existing.content.trim() == content)
-                    {
-                        continue;
-                    }
-                    entry.score *= 0.85;
-                    entries.push(entry);
-                    if entries.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
-                        break;
-                    }
-                }
-            }
-        }
+        let degradation_reason = letta_outcome
+            .as_ref()
+            .and_then(|outcome| outcome.degradation_reason)
+            .or(health_reason);
+        let mut letta_entries = letta_outcome.map(|outcome| outcome.entries).unwrap_or_default();
+        crate::memory_control::filter_forgotten(&self.pool, req.org_id.trim(), &owner_user_id, &mut letta_entries)
+            .await.map_err(|_| Status::unavailable("memory deletion state unavailable"))?;
+
+        let entries = merge_memory_search_results(
+            pg_rows,
+            &owner_user_id,
+            letta_entries,
+            usize::try_from(limit).unwrap_or(usize::MAX),
+        );
 
         Ok(Response::new(search_response(entries, degradation_reason)))
     }
@@ -319,6 +458,13 @@ impl MemoryService for MemoryGrpc {
             .authorize_thread(&caller, req.org_id.trim(), req.thread_id.trim())
             .await?;
 
+        let (conversation_only,): (bool,) = sqlx::query_as(
+            "SELECT source_scope = 'conversation' FROM threads WHERE id = $1",
+        ).bind(req.thread_id.trim()).fetch_one(&self.pool).await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        if conversation_only {
+            return Err(Status::failed_precondition("Conversation-only tasks cannot create long-term memories."));
+        }
         let memory_id = crate::dreaming::index_agent_memory(
             &self.pool,
             req.org_id.trim(),
@@ -360,6 +506,9 @@ impl MemoryService for MemoryGrpc {
             Some(LETTA_NOT_CONFIGURED)
         };
 
+        if let Some(letta) = self.letta.as_ref() {
+            crate::memory_control::erase_late_mirror(&self.pool, letta, req.org_id.trim(), &owner_user_id, &memory_id).await;
+        }
         Ok(Response::new(index_response(memory_id, degradation_reason)))
     }
 
@@ -441,6 +590,8 @@ impl MemoryService for MemoryGrpc {
             }
         }
 
+        crate::memory_control::filter_forgotten(&self.pool, org_id, user_id, &mut entries)
+            .await.map_err(|_| Status::unavailable("memory deletion state unavailable"))?;
         Ok(Response::new(list_response(entries, degradation_reason)))
     }
 
@@ -479,15 +630,29 @@ impl MemoryService for MemoryGrpc {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        if !deleted {
+        // The semantic tier is asked even when the durable row was already
+        // gone, because `ListMemory` merges BOTH tiers: a row the user can see
+        // in "what do you remember" may exist only in Letta (rows written
+        // before the durable index, or by a path that only indexed
+        // semantically). Returning `not_found` on the durable miss — as this
+        // did — made those rows visible and permanently undeletable, which is
+        // the one outcome a memory-erasure path must never produce. Measured
+        // 2026-09-14: 43 listed, 36 deletable, 7 stuck.
+        let semantic = if let Some(letta) = self.letta.as_ref() {
+            Some(letta.delete_detailed(org_id, user_id, memory_id).await)
+        } else {
+            None
+        };
+        let erased_semantically = semantic.as_ref().is_some_and(|outcome| outcome.deleted);
+
+        if !deleted && !erased_semantically {
             return Err(Status::not_found("memory not found"));
         }
 
         // Best-effort: the durable record is already gone and is the source
         // of truth for existence, so a degraded semantic-side delete does not
         // fail the RPC -- it is only reported back for observability.
-        let degradation_reason = if let Some(letta) = self.letta.as_ref() {
-            let outcome = letta.delete_detailed(org_id, user_id, memory_id).await;
+        let degradation_reason = if let Some(outcome) = semantic {
             // `outcome.deleted` used to be discarded entirely here, which is
             // exactly how letta-bridge's own pgstore/memstore tiers being a
             // silent no-op (see letta-bridge's pkg for the fix) went
@@ -869,5 +1034,175 @@ mod tests {
         assert_eq!(error.code(), tonic::Code::Internal);
         assert_eq!(error.message(), "thread ownership lookup failed");
         assert!(!error.message().contains("row"));
+    }
+
+    mod merge {
+        use super::*;
+        use crate::dreaming::{MemoryProvenance, MemorySearchRow};
+
+        fn pg_row(content: &str, score: f32, exact_match: bool, updated_at: DateTime<Utc>) -> MemorySearchRow {
+            MemorySearchRow {
+                id: format!("pg-{content}"),
+                thread_id: "thread-a".to_owned(),
+                topic: "MEMORY".to_owned(),
+                content: content.to_owned(),
+                score,
+                updated_at,
+                provenance: MemoryProvenance::Inferred,
+                exact_match,
+            }
+        }
+
+        fn letta_entry(content: &str, score: f32, updated_at: DateTime<Utc>) -> MemoryEntry {
+            MemoryEntry {
+                memory_id: format!("letta-{content}"),
+                thread_id: "thread-a".to_owned(),
+                topic: "MEMORY".to_owned(),
+                content: content.to_owned(),
+                score,
+                updated_at: Some(prost_types::Timestamp {
+                    seconds: updated_at.timestamp(),
+                    nanos: 0,
+                }),
+                user_id: "user-a".to_owned(),
+                provenance: 0,
+            }
+        }
+
+        fn now() -> DateTime<Utc> {
+            DateTime::parse_from_rfc3339("2026-09-17T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        }
+
+        /// THE bug this whole fix exists for: a real semantic match must not
+        /// be crowded out by pgstore rows that merely happen to be recent.
+        /// Before this change, the semantic backend was queried only for the
+        /// SHORTFALL after pgstore filled `limit` — which pgstore's own
+        /// unfiltered WHERE clause did almost every time, so this exact case
+        /// (a relevant Letta hit, but pgstore already has `limit` recent rows)
+        /// silently dropped the relevant result on the floor.
+        #[test]
+        fn a_real_semantic_match_is_not_crowded_out_by_merely_recent_pgstore_rows() {
+            let t = now();
+            let pg_rows = vec![
+                pg_row("user is based in Norway", 0.9, false, t),
+                pg_row("user works in IT", 0.85, false, t),
+            ];
+            let letta = vec![letta_entry("the user's employer is Nordvik", 0.81, t)];
+
+            let merged = merge_memory_search_results(pg_rows, "user-a", letta, 2);
+
+            assert_eq!(merged.len(), 2);
+            assert!(
+                merged.iter().any(|e| e.content.contains("Nordvik")),
+                "the semantic hit must survive the merge even though pgstore already filled the limit: {merged:?}"
+            );
+        }
+
+        /// The two genuine relevance signals (an exact restatement, and a real
+        /// semantic match) both outrank a row with no relevance signal at all
+        /// — even one with a much higher raw `score` — because `score` on a
+        /// non-exact-match pgstore row is bare self-reported confidence about
+        /// the FACT, not relevance to this query, and never enters the RRF
+        /// fusion at all; it is fallback filler, ranked only against other
+        /// filler.
+        #[test]
+        fn relevance_signals_outrank_a_high_confidence_row_with_no_relevance_signal() {
+            let t = now();
+            let pg_rows = vec![
+                pg_row("high-confidence but irrelevant fact", 0.99, false, t),
+                pg_row("the literal query text", 0.5, true, t),
+            ];
+            let letta = vec![letta_entry("a real semantic match", 0.6, t)];
+
+            let merged = merge_memory_search_results(pg_rows, "user-a", letta, 3);
+
+            assert_eq!(merged.len(), 3);
+            assert_eq!(
+                merged[2].content, "high-confidence but irrelevant fact",
+                "a row with neither an exact match nor a semantic hit must rank last: {merged:?}"
+            );
+            assert!(
+                merged[0..2].iter().any(|e| e.content == "the literal query text"),
+                "the exact-match row must be one of the top two: {merged:?}"
+            );
+            assert!(
+                merged[0..2].iter().any(|e| e.content == "a real semantic match"),
+                "the semantic-match row must be one of the top two: {merged:?}"
+            );
+        }
+
+        /// A fact confirmed by BOTH signals — it is an exact restatement AND
+        /// the semantic backend also independently surfaces it — earns a real
+        /// RRF boost over a fact confirmed by only one signal. This is the
+        /// property a hard-priority-bucket scheme cannot express: two
+        /// independent signals agreeing is stronger evidence than either
+        /// alone.
+        #[test]
+        fn a_fact_confirmed_by_both_signals_outranks_one_confirmed_by_only_one() {
+            let t = now();
+            let pg_rows = vec![
+                pg_row("confirmed by both signals", 0.6, true, t),
+                pg_row("confirmed only by exact match", 0.9, true, t),
+            ];
+            let letta = vec![
+                letta_entry("confirmed by both signals", 0.55, t),
+                letta_entry("confirmed only by semantic match", 0.95, t),
+            ];
+
+            let merged = merge_memory_search_results(pg_rows, "user-a", letta, 4);
+
+            assert_eq!(
+                merged[0].content, "confirmed by both signals",
+                "double-confirmed must win even though single-signal rows had higher raw scores on their own side: {merged:?}"
+            );
+        }
+
+        /// A fact stored in both pgstore and the semantic mirror (the normal
+        /// case once §2's write-path fix lands) must appear once, not twice.
+        #[test]
+        fn the_same_fact_present_in_both_sources_is_not_duplicated() {
+            let t = now();
+            let pg_rows = vec![pg_row("user prefers drafts, not sent messages", 0.85, false, t)];
+            let letta = vec![letta_entry("user prefers drafts, not sent messages", 0.7, t)];
+
+            let merged = merge_memory_search_results(pg_rows, "user-a", letta, 5);
+
+            assert_eq!(merged.len(), 1);
+        }
+
+        /// The merge respects the caller's limit even when both sources
+        /// together would exceed it.
+        #[test]
+        fn the_result_never_exceeds_the_requested_limit() {
+            let t = now();
+            let pg_rows = vec![
+                pg_row("a", 0.9, false, t),
+                pg_row("b", 0.8, false, t),
+                pg_row("c", 0.7, false, t),
+            ];
+            let letta = vec![letta_entry("d", 0.6, t), letta_entry("e", 0.5, t)];
+
+            let merged = merge_memory_search_results(pg_rows, "user-a", letta, 2);
+
+            assert_eq!(merged.len(), 2);
+        }
+
+        /// No semantic backend configured (or nothing returned) degrades to
+        /// pgstore-only, still correctly bucketed.
+        #[test]
+        fn an_empty_semantic_result_still_returns_pgstore_rows_correctly_ranked() {
+            let t = now();
+            let pg_rows = vec![
+                pg_row("exact query restatement", 0.5, true, t),
+                pg_row("unrelated recent row", 0.99, false, t),
+            ];
+
+            let merged = merge_memory_search_results(pg_rows, "user-a", vec![], 2);
+
+            assert_eq!(merged[0].content, "exact query restatement");
+            assert_eq!(merged[1].content, "unrelated recent row");
+        }
     }
 }

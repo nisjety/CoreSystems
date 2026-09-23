@@ -6,9 +6,11 @@ import {
 } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
 import { For } from 'solid-js'
+import katex from 'katex'
 import {
   imageArtifactSrc,
   looksLikeImageContent,
+  mergeArtifactVersion,
 } from './chat-artifacts'
 import {
   createId,
@@ -30,6 +32,7 @@ import {
   type GeneratedImagePreview,
   type MarkdownBlock,
   type MarkdownListItem,
+  type MarkdownQuoteLine,
   type MarkdownTableAlign,
   PROSE_ARTIFACT_KINDS,
   type TaskStepStatus,
@@ -46,7 +49,11 @@ export function collectArtifactItems(turns: ChatTurn[]): ArtifactPanelItem[] {
         file: selectGeneratedFileForArtifact(artifact, turn),
         turn,
       }
-      if (!existing || artifact.version >= existing.artifact.version) byId.set(artifact.id, item)
+      const carrier = !existing || artifact.version >= existing.artifact.version ? item : existing
+      byId.set(artifact.id, {
+        ...carrier,
+        artifact: mergeArtifactVersion(existing?.artifact, artifact),
+      })
     }
   }
   return [...byId.values()]
@@ -72,21 +79,97 @@ export function selectGeneratedFileForArtifact(artifact: ChatArtifact, turn: Cha
   return imageFiles.length === 1 ? imageFiles[0] : undefined
 }
 
+/**
+ * How the backend marks a source it found but never fetched.
+ *
+ * A deep-research run lists every hit it turned up while fetching only a
+ * handful of them, and it reports both kinds as citations: an unfetched lead
+ * carries a `dr-unread-` id and a snippet opening with `[not read: …]`. The
+ * Kilder panel reads the grouping off these markers and nothing else — a source
+ * counts as read unless the server said otherwise, because guessing from the
+ * prose is exactly the inference that would let the panel claim evidence it
+ * does not have.
+ */
+const UNREAD_CITATION_ID_PREFIX = 'dr-unread-'
+const UNREAD_SNIPPET_MARKER = /^\s*\[not read:[^\]]*\]\s*/i
+
+export function isUnreadEvidenceSource(source: EvidenceSource): boolean {
+  // Internal knowledge is retrieved as text; there is no fetch step that could
+  // have failed, so the read/unread split simply does not apply to it.
+  if (source.kind === 'knowledge') return false
+  return source.id.startsWith(UNREAD_CITATION_ID_PREFIX) || UNREAD_SNIPPET_MARKER.test(source.snippet)
+}
+
+/**
+ * The snippet with its `[not read: …]` marker removed. Once a card sits under
+ * the "Ikke lest" heading the prefix only repeats the heading — in English, on
+ * a Norwegian surface.
+ */
+export function evidenceSourceSnippet(source: EvidenceSource): string {
+  return source.snippet.replace(UNREAD_SNIPPET_MARKER, '').trim()
+}
+
+/** Evidence Verevon actually read, then the leads it only ever saw a title for. */
+export function partitionEvidenceSources(sources: readonly EvidenceSource[]): {
+  read: EvidenceSource[]
+  unread: EvidenceSource[]
+} {
+  const read: EvidenceSource[] = []
+  const unread: EvidenceSource[] = []
+  for (const source of sources) {
+    if (isUnreadEvidenceSource(source)) unread.push(source)
+    else read.push(source)
+  }
+  return { read, unread }
+}
+
+/**
+ * The Kilder tally as a spoken sentence, for the streaming live region.
+ *
+ * The screen-reader announcement said only that Verevon was working, so a
+ * reader who cannot see the badge had no equivalent of the visible "3 av 24" —
+ * and the whole point of F-16 is that the unqualified number reads as
+ * twenty-four pages of evidence. Phrased like `SourcesPanel`: both numbers only
+ * while something went unread, and nothing at all when the turn has no sources,
+ * because "0 kilder lest" repeated every ten seconds on every plain Ask turn
+ * would be a metronome rather than information.
+ *
+ * Leads with a space so it can be concatenated onto whichever lifecycle
+ * sentence is being announced, and disappears cleanly when there is nothing to
+ * say.
+ */
+export function spokenSourceTally(read: number, total: number): string {
+  if (total <= 0) return ''
+  return read < total ? ` ${read} av ${total} kilder lest.` : ` ${total} kilder lest.`
+}
+
 export function collectEvidenceSources(turns: ChatTurn[]): EvidenceSource[] {
-  const seen = new Set<string>()
+  const seen = new Map<string, number>()
   const result: EvidenceSource[] = []
   for (const turn of turns) {
     for (const source of turn.grounding?.sources ?? []) {
       const key = `knowledge:${source.documentId || source.id}`
       if (seen.has(key)) continue
-      seen.add(key)
+      seen.set(key, result.length)
       result.push(source)
     }
     for (const citation of turn.citations ?? []) {
       const key = `web:${citation.url || citation.id}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      result.push({ ...citation, kind: 'web' })
+      const source: EvidenceSource = { ...citation, kind: 'web' }
+      const existing = seen.get(key)
+      if (existing !== undefined) {
+        // A page is normally cited as a lead first and fetched afterwards, so
+        // plain first-write-wins would pin a source that WAS read under "Ikke
+        // lest" for the rest of the thread. The read copy replaces the lead;
+        // never the reverse, or a later lead would demote real evidence.
+        const previous = result[existing]
+        if (previous && isUnreadEvidenceSource(previous) && !isUnreadEvidenceSource(source)) {
+          result[existing] = source
+        }
+        continue
+      }
+      seen.set(key, result.length)
+      result.push(source)
     }
   }
   return result
@@ -486,34 +569,49 @@ export function dayKey(value: string) {
   return new Date(value).toDateString()
 }
 
-export function formatDayLabel(value: string) {
+export function formatDayLabel(value: string, locale: 'no' | 'en' = 'en') {
   const date = new Date(value)
   const today = new Date()
   const yesterday = new Date(today)
   yesterday.setDate(today.getDate() - 1)
-  if (date.toDateString() === today.toDateString()) return 'Today'
-  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday'
-  return new Intl.DateTimeFormat('en', { weekday: 'long', month: 'short', day: 'numeric' }).format(date)
+  if (date.toDateString() === today.toDateString()) return locale === 'no' ? 'I dag' : 'Today'
+  if (date.toDateString() === yesterday.toDateString()) return locale === 'no' ? 'I går' : 'Yesterday'
+  return new Intl.DateTimeFormat(locale === 'no' ? 'nb-NO' : 'en', { weekday: 'long', month: 'short', day: 'numeric' }).format(date)
 }
 
-export function formatRelative(value: string) {
+export function formatRelative(value: string, locale: 'no' | 'en' = 'en') {
   const timestamp = new Date(value).getTime()
   if (Number.isNaN(timestamp)) return ''
   const minutes = Math.max(0, Math.round((Date.now() - timestamp) / 60000))
-  if (minutes < 1) return 'Just now'
-  if (minutes < 60) return `${minutes}m ago`
+  if (minutes < 1) return locale === 'no' ? 'Nå nettopp' : 'Just now'
+  if (minutes < 60) return locale === 'no' ? `for ${minutes} min siden` : `${minutes}m ago`
   const hours = Math.round(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(new Date(value))
+  if (hours < 24) return locale === 'no' ? `for ${hours} t siden` : `${hours}h ago`
+  return new Intl.DateTimeFormat(locale === 'no' ? 'nb-NO' : 'en', { month: 'short', day: 'numeric' }).format(new Date(value))
 }
 
-export function formatTime(value: string) {
-  return new Intl.DateTimeFormat('en', { hour: '2-digit', minute: '2-digit' }).format(new Date(value))
+export function formatTime(value: string, locale: 'no' | 'en' = 'en') {
+  return new Intl.DateTimeFormat(locale === 'no' ? 'nb-NO' : 'en', { hour: '2-digit', minute: '2-digit' }).format(new Date(value))
 }
 
 export function formatLatency(ms: number) {
   if (ms < 1000) return `${Math.round(ms)} ms`
   return `${(ms / 1000).toFixed(1)} s`
+}
+
+/**
+ * A wait that is still running, for the thinking indicator.
+ *
+ * Deliberately not `formatLatency`: that reports a finished measurement to one
+ * decimal ("94.3 s"), which on a live counter ticks a digit nobody is reading
+ * and turns a minute-and-a-half into a number people have to divide. Seconds
+ * are floored rather than rounded so the label never claims a second that has
+ * not elapsed yet.
+ */
+export function formatElapsedWait(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000))
+  if (seconds < 60) return `${seconds} s`
+  return `${Math.floor(seconds / 60)} min ${seconds % 60} s`
 }
 
 /**
@@ -586,6 +684,10 @@ export function getTaskStepIcon(status: TaskStepStatus): { className: string; no
   return { className: 'is-stopped', node: <Square size={11} /> }
 }
 
+// Opening code fence: 3+ backticks, capturing the marker itself (its length
+// decides what closes it) plus the optional info string (language).
+const FENCE_OPEN_PATTERN = /^(`{3,})(.*)$/
+
 export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n')
   const blocks: MarkdownBlock[] = []
@@ -598,17 +700,50 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue
     }
 
-    const fence = /^```(.*)$/.exec(line.trim())
+    const fence = FENCE_OPEN_PATTERN.exec(line.trim())
     if (fence) {
       const code: string[] = []
-      const lang = fence[1]?.trim() ?? ''
+      const marker = fence[1] ?? '```'
+      const lang = fence[2]?.trim() ?? ''
       index += 1
-      while (index < lines.length && !/^```/.test(lines[index]?.trim() ?? '')) {
+      // CommonMark: a fence only closes on a line whose entire trimmed
+      // content is AT LEAST as many backticks as the one that opened it —
+      // never fewer, and never backticks with extra trailing text. A shorter
+      // run (e.g. the ```python inside a ````markdown block) is therefore
+      // literal content of the outer fence, not a close; the model must use a
+      // longer outer fence to nest, exactly as CommonMark requires.
+      const closePattern = new RegExp(`^\`{${marker.length},}$`)
+      while (index < lines.length && !closePattern.test(lines[index]?.trim() ?? '')) {
         code.push(lines[index] ?? '')
         index += 1
       }
-      if (index < lines.length) index += 1
-      blocks.push({ kind: 'code', lang, text: code.join('\n') })
+      // Ran out of input before a closing fence of at least the same length
+      // showed up: this is an in-progress fence, still being typed token by
+      // token. `closed: false` lets a fenced ```mermaid``` block fall back to
+      // a plain code block instead of handing an incomplete diagram source
+      // to mermaid.render.
+      const closed = index < lines.length
+      if (closed) index += 1
+      blocks.push({ kind: 'code', lang, text: code.join('\n'), closed })
+      continue
+    }
+
+    // Standalone HTML comments are Markdown metadata, not visible prose.
+    // Handle them only outside fenced/inline code; never enable raw HTML.
+    if (/^\s*<!--/.test(line)) {
+      while (index < lines.length && !lines[index]?.includes('-->')) index += 1
+      if (index < lines.length) {
+        const closing = lines[index] ?? ''
+        lines[index] = closing.slice(closing.indexOf('-->') + 3)
+        if (!lines[index]?.trim()) index += 1
+      }
+      continue
+    }
+
+    const math = parseMathBlock(lines, index)
+    if (math) {
+      blocks.push(math.block)
+      index = math.next
       continue
     }
 
@@ -631,13 +766,15 @@ export function parseMarkdownBlocks(markdown: string): MarkdownBlock[] {
       continue
     }
 
-    if (/^\s*>\s?/.test(line)) {
-      const quoted: string[] = []
-      while (index < lines.length && /^\s*>\s?/.test(lines[index] ?? '')) {
-        quoted.push((lines[index] ?? '').replace(/^\s*>\s?/, ''))
+    if (/^\s*>/.test(line)) {
+      const quoteLines: MarkdownQuoteLine[] = []
+      let parsedLine = parseQuoteLine(lines[index] ?? '')
+      while (index < lines.length && parsedLine) {
+        quoteLines.push(parsedLine)
         index += 1
+        parsedLine = parseQuoteLine(lines[index] ?? '')
       }
-      blocks.push({ kind: 'quote', text: quoted.join('\n') })
+      blocks.push({ kind: 'quote', lines: quoteLines })
       continue
     }
 
@@ -712,10 +849,50 @@ export function parseDetails(lines: string[], start: number): { block: Extract<M
   }
 }
 
+/**
+ * Block ("display") math: a `$$...$$` span, either opened and closed on one
+ * line (`$$E = mc^2$$`) or spanning multiple lines with the delimiter alone
+ * on its own line, same shape as a fenced code block. Mirrors the fence
+ * parser's `closed` bookkeeping: if the source runs out before a closing
+ * `$$` line, the block is reported `closed: false` so the renderer shows the
+ * raw, still-being-typed LaTeX instead of handing an incomplete expression
+ * to KaTeX.
+ */
+export function parseMathBlock(lines: string[], start: number): { block: Extract<MarkdownBlock, { kind: 'math' }>; next: number } | null {
+  const line = lines[start] ?? ''
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('$$')) return null
+  const rest = trimmed.slice(2)
+  // Same-line open+close: `$$...$$` with real content between the pairs
+  // (an empty `$$$$` or a bare `$$` line falls through to the multi-line form
+  // below instead of parsing as an empty formula).
+  if (rest.length > 2 && rest.endsWith('$$')) {
+    return { block: { kind: 'math', text: rest.slice(0, -2).trim(), closed: true }, next: start + 1 }
+  }
+  const content: string[] = []
+  if (rest.trim()) content.push(rest)
+  let index = start + 1
+  let closed = false
+  while (index < lines.length) {
+    if ((lines[index] ?? '').trim() === '$$') {
+      closed = true
+      index += 1
+      break
+    }
+    content.push(lines[index] ?? '')
+    index += 1
+  }
+  return { block: { kind: 'math', text: content.join('\n').trim(), closed }, next: index }
+}
+
 export function parseList(lines: string[], start: number): { block: Extract<MarkdownBlock, { kind: 'list' }>; next: number } | null {
   const first = LIST_ITEM_PATTERN.exec(lines[start] ?? '')
   if (!first) return null
   const ordered = isOrderedListMarker(first[2] ?? '')
+  // CommonMark preserves the start number of the FIRST item of an ordered
+  // list ("391. Fasit." must render as <ol start="391">, not silently
+  // renumbered to "1." — see F-02). Only the first item's marker sets it.
+  const startNumber = ordered ? parseOrderedListNumber(first[2] ?? '') : undefined
   const items: MarkdownListItem[] = []
   let index = start
   while (index < lines.length) {
@@ -726,19 +903,59 @@ export function parseList(lines: string[], start: number): { block: Extract<Mark
     // Switching marker family at the top level starts a new list; nested items
     // may freely mix bullets and numbers under either parent.
     if (depth === 0 && itemOrdered !== ordered) break
-    items.push({ depth, ordered: itemOrdered, text: match[3] ?? '' })
+    const task = parseTaskMarker(match[3] ?? '')
+    items.push({
+      depth,
+      ordered: itemOrdered,
+      text: task ? task.text : (match[3] ?? ''),
+      checked: task?.checked,
+    })
     index += 1
   }
-  return { block: { kind: 'list', ordered, items }, next: index }
+  return { block: { kind: 'list', ordered, items, startNumber }, next: index }
 }
 
 function isOrderedListMarker(marker: string): boolean {
   return /^\d+[.)]$/.test(marker)
 }
 
+function parseOrderedListNumber(marker: string): number | undefined {
+  const match = /^(\d+)[.)]$/.exec(marker)
+  return match ? Number(match[1]) : undefined
+}
+
+const TASK_MARKER_PATTERN = /^\[([ xX])\]\s+(.*)$/
+
+/** GFM task-list marker ("- [ ] " / "- [x] ") at the start of a list item's
+ * text. Case-insensitive on `x` per the audit's spec; the marker is stripped
+ * off so `text` is the item's actual content. */
+function parseTaskMarker(itemText: string): { checked: boolean; text: string } | null {
+  const match = TASK_MARKER_PATTERN.exec(itemText)
+  if (!match) return null
+  return { checked: (match[1] ?? '').toLowerCase() === 'x', text: match[2] ?? '' }
+}
+
 function listIndentDepth(indent: string): number {
   const width = indent.replace(/\t/g, '  ').length
   return Math.min(6, Math.floor(width / 2))
+}
+
+/**
+ * One line of a blockquote, with its nesting depth: the count of leading '>'
+ * markers, whether doubled (">> text") or space-separated ("> > text").
+ * Mirrors `listIndentDepth` for lists so nested quotes can recurse the same
+ * way nested lists do (see `renderMarkdownQuoteLevel` in ChatMessages.tsx).
+ */
+function parseQuoteLine(line: string): MarkdownQuoteLine | null {
+  if (!/^\s*>/.test(line)) return null
+  let rest = line.replace(/^\s*/, '')
+  let depth = 0
+  while (rest.startsWith('>')) {
+    depth += 1
+    rest = rest.slice(1)
+    if (rest.startsWith(' ')) rest = rest.slice(1)
+  }
+  return { depth, text: rest }
 }
 
 /**
@@ -827,6 +1044,8 @@ function normalizeTableRow(cells: string[], width: number): string[] {
 
 export function isMarkdownBlockStart(line: string, nextLine?: string) {
   return /^\s*```/.test(line)
+    || /^\s*<!--/.test(line)
+    || /^\s*\$\$/.test(line)
     || DETAILS_OPEN_PATTERN.test(line)
     || /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
     || /^#{1,6}\s+/.test(line)
@@ -876,22 +1095,87 @@ export function InlineCitationMarker(props: {
   )
 }
 
+/**
+ * CommonMark backslash escapes. Models escape `#` (hashtags), `*`, `_` and
+ * `[` when they mean the literal character — "\#arbeidsplass" — and the
+ * escape used to reach the screen as a visible backslash (RUN-LOG finding 17).
+ * Only ASCII punctuation is escapable, exactly as the spec defines it; a
+ * backslash before anything else (a letter, a newline) stays literal.
+ */
+const BACKSLASH_ESCAPE_PATTERN = /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g
+
+export function unescapeMarkdown(text: string): string {
+  return text.replace(BACKSLASH_ESCAPE_PATTERN, '$1')
+}
+
+/**
+ * KaTeX render, shared by inline (`$...$`) and block (`$$...$$`) math.
+ * `output: 'html'` skips the MathML mirror KaTeX emits by default (this
+ * renderer has no use for it and it only adds weight); `throwOnError: true`
+ * turns a malformed expression into a catchable exception instead of KaTeX's
+ * own inline "parse error" markup, so the caller can fall back to the raw
+ * source text — matching this renderer's existing rule that a broken
+ * fragment must never take the rest of the message down with it. KaTeX's
+ * default `trust: false` (unchanged here) never lets the LaTeX source embed
+ * a raw `href`/`src`/`\includegraphics`, so the returned HTML is safe to
+ * assign directly via `innerHTML`.
+ */
+function renderKatex(source: string, displayMode: boolean): string | null {
+  if (!source.trim()) return null
+  try {
+    return katex.renderToString(source, { displayMode, output: 'html', throwOnError: true })
+  } catch {
+    return null
+  }
+}
+
+/** Inline math (`$...$`) to KaTeX HTML, or null on a malformed expression. */
+export function renderInlineMath(source: string): string | null {
+  return renderKatex(source, false)
+}
+
+/** Block/display math (`$$...$$`) to KaTeX HTML, or null on a malformed expression. */
+export function renderBlockMath(source: string): string | null {
+  return renderKatex(source, true)
+}
+
 export function parseInline(text: string, citations?: readonly Citation[]): Array<string | JSX.Element> {
   const nodes: Array<string | JSX.Element> = []
   // Keep Markdown links before citation markers: `[3](url)` is a link, not
-  // an evidence marker followed by literal `(url)` text.
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\)|\[(?:\d+(?:\s*,\s*\d+)*)\])/g
+  // an evidence marker followed by literal `(url)` text. An escaped marker
+  // (`\*`, `\[`) is not a token at all — the alternation is guarded so the
+  // escape survives to `unescapeMarkdown`, which renders the bare character.
+  // The bare-URL alternative comes last: since alternation is tried
+  // left-to-right at the earliest matching position, a URL already inside a
+  // `` ` `` code span or a `[text](url)` link is consumed whole by that
+  // earlier alternative first, so it can never be matched (and re-linked) a
+  // second time by the bare-URL branch here.
+  // Inline math (`$...$`): the opening `$` must not be followed by
+  // whitespace, another `$` (that's the block-math delimiter, handled at the
+  // block level, not here) or a digit — the digit guard is what keeps a
+  // currency figure like "$5 and $10" from being read as a formula opening
+  // at the first dollar sign (same heuristic Pandoc uses for this exact
+  // ambiguity). The closing `$` must not be preceded by whitespace. Neither
+  // condition can be satisfied without a REAL closing delimiter already in
+  // the text, so a `$` left over from an expression that hasn't finished
+  // streaming yet simply doesn't match and stays literal until it does.
+  const pattern = /((?<!\\)`[^`]+`|(?<!\\)\*\*[^*]+\*\*|(?<!\\)\*[^*]+\*|(?<!\\)\$(?!\s|\$|\d)[^$\n]*?(?<!\\)(?<!\s)\$|(?<!\\)\[[^\]]+\]\([^)]+\)|(?<!\\)\[(?:\d+(?:\s*,\s*\d+)*)\]|https?:\/\/[^\s<>"'\])]+)/g
   let cursor = 0
   for (const match of text.matchAll(pattern)) {
     if (match.index == null) continue
-    if (match.index > cursor) nodes.push(text.slice(cursor, match.index))
+    if (match.index > cursor) nodes.push(unescapeMarkdown(text.slice(cursor, match.index)))
     const token = match[0]
     if (token.startsWith('`')) {
       nodes.push(<code>{token.slice(1, -1)}</code>)
     } else if (token.startsWith('**')) {
-      nodes.push(<strong>{token.slice(2, -2)}</strong>)
+      nodes.push(<strong>{unescapeMarkdown(token.slice(2, -2))}</strong>)
     } else if (token.startsWith('*')) {
-      nodes.push(<em>{token.slice(1, -1)}</em>)
+      nodes.push(<em>{unescapeMarkdown(token.slice(1, -1))}</em>)
+    } else if (token.startsWith('$')) {
+      // A parse error falls back to the raw `$...$` source rather than
+      // dropping the expression or crashing the whole message render.
+      const html = renderInlineMath(token.slice(1, -1))
+      nodes.push(html ? <span class="verevon-chat-math verevon-chat-math--inline" innerHTML={html} /> : token)
     } else if (citations && /^\[\d+(?:\s*,\s*\d+)*\]$/.test(token)) {
       const indexes = token
         .slice(1, -1)
@@ -907,12 +1191,31 @@ export function parseInline(text: string, citations?: readonly Citation[]): Arra
           ? <InlineCitationMarker citations={sources.map((entry) => entry.citation)} indexes={indexes} />
           : token,
       )
+    } else if (/^https?:\/\//.test(token)) {
+      // Bare URL, not already wrapped in `[text](url)` markdown-link syntax
+      // (that case is handled by the branch below). Every competitor
+      // autolinks these; trim trailing sentence punctuation off the link so
+      // "... se https://example.com." doesn't pull the period into the href.
+      const { url, trailing } = splitUrlTrailingPunctuation(token)
+      nodes.push(<a href={url} target="_blank" rel="noopener noreferrer">{url}</a>)
+      if (trailing) nodes.push(trailing)
     } else {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)
-      nodes.push(link ? <a href={link[2]} target="_blank" rel="noopener noreferrer">{link[1]}</a> : token)
+      nodes.push(link ? <a href={link[2]} target="_blank" rel="noopener noreferrer">{unescapeMarkdown(link[1] ?? '')}</a> : token)
     }
     cursor = match.index + token.length
   }
-  if (cursor < text.length) nodes.push(text.slice(cursor))
+  if (cursor < text.length) nodes.push(unescapeMarkdown(text.slice(cursor)))
   return nodes
+}
+
+/**
+ * Splits trailing sentence punctuation (".", ",", ";", ":", "!", "?") off an
+ * autolinked bare URL. The fence-style character class in `parseInline`'s
+ * pattern already excludes ")"/"]" from the match, so a URL inside plain
+ * parentheses like "(see https://example.com)" is unaffected by this step.
+ */
+function splitUrlTrailingPunctuation(url: string): { url: string; trailing: string } {
+  const trailing = /[.,;:!?]+$/.exec(url)
+  return trailing ? { url: url.slice(0, trailing.index), trailing: trailing[0] } : { url, trailing: '' }
 }

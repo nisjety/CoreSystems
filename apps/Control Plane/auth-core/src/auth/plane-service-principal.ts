@@ -52,10 +52,20 @@ export class ServicePrincipalConfigurationError extends Error {}
 export class ServicePrincipalAuthorizationError extends Error {}
 
 function privateRegistryFile(stats: Stats): boolean {
+  if (!stats.isFile()) {
+    return false;
+  }
+  if (process.platform === 'win32') {
+    // Node synthesizes mode/uid from the read-only attribute on Windows, so
+    // POSIX owner/permission hardening cannot be expressed or enforced there.
+    // Deployment targets are Linux; on Windows the file is protected by the
+    // user-profile ACL instead. The isFile/symlink/size checks above and
+    // below still apply on every platform.
+    return true;
+  }
   const currentUserId =
     typeof process.getuid === 'function' ? process.getuid() : stats.uid;
   return (
-    stats.isFile() &&
     stats.uid === currentUserId &&
     (stats.mode & 0o400) === 0o400 &&
     (stats.mode & 0o077) === 0

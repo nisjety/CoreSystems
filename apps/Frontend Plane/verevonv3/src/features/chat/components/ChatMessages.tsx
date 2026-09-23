@@ -1,3 +1,4 @@
+import { workStepLabel } from './chat-normalizers'
 import {
   type Approval,
   type ApprovalDecision,
@@ -19,6 +20,7 @@ import {
   Globe2,
   Image as ImageIcon,
   Info,
+  Loader2,
   MessageSquarePlus,
   MoreHorizontal,
   Paperclip,
@@ -30,6 +32,7 @@ import {
   TerminalSquare,
   ThumbsDown,
   ThumbsUp,
+  Trash2,
   Volume2,
   Wrench,
   X,
@@ -49,6 +52,7 @@ import {
 import type { AutonomyRung, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
+import { correctMemory, deleteMemory, listMemories } from '@/shared/api/memory-client'
 import {
   For,
   Match,
@@ -57,6 +61,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  onCleanup,
 } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import {
@@ -67,6 +72,7 @@ import {
   domId,
   formatBytes,
   formatDayLabel,
+  formatElapsedWait,
   formatLatency,
   formatRelative,
   formatTime,
@@ -77,6 +83,7 @@ import {
   parseMarkdownBlocks,
   prettyModel,
   readAloud,
+  renderBlockMath,
 } from './chat-media-markdown'
 import {
   type AgentTaskStep,
@@ -92,11 +99,13 @@ import {
   type IconComponent,
   type MarkdownBlock,
   type MarkdownListItem,
+  type MarkdownQuoteLine,
   TOOL_LABELS,
 } from './chat-types'
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
+import { streamActivityLabel, type StreamActivity } from '@/features/chat/lib/stream-activity'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
-import { useI18n } from '@/shared/i18n'
+import { translateApiError, useI18n } from '@/shared/i18n'
 
 export function MessageBlock(props: {
   copied: boolean
@@ -116,6 +125,14 @@ export function MessageBlock(props: {
   onFeedback: (rating: 'positive' | 'negative', note?: string) => Promise<boolean>
   onRegenerate: () => void
   onRerunAsNewTurn?: () => void
+  /**
+   * "Fortsett" — continue a STOPPED turn's partial answer from exactly where
+   * it left off, rather than discarding it. Absent on a surface that does not
+   * offer it (mirrors `onTogglePin`'s convention); `AssistantMessage` itself
+   * gates visibility on the turn actually being stopped with partial content,
+   * so a caller need not repeat that check.
+   */
+  onContinue?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
   onApprovePlan: (rung: AutonomyRung, justification: string) => void
   planApproval?: PlanApprovalStatus
@@ -127,6 +144,8 @@ export function MessageBlock(props: {
   onSelectVersion?: (target: number) => void
   /** Effectful turns cannot be edited or regenerated in place. */
   editLocked?: boolean
+  /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
+  threadId?: string | null
 }) {
   // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
   // role through a memo so the conditional branch is established in a tracked
@@ -177,8 +196,8 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   },
   'memory-recall': {
     kind: 'memory-recall',
-    render: (node) => (
-      <MemoryRecallNotice count={node.count} memories={node.memories} />
+    render: (node, ctx) => (
+      <MemoryRecallNotice count={node.count} memories={node.memories} threadId={ctx.threadId} />
     ),
   },
   truncated: {
@@ -263,15 +282,15 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
  * rendering two of them at once impossible. Keeping that guarantee is why
  * `AnswerState` is a discriminated union rather than three separate nodes.
  */
-function AnswerRegion(props: {
+export function AnswerRegion(props: {
   answer: AnswerState
   onRegenerate: () => void
   citations?: readonly Citation[]
 }) {
   return (
     <Switch>
-      <Match when={props.answer.state === 'pending'}>
-        <ThinkingDots />
+      <Match when={props.answer.state === 'pending' ? props.answer : null}>
+        {(pending) => <ThinkingDots since={pending().since} activity={pending().activity} />}
       </Match>
       <Match when={props.answer.state === 'failed' ? props.answer : null}>
         {(failed) => (
@@ -316,6 +335,8 @@ export function AssistantMessage(props: {
   onFeedback: (rating: 'positive' | 'negative', note?: string) => Promise<boolean>
   onRegenerate: () => void
   onRerunAsNewTurn?: () => void
+  /** See `MessageBlock`'s doc — same "Fortsett" affordance, forwarded through. */
+  onContinue?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
   onApprovePlan: (rung: AutonomyRung, justification: string) => void
   planApproval?: PlanApprovalStatus
@@ -324,6 +345,8 @@ export function AssistantMessage(props: {
   onViewAttachments?: (attachmentId: string) => void
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
+  /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
+  threadId?: string | null
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
@@ -367,6 +390,15 @@ export function AssistantMessage(props: {
   const waiting = createMemo(() => props.message.status === 'waiting')
   const errored = createMemo(() => props.message.status === 'error')
   const effectful = createMemo(() => isEffectfulChatTurn(props.message.effectClass))
+  // "Fortsett" (continue-after-stop, chat-parity §0.1) applies only to a
+  // STOPPED turn that actually has something to continue from. A genuinely
+  // empty stopped turn (the user stopped it before any text arrived) has
+  // nothing to splice a continuation onto — "Generer på nytt" below already
+  // covers that case correctly, so this stays false rather than offering a
+  // control with nothing behind it.
+  const canContinue = createMemo(
+    () => props.message.status === 'stopped' && props.message.content.trim().length > 0,
+  )
 
   // What this turn renders, as data. The conditions and order that used to live
   // inline as fourteen nested `<Show>` blocks are now one reviewable function
@@ -386,6 +418,7 @@ export function AssistantMessage(props: {
       onSelectFollowUp: props.onSelectFollowUp,
       onRegenerate: props.onRegenerate,
       citations: props.message.citations,
+      threadId: props.threadId ?? null,
     }
     return nodes().map((node) => ({ node, context }))
   })
@@ -401,7 +434,7 @@ export function AssistantMessage(props: {
       <div class="verevon-chat-message__body">
         <div class="verevon-chat-message__heading">
           <span>Verevon</span>
-          <time>{formatRelative(props.message.createdAt)}</time>
+          <time>{formatRelative(props.message.createdAt, i18n.locale())}</time>
         </div>
         {/*
           Rendered from the derived node list through the keyed registry. Adding
@@ -501,6 +534,21 @@ export function AssistantMessage(props: {
                 </>
               )}
             >
+              {/* "Fortsett" — offered first, ahead of Regenerate, because it is
+                  the more specific and usually more useful action on a turn
+                  that already has partial text: it keeps what was written and
+                  asks the model to pick up from exactly there, rather than
+                  discarding it for a fresh answer. Only ever rendered
+                  alongside Regenerate, never instead of it — a person who
+                  would rather start over still can. */}
+              <Show when={canContinue() && props.onContinue}>
+                <MessageAction
+                  label={i18n.tr('Fortsett', 'Continue')}
+                  onClick={() => props.onContinue?.()}
+                >
+                  <ArrowRight size={14} />
+                </MessageAction>
+              </Show>
               {/* The label names the outcome, not the verb. Regenerating keeps
                   the previous answer as a switchable version, but the switcher
                   only appears AFTER the first regenerate — so the one moment a
@@ -591,7 +639,7 @@ export function UserMessage(props: {
     <article class="verevon-chat-message verevon-chat-message--user" tabindex={-1}>
       <div class="verevon-chat-user-meta">
         <span>Meg</span>
-        <time>{formatRelative(props.message.createdAt)}</time>
+        <time>{formatRelative(props.message.createdAt, i18n.locale())}</time>
       </div>
       <Show
         when={!editing()}
@@ -774,6 +822,9 @@ export function MarkdownBlockView(props: { block: MarkdownBlock; citations?: rea
       <Match when={props.block.kind === 'code'}>
         <MarkdownCodeBlock block={props.block as Extract<MarkdownBlock, { kind: 'code' }>} />
       </Match>
+      <Match when={props.block.kind === 'math'}>
+        <MarkdownMathBlock block={props.block as Extract<MarkdownBlock, { kind: 'math' }>} />
+      </Match>
       <Match when={props.block.kind === 'table'}>
         <MarkdownTable block={props.block as Extract<MarkdownBlock, { kind: 'table' }>} citations={props.citations} />
       </Match>
@@ -781,7 +832,7 @@ export function MarkdownBlockView(props: { block: MarkdownBlock; citations?: rea
         <MarkdownList block={props.block as Extract<MarkdownBlock, { kind: 'list' }>} citations={props.citations} />
       </Match>
       <Match when={props.block.kind === 'quote'}>
-        <blockquote>{parseInline((props.block as Extract<MarkdownBlock, { kind: 'quote' }>).text, props.citations)}</blockquote>
+        <MarkdownQuote block={props.block as Extract<MarkdownBlock, { kind: 'quote' }>} citations={props.citations} />
       </Match>
       <Match when={props.block.kind === 'hr'}>
         <hr />
@@ -824,14 +875,154 @@ export function DynamicHeading(props: { block: Extract<MarkdownBlock, { kind: 'h
   )
 }
 
+/**
+ * A ```mermaid``` fenced block is a diagram once (and only once) its fence has
+ * actually closed — `props.block.closed` — never mid-stream: an in-progress
+ * diagram source is frequently invalid Mermaid syntax by construction (a cut-
+ * off node definition, an unbalanced `[...]` label), and `mermaid.render`
+ * rejecting that half-written source is not an error to recover from, it's
+ * the expected shape of every token before the last one. Until the fence
+ * closes this renders exactly like any other language's code block, same as
+ * the rest of this file's streaming-resilience approach.
+ */
 export function MarkdownCodeBlock(props: { block: Extract<MarkdownBlock, { kind: 'code' }> }) {
   return (
-    <div class="verevon-chat-codeblock">
-      <Show when={props.block.lang}>
-        <div class="verevon-chat-codeblock__label">{props.block.lang}</div>
-      </Show>
-      <pre><code>{props.block.text}</code></pre>
-    </div>
+    <Show
+      when={props.block.closed && props.block.lang.trim().toLowerCase() === 'mermaid'}
+      fallback={
+        <div class="verevon-chat-codeblock">
+          <Show when={props.block.lang}>
+            <div class="verevon-chat-codeblock__label">{props.block.lang}</div>
+          </Show>
+          <pre><code>{props.block.text}</code></pre>
+        </div>
+      }
+    >
+      <MermaidDiagram code={props.block.text} />
+    </Show>
+  )
+}
+
+type MermaidRenderState =
+  | { status: 'loading' }
+  | { status: 'ok'; svg: string }
+  | { status: 'error' }
+
+// One shared module instance: mermaid.initialize() is documented as a
+// single global call, so the dynamic import + init is done once no matter
+// how many diagrams a conversation renders, and never before a mermaid
+// block actually needs it (kept out of the main bundle otherwise).
+let mermaidModulePromise: Promise<typeof import('mermaid')> | null = null
+
+function loadMermaid(): Promise<typeof import('mermaid')> {
+  if (!mermaidModulePromise) {
+    mermaidModulePromise = import('mermaid').then((module) => {
+      module.default.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        theme: 'neutral',
+        fontFamily: 'inherit',
+      })
+      return module
+    })
+  }
+  return mermaidModulePromise
+}
+
+let mermaidRenderSequence = 0
+
+// Keyed on the diagram source itself (not the block object, which is a fresh
+// reference every reparse — see `ChatMarkdown`) so a diagram that already
+// finished rendering earlier in the stream comes back instantly from cache
+// on every later re-render instead of re-running `mermaid.render` — and
+// re-flashing its loading state — purely because later tokens elsewhere in
+// the message produced a new block array.
+const mermaidRenderCache = new Map<string, MermaidRenderState>()
+
+async function renderMermaidDiagram(code: string): Promise<string> {
+  const mermaid = await loadMermaid()
+  mermaidRenderSequence += 1
+  const { svg } = await mermaid.default.render(`verevon-mermaid-${mermaidRenderSequence}`, code)
+  return svg
+}
+
+function MermaidDiagram(props: { code: string }) {
+  const [state, setState] = createSignal<MermaidRenderState>(mermaidRenderCache.get(props.code) ?? { status: 'loading' })
+
+  // Solid 2's `createEffect` splits into a tracked `compute` (here just
+  // reading `props.code`) and an imperative `effect` phase that runs the
+  // actual async render and returns its own cleanup — the single-callback
+  // Solid 1 form throws `MISSING_EFFECT_FN` and halts the whole reactive
+  // root, not just this component.
+  createEffect(
+    () => props.code,
+    (code) => {
+      const cached = mermaidRenderCache.get(code)
+      if (cached) {
+        setState(cached)
+        return
+      }
+      let cancelled = false
+      renderMermaidDiagram(code)
+        .then((svg) => {
+          const next: MermaidRenderState = { status: 'ok', svg }
+          mermaidRenderCache.set(code, next)
+          if (!cancelled) setState(next)
+        })
+        .catch(() => {
+          // Invalid-but-complete diagram source (or the mermaid module failed
+          // to load): fall back to the raw fenced text rather than leaving a
+          // stuck spinner or throwing out of the render tree.
+          const next: MermaidRenderState = { status: 'error' }
+          mermaidRenderCache.set(code, next)
+          if (!cancelled) setState(next)
+        })
+      return () => { cancelled = true }
+    },
+  )
+
+  return (
+    <Switch>
+      <Match when={state().status === 'ok'}>
+        <div class="verevon-chat-mermaid" innerHTML={(state() as Extract<MermaidRenderState, { status: 'ok' }>).svg} />
+      </Match>
+      <Match when={state().status === 'error'}>
+        <div class="verevon-chat-codeblock">
+          <div class="verevon-chat-codeblock__label">mermaid</div>
+          <pre><code>{props.code}</code></pre>
+        </div>
+      </Match>
+      <Match when={state().status === 'loading'}>
+        <div class="verevon-chat-codeblock verevon-chat-mermaid-loading">
+          <div class="verevon-chat-codeblock__label">mermaid</div>
+          <div class="verevon-chat-mermaid__placeholder" role="status" aria-live="polite">Tegner diagram…</div>
+        </div>
+      </Match>
+    </Switch>
+  )
+}
+
+/**
+ * Block ("display") math, `$$...$$`. Only rendered through KaTeX once the
+ * block's closing `$$` has actually arrived (`props.block.closed`) — the
+ * same rule `MarkdownCodeBlock` applies to a streaming mermaid fence — and
+ * only when KaTeX accepted the expression; both an unclosed, still-streaming
+ * block and a malformed one fall back to the raw `$$...$$` source text
+ * rather than showing nothing or throwing out of the render tree.
+ */
+function MarkdownMathBlock(props: { block: Extract<MarkdownBlock, { kind: 'math' }> }) {
+  const html = () => (props.block.closed ? renderBlockMath(props.block.text) : null)
+  return (
+    <Show
+      when={html()}
+      fallback={
+        <pre class="verevon-chat-math-raw">
+          <code>{`$$\n${props.block.text}${props.block.closed ? '\n$$' : ''}`}</code>
+        </pre>
+      }
+    >
+      {(svg) => <div class="verevon-chat-math verevon-chat-math--block" innerHTML={svg()} />}
+    </Show>
   )
 }
 
@@ -867,7 +1058,21 @@ export function MarkdownTable(props: { block: Extract<MarkdownBlock, { kind: 'ta
 }
 
 export function MarkdownList(props: { block: Extract<MarkdownBlock, { kind: 'list' }>; citations?: readonly Citation[] }) {
-  return <>{renderMarkdownListLevel(props.block.items, 0, props.block.items.length, props.block.ordered, props.citations)}</>
+  return (
+    <>
+      {renderMarkdownListLevel(
+        props.block.items,
+        0,
+        props.block.items.length,
+        props.block.ordered,
+        props.citations,
+        // Only the outermost <ol> honours the parsed start number — it is
+        // the leading marker of the WHOLE message's list (see F-02), not of
+        // whatever nested sublist happens to recurse through this function.
+        props.block.startNumber,
+      )}
+    </>
+  )
 }
 
 /**
@@ -875,8 +1080,18 @@ export function MarkdownList(props: { block: Extract<MarkdownBlock, { kind: 'lis
  * <ul>/<ol>, recursing for runs of deeper items so nested bullets indent the
  * way GFM renders them. Marker family per level follows the first item of
  * that level, so numbered children under bullets (and vice versa) work.
+ * `startNumber` (when given and not 1) sets `<ol start>` so a leading number
+ * like "391." is preserved instead of every ordered list silently
+ * renumbering from 1 (F-02).
  */
-function renderMarkdownListLevel(items: MarkdownListItem[], start: number, end: number, ordered: boolean, citations?: readonly Citation[]): JSX.Element {
+function renderMarkdownListLevel(
+  items: MarkdownListItem[],
+  start: number,
+  end: number,
+  ordered: boolean,
+  citations?: readonly Citation[],
+  startNumber?: number,
+): JSX.Element {
   const levelDepth = items[start]?.depth ?? 0
   const nodes: JSX.Element[] = []
   let index = start
@@ -885,8 +1100,13 @@ function renderMarkdownListLevel(items: MarkdownListItem[], start: number, end: 
     if (!item) break
     let childEnd = index + 1
     while (childEnd < end && (items[childEnd]?.depth ?? 0) > levelDepth) childEnd += 1
+    const isTask = item.checked !== undefined
     nodes.push(
-      <li>
+      // Task-list items suppress the marker glyph themselves — a checkbox
+      // stands in its place, so a bullet drawn behind it would be a second,
+      // meaningless marker.
+      <li style={isTask ? { 'list-style': 'none' } : undefined}>
+        {isTask ? <input type="checkbox" disabled checked={item.checked} /> : null}
         {parseInline(item.text, citations)}
         {childEnd > index + 1
           ? renderMarkdownListLevel(items, index + 1, childEnd, items[index + 1]?.ordered ?? false, citations)
@@ -895,7 +1115,49 @@ function renderMarkdownListLevel(items: MarkdownListItem[], start: number, end: 
     )
     index = childEnd
   }
-  return ordered ? <ol>{nodes}</ol> : <ul>{nodes}</ul>
+  return ordered
+    ? <ol start={startNumber && startNumber !== 1 ? startNumber : undefined}>{nodes}</ol>
+    : <ul>{nodes}</ul>
+}
+
+function MarkdownQuote(props: { block: Extract<MarkdownBlock, { kind: 'quote' }>; citations?: readonly Citation[] }) {
+  return renderMarkdownQuoteLevel(props.block.lines, 0, props.block.lines.length, props.citations)
+}
+
+/**
+ * Renders one nesting level of a flat, depth-annotated blockquote as a real
+ * <blockquote>, recursing for runs of deeper lines so nested quotes (">"
+ * then ">>", or "> >") indent the way GFM renders them — mirrors
+ * `renderMarkdownListLevel`'s recursion over `MarkdownListItem.depth`.
+ */
+function renderMarkdownQuoteLevel(lines: MarkdownQuoteLine[], start: number, end: number, citations?: readonly Citation[]): JSX.Element {
+  const levelDepth = lines[start]?.depth ?? 1
+  const nodes: JSX.Element[] = []
+  let paragraph: string[] = []
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return
+    // Quoted content can contain whole GFM blocks, including source tables.
+    // Parsing it as one inline paragraph flattened every row after reload.
+    nodes.push(...parseMarkdownBlocks(paragraph.join('\n')).map((block) => <MarkdownBlockView block={block} citations={citations} />))
+    paragraph = []
+  }
+  let index = start
+  while (index < end) {
+    const line = lines[index]
+    if (!line) break
+    if (line.depth > levelDepth) {
+      flushParagraph()
+      let childEnd = index
+      while (childEnd < end && (lines[childEnd]?.depth ?? 0) > levelDepth) childEnd += 1
+      nodes.push(renderMarkdownQuoteLevel(lines, index, childEnd, citations))
+      index = childEnd
+      continue
+    }
+    paragraph.push(line.text)
+    index += 1
+  }
+  flushParagraph()
+  return <blockquote>{nodes}</blockquote>
 }
 
 export function ReasoningTrace(props: { text: string; streaming: boolean }) {
@@ -1752,6 +2014,13 @@ export function ConfidenceNotice(props: {
     if (verification.verdict === 'contradicts') {
       return i18n.tr('kildene sier noe annet', 'the sources say otherwise')
     }
+    // verdict === 'unrelated': the verifier ran, but that alone doesn't mean
+    // it checked anything. Zero citations means nothing was ever attempted —
+    // a question like "17 * 23?" was never going to be in the KB — and
+    // saying "checked the documents — found no backing" there claims an
+    // active-but-failed search that never happened (F-04). Only make that
+    // claim when there were sources to actually check against.
+    if (sources === 0) return undefined
     return verification.webAllowed
       ? i18n.tr(
           'sjekket dokumentene og nettet — fant ingen dekning',
@@ -1795,11 +2064,13 @@ export function ConfidenceNotice(props: {
 }
 
 /**
- * Deterministic "memory was used" indicator (Model Plane's `memory_recall`
- * event). Shown because a user cannot otherwise distinguish an answer that
- * drew on remembered context from one that guessed — and a wrong remembered
- * fact is only correctable if you know it was in play. The backend emits the
- * event only when memory genuinely contributed, so there is no zero state.
+ * Deterministic "memory was retrieved" indicator (Model Plane's
+ * `memory_recall` event). Shown because a user cannot otherwise tell that
+ * remembered context was in play for this turn — and a wrong remembered fact
+ * is only correctable if you know it was in play. Recall is a fixed-cost
+ * lookup that runs every turn regardless of relevance, not a signal that the
+ * model actually drew on what came back (F-05) — the copy says "retrieved",
+ * never "used", so it never claims more than the event proves.
  */
 /**
  * Norwegian label per origin.
@@ -1816,7 +2087,7 @@ const MEMORY_ORIGIN_LABEL: Record<MemoryOrigin, string> = {
 }
 
 /**
- * "Memory was used", and — when the backend said which — what was used.
+ * "Memory was retrieved", and — when the backend said which — what came back.
  *
  * Collapsed to a single line by default: the count is the signal, the contents
  * are the follow-up. Expanding is the point of the whole feature, though. A
@@ -1827,11 +2098,140 @@ const MEMORY_ORIGIN_LABEL: Record<MemoryOrigin, string> = {
 export function MemoryRecallNotice(props: {
   count: number
   memories: RecalledMemory[]
+  /**
+   * The active thread, so "Rediger" can satisfy the write path's
+   * thread-ownership check. Null disables editing (but never deleting,
+   * which needs no thread) rather than sending an empty id.
+   */
+  threadId?: string | null
 }) {
+  const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
+  // A local, mutable copy: `props.memories` is the historical record of what
+  // THIS turn recalled when it ran, and stays that way. Rediger/Glem act on
+  // the real backend and must be reflected here immediately — "the user sees
+  // the memory is gone/corrected without needing to reopen the panel" — which
+  // a copy the component owns gives for free.
+  const [items, setItems] = createSignal<RecalledMemory[]>(props.memories)
+  const [editingId, setEditingId] = createSignal<string | null>(null)
+  const [draft, setDraft] = createSignal('')
+  const [loadingDraftId, setLoadingDraftId] = createSignal<string | null>(null)
+  const [confirmForgetId, setConfirmForgetId] = createSignal<string | null>(null)
+  const [busyId, setBusyId] = createSignal<string | null>(null)
+  const [actionError, setActionError] = createSignal<string | null>(null)
+
   const listed = () => props.memories.length > 0
+  // "Hentet"/"Retrieved", not "Brukte"/"Used": recall is a fixed-cost lookup
+  // that runs on every turn regardless of relevance, so the count is what the
+  // backend fetched — it is not proof the model drew on any of it (F-05).
   const summary = () =>
-    `Brukte ${props.count} ${props.count === 1 ? 'minne' : 'minner'} fra tidligere samtaler.`
+    i18n.tr(
+      `Hentet ${props.count} ${props.count === 1 ? 'minne' : 'minner'} fra tidligere samtaler.`,
+      `Retrieved ${props.count} ${props.count === 1 ? 'memory' : 'memories'} from earlier conversations.`,
+    )
+
+  /**
+   * Only a "USER"-topic entry is one `ListMemory`/`DeleteMemory` (and so this
+   * correct/forget pair, which reads and writes through the same session-core
+   * scope) can ever act on — both RPCs filter to `scope = 'user'` server-side,
+   * and topic "USER" is exactly what maps to that scope (see `dreaming.rs`'s
+   * `index_agent_memory`). Gating on the label here means the button never
+   * promises an action the backend would silently no-op on an org/workspace/
+   * policy entry.
+   */
+  const isPersonal = (memory: RecalledMemory) => memory.label === 'USER'
+
+  const startEdit = async (memory: RecalledMemory) => {
+    if (busyId()) return
+    setActionError(null)
+    setConfirmForgetId(null)
+    setEditingId(memory.memoryId)
+    setDraft(memory.preview)
+    // The recall event only carries a bounded (160-char) preview. Fetch the
+    // full stored content so correcting a long memory can never silently
+    // truncate it down to whatever happened to be shown here.
+    setLoadingDraftId(memory.memoryId)
+    try {
+      const result = await listMemories()
+      const full = result.memories.find((entry) => entry.memoryId === memory.memoryId)
+      // Still editing the same row when this lands, not a stale response for
+      // one the reader already moved past.
+      if (!full) throw new Error(i18n.tr('Minnet finnes ikke lenger. Åpne en ny samtale for å oppdatere listen.', 'This memory no longer exists. Open a new conversation to refresh the list.'))
+      if (editingId() === memory.memoryId) setDraft(full.content)
+    } catch {
+      // A recall preview is truncated. Never offer to save it as if it were
+      // the full current entry when the authoritative read failed.
+      setEditingId(null)
+      setDraft('')
+      setActionError(i18n.tr('Kunne ikke hente hele minnet. Prøv å redigere på nytt.', 'Could not load the full memory. Try editing again.'))
+    } finally {
+      setLoadingDraftId(null)
+    }
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setDraft('')
+  }
+
+  const saveEdit = async (memory: RecalledMemory) => {
+    const content = draft().trim()
+    const threadId = props.threadId
+    if (!content || !threadId || busyId()) return
+    setBusyId(memory.memoryId)
+    setActionError(null)
+    try {
+      const result = await correctMemory(memory.memoryId, threadId, content)
+      // The correction lands under a NEW id (no update-in-place RPC exists —
+      // see correctMemory's own doc), so the id is swapped in along with the
+      // text rather than just editing the preview in place.
+      setItems((current) =>
+        current.map((entry) =>
+          entry.memoryId === memory.memoryId
+            ? { ...entry, memoryId: result.memoryId || entry.memoryId, preview: content }
+            : entry,
+        ),
+      )
+      setEditingId(null)
+      setDraft('')
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke rette minnet.',
+          en: 'Could not correct the memory.',
+        }),
+      )
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  // Two-click confirm (arm, then confirm), same lightweight pattern the
+  // Settings memory list already uses — deletion is real and immediate, but
+  // does not need a full modal to say so.
+  const forget = async (memory: RecalledMemory) => {
+    if (busyId()) return
+    if (confirmForgetId() !== memory.memoryId) {
+      setConfirmForgetId(memory.memoryId)
+      return
+    }
+    setBusyId(memory.memoryId)
+    setActionError(null)
+    try {
+      await deleteMemory(memory.memoryId)
+      setItems((current) => current.filter((entry) => entry.memoryId !== memory.memoryId))
+      setConfirmForgetId(null)
+    } catch (err) {
+      setActionError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke glemme minnet.',
+          en: 'Could not forget the memory.',
+        }),
+      )
+    } finally {
+      setBusyId(null)
+    }
+  }
 
   return (
     <div class="verevon-chat-memory-recall">
@@ -1864,7 +2264,7 @@ export function MemoryRecallNotice(props: {
         </button>
         <Show when={open()}>
           <ul class="verevon-chat-memory-recall__list">
-            <For each={props.memories}>
+            <For each={items()}>
               {(memory) => (
                 <li class="verevon-chat-memory-recall__item">
                   <div class="verevon-chat-memory-recall__head">
@@ -1886,13 +2286,100 @@ export function MemoryRecallNotice(props: {
                       </span>
                     </Show>
                   </div>
-                  <p class="verevon-chat-memory-recall__preview">
-                    {memory.preview}
-                  </p>
+                  <Show
+                    when={editingId() === memory.memoryId}
+                    fallback={
+                      <p class="verevon-chat-memory-recall__preview">
+                        {memory.preview}
+                      </p>
+                    }
+                  >
+                    <div class="verevon-chat-memory-recall__edit">
+                      <textarea
+                        class="verevon-chat-memory-recall__edit-textarea"
+                        value={draft()}
+                        disabled={loadingDraftId() === memory.memoryId || busyId() === memory.memoryId}
+                        onInput={(event) => setDraft(event.currentTarget.value)}
+                      />
+                      <div class="verevon-chat-memory-recall__actions">
+                        <button
+                          type="button"
+                          class="verevon-chat-memory-recall__action"
+                          disabled={loadingDraftId() === memory.memoryId || busyId() === memory.memoryId || !draft().trim() || !props.threadId}
+                          onClick={() => void saveEdit(memory)}
+                        >
+                          <Show
+                            when={busyId() === memory.memoryId}
+                            fallback={<Check size={11} aria-hidden="true" />}
+                          >
+                            <Loader2 size={11} aria-hidden="true" />
+                          </Show>
+                          {i18n.tr('Lagre', 'Save')}
+                        </button>
+                        <button
+                          type="button"
+                          class="verevon-chat-memory-recall__action"
+                          disabled={busyId() === memory.memoryId}
+                          onClick={cancelEdit}
+                        >
+                          <X size={11} aria-hidden="true" />
+                          {i18n.tr('Avbryt', 'Cancel')}
+                        </button>
+                      </div>
+                    </div>
+                  </Show>
+                  <Show when={isPersonal(memory) && editingId() !== memory.memoryId}>
+                    <div class="verevon-chat-memory-recall__actions">
+                      <button
+                        type="button"
+                        class="verevon-chat-memory-recall__action"
+                        disabled={Boolean(busyId()) || !props.threadId}
+                        title={
+                          props.threadId
+                            ? undefined
+                            : i18n.tr(
+                                'Ingen aktiv samtale å rette fra',
+                                'No active conversation to correct from',
+                              )
+                        }
+                        onClick={() => void startEdit(memory)}
+                      >
+                        <Pencil size={11} aria-hidden="true" />
+                        {i18n.tr('Rediger', 'Correct')}
+                      </button>
+                      <button
+                        type="button"
+                        class={{
+                          'verevon-chat-memory-recall__action': true,
+                          'verevon-chat-memory-recall__action--danger':
+                            confirmForgetId() === memory.memoryId,
+                        }}
+                        disabled={busyId() === memory.memoryId}
+                        onClick={() => void forget(memory)}
+                      >
+                        <Show
+                          when={busyId() === memory.memoryId}
+                          fallback={<Trash2 size={11} aria-hidden="true" />}
+                        >
+                          <Loader2 size={11} aria-hidden="true" />
+                        </Show>
+                        {confirmForgetId() === memory.memoryId
+                          ? i18n.tr('Bekreft glemsel?', 'Confirm forgetting?')
+                          : i18n.tr('Glem', 'Forget')}
+                      </button>
+                    </div>
+                  </Show>
                 </li>
               )}
             </For>
           </ul>
+          <Show when={actionError()}>
+            {(message) => (
+              <p class="verevon-chat-memory-recall__error" role="alert">
+                {message()}
+              </p>
+            )}
+          </Show>
         </Show>
       </Show>
     </div>
@@ -2017,15 +2504,74 @@ export function MessageMenu(props: { align?: 'start' | 'end'; items: Array<{ lab
 }
 
 export function DateDivider(props: { value: string }) {
+  const i18n = useI18n()
   return (
     <div class="verevon-chat-divider">
       <span />
-      <time>{formatDayLabel(props.value)}</time>
+      <time>{formatDayLabel(props.value, i18n.locale())}</time>
     </div>
   )
 }
 
-export function ThinkingDots() {
+/**
+ * How long a wait may stay wordless before it needs to account for itself.
+ *
+ * Ten seconds: past the point where a normal turn has already produced a first
+ * token, so an ordinary answer never shows a counter at all, and well short of
+ * the minute-plus that made the surface read as hung.
+ */
+const THINKING_ELAPSED_THRESHOLD_MS = 10_000
+
+/**
+ * The waiting state.
+ *
+ * Some routes take 60–95 seconds before the first token, and a static "Tenker"
+ * held that long reads as a hung page rather than as work in progress (F-07).
+ * After the threshold this starts naming how long it has actually been waiting
+ * — and nothing else. No percentage, no estimate, no invented phase: the wait
+ * has no known duration, so any bar or ETA here would be a number the product
+ * made up.
+ *
+ * `activity` adds the other half of the question: not how long, but at what.
+ * It is `deriveStreamActivity` over the turn's own tool calls, so it appears
+ * only when the stream has actually said something — a turn that reports no
+ * activity (the subscription route in F-07 reports none for its whole wait)
+ * shows elapsed time alone, which is then the only honest thing to show.
+ */
+export function ThinkingDots(props: {
+  /** When this turn's wait began — the turn's `createdAt`. See `startedAt`. */
+  since?: string
+  /** The last thing the stream reported. Absent = nothing reported yet. */
+  activity?: StreamActivity
+}) {
+  const mountedAt = Date.now()
+  /**
+   * The turn's own start, not this component's.
+   *
+   * The transcript renders nodes through a `<For>`, which keys on item identity,
+   * and every derivation builds fresh node objects — so this component is torn
+   * down and rebuilt on each one. Anchored to mount, the clock restarted on
+   * every streamed tool call, and on the deep-research routes it exists for (a
+   * call every few hundred milliseconds) it never reached ten seconds, so the
+   * counter was invisible in exactly the case F-07 is about.
+   *
+   * A timestamp in the future is clock skew rather than a wait that has not
+   * begun, so it is clamped: a counter ticking up to zero would be worse than
+   * one that starts late.
+   */
+  const startedAt = () => {
+    const parsed = Date.parse(props.since ?? '')
+    return Number.isFinite(parsed) ? Math.min(parsed, mountedAt) : mountedAt
+  }
+  // Wall-clock difference rather than an accumulating tick count: a background
+  // tab throttles the interval, and a counter that undercounts a two-minute
+  // wait would be exactly the reassuring fiction this is meant to remove. The
+  // signal holds `now` rather than the difference so a rebuilt indicator shows
+  // the real elapsed time on its first frame instead of blinking back to zero.
+  const [now, setNow] = createSignal(mountedAt)
+  const elapsedMs = () => now() - startedAt()
+  const ticker = setInterval(() => setNow(Date.now()), 1000)
+  onCleanup(() => clearInterval(ticker))
   return (
     <span class="verevon-chat-thinking">
       <span class="verevon-thinking-dots" aria-hidden="true">
@@ -2034,11 +2580,22 @@ export function ThinkingDots() {
         <span />
       </span>
       Tenker
+      {/* Ungated by the elapsed threshold: knowing a tool is out is useful from
+          the first second, and unlike the counter it cannot read as a stall. */}
+      <Show when={props.activity}>
+        {(activity) => (
+          <small class="verevon-chat-thinking__activity">{streamActivityLabel(activity())}</small>
+        )}
+      </Show>
+      <Show when={elapsedMs() >= THINKING_ELAPSED_THRESHOLD_MS}>
+        <small class="verevon-chat-thinking__elapsed">{formatElapsedWait(elapsedMs())}</small>
+      </Show>
     </span>
   )
 }
 
 export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
+  const i18n = useI18n()
   const icon = () => getTaskStepIcon(props.step.status)
   const [open, setOpen] = createSignal(false)
   const hasRichDetail = () => Boolean(props.step.expandedDetail?.trim()) || (props.step.evidence?.length ?? 0) > 0
@@ -2058,8 +2615,8 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
           onClick={() => setOpen((value) => !value)}
         >
           <span>
-            <strong>{props.step.title}</strong>
-            <time>{formatTime(props.step.createdAt)}</time>
+            <strong>{workStepLabel(props.step.title, i18n.locale())}</strong>
+            <time>{formatTime(props.step.createdAt, i18n.locale())}</time>
           </span>
           <ChevronRight size={13} class={{ 'verevon-chat-rotate': open() }} />
         </button>

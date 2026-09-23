@@ -380,11 +380,7 @@ export function LayerSection() {
 
 			<div className="relative z-[1] mx-auto w-full px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
 				<header className="grid grid-cols-1 gap-x-8 gap-y-6 md:grid-cols-3">
-					<p className="pt-1 font-protokoll text-[12px] font-light leading-none text-verevon-text-muted">
-						04 / Plattform
-					</p>
-
-					<div className="md:col-span-2">
+					<div className="md:col-span-2 md:col-start-2">
 						<h2 className="verevon-home-heading text-verevon-j-text">
 							Fire lag. Ingen av dem skjuler de andre.
 						</h2>

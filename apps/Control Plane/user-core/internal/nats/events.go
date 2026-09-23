@@ -8,7 +8,8 @@ const (
 	SubjectAuthOrganizationMemberAdded   = "auth.organization.member_added"
 	SubjectAuthOrganizationMemberRemoved = "auth.organization.member_removed"
 
-	// Auth event subjects
+	// SubjectAuthUserRegistered and the related constants below are auth
+	// event subjects published by auth-service.
 	SubjectAuthUserRegistered     = "auth.user.registered"
 	SubjectAuthUserLogin          = "auth.user.login"
 	SubjectAuthUserLogout         = "auth.user.logout"
@@ -16,48 +17,41 @@ const (
 	SubjectAuthSessionCreated     = "auth.session.created"
 	SubjectAuthSessionEnded       = "auth.session.ended"
 
-	// User service event subjects
+	// SubjectUserCreated and the related constants below are event subjects
+	// published by user-service.
 	SubjectUserCreated               = "user.created"
 	SubjectUserUpdated               = "user.updated"
 	SubjectUserDeleted               = "user.deleted"
 	SubjectUserBlocked               = "user.blocked"
-	SubjectUserUnblocked             = "user.unblocked"
 	SubjectUserSuspended             = "user.suspended"
-	SubjectUserUnsuspended           = "user.unsuspended"
 	SubjectUserActivated             = "user.activated"
 	SubjectUserDeactivated           = "user.deactivated"
 	SubjectProfileUpdated            = "user.profile.updated"
 	SubjectSessionCreated            = "user.session.created"
-	SubjectSessionInvalidated        = "user.session.invalidated"
 	SubjectActivityLogged            = "user.activity.logged"
 	SubjectRoleAssigned              = "user.role.assigned"
 	SubjectRoleRemoved               = "user.role.removed"
 	SubjectDeviceRegistered          = "user.device.registered"
-	SubjectDeviceDeactivated         = "user.device.deactivated"
 	SubjectOrganizationMemberAdded   = "organization.member.added"
 	SubjectOrganizationMemberRemoved = "organization.member.removed"
-
-	// Stream names
-	StreamAuthEvents = "AUTH_EVENTS"
-	StreamUserEvents = "USER_EVENTS"
 )
 
 // UserRegisteredEvent from auth-service
 type UserRegisteredEvent struct {
-	Type              string                 `json:"type"`
-	UserID            string                 `json:"userId"`
-	Email             string                 `json:"email"`
-	Name              string                 `json:"name,omitempty"`
-	Provider          string                 `json:"provider"`
-	EmailVerified     bool                   `json:"emailVerified"`
-	TenantID          string                 `json:"tenantId,omitempty"`
-	MicrosoftTenantID string                 `json:"microsoftTenantId,omitempty"`
-	EmailFromProvider string                 `json:"emailFromProvider,omitempty"`
-	ScopesGranted     []string               `json:"scopesGranted,omitempty"`
-	TokenRef          string                 `json:"tokenRef,omitempty"`
-	ProfileHints      *ProviderProfileHints  `json:"profileHints,omitempty"`
-	Metadata          map[string]interface{} `json:"metadata,omitempty"`
-	Timestamp         time.Time              `json:"timestamp"`
+	Type              string                `json:"type"`
+	UserID            string                `json:"userId"`
+	Email             string                `json:"email"`
+	Name              string                `json:"name,omitempty"`
+	Provider          string                `json:"provider"`
+	EmailVerified     bool                  `json:"emailVerified"`
+	TenantID          string                `json:"tenantId,omitempty"`
+	MicrosoftTenantID string                `json:"microsoftTenantId,omitempty"`
+	EmailFromProvider string                `json:"emailFromProvider,omitempty"`
+	ScopesGranted     []string              `json:"scopesGranted,omitempty"`
+	TokenRef          string                `json:"tokenRef,omitempty"`
+	ProfileHints      *ProviderProfileHints `json:"profileHints,omitempty"`
+	Metadata          map[string]any        `json:"metadata,omitempty"`
+	Timestamp         time.Time             `json:"timestamp"`
 }
 
 // UserLoginEvent from auth-service
@@ -85,11 +79,11 @@ type UserLogoutEvent struct {
 
 // UserProfileUpdatedEvent from auth-service
 type UserProfileUpdatedEvent struct {
-	Type      string                 `json:"type"`
-	UserID    string                 `json:"userId"`
-	Email     string                 `json:"email"`
-	Changes   map[string]interface{} `json:"changes"`
-	Timestamp time.Time              `json:"timestamp"`
+	Type      string         `json:"type"`
+	UserID    string         `json:"userId"`
+	Email     string         `json:"email"`
+	Changes   map[string]any `json:"changes"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // UserProviderLinkedEvent from auth-service — fired when an existing user links a new OAuth provider
@@ -150,22 +144,22 @@ type OrganizationMembershipEvent struct {
 
 // UserCreatedEvent published by user-service
 type UserCreatedEvent struct {
-	Type      string                 `json:"type"`
-	UserID    string                 `json:"userId"`
-	Email     string                 `json:"email"`
-	Name      string                 `json:"name"`
-	Status    string                 `json:"status"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
-	Timestamp time.Time              `json:"timestamp"`
+	Type      string         `json:"type"`
+	UserID    string         `json:"userId"`
+	Email     string         `json:"email"`
+	Name      string         `json:"name"`
+	Status    string         `json:"status"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // UserUpdatedEvent published by user-service
 type UserUpdatedEvent struct {
-	Type      string                 `json:"type"`
-	UserID    string                 `json:"userId"`
-	Email     string                 `json:"email"`
-	Changes   map[string]interface{} `json:"changes"`
-	Timestamp time.Time              `json:"timestamp"`
+	Type      string         `json:"type"`
+	UserID    string         `json:"userId"`
+	Email     string         `json:"email"`
+	Changes   map[string]any `json:"changes"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // UserDeletedEvent published by user-service
@@ -189,10 +183,10 @@ type UserStatusChangedEvent struct {
 
 // UserProfileUpdatedEventOut published by user-service
 type UserProfileUpdatedEventOut struct {
-	Type      string                 `json:"type"`
-	UserID    string                 `json:"userId"`
-	Changes   map[string]interface{} `json:"changes"`
-	Timestamp time.Time              `json:"timestamp"`
+	Type      string         `json:"type"`
+	UserID    string         `json:"userId"`
+	Changes   map[string]any `json:"changes"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // UserSessionCreatedEvent published by user-service
@@ -209,14 +203,14 @@ type UserSessionCreatedEvent struct {
 
 // UserActivityLoggedEvent published by user-service
 type UserActivityLoggedEvent struct {
-	Type      string                 `json:"type"`
-	UserID    string                 `json:"userId"`
-	Action    string                 `json:"action"`
-	Resource  string                 `json:"resource,omitempty"`
-	Details   map[string]interface{} `json:"details,omitempty"`
-	IPAddress string                 `json:"ipAddress,omitempty"`
-	UserAgent string                 `json:"userAgent,omitempty"`
-	Timestamp time.Time              `json:"timestamp"`
+	Type      string         `json:"type"`
+	UserID    string         `json:"userId"`
+	Action    string         `json:"action"`
+	Resource  string         `json:"resource,omitempty"`
+	Details   map[string]any `json:"details,omitempty"`
+	IPAddress string         `json:"ipAddress,omitempty"`
+	UserAgent string         `json:"userAgent,omitempty"`
+	Timestamp time.Time      `json:"timestamp"`
 }
 
 // UserRoleAssignedEvent published by user-service

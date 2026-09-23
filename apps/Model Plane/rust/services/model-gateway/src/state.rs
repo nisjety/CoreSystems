@@ -158,6 +158,15 @@ pub struct AppState {
     /// posts, and campaigns), e.g. "<http://social-core:3162>". Used by the
     /// `social.list_*` read tools.
     pub social_core_base_url: String,
+    /// Base URL of conversation-core's HTTP API (the shared inbox), e.g.
+    /// "<http://conversation-core-go:3160>". Used by the `inbox_*` read tools.
+    pub conversation_core_base_url: String,
+    /// HMAC secret this service signs conversation-core reads with, as the
+    /// `model-gateway` delegation principal. conversation-core refuses the
+    /// shared internal API key outright, so there is no unsigned fallback:
+    /// empty means the `inbox_*` tools report the inbox as unconfigured for
+    /// this deployment instead of making a call that can only 401.
+    pub conversation_core_service_token: String,
     /// Shared `x-internal-api-key` header value for calls to the Application
     /// Plane cores that gate on it (insight-core, social-core). Both read
     /// `INTERNAL_API_KEY` on their own side, so this defaults to the same
@@ -360,6 +369,8 @@ impl AppState {
             org_core_service_token: String::new(),
             insight_core_base_url: "http://localhost:3163".to_owned(),
             social_core_base_url: "http://localhost:3162".to_owned(),
+            conversation_core_base_url: "http://localhost:3160".to_owned(),
+            conversation_core_service_token: String::new(),
             application_core_internal_key: String::new(),
             verevon_public_origin: "http://localhost:5173".to_owned(),
             mcp_oauth_service_token: String::new(),
@@ -551,6 +562,10 @@ impl AppState {
             .unwrap_or_else(|_| "http://insight-core:3163".to_owned());
         let social_core_base_url = std::env::var("SOCIAL_CORE_URL")
             .unwrap_or_else(|_| "http://social-core:3162".to_owned());
+        let conversation_core_base_url = std::env::var("CONVERSATION_CORE_URL")
+            .unwrap_or_else(|_| "http://conversation-core-go:3160".to_owned());
+        let conversation_core_service_token =
+            std::env::var("CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN").unwrap_or_default();
         let application_core_internal_key = std::env::var("APPLICATION_CORE_INTERNAL_KEY")
             .or_else(|_| std::env::var("INTERNAL_API_KEY"))
             .unwrap_or_default();
@@ -668,6 +683,8 @@ impl AppState {
             state.org_core_service_token = org_core_service_token.clone();
             state.insight_core_base_url = insight_core_base_url.clone();
             state.social_core_base_url = social_core_base_url.clone();
+            state.conversation_core_base_url = conversation_core_base_url.clone();
+            state.conversation_core_service_token = conversation_core_service_token.clone();
             state.application_core_internal_key = application_core_internal_key.clone();
             state.verevon_public_origin = verevon_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
@@ -713,6 +730,8 @@ impl AppState {
             state.org_core_service_token = org_core_service_token;
             state.insight_core_base_url = insight_core_base_url;
             state.social_core_base_url = social_core_base_url;
+            state.conversation_core_base_url = conversation_core_base_url;
+            state.conversation_core_service_token = conversation_core_service_token;
             state.application_core_internal_key = application_core_internal_key;
             state.verevon_public_origin = verevon_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();

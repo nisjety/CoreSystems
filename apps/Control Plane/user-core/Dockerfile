@@ -40,7 +40,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
         if go mod download; then \
             exit 0; \
         fi; \
-        echo "go mod download retry $i"; \
+        echo "go mod download retry ${i}"; \
         sleep 8; \
     done; \
     exit 1
@@ -54,7 +54,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
            go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.0; then \
             exit 0; \
         fi; \
-        echo "go tool install retry $i"; \
+        echo "go tool install retry ${i}"; \
         sleep 8; \
     done; \
     exit 1

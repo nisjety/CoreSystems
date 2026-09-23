@@ -1,6 +1,6 @@
 import { useLocation } from '@solidjs/router'
 import { MessageCircleMore, X } from '@/shared/icons'
-import { createMemo, createSignal, Show } from 'solid-js'
+import { createMemo, createSignal, onCleanup, Show } from 'solid-js'
 import { useI18n } from '@/shared/i18n'
 import { submitFeedback } from '@/shared/api/inbox-client'
 import { getSession } from '@/shared/session/session-store'
@@ -11,9 +11,11 @@ const MAX_NOTE_LENGTH = 600
 
 type SubmitState = 'idle' | 'sending' | 'sent' | 'error'
 
+export const OPEN_FEEDBACK_EVENT = 'verevon:open-feedback'
+
 /**
  * Persistent, zero-setup "Send feedback" control for the pilot feedback
- * channel -- rendered once in CoreShell so it floats over every route. A
+ * channel -- rendered once in CoreShell, with a menu entry on chat. A
  * signed-in org member drops a one-line friction note; it lands as a new
  * conversation in the org's own Inbox, tagged "pilot-feedback" (see
  * inbox-client's submitFeedback and conversation-core-go's
@@ -35,17 +37,32 @@ export function FeedbackWidget() {
   // send control on narrower viewports, so keep feedback available everywhere
   // else without layering two composers on top of one another.
   const isSupportInbox = createMemo(() => location.pathname.startsWith('/support'))
-  // The chat page docks its composer to the same bottom-right corner this
-  // widget floats in, and that dock's height is unbounded (autosizing
-  // textarea). --docked reads the live measured height ChatPage publishes
-  // as --verevon-composer-dock-height so the trigger always clears it
-  // instead of landing underneath the send button.
+  // Chat opens feedback from its actions menu so the persistent trigger
+  // cannot cover document copy or the composer on narrow viewports.
   const isDocked = createMemo(() => location.pathname.startsWith('/chat'))
+  let returnFocus: HTMLElement | null = null
+  const openFromMenu = () => {
+    if (!orgId() || !isDocked()) return
+    returnFocus = document.querySelector('.verevon-chat-header-button[aria-haspopup="menu"]')
+    setOpen(true)
+  }
+  const closeOnEscape = (event: KeyboardEvent) => {
+    if (open() && event.key === 'Escape') { event.preventDefault(); reset() }
+  }
+  window.addEventListener(OPEN_FEEDBACK_EVENT, openFromMenu)
+  // Consume Escape before the chat page's document-level dismissal handler.
+  window.addEventListener('keydown', closeOnEscape, true)
+  onCleanup(() => {
+    window.removeEventListener(OPEN_FEEDBACK_EVENT, openFromMenu)
+    window.removeEventListener('keydown', closeOnEscape, true)
+  })
 
   const reset = () => {
     setOpen(false)
     setState('idle')
     setNote('')
+    returnFocus?.focus()
+    returnFocus = null
   }
 
   const submit = async (event: SubmitEvent) => {
@@ -78,6 +95,7 @@ export function FeedbackWidget() {
         <Show
           when={open()}
           fallback={
+            <Show when={!isDocked()}>
             <button
               type="button"
               class="feedback-widget__trigger"
@@ -86,9 +104,10 @@ export function FeedbackWidget() {
               <MessageCircleMore size={15} aria-hidden="true" />
               <span>{i18n.tr('Tilbakemelding', 'Feedback')}</span>
             </button>
+            </Show>
           }
         >
-          <form class="feedback-widget__panel" onSubmit={submit}>
+          <form class="feedback-widget__panel" role="dialog" aria-label={i18n.tr('Meld friksjon', 'Report friction')} onSubmit={submit}>
             <div class="feedback-widget__header">
               <span class="feedback-widget__title">{i18n.tr('Meld friksjon', 'Report friction')}</span>
               <button

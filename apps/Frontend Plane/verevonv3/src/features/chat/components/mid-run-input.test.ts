@@ -126,14 +126,15 @@ describe('mid-run input is never dropped', () => {
     expect(effect).toContain('sendContent(next.content, next.modelOverride, next.options)')
   })
 
-  it('never retries a subscription selection through a platform-paid fallback provider', async () => {
+  it('never reinvokes a failed turn through a different provider', async () => {
     const text = await source(CONTROLLER)
     const handler = text.slice(
-      text.indexOf('onError: ({ message })'),
-      text.indexOf('onFrameId:', text.indexOf('onError: ({ message })')),
+      text.indexOf('onError: ({ code, message })'),
+      text.indexOf('onFrameId:', text.indexOf('onError: ({ code, message })')),
     )
 
-    expect(handler).toContain('options.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER')
+    expect(handler).not.toContain('sendContent(')
+    expect(handler).toContain("code === 'connection_error'")
   })
 
   it('preserves the subscription route when regenerating the latest answer', async () => {

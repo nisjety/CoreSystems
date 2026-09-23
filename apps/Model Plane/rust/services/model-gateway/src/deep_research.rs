@@ -9,7 +9,7 @@
 //! ## Shape
 //!
 //! ```text
-//! plan      one cheap non-streaming inference → 3-6 distinct sub-queries
+//! plan      one cheap non-streaming inference → up to 9 distinct sub-queries
 //! search    every sub-query CONCURRENTLY via web_search, deduped by URL
 //! read      the most promising pages CONCURRENTLY via fetch_url, capped
 //! synth     one inference over the read passages → report with inline [n]
@@ -63,11 +63,32 @@ use crate::{artifacts::ArtifactKind, relevance, sse_events::ChatEvent, state::Ap
 
 /// Sub-queries the plan may contain.
 ///
-/// Six is the point where an extra sub-query stops adding distinct sources for
-/// a normal business question and starts re-finding the same pages under
-/// different words — every extra one costs a search round trip plus its share
-/// of the corpus budget for a duplicate.
-const DEFAULT_MAX_SUB_QUERIES: usize = 6;
+/// Six was right while the run wanted eight successful reads: past six, an extra
+/// sub-query mostly re-found pages the earlier ones had already surfaced, and
+/// paid a search round trip for the duplicate. Raising the read target to
+/// [`DEFAULT_MAX_PAGES`] moved the binding constraint from "too many duplicates"
+/// to "not enough candidates", so the number has to be re-derived rather than
+/// left alone.
+///
+/// The supply chain shrinks at every step. Six sub-queries at
+/// [`SEARCH_RESULTS_PER_SUB_QUERY`] results is 36 raw hits; roughly a quarter of
+/// those collapse in [`dedupe_hits`] (that overlap is exactly what made a
+/// seventh sub-query pointless before), and [`apply_relevance_gate`] then sets
+/// aside about a fifth of what survives — call it 22 distinct readable
+/// candidates. At the open web's roughly one-in-two read rate (the same rate
+/// [`READ_ATTEMPT_MULTIPLIER`] is sized against) that is ~11 successful pages.
+/// A 16-page target could therefore never be met from six sub-queries no matter
+/// how many attempts the budget allowed: every run would halt as
+/// `candidates-exhausted`.
+///
+/// Nine is what the same arithmetic asks for — 9 × 6 × 0.75 × 0.8 ≈ 32 distinct
+/// relevant candidates ≈ 16 successful reads — not a round number. The
+/// duplicates the seventh to ninth queries drag in are no longer waste either:
+/// they are the corroboration signal [`read_order`] ranks on, and the distinct
+/// remainder is candidate supply the read loop would otherwise not have. The
+/// added cost is three concurrent search round trips, which the wall clock does
+/// not feel because the whole phase is one `join_all`.
+const DEFAULT_MAX_SUB_QUERIES: usize = 9;
 /// Absolute ceiling on sub-queries regardless of configuration.
 const MAX_SUB_QUERIES_CEILING: usize = 10;
 /// One sub-query is still valid research (a narrow question decomposes into
@@ -78,19 +99,70 @@ const MIN_SUB_QUERIES: usize = 1;
 /// Results requested per sub-query. Small on purpose: the ranking that matters
 /// is cross-sub-query corroboration, and a deep tail from one query is worth
 /// less than a shallow head from six.
+///
+/// Left at six when the page target was raised, deliberately. Candidate supply
+/// could have been bought here instead of at [`DEFAULT_MAX_SUB_QUERIES`], and
+/// more cheaply — a longer result list is the same round trip. It buys worse
+/// candidates though: the tail of one query is where a search engine's own
+/// ranking has already given up, while an extra sub-query asks a different
+/// question. The read budget is now the scarce resource, so it is spent on the
+/// better candidates.
 const SEARCH_RESULTS_PER_SUB_QUERY: i64 = 6;
 
-/// Pages fetched and read.
+/// Pages read SUCCESSFULLY — the target the read phase works towards, not the
+/// number of fetches it is allowed to attempt.
 ///
-/// Eight pages at [`page_char_cap`] each is ~32k characters — a large but
-/// affordable synthesis prompt on every tier we route to. Raising this raises
-/// the synthesis input token count linearly, which is the dominant cost of the
-/// whole feature.
-const DEFAULT_MAX_PAGES: usize = 8;
+/// This used to be an attempt cap, and that is how a run listed 24 sources and
+/// read 3: eight pages were fetched, five of them were JavaScript-rendered,
+/// non-UTF-8 or oversize, and the run ended with sixteen untouched candidates
+/// still on the list. A budget spent on attempts buys nothing when the attempt
+/// fails, so the budget is now spent on successes and the attempt ceiling
+/// below is what bounds the spend.
+///
+/// Sixteen pages at [`page_char_cap`] each is ~64k characters of evidence.
+/// Raising this raises the synthesis input token count linearly, which is the
+/// dominant cost of the whole feature — this is the number the product owner
+/// chose to pay, over the "read fewer pages, fully" alternative. Everything
+/// downstream is sized from it rather than left where an 8-page run put it:
+/// [`DEFAULT_CORPUS_CHARS`] so the 16th page is not fetched and then discarded,
+/// [`DEFAULT_MAX_SUB_QUERIES`] so 16 distinct candidates exist to read,
+/// [`DEFAULT_WALL_CLOCK_SECS`] so the run has time to finish, and
+/// [`DEFAULT_REPORT_TOKENS`] so the report can actually cite all 16.
+const DEFAULT_MAX_PAGES: usize = 16;
 /// Absolute ceiling on pages fetched regardless of configuration.
-const MAX_PAGES_CEILING: usize = 16;
+///
+/// Kept above the default rather than equal to it: a ceiling that pins the
+/// default makes `DEEP_RESEARCH_MAX_PAGES` a knob with no upward travel, and an
+/// operator raising it would silently get nothing. 24 is the most the corpus
+/// ceiling can still feed at the default per-page cap (24 × 4,000 = 96,000,
+/// inside [`MAX_CORPUS_CHARS_CEILING`]), so the highest configurable page count
+/// is one the evidence budget can honour rather than one it would starve.
+const MAX_PAGES_CEILING: usize = 24;
 /// Reading nothing is not research; the floor is 1.
 const MIN_PAGES: usize = 1;
+
+/// Fetch attempts one run may spend per page it is trying to read.
+///
+/// Deliberately a multiplier rather than a second env knob: the fraction of
+/// pages that fail to yield text is a property of the open web (roughly half,
+/// in the runs this cap was sized against), not of a deployment, so an operator
+/// tuning [`max_pages`] should not have to discover and tune a companion. Three
+/// attempts per wanted page is what turns "8 attempted, 3 read" into "8 read"
+/// on a normal result set without turning a pathological one into a crawl.
+const READ_ATTEMPT_MULTIPLIER: usize = 3;
+/// Absolute ceiling on fetch attempts in one run, whatever the page budget and
+/// however long the candidate list is. The wall clock would eventually stop a
+/// runaway read phase, but only after spending every second the synthesis needs.
+///
+/// Raised with the page target, because at 16 wanted pages the old ceiling of 32
+/// would have quietly turned [`READ_ATTEMPT_MULTIPLIER`] from 3 into 2 — and 2
+/// is the exact expected cost of 16 successes at a one-in-two read rate, i.e. a
+/// coin flip on the median run, with no retry headroom at all for a worse-than-
+/// median one. 48 keeps the documented "three attempts per wanted page" true at
+/// the default. Above 16 pages the ceiling does bind again and an operator
+/// trades retry headroom for breadth; that is not hidden, it is in the receipt's
+/// `max_read_attempts` and in the `pages_read` bound log's `attempts=x/y`.
+const MAX_READ_ATTEMPTS_CEILING: usize = 48;
 
 /// Characters kept from ONE page.
 ///
@@ -108,10 +180,24 @@ const MIN_PAGE_CHARS: usize = 500;
 /// Total characters of page text admitted into the synthesis prompt.
 ///
 /// The real backstop: pages × per-page is the theoretical worst case, and this
-/// is the number that actually bounds the inference bill. 40k characters is
-/// roughly 10-12k tokens of evidence, which leaves headroom for the
-/// instructions and the report itself inside every context window we route to.
-const DEFAULT_CORPUS_CHARS: usize = 40_000;
+/// is the number that actually bounds the inference bill.
+///
+/// It has to be derived from the page budget, not chosen next to it. The worst
+/// case is [`DEFAULT_MAX_PAGES`] × [`DEFAULT_PAGE_CHARS`] = 16 × 4,000 = 64,000
+/// characters, and [`number_and_bound`] admits pages in read-priority order
+/// until the budget runs out — so a corpus of exactly 64,000 would still starve
+/// the last page, because every truncated page also carries its ~70-character
+/// "[truncated at …]" notice into `used`. At 40,000 the run would have fetched
+/// and then discarded the last six pages it paid for, which is the silent cap
+/// this module exists to refuse.
+///
+/// 80,000 is 5,000 per wanted page — the same per-page allowance the old 40,000
+/// gave its eight, so the raise is proportional rather than re-argued. The
+/// headroom is real: it also covers a `DEEP_RESEARCH_PAGE_CHARS` raised to
+/// 5,000 without starving the 16th page. 80k characters is roughly 20-24k tokens
+/// of evidence, which still leaves the instructions and the report room inside
+/// every context window we route to.
+const DEFAULT_CORPUS_CHARS: usize = 80_000;
 /// Absolute ceiling on the corpus regardless of configuration.
 const MAX_CORPUS_CHARS_CEILING: usize = 120_000;
 /// A corpus smaller than one page's worth cannot support a report.
@@ -124,14 +210,42 @@ const MIN_CORPUS_CHARS: usize = 1_000;
 /// forever. On expiry the pipeline synthesizes from whatever it already holds
 /// and says in the report that the budget ran out, which is strictly better
 /// than either hanging or discarding real evidence.
-const DEFAULT_WALL_CLOCK_SECS: u64 = 120;
+///
+/// Derived from the per-page fetch timeout rather than picked. A page read is
+/// one Quarry `/v1/scrape` call, bounded by `QUARRY_EDGE_TIMEOUT_SECS`
+/// (default 30s), and `quarry::Client::scrape_readable` escalates **once** to
+/// the browser driver when the plain fetch returns no text — so a single page
+/// costs up to 30s, and up to 60s when it is the empty-then-rendered case. A
+/// batch is dispatched concurrently, so a batch costs its slowest page, not its
+/// sum. Reaching 16 successes at the open web's one-in-two read rate takes about
+/// 32 attempts, and because each batch asks only for the pages still missing the
+/// batch sizes halve (16 → 8 → 4 → 2 → 1 → 1): about six generations. At one
+/// full plain-fetch timeout per generation that is 6 × 30 = 180s of reading.
+///
+/// 20 ([`PLAN_TIMEOUT`]) + 30 (the search phase, also one concurrent round at
+/// the same edge timeout) + 180 (reading) + 180 ([`SYNTHESIS_TIMEOUT`]) = 410.
+///
+/// It deliberately does NOT cover the pathological worst case — every generation
+/// hitting both the plain and the rendered timeout would be 360s of reading
+/// alone, and no finite budget covers an upstream that hangs on every page. That
+/// case is what the deadline is *for*: it is the bound that fires, the read loop
+/// stops, and the coverage line says the evidence base is partial.
+const DEFAULT_WALL_CLOCK_SECS: u64 = 410;
 /// Absolute ceiling on the wall clock regardless of configuration.
 const MAX_WALL_CLOCK_SECS: u64 = 600;
 /// Below ~20s not even the plan + one search round completes.
 const MIN_WALL_CLOCK_SECS: u64 = 20;
 
 /// Output budget for the synthesis inference (the report itself).
-const DEFAULT_REPORT_TOKENS: i32 = 4_096;
+///
+/// Raised with the page target, because the report contract puts the two
+/// sections that keep it honest LAST: `## Kunne ikke verifiseres` and the
+/// `## Kilder` list. An output budget that runs out therefore does not shorten
+/// the findings — it truncates exactly the coverage admission and the citation
+/// list, leaving a confident-looking report over an evidence base the reader can
+/// no longer check. Doubling the pages doubles the Kilder list and widens the
+/// findings, so the budget doubles with them.
+const DEFAULT_REPORT_TOKENS: i32 = 8_192;
 /// Absolute ceiling on report output tokens regardless of configuration.
 const MAX_REPORT_TOKENS: i32 = 16_384;
 /// A report shorter than this cannot carry findings plus an unverified section.
@@ -155,7 +269,8 @@ const PLAN_MODEL: &str = "verevon-budget";
 /// measured plan call spent 7.9s (1408 reasoning tokens) before emitting its
 /// first visible token. A 10s ceiling made a healthy planner a coin flip.
 const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
-/// Output budget for 3-6 short sub-queries, one per line.
+/// Output budget for a handful of short sub-queries, one per line — up to
+/// [`MAX_SUB_QUERIES_CEILING`] of them.
 ///
 /// Sized for *reasoning* tokens, not just the ~30 tokens of visible output.
 /// `verevon-budget` resolves to gpt-5-nano, which bills its chain of thought
@@ -168,7 +283,53 @@ const PLAN_MAX_TOKENS: i32 = 2048;
 /// Hard ceiling on the synthesis inference. Generous (it writes a full report
 /// over a large prompt) but finite, so a stalled provider degrades to
 /// "corpus in context" rather than hanging the stream.
-const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(90);
+///
+/// Three minutes, not 90 seconds: it has to be sized against
+/// [`DEFAULT_REPORT_TOKENS`], and 90s was already only ~45 tokens/second for a
+/// 4,096-token report. At 8,192 tokens the same rate needs ~180s, and a ceiling
+/// the report cannot finish inside is worse than a slow one — the run would pay
+/// for all 16 page reads and then throw the report away on a timeout, degrading
+/// to "write it yourself from the corpus" on every healthy run.
+const SYNTHESIS_TIMEOUT: Duration = Duration::from_mins(3);
+
+// The caps above are a budget, not six independent numbers, and the way they
+// stop agreeing is by one of them being edited alone. Both checks below are
+// compile-time, because a mismatch produces no error at runtime — just a run
+// that fetches pages it then discards, or a wall clock the inference ceilings
+// have already spent before the first page is read. That is precisely the class
+// of silent cap this module exists to refuse, so it fails the build instead.
+const _: () = assert!(
+    DEFAULT_CORPUS_CHARS > DEFAULT_MAX_PAGES * DEFAULT_PAGE_CHARS,
+    "the corpus budget must exceed max_pages × page_chars — strictly, so the last page still \
+     has room for its truncation notice — or the read target is a number the corpus quietly \
+     refuses to honour"
+);
+const _: () = assert!(
+    DEFAULT_WALL_CLOCK_SECS > PLAN_TIMEOUT.as_secs() + SYNTHESIS_TIMEOUT.as_secs(),
+    "the wall clock must outlast the two inference ceilings it contains, or the read phase is \
+     budgeted zero seconds"
+);
+const _: () = assert!(
+    DEFAULT_MAX_PAGES < MAX_PAGES_CEILING
+        && DEFAULT_MAX_SUB_QUERIES < MAX_SUB_QUERIES_CEILING
+        && DEFAULT_CORPUS_CHARS < MAX_CORPUS_CHARS_CEILING
+        && DEFAULT_WALL_CLOCK_SECS < MAX_WALL_CLOCK_SECS,
+    "every default must leave room under its own ceiling: a default pinned at the limit turns its \
+     env override into a knob with no upward travel, so an operator who raises it gets nothing \
+     and is told nothing"
+);
+// reason: both operands are positive literals well inside i32; the cast is exact
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+const _: () = assert!(
+    DEFAULT_REPORT_TOKENS >= (DEFAULT_MAX_PAGES * REPORT_TOKENS_PER_SOURCE) as i32,
+    "the report's output budget must scale with the page target: `## Kilder` is one line per \
+     cited source and it comes LAST in the contract, so a budget that does not grow truncates \
+     the citation list and the coverage admission rather than the findings"
+);
+/// Output tokens one cited source is assumed to need: its `## Kilder` line plus
+/// its share of the findings. A rough figure, and only ever used to check that
+/// [`DEFAULT_REPORT_TOKENS`] moved when [`DEFAULT_MAX_PAGES`] did.
+const REPORT_TOKENS_PER_SOURCE: usize = 512;
 
 /// Longest sub-query the plan may contain, in characters. A sub-query is a
 /// search string; past this the model has written a sentence, and search
@@ -276,6 +437,51 @@ cached_cap!(
 // Sources
 // ---------------------------------------------------------------------------
 
+/// Why a source carries no extract, as a machine token.
+///
+/// The Kilder tab used to learn this only from English prose glued to the front
+/// of the snippet (`[not read: …]`), so a client could not tell "we never tried
+/// this one" from "we tried and the page was JavaScript-rendered" without
+/// substring-matching a sentence that is free to be reworded. That is the
+/// difference between "we ran out of budget" and "the web let us down", and the
+/// user is entitled to see which one happened.
+///
+/// [`ChatEvent::Citation`] has no status field and lives in a file this work
+/// does not own, so the token travels in the citation id
+/// (`dr-unread-{code}-{k}`), which keeps the `dr-unread-` prefix every existing
+/// client already keys on, and in the tool receipt's `unread_by_status` counts.
+/// The prose reason stays alongside it: it is what the synthesis prompt shows
+/// the model, and a token is not a sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UnreadStatus {
+    /// Never fetched: the run stopped before this candidate came up.
+    NotAttempted,
+    /// The relevance gate set it aside, so it was deliberately never fetched.
+    Filtered,
+    /// Fetched, and the fetch or the extraction failed. The paired prose reason
+    /// carries the specific cause the fetch layer reported.
+    FetchFailed,
+    /// The wall clock expired while this page was in flight.
+    Deadline,
+    /// Read successfully, then dropped because the corpus budget was full.
+    CorpusFull,
+}
+
+impl UnreadStatus {
+    /// The stable machine token. Changing one of these breaks a client's
+    /// grouping, so they are treated as wire format, not as labels.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not-attempted",
+            Self::Filtered => "filtered",
+            Self::FetchFailed => "fetch-failed",
+            Self::Deadline => "deadline",
+            Self::CorpusFull => "corpus-full",
+        }
+    }
+}
+
 /// One candidate source discovered by search or explicitly linked by the user,
 /// plus whatever we managed to read from it.
 ///
@@ -311,6 +517,14 @@ pub struct ResearchSource {
     /// search path supplied one at all. Feeds [`crate::relevance`] as the
     /// preferred signal; `None` means Quarry did not rerank, NOT "scored zero".
     pub provider_score: Option<f32>,
+    /// Best overlap between a sub-query and the reranker's highlight passages
+    /// for this hit, `0.0`–`1.0`. `None` means the hit carried no highlights,
+    /// which is "not judged" rather than "no overlap" — see
+    /// [`highlight_overlap`]. A read-priority signal in [`read_order`], because
+    /// a highlight is the reranker naming the sentences that made it pick the
+    /// page, which is the closest thing search gives us to evidence that the
+    /// page answers the question before we have paid to fetch it.
+    pub highlight_overlap: Option<f32>,
     /// How plausibly this source can answer the question, `0.0`–`1.0`, from
     /// [`crate::relevance::assess`]. Load-bearing twice: it gates whether the
     /// source may be read at all, and it is the primary key of [`read_order`].
@@ -333,6 +547,10 @@ pub struct ResearchSource {
     /// Why there is no extract, in words the synthesis prompt can show the
     /// model. `None` only when `extract` is `Some`.
     pub unread_reason: Option<String>,
+    /// The same fact as `unread_reason`, as a machine token for the client.
+    /// Always written together with it through [`ResearchSource::mark_unread`],
+    /// so the prose and the token cannot drift apart.
+    pub unread_status: Option<UnreadStatus>,
 }
 
 impl ResearchSource {
@@ -340,6 +558,28 @@ impl ResearchSource {
     #[must_use]
     pub fn is_read(&self) -> bool {
         self.number.is_some() && self.extract.is_some()
+    }
+
+    /// Record that this source is not evidence, with both the machine token and
+    /// the prose the synthesis prompt shows.
+    ///
+    /// Clears the extract and the number as well: every caller that had a reason
+    /// to set this also had a reason not to let the source be cited, and doing
+    /// it in one place is what stops a future edit from leaving a numbered
+    /// source with a "could not be read" label on it.
+    pub fn mark_unread(&mut self, status: UnreadStatus, reason: impl Into<String>) {
+        self.extract = None;
+        self.number = None;
+        self.unread_status = Some(status);
+        self.unread_reason = Some(reason.into());
+    }
+
+    /// Record the page's own text. The inverse of [`Self::mark_unread`]: a
+    /// source with an extract must not also carry an unread status.
+    pub fn mark_read(&mut self, extract: String) {
+        self.extract = Some(extract);
+        self.unread_reason = None;
+        self.unread_status = None;
     }
 }
 
@@ -366,10 +606,37 @@ pub struct Coverage {
     pub read: usize,
     /// Sources search found but we could not read.
     pub unread: usize,
+    /// Pages the run SET OUT to read — [`max_pages`] as the read phase saw it.
+    ///
+    /// `read` is not a fact on its own: four successful pages is half of an
+    /// eight-page run and a quarter of a sixteen-page one, and only the second
+    /// number says which. It is captured from the read phase rather than re-read
+    /// from the environment inside [`coverage_statement`], so a finished run is
+    /// judged against the budget it actually asked for.
+    ///
+    /// 0 means no read phase ran at all (no Quarry edge, nothing to read), which
+    /// is a different thing from a target of zero — see [`evidence_band`].
+    pub page_target: usize,
+    /// Which bound ended the read loop. The same fact the `pages_read` bound log
+    /// carries, kept here so the coverage statement can say WHY the run fell
+    /// short of `page_target` rather than only that it did. `None` when the read
+    /// loop never ran.
+    pub halt: Option<ReadHalt>,
     /// Whether the wall clock ran out before the planned work finished.
     pub deadline_hit: bool,
     /// Whether the corpus budget stopped admitting evidence we had fetched.
     pub corpus_exhausted: bool,
+}
+
+impl Coverage {
+    /// The bound that stopped the read phase, as the same stable token
+    /// [`read_halt_code`] writes to the `pages_read` log — so a coverage
+    /// statement and the log line for the same run cannot name different bounds.
+    #[must_use]
+    pub fn halt_code(&self) -> Option<&'static str> {
+        self.halt
+            .map(|halt| read_halt_code(self.deadline_hit, halt))
+    }
 }
 
 /// Result of a deep-research turn. Mirrors [`crate::tool_loop::ToolRounds`] so
@@ -713,6 +980,11 @@ pub struct SearchHit {
     /// passed one through. See [`hits_from_search_output`] for why this is
     /// `None` on every deployment today.
     pub score: Option<f32>,
+    /// Overlap between this hit's reranker highlight passages and the sub-query
+    /// that produced it, when the search tool passed highlights through. `None`
+    /// means no highlights were supplied — the same "not judged" distinction
+    /// `score` keeps, and for the same upstream reason.
+    pub highlight_overlap: Option<f32>,
 }
 
 /// Collapse hits from every sub-query into unique candidate sources.
@@ -750,6 +1022,13 @@ pub fn dedupe_hits(hits: &[SearchHit]) -> Vec<ResearchSource> {
                 (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
                 (existing, incoming) => existing.or(incoming),
             };
+            // Same reasoning for highlights: a page the reranker highlighted
+            // under one sub-query is highlighted evidence for the run, even
+            // though another sub-query's copy of it came back bare.
+            source.highlight_overlap = match (source.highlight_overlap, hit.highlight_overlap) {
+                (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                (existing, incoming) => existing.or(incoming),
+            };
             // Keep the richest metadata we have seen for this URL: providers
             // differ on which fields they populate for the same page.
             if source.title.trim().is_empty() && !hit.title.trim().is_empty() {
@@ -775,12 +1054,14 @@ pub fn dedupe_hits(hits: &[SearchHit]) -> Vec<ResearchSource> {
             sub_queries: vec![hit.sub_query],
             best_rank: hit.rank,
             provider_score: hit.score,
+            highlight_overlap: hit.highlight_overlap,
             // Neutral until `apply_relevance_gate` runs. Defaulting to 0.0 would
             // make an ungated call silently rank every source as irrelevant.
             relevance: 1.0,
             filtered: false,
             extract: None,
             unread_reason: Some(NOT_ATTEMPTED.to_owned()),
+            unread_status: Some(UnreadStatus::NotAttempted),
         });
     }
     // Resolve the URL fallback once, after every duplicate has had its chance
@@ -867,10 +1148,12 @@ pub fn merge_linked_sources(sources: &mut Vec<ResearchSource>, question: &str) -
             sub_queries: Vec::new(),
             best_rank: 0,
             provider_score: None,
+            highlight_overlap: None,
             relevance: 1.0,
             filtered: false,
             extract: None,
             unread_reason: Some(NOT_ATTEMPTED.to_owned()),
+            unread_status: Some(UnreadStatus::NotAttempted),
         });
     }
     prioritized
@@ -901,6 +1184,44 @@ fn relevance_tier(relevance: f32) -> usize {
     let scaled = (relevance.clamp(0.0, 1.0) * RELEVANCE_TIERS as f32) as usize;
     scaled.min(RELEVANCE_TIERS - 1)
 }
+
+/// How many highlight-overlap buckets [`read_order`] sorts on. Bucketed for the
+/// same reason relevance is: the overlap is a word-match ratio over a handful of
+/// terms, so comparing 0.34 with 0.33 would be arithmetic, not judgement.
+const HIGHLIGHT_TIERS: usize = 4;
+
+/// Which highlight-overlap bucket a hit falls in. Higher is better.
+///
+/// `None` — the hit carried no highlights at all — sorts as the bottom bucket,
+/// the same as a measured overlap of zero. That asymmetry is deliberate: a
+/// highlight is *positive* evidence that the page answers the sub-query, and its
+/// absence leaves the source exactly where the signals ahead of this one already
+/// put it. Today every hit is `None`, because the shared `web_search` arm
+/// projects results down to `{url, title, snippet}` before this module sees
+/// them, so this key is inert until that changes — see
+/// [`hits_from_search_output`].
+// reason: HIGHLIGHT_TIERS is 4; the product is bounded by 4.0 and never negative
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn highlight_tier(overlap: Option<f32>) -> usize {
+    let Some(value) = overlap else {
+        return 0;
+    };
+    let scaled = (value.clamp(0.0, 1.0) * HIGHLIGHT_TIERS as f32) as usize;
+    scaled.min(HIGHLIGHT_TIERS - 1)
+}
+
+/// Corroboration above this stops buying read priority.
+///
+/// Three independent sub-queries surfacing one page is the whole signal; a
+/// sixth is usually the plan re-finding one popular page under a sixth
+/// phrasing, and letting that outvote a reranker highlight is how a run spends
+/// its budget re-reading the same site. Capping keeps corroboration a tier
+/// rather than a running total.
+const MAX_CORROBORATION_TIER: usize = 3;
 
 /// What the relevance gate did, as facts the coverage line must state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -967,9 +1288,7 @@ pub fn apply_relevance_gate(question: &str, sources: &mut [ResearchSource]) -> G
             continue;
         }
         source.filtered = true;
-        source.extract = None;
-        source.number = None;
-        source.unread_reason = Some(relevance::filtered_reason(verdict));
+        source.mark_unread(UnreadStatus::Filtered, relevance::filtered_reason(verdict));
         filtered = filtered.saturating_add(1);
     }
 
@@ -979,18 +1298,33 @@ pub fn apply_relevance_gate(question: &str, sources: &mut [ResearchSource]) -> G
     }
 }
 
-/// Read priority: most relevant tier first, then most corroborated, then best
-/// search rank, then discovery order. Filtered sources are excluded outright.
+/// Read priority, ordered by the signals that predict a page answers the
+/// question. Filtered sources are excluded outright.
 ///
-/// Relevance leads because corroboration was actively harmful without it: six
-/// sub-queries all surfacing the same off-topic page counted as six independent
-/// votes for noise, and that page then out-ranked the one source that actually
-/// answered the question. Within a relevance tier corroboration is still the
-/// right signal — a page two independent sub-queries both surfaced beats the top
-/// hit of one narrow phrasing.
+/// Keys, in order, all descending except the last:
+///
+/// 1. **User-supplied.** The user named this page as part of the question.
+/// 2. **Relevance tier** ([`relevance_tier`]). It leads because corroboration
+///    was actively harmful without it: six sub-queries all surfacing the same
+///    off-topic page counted as six independent votes for noise, and that page
+///    then out-ranked the one source that actually answered the question. The
+///    tier already folds in Quarry's reranker score, which
+///    [`crate::relevance::assess`] prefers over lexical overlap when present.
+/// 3. **Corroboration tier** — distinct sub-queries that surfaced the URL,
+///    capped at [`MAX_CORROBORATION_TIER`].
+/// 4. **Highlight tier** ([`highlight_tier`]) — how much of the sub-query the
+///    reranker's highlight passages actually cover.
+/// 5. **Discovery order**, which makes the whole ordering deterministic.
+///
+/// Provider rank is deliberately NOT a key any more. An audit of live runs
+/// found the upstream ordering is essentially raw engine order, reranked only
+/// at the head, so sorting on it was sorting on which engine answered first —
+/// noise dressed as a signal, sitting above the discovery-order tiebreak that
+/// already encodes the same thing. `best_rank` is still recorded on the source,
+/// because it is honest metadata and user-supplied links set it to 0.
 ///
 /// Excluding filtered sources here is what spends the read budget honestly: a
-/// source that is never in `order` is never fetched by [`pages_to_read`] and
+/// source that is never in `order` is never fetched by [`plan_read_batch`] and
 /// never numbered by [`number_and_bound`].
 #[must_use]
 pub fn read_order(sources: &[ResearchSource]) -> Vec<usize> {
@@ -1003,23 +1337,183 @@ pub fn read_order(sources: &[ResearchSource]) -> Vec<usize> {
         b.user_supplied.cmp(&a.user_supplied).then(
             relevance_tier(b.relevance)
                 .cmp(&relevance_tier(a.relevance))
-                .then(b.sub_queries.len().cmp(&a.sub_queries.len()))
-                .then(a.best_rank.cmp(&b.best_rank))
+                .then(
+                    b.sub_queries
+                        .len()
+                        .min(MAX_CORROBORATION_TIER)
+                        .cmp(&a.sub_queries.len().min(MAX_CORROBORATION_TIER)),
+                )
+                .then(highlight_tier(b.highlight_overlap).cmp(&highlight_tier(a.highlight_overlap)))
                 .then(left.cmp(&right)),
         )
     });
     order
 }
 
-/// The pages to fetch: read priority, truncated to the page budget.
+/// Live state of the read phase, carried from one batch to the next.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadProgress {
+    /// Pages fetched so far, successful or not.
+    pub attempted: usize,
+    /// Pages whose own text we now hold. This is what the budget is spent on.
+    pub succeeded: usize,
+    /// Batches dispatched, for the bound log.
+    pub batches: usize,
+    /// Characters of page text held so far, against the corpus cap.
+    pub corpus_chars: usize,
+}
+
+/// Why the read phase stopped asking for more pages.
 ///
-/// Its own function rather than an inline `.take()` so the page cap is
-/// *enforced somewhere testable* — the fetch phase is the one that spends real
-/// network time and real audit rows, and "we only fetch N" is a claim that
-/// should fail a test if it ever stops being true.
+/// Every variant is a bound the run hit, and every one is logged with its
+/// numbers — a "3 of 24" outcome has to be explainable from the logs, which it
+/// was not while the page cap was a silent `.take(8)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadHalt {
+    /// [`max_pages`] pages were read successfully. The good ending.
+    TargetMet,
+    /// Every non-filtered candidate had been attempted.
+    CandidatesExhausted,
+    /// The attempt ceiling ran out before the target was met.
+    AttemptsExhausted,
+    /// The corpus budget has no room for another page, so fetching one would
+    /// spend network time on text that could not be admitted anyway.
+    CorpusFull,
+}
+
+impl ReadHalt {
+    /// Stable token for the bound log.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::TargetMet => "target-met",
+            Self::CandidatesExhausted => "candidates-exhausted",
+            Self::AttemptsExhausted => "attempts-exhausted",
+            Self::CorpusFull => "corpus-full",
+        }
+    }
+}
+
+/// What the read phase set out to do and what stopped it.
+///
+/// Bundled rather than passed to [`coverage_of`] as four more parameters,
+/// because they are one fact about one phase: the target means nothing without
+/// the bound that ended the loop, and the coverage statement reads them
+/// together — "4 of 16, because the fetch-attempt ceiling ran out" is the whole
+/// sentence, and either half alone is a worse one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadOutcome {
+    /// Pages the run set out to read SUCCESSFULLY — [`max_pages`] for this
+    /// process.
+    pub target: usize,
+    /// The bound that ended the read loop.
+    pub halt: ReadHalt,
+    /// Whether the wall clock expired. Outranks `halt`, for the reason
+    /// [`read_halt_code`] gives.
+    pub deadline_hit: bool,
+    /// Whether the corpus budget refused pages that had already been fetched.
+    pub corpus_exhausted: bool,
+}
+
+/// The bound to name in the read phase's structured log.
+///
+/// The wall clock outranks the loop's own verdict, and it has to: when the
+/// deadline fires, the loop exits carrying whatever [`plan_read_batch`] last
+/// said — or, if the search phase already burned the clock, the initial
+/// `CandidatesExhausted` that nothing ever set. Logging that would name a bound
+/// which never fired, and send an audit looking for a candidate-supply problem
+/// that does not exist.
+///
+/// A named function rather than an inline ternary at the one call site, so
+/// "whichever bound actually stopped the run is the one in the log" is a claim a
+/// test can hold.
+#[must_use]
+pub fn read_halt_code(deadline_hit: bool, halt: ReadHalt) -> &'static str {
+    if deadline_hit {
+        "deadline"
+    } else {
+        halt.code()
+    }
+}
+
+/// Fetch attempts this run may spend chasing `target` successful reads.
+///
+/// The ceiling that keeps a success budget from becoming an unbounded one: a
+/// long candidate list where nothing is readable must cost a bounded number of
+/// fetches, not one per candidate.
+///
+/// Deliberately NOT clamped to the candidate count. Clamping would make
+/// [`ReadHalt::CandidatesExhausted`] unreachable — every short list would report
+/// itself as "out of attempts" — and those are different stories about the same
+/// thin report: one says the web had nothing more to offer, the other says we
+/// stopped looking.
+#[must_use]
+pub fn read_attempt_budget(target: usize) -> usize {
+    target
+        .saturating_mul(READ_ATTEMPT_MULTIPLIER)
+        .min(MAX_READ_ATTEMPTS_CEILING)
+}
+
+/// The next batch of candidates to fetch, or why there is no next batch.
+///
+/// This is the whole success-budget rule, kept pure so it is testable without a
+/// network: ask for as many pages as are still MISSING from the target, taken
+/// from the best candidates not yet attempted. A batch that fails completely is
+/// therefore replaced by the next-best candidates on the following turn of the
+/// loop instead of ending the run — which is the bug this function exists to
+/// fix, where eight attempts with five silent failures ended a run with sixteen
+/// untouched sources still on the list.
+///
+/// The batch is never larger than what is still wanted, so a run that needs one
+/// more page fetches one more page rather than another eight.
+///
+/// # Errors
+///
+/// Returns the [`ReadHalt`] that stopped the phase. Not a failure: every variant
+/// is a bound the run is entitled to hit, and the caller logs it with its
+/// numbers so a thin evidence base is explainable from the logs.
+pub fn plan_read_batch(
+    order: &[usize],
+    progress: ReadProgress,
+    target: usize,
+    attempt_budget: usize,
+    corpus_cap: usize,
+) -> Result<Vec<usize>, ReadHalt> {
+    if progress.succeeded >= target {
+        return Err(ReadHalt::TargetMet);
+    }
+    // Checked before the attempt budget because it is the stronger fact: with
+    // less than one minimum page of room left, `number_and_bound` would refuse
+    // whatever came back, so the fetch would be paid for and then discarded.
+    if progress.corpus_chars.saturating_add(MIN_PAGE_CHARS) > corpus_cap {
+        return Err(ReadHalt::CorpusFull);
+    }
+    if progress.attempted >= attempt_budget {
+        return Err(ReadHalt::AttemptsExhausted);
+    }
+    let wanted = target.saturating_sub(progress.succeeded);
+    let allowed = attempt_budget.saturating_sub(progress.attempted);
+    let batch: Vec<usize> = order
+        .iter()
+        .skip(progress.attempted)
+        .copied()
+        .take(wanted.min(allowed))
+        .collect();
+    if batch.is_empty() {
+        return Err(ReadHalt::CandidatesExhausted);
+    }
+    Ok(batch)
+}
+
+/// The first batch a run of `cap` pages would fetch.
+///
+/// Kept as its own function because "we only fetch the best N" is a claim that
+/// should fail a test if it ever stops being true, and because the read loop's
+/// first iteration is the one case worth naming.
 #[must_use]
 pub fn pages_to_read(order: &[usize], cap: usize) -> Vec<usize> {
-    order.iter().copied().take(cap).collect()
+    plan_read_batch(order, ReadProgress::default(), cap, order.len(), usize::MAX)
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,9 +1558,10 @@ pub fn number_and_bound(
         };
         let trimmed = extract.trim();
         if trimmed.is_empty() {
-            sources[index].extract = None;
-            sources[index].number = None;
-            sources[index].unread_reason = Some("the fetch returned no readable text".to_owned());
+            sources[index].mark_unread(
+                UnreadStatus::FetchFailed,
+                "the fetch returned no readable text",
+            );
             continue;
         }
         let remaining = corpus_cap.saturating_sub(used);
@@ -1074,12 +1569,13 @@ pub fn number_and_bound(
         // evidence behind it, which is exactly the dishonesty this module
         // exists to prevent. Below one minimum page, stop admitting entirely.
         if remaining < MIN_PAGE_CHARS {
-            sources[index].extract = None;
-            sources[index].number = None;
-            sources[index].unread_reason = Some(format!(
-                "read, but dropped from the evidence set: the {corpus_cap}-character research \
-                 corpus budget was already full"
-            ));
+            sources[index].mark_unread(
+                UnreadStatus::CorpusFull,
+                format!(
+                    "read, but dropped from the evidence set: the {corpus_cap}-character research \
+                     corpus budget was already full"
+                ),
+            );
             dropped = dropped.saturating_add(1);
             continue;
         }
@@ -1092,10 +1588,13 @@ pub fn number_and_bound(
 
     // Anything the loop never numbered must carry a reason; a source with
     // neither a number nor an explanation would appear in the report's
-    // unverified list as a bare URL.
+    // unverified list as a bare URL, and one with no status would land in the
+    // client's unread group with nothing to group it by.
     for source in sources.iter_mut() {
         if source.number.is_none() && source.unread_reason.is_none() {
-            source.unread_reason = Some(NOT_ATTEMPTED.to_owned());
+            source.mark_unread(UnreadStatus::NotAttempted, NOT_ATTEMPTED);
+        } else if source.number.is_none() && source.unread_status.is_none() {
+            source.unread_status = Some(UnreadStatus::NotAttempted);
         }
     }
     dropped
@@ -1109,8 +1608,7 @@ pub fn coverage_of(
     with_results: usize,
     search_failures: usize,
     gate: GateReport,
-    deadline_hit: bool,
-    corpus_exhausted: bool,
+    read_phase: ReadOutcome,
 ) -> Coverage {
     let read = sources.iter().filter(|source| source.is_read()).count();
     Coverage {
@@ -1122,8 +1620,126 @@ pub fn coverage_of(
         relevance_fallback: gate.fallback_used,
         read,
         unread: sources.len().saturating_sub(read),
-        deadline_hit,
-        corpus_exhausted,
+        page_target: read_phase.target,
+        halt: Some(read_phase.halt),
+        deadline_hit: read_phase.deadline_hit,
+        corpus_exhausted: read_phase.corpus_exhausted,
+    }
+}
+
+/// The absolute read count the thin rule falls back to when no page target was
+/// recorded — the number the rule used to be, kept only for the case where
+/// there is no budget to compare against (see [`evidence_band`]).
+const ABSOLUTE_THIN_READS: usize = 3;
+
+/// How the pages actually read compare with the pages the run asked for.
+///
+/// Bucketed rather than reported as a ratio, for the reason [`relevance_tier`]
+/// is bucketed: the statement has to make one judgement the model cannot soften,
+/// and a percentage in prose invites it to round in its own favour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceBand {
+    /// Nothing was read. Not a thin evidence base — no evidence base.
+    Absent,
+    /// Under a third of the wanted pages.
+    Thin,
+    /// Under two thirds of them.
+    Narrow,
+    /// Two thirds or more: the run substantially got what it went for.
+    Adequate,
+}
+
+/// Which band `read` successful pages falls in against the `page_target` the run
+/// asked for.
+///
+/// **Proportional on purpose.** This rule used to be the absolute `read < 3`,
+/// written when [`DEFAULT_MAX_PAGES`] was 8 — where it meant "under three
+/// eighths of the budget". The target then moved to 16 and the rule did not:
+/// those same three reads became under a fifth of the budget, and a run that
+/// managed 4 of 16 pages started reporting adequate coverage. That gap widens
+/// with every raise, so the threshold has to be a share of the budget rather
+/// than a count.
+///
+/// Thirds are what the old rule already was, re-expressed. At an 8-page target
+/// `read * 3 < 8` holds for 0, 1 and 2 reads and fails at 3 — exactly `read < 3`
+/// — so nothing about the original judgement is being revised here; it is only
+/// stopped from being pinned to a budget that no longer exists. At 16 it asks
+/// for 6 successful pages, at 24 for 8. The second threshold at two thirds is
+/// the band the old rule had no way to express: 8 of 16 is neither thin nor the
+/// breadth the run was paid to deliver, and a report that calls it thorough is
+/// overclaiming.
+///
+/// This is the statement that stops a bigger budget from becoming a confidence
+/// inflator. The evaluation literature on retrieval-augmented generation is
+/// explicit that retrieving MORE without grounding BETTER lowers factual
+/// accuracy — more passages mean more distractors, and a longer source list
+/// reads as authority whether or not the answer rests on it. So the raise from 8
+/// to 16 pages only pays off if what the run actually achieved is stated against
+/// what it asked for; otherwise the extra budget buys nothing but a more
+/// confident-sounding report over the same thin evidence.
+///
+/// A `page_target` of 0 means no read phase ran (no Quarry edge, nothing found)
+/// rather than "a budget of zero", so there is nothing to divide by and the
+/// absolute floor is the most this case can honestly say.
+#[must_use]
+pub fn evidence_band(read: usize, page_target: usize) -> EvidenceBand {
+    if read == 0 {
+        return EvidenceBand::Absent;
+    }
+    if page_target == 0 {
+        return if read < ABSOLUTE_THIN_READS {
+            EvidenceBand::Thin
+        } else {
+            EvidenceBand::Adequate
+        };
+    }
+    // Compared in thirds as integers: a float ratio would round, and the whole
+    // point of this rule is that it says the same thing at every budget.
+    let thirds = read.saturating_mul(3);
+    if thirds < page_target {
+        EvidenceBand::Thin
+    } else if thirds < page_target.saturating_mul(2) {
+        EvidenceBand::Narrow
+    } else {
+        EvidenceBand::Adequate
+    }
+}
+
+/// Why the read phase stopped short of its page target, in words the report can
+/// reproduce.
+///
+/// The bound is already in the `pages_read` log, which is the wrong audience:
+/// the user reading a short report is the one entitled to know whether the web
+/// ran out of relevant pages, the pages refused to yield text, or we ran out of
+/// time. "4 of 16" invites the reader to assume the last one; only three of
+/// those four answers are a time problem, and they call for different responses
+/// (retry, rephrase, accept).
+///
+/// `None` when there is nothing to explain — the target was met and every page
+/// read made it into the evidence set.
+fn shortfall_reason(coverage: &Coverage) -> Option<&'static str> {
+    let halt = coverage.halt?;
+    if coverage.deadline_hit {
+        // Kept to a clause: the deadline gets its own sentence further down, and
+        // stating it twice at full length reads as two separate failures.
+        return Some("the research time budget ran out mid-read");
+    }
+    match halt {
+        ReadHalt::TargetMet => coverage.corpus_exhausted.then_some(
+            "the read target itself was met, but the evidence budget could not admit every page \
+             that was fetched",
+        ),
+        ReadHalt::CandidatesExhausted => Some(
+            "search surfaced no further relevant page to read — the web, not the budget, is what \
+             ran out",
+        ),
+        ReadHalt::AttemptsExhausted => Some(
+            "the fetch-attempt ceiling was spent: too many candidate pages returned no readable \
+             text",
+        ),
+        ReadHalt::CorpusFull => {
+            Some("the evidence-character budget had no room left for another page")
+        }
     }
 }
 
@@ -1164,6 +1780,20 @@ pub fn coverage_statement(coverage: &Coverage) -> String {
             coverage.filtered
         );
     }
+    if coverage.page_target > 0 {
+        // The denominator, stated before any verdict is drawn from it, so the
+        // report reproduces the ratio rather than the adjective.
+        let _ = write!(
+            statement,
+            ". This run set out to read {} page(s) and holds the text of {}",
+            coverage.page_target, coverage.read
+        );
+        if coverage.read < coverage.page_target {
+            if let Some(reason) = shortfall_reason(coverage) {
+                let _ = write!(statement, "; the read phase stopped because {reason}");
+            }
+        }
+    }
     if coverage.relevance_fallback {
         statement.push_str(
             ". WARNING: no source cleared the relevance bar for this question at all; the \
@@ -1182,15 +1812,44 @@ pub fn coverage_statement(coverage: &Coverage) -> String {
         );
     }
     statement.push('.');
-    if coverage.read == 0 {
-        statement.push_str(
+    // A plan where half the sub-queries came back with nothing is thin however
+    // many pages the surviving half yielded: the question was only half asked.
+    // Kept as an independent trigger rather than folded into the band, because
+    // it is a fact about the search phase, not about the read budget.
+    let half_the_plan_found_nothing = coverage.with_results.saturating_mul(2) <= coverage.planned;
+    match evidence_band(coverage.read, coverage.page_target) {
+        EvidenceBand::Absent => statement.push_str(
             " NO source was read successfully: there is no evidence base for this question at all.",
-        );
-    } else if coverage.read < 3 || coverage.with_results * 2 <= coverage.planned {
-        statement.push_str(
-            " This is a THIN evidence base. Say so in the answer and do not present it as \
-             thorough research.",
-        );
+        ),
+        EvidenceBand::Thin => {
+            // The proportion is only nameable when a target was recorded. With
+            // none, this verdict rests on the absolute floor alone, and "under a
+            // third" would invent a denominator the run never had.
+            let against_the_budget = if coverage.page_target > 0 {
+                " — under a third of the pages this run set out to read"
+            } else {
+                ""
+            };
+            let _ = write!(
+                statement,
+                " This is a THIN evidence base{against_the_budget}. Say so in the answer and do \
+                 not present it as thorough research."
+            );
+        }
+        EvidenceBand::Narrow if !half_the_plan_found_nothing => statement.push_str(
+            " This evidence base is NARROWER than the run asked for: state how much of the \
+             intended reading actually happened, and do not describe the research as thorough or \
+             exhaustive.",
+        ),
+        EvidenceBand::Narrow | EvidenceBand::Adequate => {
+            if half_the_plan_found_nothing {
+                statement.push_str(
+                    " This is a THIN evidence base: half or more of the planned sub-queries \
+                     returned nothing at all, so whole parts of the question were never searched. \
+                     Say so in the answer and do not present it as thorough research.",
+                );
+            }
+        }
     }
     statement
 }
@@ -1201,6 +1860,14 @@ pub fn coverage_statement(coverage: &Coverage) -> String {
 
 /// Build the synthesis prompt: numbered read passages, an explicitly uncitable
 /// unread list, the coverage facts, and the report contract.
+///
+/// Passages are emitted in citation-number order, which is read-priority order,
+/// which is relevance order — [`number_and_bound`] walks [`read_order`] when it
+/// numbers. That chain is load-bearing at a 16-page corpus in a way it was not
+/// at eight: the prompt now runs to ~80k characters, and a model attends worst
+/// to the middle of a long context. Keeping the strongest evidence at the head
+/// is what stops "read more pages" from turning into "ground the answer in
+/// whatever happened to be fetched last".
 #[must_use]
 pub fn synthesis_prompt(question: &str, sources: &[ResearchSource], coverage: &Coverage) -> String {
     let mut prompt = String::with_capacity(4_096);
@@ -1279,8 +1946,12 @@ pub fn synthesis_prompt(question: &str, sources: &[ResearchSource], coverage: &C
 ///
 /// Read sources get `dr-{n}`, which is exactly the `[n]` the report cites — the
 /// client can therefore resolve a marker to a Kilder row. Unread sources get
-/// `dr-unread-{k}`: they are surfaced (the user should see what search found)
-/// but can never be mistaken for a numbered citation.
+/// `dr-unread-{status}-{k}`: they are surfaced (the user should see what search
+/// found) but can never be mistaken for a numbered citation, and the status
+/// token lets a client group "never attempted" apart from "tried and failed"
+/// without parsing the snippet prose. The `dr-unread-` prefix is unchanged, so
+/// a client that only knows the old convention still classifies the row
+/// correctly — it just cannot say why.
 #[must_use]
 pub fn citation_events(sources: &[ResearchSource]) -> Vec<ChatEvent> {
     let mut read: Vec<&ResearchSource> = sources.iter().filter(|s| s.is_read()).collect();
@@ -1298,16 +1969,51 @@ pub fn citation_events(sources: &[ResearchSource]) -> Vec<ChatEvent> {
 
     for (index, source) in sources.iter().filter(|s| !s.is_read()).enumerate() {
         events.push(ChatEvent::Citation {
-            id: format!("dr-unread-{}", index + 1),
+            id: unread_citation_id(source, index + 1),
             title: source.title.clone(),
             url: source.url.clone(),
-            // The reason travels in the snippet because `Citation` has no
-            // status field: without it a Kilder row for an unreadable page is
-            // indistinguishable from one that grounded a claim.
+            // The prose reason travels in the snippet because `Citation` has no
+            // free-text status field: without it a Kilder row for an unreadable
+            // page is indistinguishable from one that grounded a claim. The
+            // machine-readable half of the same fact is in the id.
             snippet: unread_citation_snippet(source),
         });
     }
     events
+}
+
+/// The citation id for an unread source: `dr-unread-{status}-{k}`.
+///
+/// A source with no recorded status is emitted as `not-attempted` rather than
+/// with the token omitted, so the id shape is one thing a client can parse
+/// unconditionally instead of two.
+#[must_use]
+pub fn unread_citation_id(source: &ResearchSource, ordinal: usize) -> String {
+    let status = source
+        .unread_status
+        .unwrap_or(UnreadStatus::NotAttempted)
+        .code();
+    format!("dr-unread-{status}-{ordinal}")
+}
+
+/// Counts of unread sources per [`UnreadStatus`], for the tool receipt.
+///
+/// Aggregate rather than per-source on purpose: the receipt is re-sent to the
+/// model on every later round, so it carries numbers and the citation events
+/// carry the rows.
+#[must_use]
+pub fn unread_status_counts(
+    sources: &[ResearchSource],
+) -> std::collections::BTreeMap<&'static str, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for source in sources.iter().filter(|source| !source.is_read()) {
+        let status = source
+            .unread_status
+            .unwrap_or(UnreadStatus::NotAttempted)
+            .code();
+        *counts.entry(status).or_insert(0usize) += 1;
+    }
+    counts
 }
 
 /// Snippet for an unread source: the reason first, then whatever the search
@@ -1355,7 +2061,12 @@ pub fn report_artifact_title(question: &str) -> String {
 /// while the conversation and the tool timeline see only counts. A tool result
 /// carrying the full report would be paid for again on every later round.
 #[must_use]
-pub fn research_receipt(plan: &[String], coverage: &Coverage, report_chars: usize) -> Value {
+pub fn research_receipt(
+    plan: &[String],
+    coverage: &Coverage,
+    report_chars: usize,
+    sources: &[ResearchSource],
+) -> Value {
     serde_json::json!({
         "sub_queries": plan,
         "sub_queries_with_results": coverage.with_results,
@@ -1367,13 +2078,27 @@ pub fn research_receipt(plan: &[String], coverage: &Coverage, report_chars: usiz
         // broken. Without this the receipt invites the model to explain a gap it
         // has no information about.
         "sources_filtered_irrelevant": coverage.filtered,
+        // The same distinction the citation ids carry, as counts: "16 never
+        // attempted" and "16 fetch failures" are the same `sources_unread`
+        // number and completely different facts about the run.
+        "sources_unread_by_status": unread_status_counts(sources),
         "relevance_fallback_used": coverage.relevance_fallback,
         "report_chars": report_chars,
+        // `sources_read` alone cannot be judged: it is the pair with the target,
+        // and the bound, that says whether a short run was the web's doing or
+        // the budget's. Same token as the `pages_read` bound log.
+        "pages_wanted": coverage.page_target,
+        "read_halt": coverage.halt_code(),
         "deadline_hit": coverage.deadline_hit,
         "corpus_budget_exhausted": coverage.corpus_exhausted,
         "caps": {
             "max_sub_queries": max_sub_queries(),
+            // A target of SUCCESSFUL reads now, not an attempt cap. Keeping the
+            // key name (a receipt shape the model and the tool timeline already
+            // read) but stating the attempt ceiling beside it, so the pair
+            // cannot be misread as "at most 8 fetches happened".
             "max_pages": max_pages(),
+            "max_read_attempts": read_attempt_budget(max_pages()),
             "page_chars": page_char_cap(),
             "corpus_chars": corpus_char_cap(),
             "wall_clock_secs": wall_clock_secs(),
@@ -1464,6 +2189,36 @@ pub fn no_evidence_context_message(question: &str, coverage: &Coverage, detail: 
 // Pipeline
 // ---------------------------------------------------------------------------
 
+/// Emit one structured record of a place the run bounded its own coverage.
+///
+/// Every cap in this module used to be silent, which is why an audit looking at
+/// a run that listed 24 sources and read 3 had to reconstruct the arithmetic
+/// from the source instead of reading it out of the logs. `info`, not `debug`:
+/// these are a handful of lines per research turn, and they are the only record
+/// of why coverage stopped where it did.
+///
+/// `limit` is what the bound allowed, `considered` what was available to it, and
+/// `admitted` what actually got through.
+fn log_bound(
+    request_id: &str,
+    bound: &'static str,
+    limit: usize,
+    considered: usize,
+    admitted: usize,
+    detail: &str,
+) {
+    tracing::info!(
+        target: "deep_research.bound",
+        %request_id,
+        bound,
+        limit,
+        considered,
+        admitted,
+        detail,
+        "deep research bounded its coverage"
+    );
+}
+
 /// Resolves when the turn is cancelled or the research deadline passes.
 async fn stop_signal(cancel: &AtomicBool, deadline: Instant) -> StopReason {
     loop {
@@ -1495,20 +2250,82 @@ where
     }
 }
 
+/// Shortest token that counts towards [`highlight_overlap`].
+///
+/// A stand-in for a stopword list: `relevance`'s lists are private to that
+/// module and this signal only ever breaks ties inside one relevance tier, so
+/// dropping every token under three characters is accurate enough and does not
+/// require widening another module's surface for it.
+const MIN_HIGHLIGHT_TOKEN_CHARS: usize = 3;
+
+/// Lowercase, split on non-word characters, drop very short tokens, stem and
+/// deduplicate what remains.
+fn overlap_stems(text: &str) -> Vec<String> {
+    let lowered = text.to_lowercase();
+    let mut stems: Vec<String> = Vec::new();
+    for token in lowered.split(|character: char| !character.is_alphanumeric()) {
+        if token.chars().count() < MIN_HIGHLIGHT_TOKEN_CHARS {
+            continue;
+        }
+        let stemmed = relevance::stem(token).to_owned();
+        if !stems.contains(&stemmed) {
+            stems.push(stemmed);
+        }
+    }
+    stems
+}
+
+/// How much of `query` the reranker's highlight passages actually cover,
+/// `0.0`–`1.0`.
+///
+/// Highlights are the reranker naming the sentences that made it pick the page,
+/// so their overlap with the sub-query is the best pre-fetch evidence available
+/// that this page answers *that question* — better than the provider snippet,
+/// which is frequently boilerplate, and much better than the provider's rank.
+///
+/// `None` when the hit carried no highlights: absent is "not judged", the same
+/// distinction `provider_score` keeps, because a hit outside the reranked head
+/// has not been found irrelevant, it has not been looked at.
+// reason: token counts here are a handful per query; f32 holds them exactly
+#[allow(clippy::cast_precision_loss)]
+fn highlight_overlap(query: &str, highlights: &[String]) -> Option<f32> {
+    let joined = highlights
+        .iter()
+        .filter(|passage| !passage.trim().is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.trim().is_empty() {
+        return None;
+    }
+    let terms = overlap_stems(query);
+    if terms.is_empty() {
+        return Some(0.0);
+    }
+    let passage_stems = overlap_stems(&joined);
+    let matched = terms
+        .iter()
+        .filter(|term| passage_stems.contains(term))
+        .count();
+    Some(matched as f32 / terms.len() as f32)
+}
+
 /// Parse one audited `web_search` outcome into hits.
 ///
-/// `score` is read opportunistically. Quarry DOES return a semantic-reranker
-/// relevance per hit and `quarry::project_search_result` now keeps it, but the
-/// shared `web_search` tool arm in `tool_loop` projects each result down to
-/// `{url, title, snippet}` before this function ever sees it — so today the
-/// field is absent and every hit arrives unscored. That is a one-line change in
-/// a file this work does not own; reading the field here means the gate starts
-/// using Quarry's own judgement the moment it lands, with no further change.
-/// Until then the gate runs on lexical overlap and domain class alone, which is
-/// exactly what [`crate::relevance`] is built to do without a provider score.
+/// `score` and `highlights` are read opportunistically. Quarry DOES return a
+/// semantic-reranker relevance and highlight passages per hit and
+/// `quarry::project_search_result` now keeps both, but the shared `web_search`
+/// tool arm in `tool_loop` projects each result down to `{url, title, snippet}`
+/// before this function ever sees it — so today both fields are absent, every
+/// hit arrives unscored, and [`highlight_tier`] is inert. That is a small change
+/// in a file this work does not own; reading the fields here means the gate and
+/// the read ordering start using Quarry's own judgement the moment it lands,
+/// with no further change. Until then the gate runs on lexical overlap and
+/// domain class alone, which is exactly what [`crate::relevance`] is built to do
+/// without a provider score.
 // reason: reranker scores are in [0,1]; f64→f32 loses nothing at that magnitude
 #[allow(clippy::cast_possible_truncation)]
-fn hits_from_search_output(sub_query: usize, output: &str) -> Vec<SearchHit> {
+fn hits_from_search_output(sub_query: usize, query: &str, output: &str) -> Vec<SearchHit> {
     let Ok(items) = serde_json::from_str::<Vec<Value>>(output) else {
         return Vec::new();
     };
@@ -1520,6 +2337,17 @@ fn hits_from_search_output(sub_query: usize, output: &str) -> Vec<SearchHit> {
             if url.is_empty() {
                 return None;
             }
+            let highlights: Vec<String> = item
+                .get("highlights")
+                .and_then(Value::as_array)
+                .map(|passages| {
+                    passages
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(SearchHit {
                 sub_query,
                 rank,
@@ -1539,6 +2367,7 @@ fn hits_from_search_output(sub_query: usize, output: &str) -> Vec<SearchHit> {
                     .and_then(Value::as_f64)
                     .map(|value| value as f32)
                     .filter(|value| value.is_finite()),
+                highlight_overlap: highlight_overlap(query, &highlights),
             })
         })
         .collect()
@@ -1613,6 +2442,7 @@ pub async fn run_deep_research(
             &coverage,
             &pipeline_call_id,
             &[],
+            &[],
             "The web fetch service (Quarry edge) is not configured for this deployment, so no \
              search or page read was attempted.",
             0,
@@ -1661,6 +2491,18 @@ pub async fn run_deep_research(
         // degradation into a failed tool call for no reason.
         Err(StopReason::Deadline) => (parse_sub_queries("", question, plan_limit), true),
     };
+    log_bound(
+        request_id,
+        "sub_queries",
+        plan_limit,
+        plan.len(),
+        plan.len(),
+        if plan_degraded {
+            "planning degraded; searching the question as asked"
+        } else {
+            "plan accepted"
+        },
+    );
     events
         .step(
             STEP_PLAN,
@@ -1740,9 +2582,7 @@ pub async fn run_deep_research(
     // silently remaining active.
     for (index, query) in plan.iter().enumerate() {
         let (detail, status) = match sub_query_outcomes.get(index) {
-            Some(SubQueryOutcome::Hits(count)) => {
-                (format!("{count} treff · {query}"), "done")
-            }
+            Some(SubQueryOutcome::Hits(count)) => (format!("{count} treff · {query}"), "done"),
             Some(SubQueryOutcome::Empty) => (format!("Ingen treff · {query}"), "done"),
             Some(SubQueryOutcome::Failed) => (format!("Søket feilet · {query}"), "error"),
             None => (format!("Ikke kjørt · {query}"), "error"),
@@ -1787,14 +2627,44 @@ pub async fn run_deep_research(
         .await;
 
     // ---- Phase 3: read ---------------------------------------------------
+    //
+    // Budgeted by SUCCESS, not by attempts. The old shape fetched the best 8
+    // candidates once and stopped, so a batch where five pages were
+    // JavaScript-rendered ended the run with three extracts and sixteen
+    // untouched candidates — the "24 sources, 3 read" the audit found. Batches
+    // instead: ask for as many pages as are still missing, and let a batch that
+    // fails be replaced by the next-best candidates, until the target is met or
+    // one of the real bounds (attempts, candidates, corpus, wall clock) stops
+    // us. Each of those bounds logs its numbers.
     let priority = read_order(&sources);
-    let to_read = pages_to_read(&priority, max_pages());
-    if !to_read.is_empty() && !deadline_hit {
+    let page_target = max_pages();
+    let attempt_budget = read_attempt_budget(page_target);
+    let corpus_cap = corpus_char_cap();
+    let mut progress = ReadProgress::default();
+    // Overwritten by the first `plan_read_batch` that declines, and reported as
+    // `deadline` instead whenever the clock is what stopped us — including the
+    // case where the search phase already burned it and this loop never runs.
+    let mut halt = ReadHalt::CandidatesExhausted;
+    while !deadline_hit {
+        let batch =
+            match plan_read_batch(&priority, progress, page_target, attempt_budget, corpus_cap) {
+                Ok(batch) => batch,
+                Err(reason) => {
+                    halt = reason;
+                    break;
+                }
+            };
+        progress.batches = progress.batches.saturating_add(1);
         events
             .step(
                 STEP_READ,
                 "Leser kilder",
-                &format!("Henter {} sider parallelt.", to_read.len()),
+                &format!(
+                    "Henter {} sider parallelt ({} av {} lest).",
+                    batch.len(),
+                    progress.succeeded,
+                    page_target
+                ),
                 "active",
             )
             .await;
@@ -1811,7 +2681,7 @@ pub async fn run_deep_research(
                 session_bearer,
                 zdr,
                 &sources,
-                &to_read,
+                &batch,
             ),
         )
         .await;
@@ -1822,15 +2692,17 @@ pub async fn run_deep_research(
                     tool_successes.saturating_add(u32::try_from(ok).unwrap_or(u32::MAX));
                 tool_failures =
                     tool_failures.saturating_add(u32::try_from(failed).unwrap_or(u32::MAX));
+                progress.attempted = progress.attempted.saturating_add(batch.len());
+                progress.succeeded = progress.succeeded.saturating_add(ok);
                 for (index, outcome) in extracts {
                     match outcome {
                         Ok(text) => {
-                            sources[index].extract = Some(text);
-                            sources[index].unread_reason = None;
+                            progress.corpus_chars =
+                                progress.corpus_chars.saturating_add(text.chars().count());
+                            sources[index].mark_read(text);
                         }
                         Err(reason) => {
-                            sources[index].extract = None;
-                            sources[index].unread_reason = Some(reason);
+                            sources[index].mark_unread(UnreadStatus::FetchFailed, reason);
                         }
                     }
                 }
@@ -1840,34 +2712,76 @@ pub async fn run_deep_research(
             }
             Err(StopReason::Deadline) => {
                 deadline_hit = true;
-                for &index in &to_read {
+                progress.attempted = progress.attempted.saturating_add(batch.len());
+                for &index in &batch {
                     if sources[index].extract.is_none() {
-                        sources[index].unread_reason = Some(
-                            "the research time budget ran out before this page was read".to_owned(),
+                        sources[index].mark_unread(
+                            UnreadStatus::Deadline,
+                            "the research time budget ran out before this page was read",
                         );
                     }
                 }
             }
         }
     }
-    let dropped_for_budget = number_and_bound(&mut sources, &priority, corpus_char_cap());
+    log_bound(
+        request_id,
+        "pages_read",
+        page_target,
+        priority.len(),
+        progress.succeeded,
+        &format!(
+            "halt={} attempts={}/{} batches={}",
+            read_halt_code(deadline_hit, halt),
+            progress.attempted,
+            attempt_budget,
+            progress.batches
+        ),
+    );
+    let dropped_for_budget = number_and_bound(&mut sources, &priority, corpus_cap);
+    if dropped_for_budget > 0 {
+        log_bound(
+            request_id,
+            "corpus_chars",
+            corpus_cap,
+            progress.corpus_chars,
+            corpus_cap.min(progress.corpus_chars),
+            &format!("{dropped_for_budget} fetched page(s) could not be admitted"),
+        );
+    }
+    if deadline_hit {
+        log_bound(
+            request_id,
+            "wall_clock_secs",
+            usize::try_from(wall_clock_secs()).unwrap_or(usize::MAX),
+            priority.len(),
+            progress.succeeded,
+            "the wall clock expired before the planned work finished",
+        );
+    }
     let coverage = coverage_of(
         &sources,
         plan.len(),
         search_ok,
         search_failures,
         gate,
-        deadline_hit,
-        dropped_for_budget > 0,
+        ReadOutcome {
+            target: page_target,
+            halt,
+            deadline_hit,
+            corpus_exhausted: dropped_for_budget > 0,
+        },
     );
     events
         .step(
             STEP_READ,
             "Leser kilder",
             &format!(
-                "Leste {} av {} valgte sider ({} uten lesbar tekst).",
+                "Leste {} av {} hentede sider ({} kandidater, mål {}; {} uten lesbar tekst).",
                 coverage.read,
-                to_read.len(),
+                progress.attempted,
+                priority.len(),
+                page_target,
                 coverage.unread
             ),
             if coverage.read == 0 { "error" } else { "done" },
@@ -1913,6 +2827,7 @@ pub async fn run_deep_research(
             &coverage,
             &pipeline_call_id,
             &plan,
+            &sources,
             &detail,
             tool_successes,
             tool_failures,
@@ -1993,6 +2908,7 @@ pub async fn run_deep_research(
                 )
                 .await;
             messages.push(ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: report_context_message(question, text, &coverage),
                 name: String::new(),
@@ -2009,6 +2925,7 @@ pub async fn run_deep_research(
                 )
                 .await;
             messages.push(ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: unsynthesized_context_message(question, &sources, &coverage, reason),
                 name: String::new(),
@@ -2016,7 +2933,7 @@ pub async fn run_deep_research(
         }
     }
 
-    let receipt = research_receipt(&plan, &coverage, report_chars);
+    let receipt = research_receipt(&plan, &coverage, report_chars, &sources);
     events
         .push(ChatEvent::ToolResult {
             id: pipeline_call_id,
@@ -2040,6 +2957,9 @@ pub async fn run_deep_research(
         with_results = coverage.with_results,
         found = coverage.found,
         read = coverage.read,
+        // Logged beside `read` for the same reason the coverage statement carries
+        // it: 4 reads is most of an 8-page run and a quarter of a 16-page one.
+        page_target = coverage.page_target,
         unread = coverage.unread,
         deadline_hit = coverage.deadline_hit,
         report_chars,
@@ -2090,6 +3010,7 @@ async fn finish_without_evidence(
     coverage: &Coverage,
     pipeline_call_id: &str,
     plan: &[String],
+    sources: &[ResearchSource],
     detail: &str,
     tool_successes: u32,
     tool_failures: u32,
@@ -2106,11 +3027,12 @@ async fn finish_without_evidence(
         .push(ChatEvent::ToolResult {
             id: pipeline_call_id.to_owned(),
             status: "error".to_owned(),
-            output: research_receipt(plan, coverage, 0).to_string(),
+            output: research_receipt(plan, coverage, 0, sources).to_string(),
             error: Some(detail.to_owned()),
         })
         .await;
     messages.push(ChatMessage {
+        compaction_summary: String::new(),
         role: "user".to_owned(),
         content: no_evidence_context_message(question, coverage, detail),
         name: String::new(),
@@ -2233,6 +3155,7 @@ async fn plan_once(
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
                 messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: plan_prompt(question, limit),
                     name: String::new(),
@@ -2337,7 +3260,8 @@ async fn search_sub_queries(
             outcomes.push(SubQueryOutcome::Failed);
             continue;
         }
-        let parsed = hits_from_search_output(index, &outcome.output);
+        let query = plan.get(index).map_or("", String::as_str);
+        let parsed = hits_from_search_output(index, query, &outcome.output);
         if parsed.is_empty() {
             // A search that returned zero rows is not a failure of the call,
             // but it is not coverage either — counting it as coverage is how a
@@ -2453,6 +3377,7 @@ async fn synthesize_report(
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
                 messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: prompt.to_owned(),
                     name: String::new(),
@@ -2523,12 +3448,14 @@ mod tests {
             sub_queries,
             best_rank: rank,
             provider_score: None,
+            highlight_overlap: None,
             // Ungated: the same neutral value `dedupe_hits` produces, so tests
             // about ordering and numbering are not accidentally testing the gate.
             relevance: 1.0,
             filtered: false,
             extract: None,
             unread_reason: Some(NOT_ATTEMPTED.to_owned()),
+            unread_status: Some(UnreadStatus::NotAttempted),
         }
     }
 
@@ -2537,15 +3464,43 @@ mod tests {
         let mut source = source(url, vec![0], 0);
         source.relevance = relevance;
         source.filtered = true;
-        source.unread_reason = Some("filtered as irrelevant to the question (test)".to_owned());
+        source.mark_unread(
+            UnreadStatus::Filtered,
+            "filtered as irrelevant to the question (test)",
+        );
         source
     }
 
     fn read_source(url: &str, text: &str) -> ResearchSource {
         let mut source = source(url, vec![0], 0);
-        source.extract = Some(text.to_owned());
-        source.unread_reason = None;
+        source.mark_read(text.to_owned());
         source
+    }
+
+    /// A read phase that reached its target with no other bound in play, for the
+    /// tests that are about something else. Tests about coverage honesty build
+    /// their own [`ReadOutcome`], because the bound is the thing they assert on.
+    fn target_met(target: usize) -> ReadOutcome {
+        ReadOutcome {
+            target,
+            halt: ReadHalt::TargetMet,
+            deadline_hit: false,
+            corpus_exhausted: false,
+        }
+    }
+
+    /// A search hit with no reranker signals, which is every hit on every
+    /// deployment today.
+    fn hit(sub_query: usize, rank: usize, url: &str) -> SearchHit {
+        SearchHit {
+            sub_query,
+            rank,
+            url: url.to_owned(),
+            title: String::new(),
+            snippet: String::new(),
+            score: None,
+            highlight_overlap: None,
+        }
     }
 
     // --- plan parsing ----------------------------------------------------
@@ -2658,14 +3613,7 @@ mod tests {
         // Cross-sub-query corroboration is the read-priority signal, so it must
         // survive dedupe rather than being overwritten by the last hit.
         let hits = vec![
-            SearchHit {
-                sub_query: 0,
-                rank: 3,
-                url: "https://a.no/x".into(),
-                title: String::new(),
-                snippet: String::new(),
-                score: None,
-            },
+            hit(0, 3, "https://a.no/x"),
             SearchHit {
                 sub_query: 1,
                 rank: 1,
@@ -2673,14 +3621,11 @@ mod tests {
                 title: "A page".into(),
                 snippet: "about x".into(),
                 score: Some(0.8),
+                highlight_overlap: Some(0.5),
             },
             SearchHit {
-                sub_query: 1,
-                rank: 0,
-                url: "https://b.no/y".into(),
                 title: "B".into(),
-                snippet: String::new(),
-                score: None,
+                ..hit(1, 0, "https://b.no/y")
             },
         ];
         let sources = dedupe_hits(&hits);
@@ -2691,6 +3636,10 @@ mod tests {
         // sub-query's judgement must not be lost to another's silence.
         assert_eq!(sources[0].provider_score, Some(0.8));
         assert_eq!(sources[1].provider_score, None);
+        // Highlights follow the same max rule and for the same reason: the hit
+        // that was reranked is the one that carries them.
+        assert_eq!(sources[0].highlight_overlap, Some(0.5));
+        assert_eq!(sources[1].highlight_overlap, None);
         assert_eq!(sources[0].best_rank, 1, "keeps the best rank seen");
         // Metadata is backfilled from the richer duplicate; a URL is a poor
         // title when a real one exists.
@@ -2703,15 +3652,74 @@ mod tests {
     }
 
     #[test]
-    fn read_order_prefers_corroboration_then_rank_then_discovery_order() {
+    fn read_order_prefers_corroboration_then_discovery_order_not_provider_rank() {
         let sources = vec![
             source("https://a.no", vec![0], 0),
             source("https://b.no", vec![0, 1, 2], 4),
             source("https://c.no", vec![0, 1], 2),
             source("https://d.no", vec![0, 1], 1),
         ];
-        // b (3 sub-queries) → d and c (2 each, d ranked better) → a (1).
-        assert_eq!(read_order(&sources), vec![1, 3, 2, 0]);
+        // b (3 sub-queries) → c and d (2 each) → a (1). c precedes d on
+        // discovery order, NOT on d's better provider rank: the audit found the
+        // upstream ordering is essentially raw engine order, so ranking on it
+        // was ranking on which engine answered first.
+        assert_eq!(read_order(&sources), vec![1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn read_order_caps_corroboration_so_a_highlight_match_can_still_win() {
+        // Six phrasings of one plan re-finding one popular page is not six
+        // independent votes. Past the cap, the reranker's own evidence that a
+        // page answers the sub-query is the better signal.
+        let popular = source("https://popular.no", vec![0, 1, 2, 3, 4, 5], 0);
+        let mut highlighted = source("https://answers.no", vec![0, 1, 2], 9);
+        highlighted.highlight_overlap = Some(0.9);
+        let sources = vec![popular, highlighted];
+
+        assert_eq!(
+            read_order(&sources),
+            vec![1, 0],
+            "both are at the corroboration cap, so the highlight decides"
+        );
+    }
+
+    #[test]
+    fn absent_highlights_never_demote_a_source_below_a_measured_zero() {
+        // Absent is "not reranked", not "no overlap" — but there is no honest
+        // total order that treats them as incomparable, so both sort in the
+        // bottom bucket and the tie falls through to discovery order.
+        assert_eq!(highlight_tier(None), highlight_tier(Some(0.0)));
+        assert!(highlight_tier(Some(0.9)) > highlight_tier(None));
+        // Clamped, so a provider sending a score outside [0,1] cannot index
+        // past the top bucket.
+        assert_eq!(highlight_tier(Some(4.0)), HIGHLIGHT_TIERS - 1);
+        assert_eq!(highlight_tier(Some(-1.0)), 0);
+    }
+
+    #[test]
+    fn highlight_overlap_measures_the_sub_query_against_the_reranked_passages() {
+        // The signal the ordering leans on once `web_search` stops projecting
+        // highlights away: how much of the sub-query the reranker's chosen
+        // sentences actually cover.
+        let full = highlight_overlap(
+            "oslo befolkning 2026",
+            &["Oslo hadde en befolkning på 720 000 i 2026.".to_owned()],
+        );
+        assert_eq!(full, Some(1.0));
+
+        let partial = highlight_overlap(
+            "oslo befolkning 2026",
+            &["Bergen er Norges nest største by.".to_owned()],
+        );
+        assert_eq!(partial, Some(0.0));
+
+        // No highlights at all is "not judged", which the ordering must be able
+        // to tell apart from "judged and nothing matched".
+        assert_eq!(highlight_overlap("oslo befolkning", &[]), None);
+        assert_eq!(
+            highlight_overlap("oslo befolkning", &["   ".to_owned()]),
+            None
+        );
     }
 
     // --- numbering / caps -------------------------------------------------
@@ -2799,7 +3807,7 @@ mod tests {
             read_source("https://read.no", "text"),
             source("https://unread.no", vec![0], 1),
         ];
-        sources[1].unread_reason = Some("JavaScript-rendered".to_owned());
+        sources[1].mark_unread(UnreadStatus::FetchFailed, "JavaScript-rendered");
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 10_000);
 
@@ -2808,7 +3816,7 @@ mod tests {
         let ChatEvent::Citation { id, snippet, .. } = &events[1] else {
             panic!("expected a citation");
         };
-        assert_eq!(id, "dr-unread-1");
+        assert_eq!(id, "dr-unread-fetch-failed-1");
         assert!(
             id.strip_prefix("dr-")
                 .and_then(|rest| rest.parse::<usize>().ok())
@@ -2816,6 +3824,79 @@ mod tests {
             "an unread id must not parse as a citation number"
         );
         assert!(snippet.starts_with("[not read: JavaScript-rendered]"));
+    }
+
+    /// The audit's actual complaint: the client could see that a source was
+    /// unread but not WHY, because the only signal was English prose glued to
+    /// the front of the snippet. "Never attempted" and "tried and failed" are
+    /// different facts about the run and must be distinguishable without
+    /// parsing a sentence.
+    #[test]
+    fn an_unread_citation_carries_a_machine_readable_status_not_only_prose() {
+        let mut sources = vec![
+            read_source("https://read.no", "text"),
+            source("https://never-tried.no", vec![0], 1),
+            source("https://broken.no", vec![0], 2),
+            filtered_source("https://off-topic.no", 0.05),
+        ];
+        sources[2].mark_unread(
+            UnreadStatus::FetchFailed,
+            "the fetch succeeded but extracted no readable text",
+        );
+        let order = read_order(&sources);
+        number_and_bound(&mut sources, &order, 10_000);
+
+        let ids: Vec<String> = citation_events(&sources)
+            .iter()
+            .map(|event| match event {
+                ChatEvent::Citation { id, .. } => id.clone(),
+                other => panic!("expected a citation, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "dr-1",
+                "dr-unread-not-attempted-1",
+                "dr-unread-fetch-failed-2",
+                "dr-unread-filtered-3",
+            ]
+        );
+        // Backwards compatible: a client that only knows the old convention
+        // still classifies every one of these as unread.
+        assert!(ids[1..].iter().all(|id| id.starts_with("dr-unread-")));
+
+        // And the same distinction reaches the tool receipt as counts, where
+        // "16 never attempted" and "16 fetch failures" would otherwise both be
+        // one `sources_unread` number.
+        let counts = unread_status_counts(&sources);
+        assert_eq!(counts.get("not-attempted"), Some(&1));
+        assert_eq!(counts.get("fetch-failed"), Some(&1));
+        assert_eq!(counts.get("filtered"), Some(&1));
+        assert_eq!(counts.get("deadline"), None);
+    }
+
+    /// A page that was read and then dropped by the corpus budget is neither
+    /// "never attempted" nor "the web failed us" — it is the run's own cap, and
+    /// the run should be able to say so.
+    #[test]
+    fn a_page_dropped_for_corpus_budget_reports_its_own_status() {
+        let mut sources = vec![
+            read_source("https://a.no", &"a".repeat(3_000)),
+            read_source("https://b.no", &"b".repeat(3_000)),
+        ];
+        let order = read_order(&sources);
+        number_and_bound(&mut sources, &order, 3_200);
+
+        assert_eq!(sources[1].unread_status, Some(UnreadStatus::CorpusFull));
+        let ids: Vec<String> = citation_events(&sources)
+            .iter()
+            .map(|event| match event {
+                ChatEvent::Citation { id, .. } => id.clone(),
+                other => panic!("expected a citation, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids[1], "dr-unread-corpus-full-1");
     }
 
     #[test]
@@ -2828,6 +3909,147 @@ mod tests {
         assert_eq!(pages_to_read(&order, 99), order);
         assert!(pages_to_read(&order, 0).is_empty());
         assert!(pages_to_read(&[], 5).is_empty());
+    }
+
+    /// Drive the batching rule the way the pipeline does, with a caller-supplied
+    /// verdict per candidate, and report what the run ended up holding.
+    ///
+    /// Returns `(read indexes, attempts, batches, halt)`. The async loop in
+    /// `run_deep_research` is the same shape with `read_pages` where `succeeds`
+    /// is — everything that decides coverage lives in [`plan_read_batch`], which
+    /// is why it is a pure function.
+    fn drive_read_loop(
+        order: &[usize],
+        target: usize,
+        corpus_cap: usize,
+        page_chars: usize,
+        succeeds: impl Fn(usize) -> bool,
+    ) -> (Vec<usize>, usize, usize, ReadHalt) {
+        let attempt_budget = read_attempt_budget(target);
+        let mut progress = ReadProgress::default();
+        let mut read: Vec<usize> = Vec::new();
+        loop {
+            let batch = match plan_read_batch(order, progress, target, attempt_budget, corpus_cap) {
+                Ok(batch) => batch,
+                Err(halt) => return (read, progress.attempted, progress.batches, halt),
+            };
+            progress.batches += 1;
+            progress.attempted += batch.len();
+            for index in batch {
+                if succeeds(index) {
+                    progress.succeeded += 1;
+                    progress.corpus_chars += page_chars;
+                    read.push(index);
+                }
+            }
+        }
+    }
+
+    /// The audit finding, as a test: eight attempts with five silent failures
+    /// used to end the run holding three pages while sixteen candidates sat
+    /// untouched. The budget is spent on successes now, so the failures are
+    /// replaced by the next-best candidates.
+    #[test]
+    fn the_read_budget_keeps_going_until_enough_pages_actually_succeeded() {
+        let order: Vec<usize> = (0..24).collect();
+        // Every third candidate yields text — the shape the audit measured.
+        let (read, attempts, batches, halt) =
+            drive_read_loop(&order, 8, usize::MAX, 4_000, |index| index % 3 == 0);
+
+        assert_eq!(read.len(), 8, "the target is 8 SUCCESSFUL reads");
+        assert!(
+            attempts > 8,
+            "reaching 8 successes at a 1-in-3 hit rate must cost more than 8 attempts, got \
+             {attempts}"
+        );
+        assert!(batches > 1, "failures must be replaced, not accepted");
+        assert_eq!(halt, ReadHalt::TargetMet);
+    }
+
+    /// The specific case the old shape handled worst: the whole first batch
+    /// fails. That used to be the end of the run — zero evidence from a
+    /// candidate list that still held twenty readable pages.
+    #[test]
+    fn a_first_batch_that_fails_completely_is_replaced_not_accepted() {
+        let order: Vec<usize> = (0..24).collect();
+        // The first eight (one full batch) are dead; everything after reads.
+        let (read, attempts, batches, halt) =
+            drive_read_loop(&order, 8, usize::MAX, 4_000, |index| index >= 8);
+
+        assert_eq!(read, (8..16).collect::<Vec<usize>>());
+        assert_eq!(attempts, 16, "one wasted batch, then one that worked");
+        assert_eq!(batches, 2);
+        assert_eq!(halt, ReadHalt::TargetMet);
+    }
+
+    /// Success-budgeted is not unbounded. A candidate list where nothing is
+    /// readable must cost a bounded number of fetches and then stop, rather than
+    /// eating the wall clock the synthesis needs.
+    #[test]
+    fn a_candidate_list_that_never_succeeds_stops_at_the_attempt_ceiling() {
+        let order: Vec<usize> = (0..200).collect();
+        let (read, attempts, _batches, halt) =
+            drive_read_loop(&order, 8, usize::MAX, 4_000, |_| false);
+
+        assert!(read.is_empty());
+        assert_eq!(attempts, read_attempt_budget(8));
+        assert_eq!(attempts, 8 * READ_ATTEMPT_MULTIPLIER);
+        assert_eq!(halt, ReadHalt::AttemptsExhausted);
+        // And the hard ceiling holds however generous the page budget is.
+        assert_eq!(
+            read_attempt_budget(MAX_PAGES_CEILING),
+            MAX_READ_ATTEMPTS_CEILING
+        );
+    }
+
+    /// A short candidate list is exhausted rather than retried, and the halt
+    /// says which of the two happened — "we ran out of pages to try" and "we ran
+    /// out of tries" are different stories about the same thin report.
+    #[test]
+    fn a_short_candidate_list_halts_as_exhausted_not_as_out_of_attempts() {
+        // Three dead candidates and attempts to spare: the web had nothing more
+        // to offer, which is a different story from "we stopped looking", and
+        // the coverage line is built on being able to tell them apart.
+        let order = vec![0, 1, 2];
+        let (read, attempts, _batches, halt) =
+            drive_read_loop(&order, 8, usize::MAX, 4_000, |_| false);
+        assert!(read.is_empty());
+        assert_eq!(attempts, 3, "every candidate was tried");
+        assert_eq!(halt, ReadHalt::CandidatesExhausted);
+    }
+
+    /// The corpus cap still bounds the run. Fetching a page that could never be
+    /// admitted spends network time for nothing, so the loop stops as soon as
+    /// there is less than one minimum page of room left.
+    ///
+    /// The check is per batch, not per page: a batch is dispatched concurrently,
+    /// so it can overshoot the cap, and `number_and_bound` is what actually
+    /// enforces it on the corpus. This stops the loop from dispatching the NEXT
+    /// batch into a budget that has no room for it.
+    #[test]
+    fn the_read_loop_stops_when_the_corpus_budget_has_no_room_left() {
+        let order: Vec<usize> = (0..24).collect();
+        let (read, _attempts, _batches, halt) =
+            drive_read_loop(&order, 8, 10_000, 4_000, |index| index % 4 == 0);
+
+        assert_eq!(read, vec![0, 4, 8, 12]);
+        assert_eq!(halt, ReadHalt::CorpusFull);
+    }
+
+    /// A batch is never larger than what is still missing: a run needing one
+    /// more page fetches one more page, not another full batch.
+    #[test]
+    fn a_batch_asks_only_for_the_pages_still_missing() {
+        let order: Vec<usize> = (0..24).collect();
+        let progress = ReadProgress {
+            attempted: 8,
+            succeeded: 7,
+            batches: 1,
+            corpus_chars: 28_000,
+        };
+        let batch =
+            plan_read_batch(&order, progress, 8, 24, 40_000).expect("one page still wanted");
+        assert_eq!(batch, vec![8], "one missing page, one fetch");
     }
 
     #[test]
@@ -2923,6 +4145,277 @@ mod tests {
         assert!((MIN_PAGES..=MAX_PAGES_CEILING).contains(&max_pages()));
     }
 
+    // --- the budget agrees with itself -------------------------------------
+    //
+    // Raising the page target turned six independent-looking constants into one
+    // budget. These tests hold the arithmetic that ties them together, because
+    // every way it can break is silent at runtime: a corpus too small fetches
+    // pages and discards them, a fan-out too narrow halts as
+    // `candidates-exhausted` every run, a wall clock too short reports a partial
+    // evidence base on a healthy one.
+
+    #[test]
+    fn a_full_page_target_fits_inside_the_corpus_budget() {
+        // The exact starvation this raise exists to prevent: at the old 40k
+        // corpus, a 16-page run would have paid for six page reads it then threw
+        // away. Sixteen full-size pages must all reach the prompt.
+        let mut sources: Vec<ResearchSource> = (0..DEFAULT_MAX_PAGES)
+            .map(|index| {
+                read_source(
+                    &format!("https://source-{index}.no"),
+                    &"x".repeat(DEFAULT_PAGE_CHARS),
+                )
+            })
+            .collect();
+        let order = read_order(&sources);
+        let dropped = number_and_bound(&mut sources, &order, DEFAULT_CORPUS_CHARS);
+
+        assert_eq!(
+            dropped, 0,
+            "no page the run paid to fetch may be dropped at the default budget"
+        );
+        let numbers: Vec<Option<usize>> = sources.iter().map(|source| source.number).collect();
+        assert_eq!(
+            numbers,
+            (1..=DEFAULT_MAX_PAGES).map(Some).collect::<Vec<_>>(),
+            "every page is numbered, in read-priority order"
+        );
+    }
+
+    #[test]
+    fn a_full_page_target_numbers_every_page_and_the_citations_still_map() {
+        // More retrieval is only better if the extra pages are usable as
+        // evidence. That means 16 distinct numbers, 16 `dr-{n}` citation ids the
+        // client can resolve a marker to, and a prompt that actually lists the
+        // sixteenth — not fifteen plus one page nobody can cite.
+        let mut sources: Vec<ResearchSource> = (0..DEFAULT_MAX_PAGES)
+            .map(|index| {
+                read_source(
+                    &format!("https://source-{index}.no"),
+                    &format!("Evidence from page {index}."),
+                )
+            })
+            .collect();
+        let order = read_order(&sources);
+        number_and_bound(&mut sources, &order, DEFAULT_CORPUS_CHARS);
+
+        let coverage = coverage_of(
+            &sources,
+            DEFAULT_MAX_SUB_QUERIES,
+            DEFAULT_MAX_SUB_QUERIES,
+            0,
+            GateReport::default(),
+            target_met(DEFAULT_MAX_PAGES),
+        );
+        assert_eq!(coverage.read, DEFAULT_MAX_PAGES);
+
+        let ids: Vec<String> = citation_events(&sources)
+            .into_iter()
+            .map(|event| match event {
+                ChatEvent::Citation { id, .. } => id,
+                other => panic!("expected a citation, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            (1..=DEFAULT_MAX_PAGES)
+                .map(|number| format!("dr-{number}"))
+                .collect::<Vec<_>>(),
+            "citation ids must cover exactly the pages that were read"
+        );
+
+        let prompt = synthesis_prompt("q", &sources, &coverage);
+        assert!(
+            prompt.contains(&format!("[{DEFAULT_MAX_PAGES}]")),
+            "the last page must reach the prompt, not just the source list"
+        );
+        // The uncitable section must be absent, not merely empty. Matching the
+        // section header rather than the phrase: the report contract at the end
+        // of the prompt names "FOUND BUT NOT READ" unconditionally.
+        assert!(!prompt.contains("FOUND BUT NOT READ — search returned these"));
+    }
+
+    #[test]
+    fn the_sub_query_fan_out_can_supply_the_pages_the_read_target_wants() {
+        // The arithmetic in `DEFAULT_MAX_SUB_QUERIES`' comment, as a test: six
+        // sub-queries cannot feed a 16-page target however many attempts the
+        // budget allows, because the candidates simply do not exist.
+        let results_each = usize::try_from(SEARCH_RESULTS_PER_SUB_QUERY)
+            .expect("the per-sub-query result count is a small positive number");
+        // Attrition, in the order it happens: `dedupe_hits` collapses roughly a
+        // quarter of the raw hits, `apply_relevance_gate` sets aside about a
+        // fifth of the survivors, and about half of what is fetched yields no
+        // readable text.
+        let reachable_successes = |sub_queries: usize| sub_queries * results_each * 3 / 4 * 4 / 5 / 2;
+
+        assert!(
+            reachable_successes(DEFAULT_MAX_SUB_QUERIES) >= DEFAULT_MAX_PAGES,
+            "{DEFAULT_MAX_SUB_QUERIES} sub-queries must be able to supply {DEFAULT_MAX_PAGES} \
+             successful reads, got {}",
+            reachable_successes(DEFAULT_MAX_SUB_QUERIES)
+        );
+        assert!(
+            reachable_successes(6) < DEFAULT_MAX_PAGES,
+            "the old fan-out must be genuinely short of the new target, or this raise is \
+             unjustified"
+        );
+    }
+
+    #[test]
+    fn the_attempt_ceiling_still_allows_three_tries_per_wanted_page() {
+        // Half of the open web yields no text, so 16 successes cost ~32 attempts
+        // in expectation. An attempt budget of exactly 32 would be a coin flip on
+        // the median run — the ceiling has to leave the documented 3× headroom at
+        // the default, and only start binding above it.
+        assert_eq!(
+            read_attempt_budget(DEFAULT_MAX_PAGES),
+            DEFAULT_MAX_PAGES * READ_ATTEMPT_MULTIPLIER
+        );
+        assert!(read_attempt_budget(DEFAULT_MAX_PAGES) > DEFAULT_MAX_PAGES * 2);
+        // And the ceiling is still a real bound at the top of the range.
+        assert_eq!(
+            read_attempt_budget(MAX_PAGES_CEILING),
+            MAX_READ_ATTEMPTS_CEILING
+        );
+    }
+
+    #[test]
+    fn the_wall_clock_is_sized_for_a_whole_run_not_for_one_phase() {
+        // Derived from the per-page fetch timeout, per the constant's comment:
+        // Quarry's scrape timeout is 30s (QUARRY_EDGE_TIMEOUT_SECS), batches are
+        // concurrent so a generation costs its slowest page, and the batch sizes
+        // halve as successes accumulate — about six generations to reach 16.
+        const QUARRY_SCRAPE_TIMEOUT_SECS: u64 = 30;
+        const READ_GENERATIONS: u64 = 6;
+        let needed = PLAN_TIMEOUT.as_secs()
+            + QUARRY_SCRAPE_TIMEOUT_SECS
+            + READ_GENERATIONS * QUARRY_SCRAPE_TIMEOUT_SECS
+            + SYNTHESIS_TIMEOUT.as_secs();
+
+        assert!(
+            DEFAULT_WALL_CLOCK_SECS >= needed,
+            "the wall clock ({DEFAULT_WALL_CLOCK_SECS}s) must cover plan + search + {READ_GENERATIONS} \
+             read generations + synthesis ({needed}s), or a healthy run reports a partial evidence \
+             base"
+        );
+        // The two relationships that are pure arithmetic over constants — every
+        // default leaving room under its ceiling, and the report budget scaling
+        // with the page target — are compile-time assertions beside the constants
+        // themselves, because a runtime test cannot fail a build that already
+        // shipped the mismatch.
+    }
+
+    #[test]
+    fn each_budget_bound_stops_the_read_loop_on_its_own_at_the_full_target() {
+        // A bigger budget must still be a bounded one, and each bound has to hold
+        // alone — the run must not depend on the wall clock to rescue it from an
+        // unreadable candidate list, because by then it has spent every second
+        // the synthesis needs.
+        let long: Vec<usize> = (0..200).collect();
+
+        let (read, _attempts, _batches, halt) =
+            drive_read_loop(&long, DEFAULT_MAX_PAGES, DEFAULT_CORPUS_CHARS, 4_000, |_| {
+                true
+            });
+        assert_eq!(read.len(), DEFAULT_MAX_PAGES);
+        assert_eq!(halt, ReadHalt::TargetMet);
+
+        // Attempts: nothing readable, so the run stops at its own ceiling rather
+        // than walking all 200 candidates.
+        let (read, attempts, _batches, halt) =
+            drive_read_loop(&long, DEFAULT_MAX_PAGES, DEFAULT_CORPUS_CHARS, 4_000, |_| {
+                false
+            });
+        assert!(read.is_empty());
+        assert_eq!(attempts, read_attempt_budget(DEFAULT_MAX_PAGES));
+        assert_eq!(halt, ReadHalt::AttemptsExhausted);
+
+        // Corpus: pages keep reading, but the evidence budget fills before the
+        // page target is met, so the loop stops rather than fetching text that
+        // `number_and_bound` would refuse to admit anyway.
+        let (read, _attempts, _batches, halt) =
+            drive_read_loop(&long, DEFAULT_MAX_PAGES, 20_000, 4_000, |index| {
+                index % 4 == 0
+            });
+        assert_eq!(read, vec![0, 4, 8, 12, 16, 20, 24]);
+        assert_eq!(halt, ReadHalt::CorpusFull);
+
+        // Candidates: a short list is exhausted, not retried into the attempt
+        // ceiling — "the web had nothing more" is a different story from "we
+        // stopped looking", and the coverage line depends on telling them apart.
+        let short: Vec<usize> = (0..10).collect();
+        let (read, attempts, _batches, halt) =
+            drive_read_loop(&short, DEFAULT_MAX_PAGES, DEFAULT_CORPUS_CHARS, 4_000, |_| {
+                true
+            });
+        assert_eq!(read.len(), 10);
+        assert_eq!(attempts, 10);
+        assert_eq!(halt, ReadHalt::CandidatesExhausted);
+    }
+
+    /// The wall clock is the one bound the read loop cannot decide for itself —
+    /// [`plan_read_batch`] knows nothing about time — so it has to hold from
+    /// outside the loop. With a much larger page budget it is also the bound most
+    /// likely to fire, which makes "stops the phase before it starts" load-
+    /// bearing rather than theoretical: an expired clock must not buy one more
+    /// batch of sixteen concurrent fetches.
+    #[tokio::test]
+    async fn an_expired_wall_clock_stops_a_phase_before_it_runs() {
+        let cancel = AtomicBool::new(false);
+        let ran = AtomicBool::new(false);
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("the monotonic clock is past the process start");
+        let verdict = guarded(&cancel, expired, async {
+            ran.store(true, Ordering::Relaxed);
+        })
+        .await;
+
+        assert_eq!(verdict, Err(StopReason::Deadline));
+        assert!(
+            !ran.load(Ordering::Relaxed),
+            "an expired deadline must short-circuit the phase, not merely end it sooner"
+        );
+
+        // Stop outranks a deadline that has not arrived: the same short-circuit,
+        // a different verdict, because a cancelled turn must not answer at all
+        // while an expired one still reports what it gathered.
+        cancel.store(true, Ordering::Relaxed);
+        let verdict = guarded(&cancel, Instant::now() + Duration::from_mins(1), async {}).await;
+        assert_eq!(verdict, Err(StopReason::Cancelled));
+    }
+
+    #[test]
+    fn whichever_bound_fired_is_the_one_named_in_the_log() {
+        // The bound log is the only record of why a 16-page run read four pages,
+        // so it must name the bound that actually fired. The wall clock outranks
+        // the loop's own verdict: when the clock stops the loop, `halt` still
+        // holds whatever `plan_read_batch` last said — or the initial value,
+        // when the search phase burned the clock and the loop never ran.
+        assert_eq!(
+            read_halt_code(false, ReadHalt::CandidatesExhausted),
+            "candidates-exhausted"
+        );
+        assert_eq!(
+            read_halt_code(true, ReadHalt::CandidatesExhausted),
+            "deadline"
+        );
+        assert_eq!(read_halt_code(false, ReadHalt::TargetMet), "target-met");
+        assert_eq!(read_halt_code(true, ReadHalt::TargetMet), "deadline");
+
+        // Five distinct tokens, so a log reader can group runs by cause.
+        let codes: BTreeSet<&str> = [
+            read_halt_code(false, ReadHalt::TargetMet),
+            read_halt_code(false, ReadHalt::CandidatesExhausted),
+            read_halt_code(false, ReadHalt::AttemptsExhausted),
+            read_halt_code(false, ReadHalt::CorpusFull),
+            read_halt_code(true, ReadHalt::TargetMet),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(codes.len(), 5);
+    }
+
     // --- honesty ----------------------------------------------------------
 
     #[test]
@@ -2938,6 +4431,8 @@ mod tests {
             relevance_fallback: false,
             read: 2,
             unread: 3,
+            page_target: 8,
+            halt: Some(ReadHalt::CandidatesExhausted),
             deadline_hit: true,
             corpus_exhausted: true,
         };
@@ -2977,6 +4472,160 @@ mod tests {
         assert!(!healthy_statement.contains("PARTIAL"));
     }
 
+    /// The defect the page target's raise introduced: the thin rule stayed the
+    /// absolute `read < 3` while the budget doubled, so a run that managed 4 of
+    /// 16 wanted pages reported adequate coverage. A coverage claim has to be
+    /// judged against the budget that was actually requested, or every raise
+    /// silently buys confidence instead of evidence.
+    #[test]
+    fn a_thin_run_is_judged_against_the_budget_it_asked_for_not_an_absolute_floor() {
+        // 4 of 16 is a quarter of the intended reading. The plan itself was
+        // healthy — every sub-query returned results — so the ONLY thing that can
+        // make this thin is the read ratio.
+        let quarter_of_the_budget = Coverage {
+            planned: 9,
+            with_results: 9,
+            found: 30,
+            read: 4,
+            unread: 26,
+            page_target: 16,
+            halt: Some(ReadHalt::AttemptsExhausted),
+            ..Coverage::default()
+        };
+        let statement = coverage_statement(&quarter_of_the_budget);
+        assert!(
+            statement.contains("THIN evidence base"),
+            "4 of 16 wanted pages is thin however comfortable 4 looked at a target of 8: \
+             {statement}"
+        );
+        assert!(
+            statement.contains("set out to read 16 page(s) and holds the text of 4"),
+            "the ratio itself must be stated, not just the adjective: {statement}"
+        );
+
+        // 14 of 16 is the run substantially doing what it set out to do. Calling
+        // that thin would be the opposite dishonesty, and it would train the
+        // reader to ignore the word.
+        let nearly_complete = Coverage {
+            read: 14,
+            unread: 16,
+            page_target: 16,
+            ..quarter_of_the_budget
+        };
+        let statement = coverage_statement(&nearly_complete);
+        assert!(!statement.contains("THIN"), "{statement}");
+        assert!(!statement.contains("NARROWER"), "{statement}");
+        assert!(
+            statement.contains("set out to read 16 page(s) and holds the text of 14"),
+            "{statement}"
+        );
+    }
+
+    /// The ratio is not a new policy — it is the old rule, unpinned from the
+    /// 8-page budget it was written against. If it disagreed with `read < 3`
+    /// there, this would be a judgement change wearing a refactor's clothes.
+    #[test]
+    fn the_proportional_thin_rule_reproduces_the_old_absolute_one_at_an_eight_page_target() {
+        assert_eq!(
+            evidence_band(0, 8),
+            EvidenceBand::Absent,
+            "0 is not thin — it is nothing"
+        );
+        assert_eq!(evidence_band(1, 8), EvidenceBand::Thin);
+        assert_eq!(evidence_band(2, 8), EvidenceBand::Thin);
+        assert_ne!(
+            evidence_band(3, 8),
+            EvidenceBand::Thin,
+            "`read < 3` stopped calling 3 thin at an 8-page target, and so must this"
+        );
+
+        // And it keeps meaning the same share of the run when the budget moves.
+        assert_eq!(evidence_band(4, 16), EvidenceBand::Thin);
+        assert_eq!(evidence_band(5, 16), EvidenceBand::Thin);
+        assert_ne!(evidence_band(6, 16), EvidenceBand::Thin);
+        assert_eq!(evidence_band(8, 16), EvidenceBand::Narrow);
+        assert_eq!(evidence_band(14, 16), EvidenceBand::Adequate);
+        assert_eq!(evidence_band(7, 24), EvidenceBand::Thin);
+
+        // No read phase ran at all, so there is no budget to divide by and the
+        // absolute floor is the most that case can honestly claim.
+        assert_eq!(evidence_band(2, 0), EvidenceBand::Thin);
+        assert_eq!(evidence_band(3, 0), EvidenceBand::Adequate);
+    }
+
+    /// "4 of 16" invites the reader to assume we ran out of time. Three of the
+    /// four bounds are not a time problem, and they call for different responses
+    /// — so the statement names the one that actually fired.
+    #[test]
+    fn a_short_run_names_the_bound_that_stopped_it() {
+        let short = Coverage {
+            planned: 9,
+            with_results: 9,
+            found: 30,
+            read: 4,
+            unread: 26,
+            page_target: 16,
+            halt: Some(ReadHalt::AttemptsExhausted),
+            ..Coverage::default()
+        };
+        assert!(
+            coverage_statement(&short).contains("fetch-attempt ceiling was spent"),
+            "the pages refused to yield text — not a time problem and not a search problem"
+        );
+
+        let exhausted = Coverage {
+            halt: Some(ReadHalt::CandidatesExhausted),
+            ..short
+        };
+        assert!(
+            coverage_statement(&exhausted).contains("no further relevant page to read"),
+            "the web ran out, not the budget — rephrasing helps, retrying does not"
+        );
+
+        let corpus_full = Coverage {
+            halt: Some(ReadHalt::CorpusFull),
+            ..short
+        };
+        assert!(
+            coverage_statement(&corpus_full).contains("evidence-character budget"),
+            "our own cap stopped this one"
+        );
+
+        let timed_out = Coverage {
+            deadline_hit: true,
+            ..short
+        };
+        let statement = coverage_statement(&timed_out);
+        assert!(
+            statement.contains("research time budget ran out"),
+            "{statement}"
+        );
+
+        // The deadline outranks whatever the loop last said, exactly as the
+        // `pages_read` log records it — one run cannot be told two stories.
+        assert_eq!(timed_out.halt_code(), Some("deadline"));
+        assert_eq!(exhausted.halt_code(), Some("candidates-exhausted"));
+        assert_eq!(Coverage::default().halt_code(), None);
+
+        // A run that met its target explains nothing, because there is nothing
+        // to explain.
+        let met = Coverage {
+            read: 16,
+            unread: 14,
+            halt: Some(ReadHalt::TargetMet),
+            ..short
+        };
+        let statement = coverage_statement(&met);
+        assert!(
+            !statement.contains("the read phase stopped because"),
+            "{statement}"
+        );
+        assert!(
+            statement.contains("set out to read 16 page(s) and holds the text of 16"),
+            "{statement}"
+        );
+    }
+
     #[test]
     fn coverage_counts_only_sources_whose_text_we_hold_as_read() {
         let mut sources = vec![
@@ -2986,7 +4635,7 @@ mod tests {
         ];
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 10_000);
-        let coverage = coverage_of(&sources, 3, 2, 1, GateReport::default(), false, false);
+        let coverage = coverage_of(&sources, 3, 2, 1, GateReport::default(), target_met(1));
         assert_eq!(coverage.found, 3);
         assert_eq!(coverage.read, 1);
         assert_eq!(coverage.unread, 2);
@@ -3007,7 +4656,7 @@ mod tests {
         sources[1].unread_reason = Some("JavaScript-rendered".to_owned());
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 10_000);
-        let coverage = coverage_of(&sources, 2, 2, 0, GateReport::default(), false, false);
+        let coverage = coverage_of(&sources, 2, 2, 0, GateReport::default(), target_met(1));
 
         let prompt = synthesis_prompt("hvor mange bor i oslo", &sources, &coverage);
         assert!(prompt.contains("[1] Title of https://read.no — https://read.no"));
@@ -3103,10 +4752,22 @@ mod tests {
             relevance_fallback: false,
             read: 5,
             unread: 4,
+            page_target: 16,
+            halt: Some(ReadHalt::AttemptsExhausted),
             deadline_hit: false,
             corpus_exhausted: false,
         };
-        let receipt = research_receipt(&["a".to_owned(), "b".to_owned()], &coverage, 12_000);
+        let mut sources = vec![
+            source("https://a.no", vec![0], 0),
+            source("https://b.no", vec![0], 1),
+        ];
+        sources[1].mark_unread(UnreadStatus::FetchFailed, "JavaScript-rendered");
+        let receipt = research_receipt(
+            &["a".to_owned(), "b".to_owned()],
+            &coverage,
+            12_000,
+            &sources,
+        );
         assert_eq!(receipt["sources_found"], 9);
         assert_eq!(receipt["sources_read"], 5);
         assert_eq!(receipt["sources_unread"], 4);
@@ -3114,11 +4775,23 @@ mod tests {
         assert_eq!(receipt["report_chars"], 12_000);
         assert_eq!(receipt["sub_queries"].as_array().map(Vec::len), Some(2));
         assert!(receipt["caps"]["max_pages"].is_number());
+        // The page budget is a success target, so the attempt ceiling has to be
+        // stated beside it or the receipt reads as "at most 8 fetches happened".
+        assert!(receipt["caps"]["max_read_attempts"].is_number());
         assert!(receipt["caps"]["corpus_chars"].is_number());
+        // Five reads is only judgeable next to the sixteen the run wanted, and
+        // next to the bound that ended it — the same token the `pages_read` log
+        // carries, so a receipt and a log line cannot tell different stories.
+        assert_eq!(receipt["pages_wanted"], 16);
+        assert_eq!(receipt["read_halt"], "attempts-exhausted");
+        // Unread sources carry their status as counts, not only as prose on
+        // each Kilder row.
+        assert_eq!(receipt["sources_unread_by_status"]["not-attempted"], 1);
+        assert_eq!(receipt["sources_unread_by_status"]["fetch-failed"], 1);
         // The report text itself is NOT in the receipt.
         let serialized = receipt.to_string();
         assert!(
-            serialized.len() < 600,
+            serialized.len() < 800,
             "receipt must stay compact: {serialized}"
         );
     }
@@ -3155,7 +4828,7 @@ mod tests {
         let mut sources = vec![read_source("https://a.no", "measured 42")];
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 10_000);
-        let coverage = coverage_of(&sources, 1, 1, 0, GateReport::default(), false, false);
+        let coverage = coverage_of(&sources, 1, 1, 0, GateReport::default(), target_met(1));
         let message = unsynthesized_context_message(
             "q",
             &sources,
@@ -3194,6 +4867,7 @@ mod tests {
     fn search_output_parsing_tolerates_the_shapes_web_search_actually_returns() {
         let hits = hits_from_search_output(
             2,
+            "a query",
             r#"[{"url":"https://a.no","title":"A","snippet":"s"},
                 {"url":"  ","title":"blank"},
                 {"title":"no url"},
@@ -3208,23 +4882,30 @@ mod tests {
         assert_eq!(hits[1].rank, 3);
         // A non-array (an error string that slipped through) yields nothing
         // rather than panicking.
-        assert!(hits_from_search_output(0, "not json").is_empty());
+        assert!(hits_from_search_output(0, "a query", "not json").is_empty());
     }
 
-    /// Quarry's reranker score must be picked up the moment the shared
-    /// `web_search` arm starts forwarding it, and its absence must read as
-    /// "not scored" rather than "scored zero" — which is the state of every
-    /// deployment today, since that arm currently projects results down to
-    /// `{url, title, snippet}`.
+    /// Quarry's reranker score and highlight passages must be picked up the
+    /// moment the shared `web_search` arm starts forwarding them, and their
+    /// absence must read as "not judged" rather than "judged zero" — which is
+    /// the state of every deployment today, since that arm currently projects
+    /// results down to `{url, title, snippet}`.
     #[test]
-    fn search_output_parsing_reads_a_reranker_score_when_one_is_present() {
+    fn search_output_parsing_reads_reranker_signals_when_they_are_present() {
         let hits = hits_from_search_output(
             0,
-            r#"[{"url":"https://a.no","title":"A","snippet":"s","score":0.91},
+            "oslo befolkning",
+            r#"[{"url":"https://a.no","title":"A","snippet":"s","score":0.91,
+                 "highlights":["Oslo hadde en befolkning på 720 000."]},
                 {"url":"https://b.no","title":"B","snippet":"s"}]"#,
         );
         assert_eq!(hits[0].score, Some(0.91));
+        assert_eq!(hits[0].highlight_overlap, Some(1.0));
         assert_eq!(hits[1].score, None, "absent is not zero");
+        assert_eq!(
+            hits[1].highlight_overlap, None,
+            "no highlights is not zero overlap"
+        );
     }
 
     #[test]
@@ -3284,44 +4965,29 @@ mod tests {
     fn observed_weather_noise() -> Vec<ResearchSource> {
         let hits = vec![
             SearchHit {
-                sub_query: 0,
-                rank: 0,
-                url: "https://www.instagram.com/p/Cx123/".into(),
                 title: "The best cafés in Paris".into(),
                 snippet: "Coffee, croissants and a corner table.".into(),
-                score: None,
+                ..hit(0, 0, "https://www.instagram.com/p/Cx123/")
             },
             SearchHit {
-                sub_query: 1,
-                rank: 0,
-                url: "https://www.fhi.no/publ/2024/skjelettalder/".into(),
                 title: "Skjelettalder som metode for aldersvurdering".into(),
                 snippet: "Rapport om metodens treffsikkerhet.".into(),
-                score: None,
+                ..hit(1, 0, "https://www.fhi.no/publ/2024/skjelettalder/")
             },
             SearchHit {
-                sub_query: 2,
-                rank: 0,
-                url: "https://www.tiktok.com/@parfyme/video/7301".into(),
                 title: "Min nye parfyme".into(),
                 snippet: "Denne dufter helt vilt godt.".into(),
-                score: None,
+                ..hit(2, 0, "https://www.tiktok.com/@parfyme/video/7301")
             },
             SearchHit {
-                sub_query: 3,
-                rank: 0,
-                url: "https://no.linkedin.com/in/ola-nordmann".into(),
                 title: "Ola Nordmann - Senior Consultant".into(),
                 snippet: "Erfaren rådgiver innen prosjektledelse.".into(),
-                score: None,
+                ..hit(3, 0, "https://no.linkedin.com/in/ola-nordmann")
             },
             SearchHit {
-                sub_query: 0,
-                rank: 1,
-                url: "https://www.yr.no/nb/v%C3%A6rvarsel/Oslo".into(),
                 title: "Været i Oslo - Yr".into(),
                 snippet: "Værvarsel for Oslo time for time.".into(),
-                score: None,
+                ..hit(0, 1, "https://www.yr.no/nb/v%C3%A6rvarsel/Oslo")
             },
         ];
         dedupe_hits(&hits)
@@ -3390,8 +5056,7 @@ mod tests {
     fn a_filtered_source_keeps_a_labelled_kilder_row_rather_than_vanishing() {
         let mut sources = observed_weather_noise();
         apply_relevance_gate("hva er været i Oslo i dag", &mut sources);
-        sources[4].extract = Some("Værvarsel for Oslo.".to_owned());
-        sources[4].unread_reason = None;
+        sources[4].mark_read("Værvarsel for Oslo.".to_owned());
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 100_000);
 
@@ -3429,11 +5094,10 @@ mod tests {
     fn counts_stay_truthful_when_the_gate_filters() {
         let mut sources = observed_weather_noise();
         let gate = apply_relevance_gate("hva er været i Oslo i dag", &mut sources);
-        sources[4].extract = Some("Værvarsel for Oslo.".to_owned());
-        sources[4].unread_reason = None;
+        sources[4].mark_read("Værvarsel for Oslo.".to_owned());
         let order = read_order(&sources);
         number_and_bound(&mut sources, &order, 100_000);
-        let coverage = coverage_of(&sources, 4, 4, 0, gate, false, false);
+        let coverage = coverage_of(&sources, 4, 4, 0, gate, target_met(1));
 
         assert_eq!(coverage.found, 5);
         assert_eq!(coverage.filtered, 4);
@@ -3464,12 +5128,9 @@ mod tests {
     fn the_gate_never_filters_everything_away() {
         let hits: Vec<SearchHit> = (0..6)
             .map(|index| SearchHit {
-                sub_query: 0,
-                rank: index,
-                url: format!("https://www.instagram.com/p/{index}/"),
                 title: "Sommerferie i Italia".into(),
                 snippet: "Bilder fra turen.".into(),
-                score: None,
+                ..hit(0, index, &format!("https://www.instagram.com/p/{index}/"))
             })
             .collect();
         let mut sources = dedupe_hits(&hits);
@@ -3481,7 +5142,19 @@ mod tests {
         assert!(surviving > 0, "the user must never get an empty result set");
         assert_eq!(gate.filtered, sources.len() - surviving);
 
-        let coverage = coverage_of(&sources, 1, 1, 0, gate, false, false);
+        let coverage = coverage_of(
+            &sources,
+            1,
+            1,
+            0,
+            gate,
+            ReadOutcome {
+                target: 1,
+                halt: ReadHalt::CandidatesExhausted,
+                deadline_hit: false,
+                corpus_exhausted: false,
+            },
+        );
         let statement = coverage_statement(&coverage);
         assert!(
             statement.contains("no source cleared the relevance bar"),

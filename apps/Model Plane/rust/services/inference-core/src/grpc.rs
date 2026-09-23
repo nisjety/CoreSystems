@@ -187,17 +187,18 @@ impl InferenceCore for InferenceService {
         request: Request<pb::InferRequest>,
     ) -> Result<Response<pb::InferResponse>, Status> {
         let principal = self.authorize(&request).await?;
+        let no_store = request.metadata().get("cache-control").is_some_and(|value| value == "no-store");
         let req = request.into_inner();
 
         let internal_req = to_internal_request(&req, &principal)?;
 
-        let result = self
-            .chain
-            .infer(&internal_req)
-            .await
-            .map_err(provider_error_to_status)?;
+        let result = if no_store {
+            self.chain.infer_without_response_cache(&internal_req).await
+        } else {
+            self.chain.infer(&internal_req).await
+        }.map_err(provider_error_to_status)?;
 
-        Ok(Response::new(pb::InferResponse {
+        let mut response = Response::new(pb::InferResponse {
             request_id: result.request_id,
             content: result.content,
             model_used: result.model_used,
@@ -207,6 +208,9 @@ impl InferenceCore for InferenceService {
             provider_used: result.provider_used,
             residency: result.residency,
             token_confidence: result.token_confidence.map(Into::into),
+            cache_read_input_tokens: result.cache_read_input_tokens,
+            cache_creation_input_tokens: result.cache_creation_input_tokens,
+            compaction_summary: result.compaction_summary,
             tool_calls: result
                 .tool_calls
                 .into_iter()
@@ -216,7 +220,9 @@ impl InferenceCore for InferenceService {
                     arguments_json: tc.arguments_json,
                 })
                 .collect(),
-        }))
+        });
+        if no_store { response.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata")); }
+        Ok(response)
     }
 
     type InferStreamStream = tokio_stream::wrappers::ReceiverStream<Result<pb::InferChunk, Status>>;
@@ -1018,6 +1024,7 @@ fn to_internal_request(
         .messages
         .iter()
         .map(|m| provider::ChatMessage {
+            compaction_summary: m.compaction_summary.clone(),
             role: m.role.clone(),
             content: m.content.clone(),
             name: m.name.clone(),
@@ -1036,6 +1043,7 @@ fn to_internal_request(
 
     Ok(provider::InferRequest {
         thinking_budget_tokens: req.thinking_budget_tokens,
+        prefer_priority_service_tier: req.prefer_priority_service_tier,
         request_id: req.request_id.clone(),
         provider_hint: req.provider_hint.clone(),
         model: req.model.clone(),

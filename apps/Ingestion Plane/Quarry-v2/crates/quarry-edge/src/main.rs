@@ -56,6 +56,61 @@ mod state;
 mod test_support;
 mod telemetry;
 
+/// How often the local-index maintenance task wakes. Short relative to the
+/// commit interval so the document-count trigger below reacts promptly during
+/// a crawl burst instead of waiting out a full interval.
+const LOCAL_INDEX_COMMIT_POLL: Duration = Duration::from_secs(1);
+/// Commit the local index at least this often. A crash loses at most this much
+/// recent corpus, which for a re-fetchable cache is an acceptable trade against
+/// committing on every document (each commit writes a segment).
+const LOCAL_INDEX_COMMIT_INTERVAL: Duration = Duration::from_secs(30);
+/// …or this many uncommitted documents, whichever comes first.
+const LOCAL_INDEX_COMMIT_DOCS: u64 = 200;
+/// How often to run the age/ceiling retention pass. Hourly: the bounds are
+/// measured in days and millions of documents, so a tighter cadence would only
+/// burn merge cycles.
+const LOCAL_INDEX_RETENTION_INTERVAL: Duration = Duration::from_secs(3_600);
+/// Upper bound on how long shutdown waits for the final commit.
+const LOCAL_INDEX_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Resolves when the process is asked to stop: Ctrl-C anywhere, or SIGTERM on
+/// unix (what Kubernetes and `docker stop` send).
+///
+/// Introduced with the local-index commit ticker — the edge previously ran
+/// `axum::serve(...).await` with no graceful shutdown at all, so there was no
+/// point at which any component could flush. Anything else needing a clean
+/// stop should hang off this same signal rather than adding a second one.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %e, "failed to install Ctrl-C handler");
+            // Never resolving is correct here: a broken handler must not be
+            // read as "shutdown requested".
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("shutdown: Ctrl-C received"),
+        _ = terminate => tracing::info!("shutdown: SIGTERM received"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -744,6 +799,69 @@ async fn main() -> anyhow::Result<()> {
         },
     };
 
+    // Durability for the local corpus. Tantivy's autocommit is driven by
+    // writer-heap pressure alone, so a low-traffic edge can hold every write
+    // since boot in memory and lose all of them when the container is
+    // recycled — which is what made the local tier look permanently empty in
+    // production while `add_document` was plainly succeeding.
+    //
+    // The ticker commits on whichever comes first: elapsed time or accumulated
+    // documents. The count trigger exists for the crawl case, where a single
+    // burst can add thousands of documents inside one interval.
+    let (index_shutdown_tx, index_shutdown_rx) = tokio::sync::watch::channel(false);
+    let index_commit_task = local_index.as_ref().map(|idx| {
+        let idx = idx.clone();
+        let mut shutdown = index_shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut poll = tokio::time::interval(LOCAL_INDEX_COMMIT_POLL);
+            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut since_commit = Duration::ZERO;
+            let mut since_retention = Duration::ZERO;
+            loop {
+                tokio::select! {
+                    _ = poll.tick() => {}
+                    _ = shutdown.changed() => {
+                        // Final flush: everything added since the last tick
+                        // would otherwise be lost, which is precisely the
+                        // window an operator-initiated restart lands in.
+                        if let Err(e) = idx.flush().await {
+                            tracing::warn!(error = %e, "local index: shutdown flush failed");
+                        } else {
+                            tracing::info!(docs = idx.doc_count(), "local index: flushed on shutdown");
+                        }
+                        return;
+                    }
+                }
+                since_commit += LOCAL_INDEX_COMMIT_POLL;
+                since_retention += LOCAL_INDEX_COMMIT_POLL;
+
+                let pending = idx.pending_writes();
+                if pending > 0
+                    && (since_commit >= LOCAL_INDEX_COMMIT_INTERVAL
+                        || pending >= LOCAL_INDEX_COMMIT_DOCS)
+                {
+                    match idx.flush().await {
+                        Ok(()) => tracing::debug!(pending, "local index: committed"),
+                        Err(e) => tracing::warn!(error = %e, "local index: commit failed"),
+                    }
+                    since_commit = Duration::ZERO;
+                }
+
+                if since_retention >= LOCAL_INDEX_RETENTION_INTERVAL {
+                    since_retention = Duration::ZERO;
+                    match idx.enforce_retention().await {
+                        Ok(outcome) => tracing::info!(
+                            evicted = outcome.evicted_by_ceiling,
+                            docs = outcome.docs_after,
+                            "local index: retention pass"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "local index: retention pass failed"),
+                    }
+                }
+            }
+        })
+    });
+
     // Cycle 19 / cluster #17: assemble the SearchProvider via
     // SmartSearchRouter — intent-aware routing with parallel widening,
     // per-provider circuit breakers, and a query-result TTL cache.
@@ -1319,7 +1437,25 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!(%addr, "quarry-edge-rs listening");
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Serve returned, so no new requests can add to the corpus. Signal the
+    // maintenance task and wait for its final commit — dropping straight out
+    // of `main` here would abort the task mid-flush and lose exactly the
+    // writes the ticker exists to protect.
+    let _ = index_shutdown_tx.send(true);
+    if let Some(task) = index_commit_task {
+        match tokio::time::timeout(LOCAL_INDEX_SHUTDOWN_FLUSH_TIMEOUT, task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "local index: commit task panicked"),
+            // A commit on a large index can outlive a tight orchestrator kill
+            // window; losing it is better than never exiting and being killed
+            // with -9 mid-write.
+            Err(_) => tracing::warn!("local index: shutdown flush timed out"),
+        }
+    }
     Ok(())
 }
 

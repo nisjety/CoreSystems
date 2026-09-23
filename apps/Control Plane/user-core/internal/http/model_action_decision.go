@@ -57,13 +57,8 @@ func (s *Server) issueModelActionView(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "model action authority is unavailable"})
 		return
 	}
-	evidence, err := s.spaceRepo.ResolveAgentActionDecisionEvidence(c.Request.Context(), authority.SpaceRef, authority.OrgID, authority.SubjectID)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "current Space authority is unavailable"})
+	evidence, ok := s.resolveRunActionEvidence(c, authority.SpaceRef, authority.OrgID, authority.SubjectID)
+	if !ok {
 		return
 	}
 	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
@@ -126,13 +121,8 @@ func (s *Server) issueRunActionDecision(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "run action authority is unavailable"})
 		return
 	}
-	evidence, err := s.spaceRepo.ResolveAgentActionDecisionEvidence(c.Request.Context(), authority.SpaceRef, authority.OrgID, authority.SubjectID)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "current Space authority is unavailable"})
+	evidence, ok := s.resolveRunActionEvidence(c, authority.SpaceRef, authority.OrgID, authority.SubjectID)
+	if !ok {
 		return
 	}
 	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
@@ -167,6 +157,21 @@ func (s *Server) issueRunActionDecision(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
 }
 
+// resolveRunActionEvidence loads current Space evidence for a resolved run
+// authority, writing the fail-closed response and returning ok=false on error.
+func (s *Server) resolveRunActionEvidence(c *gin.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, bool) {
+	evidence, err := s.spaceRepo.ResolveAgentActionDecisionEvidence(c.Request.Context(), spaceRef, orgID, subjectID)
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
+		return spaces.PersonalThreadDecisionEvidence{}, false
+	}
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "current Space authority is unavailable"})
+		return spaces.PersonalThreadDecisionEvidence{}, false
+	}
+	return evidence, true
+}
+
 // checkCurrentRunActionAuthority is the owner-plane freshness fence for a
 // previously signed run-action decision. The caller presents non-secret
 // claims only; Conversation Core has already verified the bearer and still
@@ -188,13 +193,8 @@ func (s *Server) checkCurrentRunActionAuthority(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid run action authority is required"})
 		return
 	}
-	evidence, err := s.spaceRepo.ResolveAgentActionDecisionEvidence(c.Request.Context(), decision.SpaceRef, decision.OrgID, decision.SubjectID)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
-		return
-	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "current Space authority is unavailable"})
+	evidence, ok := s.resolveRunActionEvidence(c, decision.SpaceRef, decision.OrgID, decision.SubjectID)
+	if !ok {
 		return
 	}
 	if err := spaces.ValidateCurrentRunActionDecision(evidence, decision); err != nil {

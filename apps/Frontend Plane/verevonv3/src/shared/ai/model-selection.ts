@@ -77,7 +77,8 @@ export async function resolveAiModelSelection(orgId: string): Promise<AiModelSel
     connection.status.trim().toLocaleLowerCase() === 'active'
       && connection.id === selected.subscriptionConnectionId,
   ) ?? connections.find((connection) => connection.status.trim().toLocaleLowerCase() === 'active')
-  return active ? { ...selected, subscriptionConnectionId: active.id } : selected
+  if (!active) throw new Error('ChatGPT-abonnementet er ikke tilkoblet. Koble til i Integrasjoner eller velg en annen modell.')
+  return { ...selected, subscriptionConnectionId: active.id }
 }
 
 export function resetAiModelSelectionForTests(orgId: string): void {

@@ -217,6 +217,7 @@ async fn append_user_message(
     goal: &str,
     bearer: Option<&str>,
     space: Option<&ThreadSpaceContext>,
+    conversation_only: bool,
 ) -> Result<(), tonic::Status> {
     let space = space.cloned().unwrap_or_else(|| ThreadSpaceContext {
         space_id: String::new(),
@@ -238,7 +239,9 @@ async fn append_user_message(
             thread_id: thread_id.to_owned(),
             role: "user".to_owned(),
             content: goal.to_owned(),
-            metadata: None,
+            metadata: conversation_only.then(|| prost_types::Struct {
+                fields: [("source_scope".to_owned(), json_to_prost_value(&serde_json::json!("conversation")))].into(),
+            }),
             agent_name: String::new(),
             space_id: space.space_id,
             space_decision_ref: space.space_decision_ref,
@@ -335,6 +338,7 @@ pub async fn prepare_managed_run_authenticated(
     bearer: &VerifiedSessionBearer,
     space: Option<&ThreadSpaceContext>,
     append_space: Option<&ThreadSpaceContext>,
+    conversation_only: bool,
 ) -> Result<SessionRun> {
     prepare_managed_run_with_bearer(
         state,
@@ -351,6 +355,7 @@ pub async fn prepare_managed_run_authenticated(
         Some(bearer.as_str()),
         space,
         append_space,
+        conversation_only,
     )
     .await
 }
@@ -388,6 +393,7 @@ pub(crate) async fn prepare_managed_run_with_token(
         Some(bearer),
         None,
         None,
+        false,
     )
     .await
 }
@@ -408,6 +414,7 @@ async fn prepare_managed_run_with_bearer(
     bearer: Option<&str>,
     space: Option<&ThreadSpaceContext>,
     append_space: Option<&ThreadSpaceContext>,
+    conversation_only: bool,
 ) -> Result<SessionRun> {
     let thread_id = if zdr {
         // Do not persist a caller-provided thread id or prompt before Session
@@ -430,7 +437,7 @@ async fn prepare_managed_run_with_bearer(
             .await?
         };
         if let Err(error) =
-            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space).await
+            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only).await
         {
             if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
                 tracing::info!(
@@ -446,7 +453,7 @@ async fn prepare_managed_run_with_bearer(
                     space,
                 )
                 .await?;
-                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space)
+                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only)
                     .await
                     .context("session-core append_message(user) failed")?;
             } else {
@@ -582,7 +589,7 @@ async fn prepare_run_with_bearer(
         .await?
     };
 
-    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None).await {
+    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None, false).await {
         if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
             tracing::info!(
                 requested_thread_id = %thread_id,
@@ -597,7 +604,7 @@ async fn prepare_run_with_bearer(
                 None,
             )
             .await?;
-            append_user_message(&mut client, &thread_id, goal, bearer, None)
+            append_user_message(&mut client, &thread_id, goal, bearer, None, false)
                 .await
                 .context("session-core append_message(user) failed")?;
         } else {
@@ -1078,11 +1085,35 @@ async fn append_assistant_message_with_bearer(
 /// A turn can have either, both, or neither. Returns `None` for neither, so an
 /// ungrounded turn stores no metadata rather than an empty object.
 ///
-/// Generated-image artifacts are deliberately excluded: on that path they are
-/// base64 data URIs, far too large to belong in a message metadata column.
+/// - `artifacts` — the turn's authored work product (documents, code, HTML),
+///   latest version per id, written under `artifacts` which the SPA reads as
+///   `turn.artifacts`. Before this, the durable read returned zero artifacts
+///   for a turn that had produced three (RUN-LOG finding 3): the panel was
+///   empty on any device but the one that streamed the turn.
+///
+/// Generated-image and file artifacts are deliberately excluded: on that path
+/// they are base64 data URIs, far too large to belong in a message metadata
+/// column (`RecordedArtifact::from_event` never records them).
+pub(crate) fn with_compaction_summary(
+    metadata: Option<prost_types::Struct>, summary: &str, zdr: bool,
+) -> Option<prost_types::Struct> {
+    if zdr || summary.trim().is_empty() || summary.len() > 128_000 { return metadata; }
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert("native_compaction_summary".to_owned(), json_to_prost_value(&serde_json::json!(summary)));
+    Some(metadata)
+}
+
+pub(crate) fn persisted_compaction_summary(metadata: Option<&prost_types::Struct>) -> String {
+    match metadata.and_then(|m| m.fields.get("native_compaction_summary")).and_then(|v| v.kind.as_ref()) {
+        Some(prost_types::value::Kind::StringValue(value)) if value.len() <= 128_000 => value.clone(),
+        _ => String::new(),
+    }
+}
+
 pub(crate) fn turn_evidence_metadata(
     grounding: Option<&crate::retrieval::Grounding>,
     citations: &[crate::sse_events::RecordedCitation],
+    artifacts: &[crate::sse_events::RecordedArtifact],
     quality: TurnQuality,
 ) -> Option<prost_types::Struct> {
     let mut fields = std::collections::BTreeMap::new();
@@ -1096,6 +1127,12 @@ pub(crate) fn turn_evidence_metadata(
     if !citations.is_empty() {
         if let Ok(value) = serde_json::to_value(citations) {
             fields.insert("citations".to_owned(), json_to_prost_value(&value));
+        }
+    }
+
+    if !artifacts.is_empty() {
+        if let Ok(value) = serde_json::to_value(artifacts) {
+            fields.insert("artifacts".to_owned(), json_to_prost_value(&value));
         }
     }
 
@@ -1145,6 +1182,18 @@ pub(crate) struct TurnVerification {
     pub(crate) web_allowed: bool,
 }
 
+/// Add an exact-result receipt to the same durable turn as the result itself.
+/// Retention and authenticated ownership remain those of the existing append.
+pub(crate) fn with_result_receipt(
+    metadata: Option<prost_types::Struct>,
+    receipt: Option<&serde_json::Value>,
+) -> Option<prost_types::Struct> {
+    let Some(receipt) = receipt else { return metadata; };
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert("resultReceipt".to_owned(), json_to_prost_value(receipt));
+    Some(metadata)
+}
+
 fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
     use prost_types::value::Kind;
     let kind = match value {
@@ -1189,6 +1238,7 @@ pub async fn append_queued_user_message(
     content: &str,
     bearer: &VerifiedSessionBearer,
     space: Option<&ThreadSpaceContext>,
+    conversation_only: bool,
 ) -> Result<(), tonic::Status> {
     let mut client = state.session_client.clone();
     append_user_message(
@@ -1197,6 +1247,7 @@ pub async fn append_queued_user_message(
         content,
         Some(bearer.as_str()),
         space,
+        conversation_only,
     )
     .await
     .map_err(|error| {
@@ -1221,6 +1272,18 @@ impl StringExt for String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_checkpoint_survives_durable_metadata_encoding_and_respects_zdr() {
+        use prost::Message;
+        let metadata = super::with_compaction_summary(None, "K3; 9 packed; 3 pending", false).unwrap();
+        let stored = metadata.encode_to_vec();
+        let reloaded = prost_types::Struct::decode(stored.as_slice()).unwrap();
+        assert_eq!(super::persisted_compaction_summary(Some(&reloaded)), "K3; 9 packed; 3 pending");
+        assert!(super::with_compaction_summary(None, "private source", true).is_none());
+        assert!(super::with_compaction_summary(None, &"x".repeat(128_001), false).is_none());
+        assert!(super::persisted_compaction_summary(None).is_empty());
+    }
+
     use super::{
         managed_goal, prepare_managed_run_with_token, terminalize_direct_inference_run_with_token,
         DirectInferenceTerminal, SessionRun,

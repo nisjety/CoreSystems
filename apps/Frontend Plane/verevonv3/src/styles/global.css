@@ -19690,6 +19690,29 @@ textarea:focus-visible {
   color: var(--panel);
 }
 
+/* Title row of the chunk panel: the document's name with its destructive
+   action pushed to the trailing edge, so "Slett fra kunnskapsbasen" reads as
+   an action ON the named document rather than a page-level control. */
+.knowledge-chunks-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.knowledge-chunks-panel__delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--verevon-danger, #b42318);
+}
+
+.knowledge-chunks-panel__delete:hover {
+  background: color-mix(in srgb, var(--verevon-danger, #b42318) 8%, transparent);
+}
+
 .knowledge-integration-card h3 {
   margin-top: 16px;
   font-size: 16px;
@@ -22935,7 +22958,8 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-attachment-workspace__table-wrap {
   max-height: min(62vh, 720px);
   overflow: auto;
-  background: #101217;
+  background: var(--verevon-i-surface);
+  color: var(--verevon-j-text);
 }
 
 .verevon-chat-attachment-workspace__table-wrap .verevon-chat-table {
@@ -22945,7 +22969,7 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-chat-attachment-workspace__table-wrap .verevon-chat-table caption {
   padding: 8px 14px;
-  color: var(--verevon-e-subtle);
+  color: var(--verevon-e-muted);
   font-size: 11px;
   text-align: left;
 }
@@ -22953,7 +22977,13 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-attachment-workspace__table-wrap .verevon-chat-table th,
 .verevon-chat-attachment-workspace__table-wrap .verevon-chat-table td {
   max-width: 30ch;
+  color: var(--verevon-j-text);
   overflow-wrap: anywhere;
+}
+
+.verevon-chat-attachment-workspace__table-wrap .verevon-chat-table th {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
 }
 
 .verevon-chat-attachment-workspace__unavailable {
@@ -24207,6 +24237,27 @@ body.verevon-chat-canvas-resizing * {
   color: var(--subtle);
 }
 
+/* The elapsed-wait counter (see ThinkingDots). Quieter than "Tenker" itself and
+   tabular, so a ticking second does not shuffle the words beside it. */
+.verevon-chat-thinking__elapsed {
+  color: var(--verevon-e-subtle, var(--subtle));
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* What the run is doing, beside the counter (see `deriveStreamActivity`). Same
+   quiet weight as the counter — a status line, not a second heading. Truncated
+   rather than wrapped: an MCP tool name is arbitrarily long, and a wrapping
+   label would push the transcript around on every tool call. */
+.verevon-chat-thinking__activity {
+  overflow: hidden;
+  max-width: 34ch;
+  color: var(--verevon-e-subtle, var(--subtle));
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .verevon-thinking-dots {
   display: inline-flex;
   align-items: center;
@@ -24521,6 +24572,10 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-chat-header {
+  /* The masked message list creates a stacking context. Keep header menus
+     above it so visible menu items can receive pointer input. */
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -25042,6 +25097,76 @@ body.verevon-chat-canvas-resizing * {
   border-radius: 0;
   margin: 0;
   background: transparent;
+}
+
+/* ── Markdown math (KaTeX) ──────────────────────────────────────────────────── */
+
+.verevon-chat-math--inline {
+  /* KaTeX's own CSS already sizes/aligns the formula; this only keeps a long
+     inline expression from forcing the surrounding line to scroll off-screen
+     on narrow widths — it wraps onto the next line like any other word. */
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: middle;
+}
+
+.verevon-chat-math--block {
+  margin: 4px 0 14px;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.verevon-chat-math--block:last-child {
+  margin-bottom: 0;
+}
+
+/* An unclosed `$$...$$` mid-stream, or one KaTeX rejected: shown as the raw
+   source, same chrome as an ordinary code block, so a broken expression
+   reads as "still text" rather than a rendering failure. */
+.verevon-chat-math-raw {
+  overflow: hidden;
+  overflow-x: auto;
+  border: 0;
+  border-radius: var(--chat-r-md, 12px);
+  margin: 4px 0 14px;
+  padding: 12px 16px;
+  background: var(--verevon-surface-soft);
+  box-shadow: var(--verevon-chat-shadow);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.verevon-chat-math-raw:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Markdown diagrams (Mermaid) ────────────────────────────────────────────── */
+
+.verevon-chat-mermaid {
+  overflow-x: auto;
+  margin: 4px 0 14px;
+  padding: 12px;
+  border-radius: var(--chat-r-md, 12px);
+  background: var(--verevon-surface-soft);
+  box-shadow: var(--verevon-chat-shadow);
+  text-align: center;
+}
+
+.verevon-chat-mermaid:last-child {
+  margin-bottom: 0;
+}
+
+.verevon-chat-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.verevon-chat-mermaid__placeholder {
+  padding: 8px 16px 16px;
+  color: var(--verevon-e-muted);
+  font-size: 13px;
 }
 
 /* ── Markdown tables (GFM pipe tables) ─────────────────────────────────────── */
@@ -26511,10 +26636,56 @@ body.verevon-chat-canvas-resizing * {
   text-decoration: none;
 }
 
+/* Read evidence and unread leads used to render as identical cards, so a
+   deep-research turn that read three of twenty-four pages looked like it had
+   read all of them (F-16). The unread group is deliberately flatter than the
+   cards above it: no shadow, no lift on hover, no invitation to read it as
+   evidence — it is a list of what was found, not of what was used. */
+.verevon-chat-source-tally {
+  color: var(--verevon-e-subtle);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.verevon-chat-source-group {
+  display: grid;
+  gap: 10px;
+}
+
+.verevon-chat-source-group__heading {
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.verevon-chat-source-group__note {
+  margin-top: -6px;
+  color: var(--verevon-e-subtle);
+  font-size: 12px;
+}
+
+.verevon-chat-source-group--unread .verevon-chat-source-card {
+  background: var(--verevon-surface-soft);
+  box-shadow: none;
+  padding: 12px 16px;
+}
+
+.verevon-chat-source-group--unread .verevon-chat-source-card:hover {
+  box-shadow: none;
+  transform: none;
+}
+
+.verevon-chat-source-group--unread .verevon-chat-source-card h2 {
+  color: var(--verevon-e-muted);
+  font-weight: 600;
+}
+
 /* ── Artefakter panel (artifact / canvas renderer) ─────────────────────────── */
 
-/* Artifact list beside the viewer. The breakpoint follows the resizable canvas
-   width, so a narrow Output panel keeps the rendered page usable. */
+/* Keep document tabs above the viewer until there is room for both the list
+   and a readable document. A 720px canvas left less than 400px for the result. */
 .verevon-chat-artifact-workspace {
   display: grid;
   min-height: 0;
@@ -26524,7 +26695,7 @@ body.verevon-chat-canvas-resizing * {
   padding: 20px 16px;
 }
 
-@container verevon-chat-workspace (min-width: 720px) {
+@container verevon-chat-workspace (min-width: 1024px) {
   .verevon-chat-artifact-workspace {
     grid-template-columns: 252px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
@@ -26539,7 +26710,7 @@ body.verevon-chat-canvas-resizing * {
   padding-bottom: 4px;
 }
 
-@container verevon-chat-workspace (min-width: 720px) {
+@container verevon-chat-workspace (min-width: 1024px) {
   .verevon-chat-artifact-list {
     overflow-x: hidden;
     overflow-y: auto;
@@ -26614,6 +26785,7 @@ body.verevon-chat-canvas-resizing * {
   display: grid;
   min-width: 0;
   min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }
@@ -26631,8 +26803,13 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-artifact-view__title {
   display: flex;
   min-width: 0;
+  max-width: 100%;
   align-items: flex-start;
   gap: 9px;
+}
+
+.verevon-chat-artifact-view__title > div {
+  min-width: 0;
 }
 
 .verevon-chat-artifact-view__icon {
@@ -26759,9 +26936,21 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-chat-artifact-view__body {
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: 16px;
+}
+
+/* Reports with many columns should scroll, rather than split figures and
+   short labels into almost one character per line. */
+.verevon-chat-artifact-view .verevon-chat-table {
+  table-layout: auto;
+}
+
+.verevon-chat-artifact-view .verevon-chat-table :is(th, td) {
+  min-width: 110px;
+  overflow-wrap: normal;
 }
 
 .verevon-chat-artifact-image {
@@ -41566,12 +41755,15 @@ body.verevon-chat-canvas-resizing * {
   transition: bottom 200ms ease;
 }
 
-/* The chat composer dock lives in this same corner and its height is
-   unbounded (autosizing textarea, up to 50vh expanded) -- ChatPage measures
-   it live and publishes --verevon-composer-dock-height so this trigger
-   always clears the send button instead of sitting on top of it. */
+/* Chat shows this panel only after an explicit action-menu request. */
 .feedback-widget--docked {
-  bottom: calc(var(--verevon-composer-dock-height, 0px) + 20px);
+  top: calc(var(--dashboard-navbar-height, 56px) + 12px);
+  bottom: auto;
+}
+
+.feedback-widget--docked .feedback-widget__panel {
+  max-height: calc(100dvh - var(--dashboard-navbar-height, 56px) - 32px);
+  overflow-y: auto;
 }
 
 .feedback-widget__trigger {
@@ -42295,6 +42487,171 @@ body.verevon-chat-canvas-resizing * {
 .verevon-ai-review-queue__empty h2 { margin-top: 10px; color: var(--ink); font-size: 16px; }
 .verevon-ai-review-queue__empty p { margin-top: 6px; line-height: 1.5; }
 
+/* Drafts surface (/support?surface=drafts). Shares the review queue's page
+   shape deliberately — same workspace, same reading width — but its rows lead
+   with the draft's own text rather than a metadata line, because the text is
+   what a reviewer is deciding about. */
+.verevon-drafts {
+  min-height: calc(100dvh - 132px);
+  padding: 28px clamp(16px, 4vw, 56px);
+  background: var(--panel);
+}
+
+.verevon-drafts__header,
+.verevon-drafts section {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.verevon-drafts__header { margin-bottom: 24px; }
+.verevon-drafts section + section { margin-top: 28px; }
+
+.verevon-drafts__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--verevon-accent-strong);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.verevon-drafts h1,
+.verevon-drafts h2,
+.verevon-drafts p { margin: 0; }
+
+.verevon-drafts h1 {
+  margin-top: 8px;
+  color: var(--ink);
+  font-size: clamp(22px, 3vw, 30px);
+  line-height: 1.18;
+}
+
+.verevon-drafts__header p {
+  margin-top: 8px;
+  color: var(--verevon-text-muted);
+  line-height: 1.5;
+}
+
+.verevon-drafts__section-title {
+  margin-bottom: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.verevon-drafts__list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-drafts__item {
+  padding: 16px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 12px;
+  background: var(--background);
+}
+
+.verevon-drafts__item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.verevon-drafts__item-head strong { color: var(--ink); font-size: 14px; }
+
+.verevon-drafts__status {
+  flex-shrink: 0;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Only the states a person still has to act on are tinted. Colouring every
+   status turns the list into a traffic light nobody reads. */
+.verevon-drafts__status[data-status="suggested"],
+.verevon-drafts__status[data-status="review"],
+.verevon-drafts__status[data-status="suggest_ticket"] { color: var(--verevon-accent-strong); }
+.verevon-drafts__status[data-status="failed"] { color: var(--danger); }
+
+/* The draft is prose that was written to be read as prose: newlines in the
+   stored body are meaningful, and collapsing them would show the reviewer
+   something other than what would be sent. */
+.verevon-drafts__body {
+  margin-top: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-drafts__missing {
+  margin-top: 8px;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.verevon-drafts__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.verevon-drafts__meta small { color: var(--subtle); font-size: 11px; }
+
+.verevon-drafts__open-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: var(--verevon-accent-strong);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.verevon-drafts__open-link:hover { text-decoration: underline; }
+
+.verevon-drafts__state,
+.verevon-drafts__empty {
+  max-width: 760px;
+  margin: 32px auto;
+  color: var(--verevon-text-muted);
+  text-align: center;
+}
+
+.verevon-drafts__state--error { color: var(--danger); }
+.verevon-drafts__empty svg { color: var(--verevon-accent-strong); }
+.verevon-drafts__empty h2 { margin-top: 10px; color: var(--ink); font-size: 16px; }
+.verevon-drafts__empty p { margin-top: 6px; line-height: 1.5; }
+
+.verevon-drafts__disclosure {
+  max-width: 760px;
+  margin: 20px auto 0;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dark .verevon-drafts { background: var(--ink); }
+.dark .verevon-drafts__item { background: var(--foreground); border-color: var(--verevon-dark-surface-soft); }
+.dark .verevon-drafts h1,
+.dark .verevon-drafts__section-title,
+.dark .verevon-drafts__item-head strong,
+.dark .verevon-drafts__body,
+.dark .verevon-drafts__empty h2 { color: var(--panel); }
+
 .dark .verevon-ai-review-queue { background: var(--ink); }
 .dark .verevon-ai-review-queue__item { background: var(--foreground); border-color: var(--verevon-dark-surface-soft); }
 .dark .verevon-ai-review-outcomes { background: color-mix(in srgb, var(--foreground) 88%, var(--verevon-accent-strong) 12%); border-color: var(--verevon-dark-surface-soft); }
@@ -42306,6 +42663,7 @@ body.verevon-chat-canvas-resizing * {
 
 @media (max-width: 640px) {
   .verevon-ai-review-queue { min-height: calc(100dvh - 112px); padding: 20px 16px; }
+  .verevon-drafts { min-height: calc(100dvh - 112px); padding: 20px 16px; }
   .verevon-ai-review-outcomes__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .verevon-ai-review-queue__item { align-items: flex-start; flex-direction: column; gap: 12px; }
 }
@@ -45018,6 +45376,76 @@ so it
   overflow-wrap: anywhere;
 }
 
+/* Per-entry correct/forget — the same "found it, act on it" affordance
+   Claude/ChatGPT give their own recalled-memory lists. Text buttons, not icon-
+   only: "Rediger"/"Glem" carry meaning `title` alone would hide from a reader
+   scanning quickly, and this list is already dense enough without a tooltip
+   round trip. */
+.verevon-chat-memory-recall__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+.verevon-chat-memory-recall__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.verevon-chat-memory-recall__action:hover:not(:disabled) {
+  color: var(--verevon-text);
+}
+
+.verevon-chat-memory-recall__action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Armed (needs a second click) and destructive-confirmed states both read as
+   "this is the one that removes something" — the same red used everywhere
+   else a destructive action is one click away. */
+.verevon-chat-memory-recall__action--danger {
+  color: var(--danger);
+}
+
+.verevon-chat-memory-recall__edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.verevon-chat-memory-recall__edit-textarea {
+  width: 100%;
+  min-height: 52px;
+  resize: vertical;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--verevon-text);
+  background: var(--verevon-surface);
+  border: 1px solid var(--verevon-border);
+  border-radius: var(--chat-r-sm, 8px);
+  padding: 6px 8px;
+}
+
+.verevon-chat-memory-recall__error {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--danger);
+}
+
 /* Chat — messages the user sent WHILE the agent was working.
    Every state is labelled in words as well as tinted: "venter", "levert til
    agenten" and "ikke levert" are the difference between a message the agent has
@@ -45994,6 +46422,11 @@ so it
   .dashboard-composer-root--chat .dashboard-composer-controls__right > span:not(.dashboard-composer-context-wrap),
   .dashboard-composer-root--chat .dashboard-composer-controls__right > button {
     display: none;
+  }
+
+  .dashboard-composer-root--chat .dashboard-composer-context-label--restricted {
+    display: inline;
+    font-size: 10px;
   }
 
   .dashboard-composer-root--chat .dashboard-composer-model-button {

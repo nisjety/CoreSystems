@@ -1,6 +1,7 @@
 package spaces
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -229,10 +230,5 @@ func TestTheProcessesClaimIsBoundIntoThePayloadDigest(t *testing.T) {
 }
 
 func hasPermissionInDecision(decision Decision, permission string) bool {
-	for _, granted := range decision.Permissions {
-		if granted == permission {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(decision.Permissions, permission)
 }

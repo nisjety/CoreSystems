@@ -18,6 +18,7 @@ import {
   isImageArtifact,
 } from '@/features/chat/components/chat-media-markdown'
 import { LOW_CONFIDENCE_ANSWER_THRESHOLD } from '@/features/chat/components/chat-types'
+import { deriveStreamActivity } from '@/features/chat/lib/stream-activity'
 import type { AnswerState, ChatTurn, ConversationNode } from './types'
 
 /**
@@ -31,7 +32,16 @@ import type { AnswerState, ChatTurn, ConversationNode } from './types'
  */
 function answerState(turn: ChatTurn, displayContent: string): AnswerState {
   const waiting = turn.status === 'waiting'
-  if (waiting && !turn.content && !turn.reasoning) return { state: 'pending' }
+  // `since` is the turn's createdAt, stamped locally when the request was sent,
+  // so the elapsed-wait counter is anchored to the turn rather than to whichever
+  // mount of the indicator happens to be current. See `AnswerState`.
+  if (waiting && !turn.content && !turn.reasoning) {
+    // Spread rather than `activity: … ?? undefined`: a turn that has reported
+    // no activity derives a node with no such key at all, so "nothing known
+    // yet" and "some activity" stay distinguishable by shape.
+    const activity = deriveStreamActivity(turn.toolCalls)
+    return { state: 'pending', since: turn.createdAt, ...(activity ? { activity } : {}) }
+  }
   if (turn.status === 'error') {
     return { state: 'failed', message: turn.content || 'Stream error' }
   }
@@ -97,7 +107,15 @@ export function deriveConversationNodes(
       // kilder" on turns with no sources at all -- a verification path that
       // does not exist (audit item 23). The hedge itself stays ungated: the
       // 2026-07-20 incident it exists for was an uncited answer.
-      hasEvidence: (turn.citations?.length ?? 0) > 0 || turn.grounding != null,
+      //
+      // A successful tool result IS evidence: a code-interpreter run that
+      // printed the figures, a weather lookup, a web fetch. Counting only
+      // citations produced "ingen kilder ble brukt" directly under an answer
+      // whose numbers the sandbox had just verified (RUN-LOG finding 12) — a
+      // caveat that contradicted the Arbeid panel one click away.
+      hasEvidence: (turn.citations?.length ?? 0) > 0
+        || turn.grounding != null
+        || (turn.toolCalls ?? []).some((call) => !call.error && call.status !== 'error' && call.status !== 'failed'),
     })
   }
   // Falsy count is dropped, not rendered as "recalled 0": the backend emits the

@@ -5,6 +5,7 @@ package codexsubscription
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -70,13 +71,14 @@ type ChatMessage struct {
 }
 
 type InvokeRequest struct {
-	ConnectionID    string        `json:"connectionId"`
-	RequestID       string        `json:"requestId"`
-	Model           string        `json:"model"`
-	Messages        []ChatMessage `json:"messages"`
-	MaxTokens       int           `json:"maxTokens"`
-	ReasoningEffort string        `json:"reasoningEffort"`
-	ServiceTier     string        `json:"serviceTier,omitempty"`
+	ConnectionID    string          `json:"connectionId"`
+	RequestID       string          `json:"requestId"`
+	Model           string          `json:"model"`
+	Messages        []ChatMessage   `json:"messages"`
+	MaxTokens       int             `json:"maxTokens"`
+	ReasoningEffort string          `json:"reasoningEffort"`
+	ServiceTier     string          `json:"serviceTier,omitempty"`
+	OutputSchema    json.RawMessage `json:"outputSchema,omitempty"`
 }
 
 type InvokeResponse struct {
@@ -267,6 +269,12 @@ func (m *Manager) prepareInvocation(request InvokeRequest) (string, InvokeReques
 	}
 	if strings.TrimSpace(request.ConnectionID) == "" || strings.TrimSpace(request.Model) == "" || len(request.Messages) == 0 {
 		return "", InvokeRequest{}, fmt.Errorf("%w: connectionId, model, and messages are required", ErrInvalidRequest)
+	}
+	if len(request.OutputSchema) > 0 {
+		var schema map[string]any
+		if len(request.OutputSchema) > 256*1024 || json.Unmarshal(request.OutputSchema, &schema) != nil || schema == nil || schema["type"] != "object" {
+			return "", InvokeRequest{}, ErrInvalidRequest
+		}
 	}
 	request.ReasoningEffort = strings.ToLower(strings.TrimSpace(request.ReasoningEffort))
 	if request.ReasoningEffort == "" {

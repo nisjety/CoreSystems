@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript } from './chat-normalizers'
+import { cancelledRunTurn, humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript } from './chat-normalizers'
+import type { RunDetail } from '@/shared/api/runs-client'
 import type { ChatTurn } from './chat-types'
 
 describe('summarizeToolArgs', () => {
@@ -204,6 +205,36 @@ describe('Support thread display continuity', () => {
       content: trailingText,
       createdAt: '2026-08-03T10:00:00.000Z',
     }).content).toBe(trailingText)
+  })
+})
+
+describe('durable cancellation without an accepted assistant message', () => {
+  const message = { id: '01M2ZNAY077NFJY543JZ2DJZTB', role: 'user' as const, content: 'Draft from sources.\n\nAttached text.', createdAt: '' }
+  const run: RunDetail = {
+    runId: '01M2ZNAY0W48WCREHFTGPKPNV2', threadId: 'thread', status: 'cancelled', mode: 'execute',
+    goal: `Draft from sources. Attached text. [full-goal-blake3:${'a'.repeat(64)}]`,
+    createdAt: '2026-09-20T15:00:45Z', updatedAt: '2026-09-20T15:00:54Z',
+    checkpointIndex: 0, stepsCompleted: 0, inputTokens: 0, outputTokens: 0,
+  }
+  it('projects only stopped status from the matching durable run', () => {
+    expect(cancelledRunTurn('thread', run.runId, message, run)).toMatchObject({
+      role: 'assistant', content: '', status: 'stopped', streaming: false,
+      runId: run.runId, tools: [], attachments: [], createdAt: run.updatedAt,
+    })
+    expect(cancelledRunTurn('thread', run.runId, message, run)?.requestId).toBeUndefined()
+    expect(cancelledRunTurn('thread', run.runId, message, run)?.artifacts).toBeUndefined()
+  })
+  it('does not borrow a previous, foreign, unbound, active or truncated run', () => {
+    for (const invalid of [
+      { ...run, runId: '01M2ZNAX0W48WCREHFTGPKPNV2' },
+      { ...run, threadId: 'other' }, { ...run, threadId: undefined },
+      { ...run, status: 'completed' }, { ...run, status: 'running' },
+      { ...run, parentRunId: 'parent' }, { ...run, goal: 'Draft from sources.' },
+    ]) expect(cancelledRunTurn('thread', invalid.runId, message, invalid)).toBeNull()
+    expect(cancelledRunTurn('thread', 'another-run', message, run)).toBeNull()
+    expect(cancelledRunTurn('thread', run.runId, { ...message, id: 'msg-0' }, run)).toBeNull()
+    expect(cancelledRunTurn('thread', run.runId, { ...message, content: 'A new question' }, run)).toBeNull()
+    expect(cancelledRunTurn('thread', run.runId, { ...message, id: '01M2ZNAY0W7NFJY543JZ2DJZTB' }, run)).toBeNull()
   })
 })
 

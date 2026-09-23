@@ -22,6 +22,7 @@ fn strip_extended_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Contract revision: native compaction checkpoint (inference.proto fields 4/13/14).
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let proto_root = strip_extended_prefix(
         std::path::Path::new(&manifest_dir)

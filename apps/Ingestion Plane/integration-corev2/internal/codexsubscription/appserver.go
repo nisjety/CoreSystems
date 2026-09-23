@@ -17,7 +17,7 @@ import (
 
 const (
 	codexReadOnlySandbox  = "read-only"
-	codexBaseInstructions = "You are Verevon's text-only assistant. Answer the supplied conversation directly. Do not use tools, access files, run commands, or modify anything. Return only the answer."
+	codexBaseInstructions = "You are Verevon's text-only assistant. Answer the supplied conversation directly. Do not execute tools, access files, run commands, or modify anything. When a supplied protocol requests structured tool proposals, return them as JSON data for Verevon to validate and execute. Otherwise return only the answer."
 )
 
 // ProcessRunner speaks the documented JSON-RPC-over-stdio Codex app-server
@@ -83,7 +83,9 @@ func (r *ProcessRunner) invoke(ctx context.Context, codeHome string, request Inv
 		return InvokeResponse{}, fmt.Errorf("create isolated codex workspace: %w", err)
 	}
 	var thread struct {
-		Thread struct {
+		Model         string `json:"model"`
+		ModelProvider string `json:"modelProvider"`
+		Thread        struct {
 			ID string `json:"id"`
 		} `json:"thread"`
 	}
@@ -92,6 +94,9 @@ func (r *ProcessRunner) invoke(ctx context.Context, codeHome string, request Inv
 	}
 	if strings.TrimSpace(thread.Thread.ID) == "" {
 		return InvokeResponse{}, errors.New("codex app-server did not return a thread id")
+	}
+	if err := validateServingModel(request.Model, thread.Model, thread.ModelProvider); err != nil {
+		return InvokeResponse{}, err
 	}
 	var turn struct {
 		Turn struct {
@@ -108,18 +113,29 @@ func (r *ProcessRunner) invoke(ctx context.Context, codeHome string, request Inv
 	if strings.TrimSpace(content) == "" {
 		return InvokeResponse{}, errors.New("codex subscription turn completed without text")
 	}
-	return InvokeResponse{RequestID: request.RequestID, Content: content, ModelUsed: request.Model}, nil
+	return InvokeResponse{RequestID: request.RequestID, Content: content, ModelUsed: thread.Model}, nil
+}
+
+func validateServingModel(requested, model, provider string) error {
+	if model != requested || provider != "openai" {
+		return errors.New("codex app-server did not preserve the selected subscription model and provider")
+	}
+	return nil
 }
 
 func threadStartParams(workspace string, request InvokeRequest) map[string]any {
 	params := map[string]any{
 		"cwd":              workspace,
 		"model":            request.Model,
+		"modelProvider":    "openai",
 		"approvalPolicy":   "never",
 		"sandbox":          codexReadOnlySandbox,
 		"serviceName":      "coresystem_integration_core",
 		"baseInstructions": codexBaseInstructions,
 		"ephemeral":        true,
+		// Tool proposals are JSON data for Model Gateway. The broker must not
+		// independently execute a shell or perform web searches for that data.
+		"config": map[string]any{"features.shell_tool": false, "features.unified_exec": false, "web_search": "disabled", "forced_login_method": "chatgpt"},
 	}
 	if request.ServiceTier != "" {
 		params["serviceTier"] = request.ServiceTier
@@ -138,6 +154,9 @@ func turnStartParams(threadID string, request InvokeRequest) map[string]any {
 	}
 	if request.ServiceTier != "" {
 		params["serviceTier"] = request.ServiceTier
+	}
+	if len(request.OutputSchema) > 0 {
+		params["outputSchema"] = request.OutputSchema
 	}
 	return params
 }

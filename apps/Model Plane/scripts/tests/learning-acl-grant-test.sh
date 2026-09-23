@@ -25,14 +25,21 @@ trap cleanup EXIT
 
 SESSION_PW="acl-test-session-core"
 CAPABILITY_PW="acl-test-capability-core"
+PROVISIONER_PW="acl-test-provisioner"
 
 # Every principal in the config needs a value or nats-server refuses to start;
-# only the two under test get distinct passwords.
+# only the three under test get distinct passwords. observability-provisioner-
+# model is needed from 2026-09-17 on: TestSkillReviewJetStreamACLGrant_
+# ProductionConfig provisions its own throwaway stream/consumer under its real,
+# exclusive $JS.API.STREAM.>/$JS.API.CONSUMER.> grant (mirroring nats-
+# provisioner's actual contract) before proving capability-core-runtime can
+# bind and ack it.
 docker run -d --name "$CONTAINER" -P \
   --tmpfs /data \
   -v "${CONF}:/etc/nats/nats.conf:ro" \
   -e "MODEL_SESSION_CORE_NATS_PASSWORD=${SESSION_PW}" \
   -e "MODEL_CAPABILITY_CORE_NATS_PASSWORD=${CAPABILITY_PW}" \
+  -e "MODEL_NATS_PROVISIONER_PASSWORD=${PROVISIONER_PW}" \
   -e "MODEL_GATEWAY_NATS_PASSWORD=unused" \
   -e "MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD=unused" \
   -e "MODEL_TOOL_COMPLETION_NATS_PASSWORD=unused" \
@@ -40,7 +47,6 @@ docker run -d --name "$CONTAINER" -P \
   -e "APPLICATION_CONVEX_MODEL_NATS_PASSWORD=unused" \
   -e "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD=unused" \
   -e "AUDIT_MODEL_NATS_PASSWORD=unused" \
-  -e "MODEL_NATS_PROVISIONER_PASSWORD=unused" \
   nats:2-alpine -c /etc/nats/nats.conf >/dev/null
 
 PORT="$(docker port "$CONTAINER" 4222/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1)"
@@ -63,6 +69,9 @@ docker logs "$CONTAINER" 2>&1 | grep -q "Server is ready" || {
 cd "$ROOT_DIR/go/services/capability-core"
 NATS_ACL_SESSION_CORE_URL="nats://session-core-runtime:${SESSION_PW}@127.0.0.1:${PORT}" \
 NATS_ACL_CAPABILITY_CORE_URL="nats://capability-core-runtime:${CAPABILITY_PW}@127.0.0.1:${PORT}" \
-  go test ./internal/sessionreview -run '^TestRunEventACLGrant_ProductionConfig$' -count=1 -v 2>&1 | tail -20
+NATS_ACL_PROVISIONER_URL="nats://observability-provisioner-model:${PROVISIONER_PW}@127.0.0.1:${PORT}" \
+  go test ./internal/sessionreview \
+    -run '^(TestRunEventACLGrant_ProductionConfig|TestSkillReviewJetStreamACLGrant_ProductionConfig)$' \
+    -count=1 -v 2>&1 | tail -30
 
 echo "learning ACL grant: ok"

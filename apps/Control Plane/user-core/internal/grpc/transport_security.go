@@ -61,7 +61,7 @@ func loadGRPCServerTransportCredentials(environment grpcTLSEnvironment) (credent
 	}
 	certificate, err := tls.X509KeyPair(certificatePEM, privateKeyPEM)
 	if err != nil {
-		return nil, fmt.Errorf("User Core gRPC TLS certificate and private key are invalid or mismatched")
+		return nil, fmt.Errorf("user-core gRPC TLS certificate and private key are invalid or mismatched")
 	}
 	return credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{certificate},

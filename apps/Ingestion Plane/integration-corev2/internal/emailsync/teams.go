@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"unicode"
 	"time"
 
 	"github.com/triodelab/integration-corev2/internal/store"
@@ -629,20 +630,91 @@ func (m teamsMessage) normalize(threadID, subject string, watermark time.Time, i
 	return msg, true
 }
 
+// Elements whose CONTENT is markup machinery rather than the message. Teams
+// HTML rarely carries them, but Outlook mail is mostly <style>: stripping only
+// the tags there would put a wall of CSS into body_text, which reads worse than
+// no body at all and poisons every downstream text consumer.
+var nonTextElements = []string{"style", "script", "head"}
+
 // stripHTMLTags is a minimal HTML→text rendering for the required body_text
-// field: drop tags, unescape entities, collapse surrounding whitespace.
+// field: drop non-text elements wholesale, drop the remaining tags, unescape
+// entities, and collapse whitespace.
+//
+// A tag becomes a SPACE rather than nothing: "<p>a</p><p>b</p>" is two words,
+// and concatenating them into "ab" is a silent corruption that no later
+// consumer can undo. The collapse afterwards keeps that from padding the text.
 func stripHTMLTags(s string) string {
+	for _, element := range nonTextElements {
+		s = dropElement(s, element)
+	}
 	var b strings.Builder
 	inTag := false
 	for _, r := range s {
 		switch {
 		case r == '<':
 			inTag = true
+			b.WriteRune(' ')
 		case r == '>':
 			inTag = false
 		case !inTag:
 			b.WriteRune(r)
 		}
 	}
-	return strings.TrimSpace(html.UnescapeString(b.String()))
+	return collapseWhitespace(html.UnescapeString(b.String()))
+}
+
+// dropElement removes every "<name ...> ... </name>" span, case-insensitively.
+//
+// An unclosed opening tag drops the REST of the document on purpose: an
+// unterminated <style> means everything after it would have rendered as CSS in
+// a browser, so carrying it into body_text would not be recovering content, it
+// would be inventing it.
+func dropElement(s, name string) string {
+	open, closing := "<"+name, "</"+name
+	from := 0
+	for {
+		lower := strings.ToLower(s)
+		relative := strings.Index(lower[from:], open)
+		if relative < 0 {
+			return s
+		}
+		start := from + relative
+		// `<head` is a prefix of `<header`, so a hit is only a real tag when a
+		// name boundary follows. Keep scanning past a near-miss rather than
+		// giving up: returning here would leave a later, genuine <head> in
+		// place purely because a <header> happened to come first.
+		if !isTagNameBoundary(lower, start+len(open)) {
+			from = start + len(open)
+			continue
+		}
+		end := strings.Index(lower[start:], closing)
+		if end < 0 {
+			// An unterminated <style> means everything after it would have
+			// rendered as CSS in a browser. Dropping the remainder is the
+			// honest reading; keeping it would invent message text.
+			return s[:start]
+		}
+		rest := s[start+end:]
+		gt := strings.Index(rest, ">")
+		if gt < 0 {
+			return s[:start]
+		}
+		s = s[:start] + rest[gt+1:]
+		from = start
+	}
+}
+
+func isTagNameBoundary(s string, index int) bool {
+	if index >= len(s) {
+		return false
+	}
+	// unicode.IsSpace rather than a list of rune literals: the whitespace
+	// that can follow a tag name is every ASCII space form, and spelling
+	// them out invites exactly one of them to be missed.
+	c := s[index]
+	return c == '>' || c == '/' || unicode.IsSpace(rune(c))
+}
+
+func collapseWhitespace(s string) string {
+	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
 }

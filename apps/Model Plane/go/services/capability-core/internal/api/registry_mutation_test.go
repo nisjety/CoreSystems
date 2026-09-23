@@ -357,3 +357,35 @@ func TestTaskCancellationRejectsTerminalTasksWithoutMaskingMissingTasks(t *testi
 		t.Fatalf("status = %d, body=%s, want 409", response.Code, response.Body.String())
 	}
 }
+
+// The bug this covers: a Go nil slice marshals to JSON `null`, and an org
+// with no safety policies configured — which is every org until one is set
+// up — used to return `{"policies": null}`. model-gateway's PII-redaction
+// lookup deserializes this into a non-optional `Vec<SafetyPolicy>`, and a
+// bare `null` fails that parse outright, so "no policies" and "the response
+// is corrupt" were indistinguishable, and both fell back to the fail-closed
+// default of redacting everything — including a user's own typed PII, with
+// a misleading "malformed" diagnostic. `emptyRows{}` (this file's stub DB
+// with no configured `.rows`) reproduces exactly that zero-row case.
+func TestSafetyPolicyListIsEmptyArrayNotNullWhenNoPoliciesExist(t *testing.T) {
+	database := &recordingDatabase{}
+	safety := NewSafetyHandler(database)
+	mux := http.NewServeMux()
+	safety.Register(mux)
+	handler, readToken, _ := mcpAuthenticatedHandler(t, mux)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/safety", nil)
+	request.Header.Set("Authorization", "Bearer "+readToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s, want 200", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, `"policies":null`) {
+		t.Fatalf("body = %s, want an empty array, never a null policies field", body)
+	}
+	if !strings.Contains(body, `"policies":[]`) {
+		t.Fatalf("body = %s, want an explicit empty array", body)
+	}
+}

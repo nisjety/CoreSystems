@@ -56,6 +56,17 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	if len(os.Args) > 1 {
+		if len(os.Args) != 3 || os.Args[1] != "--replay-learning-event" {
+			slog.Error("usage: capability-core [--replay-learning-event retained-event.json]")
+			os.Exit(2)
+		}
+		if err := replayLearningEvent(ctx, os.Args[2]); err != nil {
+			slog.Error("learning recovery failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	authConfig, err := authConfigFromEnv()
 	if err != nil {
@@ -189,7 +200,7 @@ func main() {
 	// capability events are v1-native (no legacy mapping).
 	var recPub publisher.EventPublisher
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
-		nc, nerr := nats.Connect(natsURL, natsAuthOptions()...)
+		nc, nerr := connectNATSWithRetry(natsURL)
 		if nerr != nil {
 			slog.Warn("NATS connect failed; capability reconcile events disabled", "error", nerr)
 		} else {
@@ -422,7 +433,20 @@ func main() {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}
 	if signer, signerErr := capserver.NewDecisionProofSignerFromEnv(); signerErr != nil {
-		slog.Warn("capability decision evidence signer unavailable; execution allow responses will lack per-call proof", "error", signerErr)
+		// Execution Core verifies per-call evidence whenever it is configured
+		// with our public key and refuses every unsigned "allow". A service
+		// that starts without the private key therefore looks healthy while
+		// silently denying every governed tool call (observed 2026-09-14: a
+		// container recreated outside the env chain lost the key, and every
+		// code_interpreter dispatch failed as "capability policy unavailable"
+		// for three days). Fail at startup instead; the only way to run
+		// unsigned is to say so explicitly.
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS")), "true") {
+			slog.Warn("capability decision evidence signer unavailable; running UNSIGNED because CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS=true — execution-core will deny allows if it verifies evidence", "error", signerErr)
+		} else {
+			slog.Error("capability decision evidence signer unavailable; refusing to start. Set CAPABILITY_CORE_DECISION_SIGNING_KEY (see deploy/.env.generated-secrets) or, for a deliberately unsigned dev run, CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS=true", "error", signerErr)
+			os.Exit(1)
+		}
 	} else {
 		capSrv.WithDecisionProofSigner(signer)
 		slog.Info("capability decision evidence signer enabled")
@@ -440,6 +464,34 @@ func main() {
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
 	_ = healthServer.Shutdown(context.Background())
+}
+
+// connectNATSWithRetry dials NATS with the same bounded retry
+// (60 attempts, 1s apart) services/nats-provisioner/main.go already uses for
+// its own connect, because "NATS is not accepting connections/auth yet" is a
+// known startup race across this stack's compose group, not a rare fault --
+// nats-provisioner already treats it as one. capability-core's connect here
+// used to be a single bare nats.Connect with no retry at all: verified live
+// on 2026-09-17, a transient "Authorization Violation" on the very first
+// dial attempt at boot (immediately re-dialing the SAME credentials moments
+// later succeeded, proving the credentials were never wrong) permanently
+// disabled reconcile events, the run-watch notify consumer, the task
+// completion consumer AND the G7 skill-review consumer for that process's
+// entire lifetime -- the only recovery was a full container restart. This
+// closes that: a transient failure now retries instead of giving up once.
+func connectNATSWithRetry(url string) (*nats.Conn, error) {
+	options := natsAuthOptions()
+	var nc *nats.Conn
+	var err error
+	for attempt := 1; attempt <= 60; attempt++ {
+		nc, err = nats.Connect(url, options...)
+		if err == nil {
+			return nc, nil
+		}
+		slog.Warn("NATS connect attempt failed; retrying", "attempt", attempt, "error", err)
+		time.Sleep(time.Second)
+	}
+	return nil, err
 }
 
 func natsAuthOptions() []nats.Option {
@@ -688,21 +740,30 @@ func taskExecutorEnabled(workflowBacked bool) bool {
 }
 
 // startLearningConsumer wires the G7 learning-review trigger on the shared
-// session-core + inference-core clients: spawn the RUN_COMPLETED consumer
-// (sessionreview). No-op when the clients are nil (backends unset) so the
-// service runs without the learning loop. The decode→review→persist core is
-// unit-tested; this subscribe wiring is e2e-verified only against the stack.
+// session-core + inference-core clients: bind the durable JetStream
+// RUN_COMPLETED consumer (sessionreview.RunConsumer, on
+// sessionreview.RunEventsStream/SkillReviewDurable -- must be pre-provisioned
+// by nats-provisioner). No-op when the clients are nil (backends unset) or
+// JetStream is unavailable, so the service runs without the learning loop
+// rather than failing to start. The decode→review→persist core is unit-tested;
+// this subscribe wiring is e2e-verified only against the stack.
 func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient) {
 	if sc == nil || ic == nil {
 		slog.Info("learning-review consumer disabled (session-core/inference-core not dialed)")
 		return
 	}
+	js, err := nc.JetStream()
+	if err != nil {
+		slog.Error("JetStream context unavailable; learning-review consumer disabled", "error", err)
+		return
+	}
 	model := os.Getenv("LEARNING_REVIEW_MODEL") // empty -> llmreviewer.DefaultModel
 	go func() {
-		if rerr := sessionreview.RunConsumer(ctx, nc, sc, ic, model); rerr != nil {
-			slog.Warn("learning-review consumer stopped", "error", rerr)
+		if rerr := sessionreview.RunConsumer(ctx, js, sc, ic, model); rerr != nil {
+			slog.Warn("learning-review consumer stopped (is it pre-provisioned on "+sessionreview.RunEventsStream+"?)", "error", rerr)
 		}
 	}()
+	slog.Info("learning-review consumer started", "stream", sessionreview.RunEventsStream, "durable", sessionreview.SkillReviewDurable)
 }
 
 // dialBackends dials session-core + inference-core once (guarded on

@@ -40,6 +40,9 @@ func TestPut_PostsCreateRequest(t *testing.T) {
 		t.Fatalf("memories = %d, want 1", len(gotBody.Memories))
 	}
 	m := gotBody.Memories[0]
+	if m.DiscreteMemoryExtracted != "t" {
+		t.Fatal("canonical memories must not spawn untracked inferred copies")
+	}
 	if m.ID != "m1" || m.Text != "hello world" || m.Namespace != "org1" ||
 		m.SessionID != "thread1" || m.MemoryType != "semantic" || m.UserID != "user1" {
 		t.Errorf("memory = %+v", m)

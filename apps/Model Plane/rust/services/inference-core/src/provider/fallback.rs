@@ -1095,6 +1095,16 @@ impl FallbackChain {
     ///
     /// Returns `ProviderError::AllExhausted` if every provider and retry is exhausted.
     pub async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        self.infer_with_response_cache(req, true).await
+    }
+
+    /// Fresh inference for checks that must not reuse or store a completed
+    /// response. Provider prefix caching and all route/privacy gates remain.
+    pub async fn infer_without_response_cache(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        self.infer_with_response_cache(req, false).await
+    }
+
+    async fn infer_with_response_cache(&self, req: &InferRequest, cache_response: bool) -> Result<InferResponse, ProviderError> {
         // Verevon intent layer: resolve a `verevon-*` mode to a concrete model
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
@@ -1108,9 +1118,11 @@ impl FallbackChain {
         validate_min_residency(req)?;
 
         // Check cache first
-        if let Some(cached) = self.cache.get(req) {
-            info!(request_id = %req.request_id, "cache hit");
-            return Ok(cached);
+        if cache_response {
+            if let Some(cached) = self.cache.get(req) {
+                info!(request_id = %req.request_id, "cache hit");
+                return Ok(cached);
+            }
         }
 
         let mut total_attempts: u32 = 0;
@@ -1148,7 +1160,7 @@ impl FallbackChain {
                     .infer_one_model(req, model, &mut total_attempts, &mut throttle)
                     .await
                 {
-                    self.cache.put(req, &response);
+                    if cache_response { self.cache.put(req, &response); }
                     return Ok(response);
                 }
             }
@@ -2070,6 +2082,7 @@ mod resolution_tests {
         async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
             *self.seen_model.lock().unwrap() = Some(req.model.clone());
             Ok(InferResponse {
+                compaction_summary: String::new(),
                 request_id: req.request_id.clone(),
                 content: "ok".to_owned(),
                 model_used: req.model.clone(),
@@ -2098,6 +2111,55 @@ mod resolution_tests {
             ..RecordingProvider::default()
         });
         FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
+    }
+
+    #[tokio::test]
+    async fn subscription_outage_never_reaches_an_api_provider_or_intent_ladder() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(503).set_body_json(serde_json::json!({"success":false,"error":{"code":"subscription_unavailable"}})))
+            .mount(&server).await;
+        let subscription: BoxedProvider = Arc::new(crate::provider::codex_subscription::CodexSubscriptionProvider::new(
+            server.uri(),"test-key",vec!["gpt-5.6-terra".into()]).unwrap());
+        let seen = Arc::new(Mutex::new(None));
+        let alternative: BoxedProvider = Arc::new(RecordingProvider { seen_model:seen.clone(), ..Default::default() });
+        let chain = FallbackChain::new_with_providers(vec![
+            ("openai-codex-subscription".into(),subscription), ("azure-openai".into(),alternative)
+        ],1).with_intent_enabled(true);
+        let request = InferRequest { request_id:"subscription-only".into(),model:"gpt-5.6-terra".into(),
+            provider_hint:"openai-codex-subscription".into(),subscription_connection_id:"connection".into(),
+            org_id:"org".into(),user_id:"user".into(),..Default::default() };
+        assert!(chain.infer(&request).await.is_err());
+        assert!(chain.infer_stream(&request).await.is_err());
+        assert!(seen.lock().unwrap().is_none(),"an unavailable subscription must never use another provider");
+        for sent in server.received_requests().await.unwrap() {
+            let body:serde_json::Value=serde_json::from_slice(&sent.body).unwrap();
+            assert_eq!(body["model"],"gpt-5.6-terra");
+            assert_eq!(body["connectionId"],"connection");
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_inference_neither_reads_nor_writes_response_cache_or_bypasses_zdr() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let mut request = InferRequest { model: "claude-sonnet-4-6".into(), ..Default::default() };
+        for id in ["fresh-1", "fresh-2"] {
+            request.request_id = id.into();
+            assert_eq!(chain.infer_without_response_cache(&request).await.unwrap().request_id, id);
+            assert_eq!(chain.cache.len(), 0);
+        }
+        request.request_id = "cached".into();
+        chain.infer(&request).await.unwrap();
+        assert_eq!(chain.cache.len(), 1);
+        request.request_id = "fresh-3".into();
+        assert_eq!(chain.infer_without_response_cache(&request).await.unwrap().request_id, "fresh-3");
+        // The original entry was neither read nor overwritten by fresh-3.
+        assert_eq!(chain.infer(&request).await.unwrap().request_id, "cached");
+        *seen.lock().unwrap() = None;
+        request.zdr = true;
+        assert!(chain.infer_without_response_cache(&request).await.is_err());
+        assert!(seen.lock().unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2160,6 +2222,7 @@ mod resolution_tests {
             request_id: "r3".to_owned(),
             model: "verevon-budget".to_owned(),
             messages: vec![crate::provider::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "hi".to_owned(),
                 name: String::new(),
@@ -2367,6 +2430,7 @@ mod resolution_tests {
             *self.reached.lock().unwrap() = true;
             let (tx, rx) = mpsc::channel(1);
             let chunk = InferChunk {
+                compaction_summary: String::new(),
                 request_id: req.request_id.clone(),
                 delta: String::new(),
                 done: true,
@@ -2380,6 +2444,8 @@ mod resolution_tests {
                 provider_used: String::new(),
                 residency: String::new(),
                 token_confidence: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             };
             tokio::spawn(async move {
                 let _ = tx.send(chunk).await;
@@ -2956,6 +3022,7 @@ mod resolution_tests {
         async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
             self.record(&req.model)?;
             Ok(InferResponse {
+                compaction_summary: String::new(),
                 request_id: req.request_id.clone(),
                 content: "ok".to_owned(),
                 model_used: req.model.clone(),
@@ -3015,6 +3082,7 @@ mod resolution_tests {
             request_id: request_id.to_owned(),
             model: model.to_owned(),
             messages: vec![crate::provider::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "Kan du sjekke i Visma hva vi har tomt på lager?".to_owned(),
                 name: String::new(),
@@ -3036,6 +3104,7 @@ mod resolution_tests {
     impl ProviderRouter for VersionEchoProvider {
         async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
             Ok(InferResponse {
+                compaction_summary: String::new(),
                 request_id: req.request_id.clone(),
                 content: "ok".to_owned(),
                 model_used: format!("{}-2024-07-18", req.model),
@@ -3059,6 +3128,7 @@ mod resolution_tests {
                 // carrying the versioned id — the real Azure shape.
                 let _ = tx
                     .send(InferChunk {
+                        compaction_summary: String::new(),
                         request_id: request_id.clone(),
                         delta: "hei".to_owned(),
                         done: false,
@@ -3070,10 +3140,13 @@ mod resolution_tests {
                         provider_used: String::new(),
                         residency: String::new(),
                         token_confidence: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
                     })
                     .await;
                 let _ = tx
                     .send(InferChunk {
+                        compaction_summary: String::new(),
                         request_id,
                         delta: String::new(),
                         done: true,
@@ -3085,6 +3158,8 @@ mod resolution_tests {
                         provider_used: String::new(),
                         residency: String::new(),
                         token_confidence: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
                     })
                     .await;
             });

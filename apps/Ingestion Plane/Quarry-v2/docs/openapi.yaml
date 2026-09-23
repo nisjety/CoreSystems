@@ -4151,9 +4151,64 @@ components:
         markdown:
           type: string
           nullable: true
+        structured:
+          $ref: '#/components/schemas/StructuredData'
         error:
           type: string
           nullable: true
+    StructuredData:
+      type: object
+      description: >-
+        Machine-readable facts harvested from the page's own markup — hydration
+        payloads, JSON-LD, microdata and tables — alongside the prose. Present
+        only when the page carried any, and independent of `status`: a
+        schema-guided extraction and a markdown one read the same page. Added
+        because readability strips `<script>` by design, which on a
+        hydration-rendered page (Enonic, Next.js, Nuxt) discards the very
+        figures the page exists to publish.
+      properties:
+        figures:
+          type: array
+          description: Labelled scalars, each with its unit and period where the page gave one.
+          items:
+            $ref: '#/components/schemas/StructuredKeyFigure'
+        tables:
+          type: array
+          items:
+            type: object
+        microdata:
+          type: array
+          items:
+            type: object
+        blobs:
+          type: array
+          description: Bounded raw JSON objects kept when no narrower shape fit.
+          items:
+            type: object
+        truncated:
+          type: boolean
+          description: >-
+            True when a size cap was hit, i.e. the page carried more than was
+            kept. A caller may treat it as a hint to escalate to a full render
+            rather than trusting a partial harvest.
+    StructuredKeyFigure:
+      type: object
+      required:
+      - label
+      - value
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+          description: Kept as a string; separators carry locale meaning (e.g. "729 437").
+        unit:
+          type: string
+        period:
+          type: string
+          description: >-
+            The period the figure describes. A figure without one is a correct
+            answer this quarter and a wrong one next.
     ExtractResponse:
       type: object
       required:

@@ -1,5 +1,7 @@
 # Verevon Chat Workspace — Start-to-Finish Implementation Plan
 
+> **Execution update — 2026-09-19:** Start with [product recording readiness](apps/Frontend%20Plane/verevonv3/docs/PRODUCT_RECORDING_READINESS_2026-09-19.md), [Q01–Q04 verification](apps/Frontend%20Plane/verevonv3/docs/PRODUCT_RECORDING_Q01_Q04_2026-09-19.md), [Q05–Q07 verification](apps/Frontend%20Plane/verevonv3/docs/PRODUCT_RECORDING_Q05_Q07_2026-09-19.md), and [Q08–Q10 execution](apps/Frontend%20Plane/verevonv3/docs/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md). The old authentication and attachment gaps have newer fixes/evidence. Campaign conformance, repeated release-build passes, connected business data, audit delivery and performance still prevent recording sign-off. Earlier checkpoints remain dated history, not an overall release certification.
+
 **Status:** Backend wiring checkpoint complete — A2A provider contract remains gated  
 **Date:** 2026-08-30  
 **Target:** `apps/Frontend Plane/verevonv3` and its same-origin gateway/runtime dependencies  
@@ -835,3 +837,108 @@ measurement — long tasks and frame timing during a real streamed turn — whic
 belongs in the chat-workspace e2e suite (`tests/e2e/chat-workspace.spec.ts`)
 once that suite can authenticate. Until then point 11 is *partly* evidenced,
 not met, and this section is the target it will be judged against.
+
+## 22. Verification against the definition of finished (2026-09-17)
+
+Re-checked against the code and the running stack. No code was changed in this
+pass. Only the points that were open in the design doc's 2026-09-06 cross-check
+(§9.4 there) are listed; the rest were confirmed done then and nothing has
+moved them.
+
+| # | Point | State on 2026-09-17 |
+|---|---|---|
+| 4 | Correct native viewer for PDFs, files, tables, HTML | Done (the generated-PDF half closed 2026-09-06). |
+| 9 | Streams resume without loss or duplication | Still **proven in code, not in an evaluation suite** — suite 8 is what would prove it, and it cannot run (below). |
+| 10 | A2A agents collaborate | **Not started**, as the plan prescribes. Zero real `a2a`/`agent_card` hits in the frontend plane or its gateway once word boundaries are applied (a looser grep produced two false positives inside unrelated identifiers — worth noting so it is not mistaken for progress). |
+| 11 | Solid rendering meets performance targets | **Partly.** The unit-level baseline in §21 exists and passes (O(1) in answer length). Browser-side paint/frame measurement is still absent, for the same reason as point 9. |
+| 12 | Keyboard, screen reader, zoom, reduced motion, mobile | Done (accessible-name localisation closed 2026-09-06). |
+| 14 | Legacy duplicate state and dead integration paths removed | **Open, unchanged.** `ag-ui-client.ts` still has zero production importers (its own test file is the only one). All seven "unproxied Model Plane" routes remain unproxied — realtime, translate, language, document-AI, `/v1/tasks`, `/v1/toon/encode` each have zero gateway mentions, and the one route the 09-06 check found mentioned (video) now has none either. |
+
+**Message pinning is now deployed.** The design doc's §9.7 recorded it as fully
+built and tested across every layer but running on pre-change containers —
+"the one thing between this and done in production." The 2026-09-17 rebuild
+carried session-core (08:02 UTC), model-gateway (08:02), `verevon-gateway-rs`
+(08:10) and the frontend (08:10); all four are healthy.
+
+**The evaluation suites are still the largest single gap, and the blocker is
+unchanged.** `tests/e2e/chat-workspace.spec.ts` exists (8 `test(` blocks by a
+direct count; the 09-06 note said nine — the difference was not chased) and is
+registered as the `chat` Playwright project, but it cannot authenticate:
+`build-verevon-services.sh` still defaults `SEED_DEV_ACCOUNT=0` and requires an
+operator-chosen password. That is an operator decision, correctly not taken
+here — but it gates the phase 4, 5, 10 and 11 exit criteria and points 9 and 11
+above, so it is the highest-leverage unblock in this document.
+
+**Against the reference systems the plan names** (Manus, Codex, Claude Code,
+Antigravity): still no subagents or parallel fan-out from chat, no scheduled or
+proactive tasks from chat, no A2A delegation — all three sit in phases 8–9 and
+none has started. The plan's own dependency order (§17) is still the right one:
+durable runs and receipts are done, so delegation is the next thing that
+becomes buildable, but it should follow the backend contract spike the plan
+already prescribes rather than a UI-first attempt.
+
+**Next steps, in order:** (1) decide on `SEED_DEV_ACCOUNT` so the e2e suite can
+run — it unblocks more than anything else here; (2) resolve AG-UI one way or the
+other — reach it or delete it, the 2026-09-02 "keep as planned" decision has now
+carried a fully built, unreachable transport for two weeks; (3) a product-intent
+decision per unproxied route, several of which likely belong deleted from the
+inventory; (4) the Phase 9 A2A backend spike.
+
+## 23. Decisions made and acted on — 2026-09-17, continued
+
+Three of the four next-steps above were decided the same day, not deferred again.
+
+**(1) `SEED_DEV_ACCOUNT` — enabled.** `SEED_DEV_ACCOUNT=1 SEED_DEV_PASSWORD=<disposable
+dev-only value>` run against `build-verevon-services.sh --from control` (idempotent —
+Control Plane was already healthy, only the seed step actually ran). The script's own
+promotion step (`UPDATE "user" SET role='superadmin', email_verified=true`) failed
+silently (`[seed] WARN: could not promote ... (continuing)`) — a pre-existing,
+minor script robustness gap, not investigated further here — and was applied by hand
+via `docker exec ... psql` instead, confirmed with a direct `SELECT` showing
+`role=superadmin, email_verified=t`. The `chat` Playwright project's own `local-setup`
+dependency (`tests/e2e/local-auth.setup.ts`) then authenticated for real —
+`ok 1 [local-setup] › authenticate local@verevon.dev (19.1s)` — closing the exact gate
+this section's own next-step named as "the highest-leverage unblock." The Playwright
+browser binary itself was also missing in this environment (`chromium_headless_shell`
+not installed) and was installed as a one-time prerequisite. The remaining 8
+`chat-workspace.spec.ts` tests were left running to completion separately.
+
+**(2) AG-UI — scoped down, not skipped.** Investigation (a dedicated research pass)
+found the adapter's *intended* real caller is an external, unauthenticated embeddable
+widget (a Channel Plane website/Shopify/WordPress widget — `apps/Channel Plane/docs/
+vision.md` describes this as the future runtime, but zero code exists there today,
+docs only), not Verevon's own chat UI. The current gateway route
+(`apps/gateway/src/domains/ag_ui.rs`, `POST /api/v1/ag-ui/stream`) requires a
+Better-Auth **session cookie** — the same middleware native chat uses — which has no
+path for a real unauthenticated external visitor. Building the actual external-embed
+consumer would mean designing a new scoped-API-key + origin-allowlist auth model *and*
+starting the Channel Plane runtime from nothing — correctly recognized as a much larger
+scope expansion than "reach it" implied, and not undertaken unprompted. Decided
+instead: wire Verevon's own chat client as a real (not test-only) caller of the
+existing session-cookie-gated route, as an internal/debug transport mode — proves the
+adapter genuinely works end-to-end against a real session, without inventing the
+external auth model. (Implementation tracked separately, sequenced after the chat
+frontend fix pass in flight the same day, to avoid two concurrent changes to
+`chat-client.ts`.)
+
+**(4) AI_FIRST_CREED_STATUS's Witness clause — checked live, in an authenticated
+session.** Navigated to `/chat` (not `/agents/runs` — see below) with the real,
+already-authenticated `Ima Fernandes Da Costa` / AQUATIQ AS session and opened an
+existing thread with real agentic history ("Matematikk: Multiplikasjon av tall"): the
+Work ("Arbeid") panel rendered **12 real work items** — `Tool: Code interpreter`,
+multiple `Tool: Web search` calls with real relevance-gate notes and timestamps,
+`Tool: Get statistics` (including a real upstream 502 surfaced honestly) — and the
+chat answer itself carried a genuine 79% confidence marker with a citation. This is
+live, first-party confirmation that the Witness surface renders real run activity
+for at least the per-thread path, not just a non-zero database count.
+Separately, `/agents/runs` (`AgentRunConsole.tsx`) was checked directly in code: its
+history rail has exactly two scopes, `'thread'` (this conversation's own runs) and
+`'system'` (comment at line 217: **"the org's cron-fired runs"**, not an aggregate
+of every run org-wide) — so there genuinely is no single page listing all 184 runs
+at once, confirming AI_FIRST_CREED_STATUS's own framing ("the console has plenty to
+witness," not "the console shows one flat list") rather than surfacing a new gap.
+The ticket-lane routing gap (a governed action landing only in conversation-core's
+tables, invisible to this console) was not re-investigated this pass.
+
+(3), the per-unproxied-route product-intent decision, was not picked up this pass —
+still open.

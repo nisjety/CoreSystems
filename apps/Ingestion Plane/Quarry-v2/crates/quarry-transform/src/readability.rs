@@ -25,6 +25,8 @@
 
 use scraper::{ElementRef, Html, Selector};
 
+use crate::charset::{self, charset_from_content_type, DecodedBody};
+
 /// Result of readability extraction. `content_html` is a sanitized HTML
 /// fragment suitable for `html2md::parse_html`.
 #[derive(Debug, Clone)]
@@ -141,6 +143,92 @@ pub fn extract(html: &str) -> Option<Readable> {
         byline,
         content_html,
     })
+}
+
+/// How far into the document we look for a `<meta charset>` declaration.
+/// The HTML spec only obliges a browser's pre-scan to cover the first 1024
+/// bytes, but we decode once, offline, with the whole body already in hand —
+/// and older public-sector pages routinely push the meta tag past 1 KB behind
+/// IE conditional comments and inline shims, so a 1 KB window would miss
+/// exactly the legacy documents that still depend on the declaration.
+const META_CHARSET_SCAN_BYTES: usize = 4096;
+
+/// Decode a raw HTTP response body into HTML text, taking the encoding from
+/// (in order) the `Content-Type` header's `charset=`, the document's own
+/// `<meta charset>` / `<meta http-equiv="Content-Type">` declaration, and
+/// finally a `chardetng` byte sniff.
+///
+/// Exists because fetchers that did `str::from_utf8(&bytes).ok()` dropped
+/// every ISO-8859-1 / windows-1252 page on the floor as if it had no content
+/// at all — still the common case on Norwegian municipal and older
+/// public-sector sites. Decoding here is lossy rather than fallible: a page
+/// with a handful of undecodable bytes is worth far more than no page, and
+/// callers that care can measure the `U+FFFD` share of the result.
+pub fn decode_html_body(body: &[u8], content_type: Option<&str>) -> DecodedBody {
+    if let Some(label) = content_type.and_then(charset_from_content_type) {
+        // Not blind trust: `charset::decode` sanity-checks the declared
+        // label against a prefix decode and sniffs anyway when it is a lie.
+        return charset::decode(body, Some(label));
+    }
+    let window = &body[..body.len().min(META_CHARSET_SCAN_BYTES)];
+    if let Some(label) = meta_charset(window) {
+        return charset::decode(body, Some(&label));
+    }
+    charset::decode(body, None)
+}
+
+/// Find the encoding label declared by a `<meta>` tag inside `prefix`.
+///
+/// One pass handles both spellings — `<meta charset="...">` and the legacy
+/// `<meta http-equiv="Content-Type" content="text/html; charset=...">` —
+/// because both put the literal `charset=` inside the tag and differ only in
+/// the surrounding quoting.
+fn meta_charset(prefix: &[u8]) -> Option<String> {
+    let lower = prefix.to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(rel) = find(&lower[from..], b"<meta") {
+        let tag_start = from + rel;
+        let tag_end = find(&lower[tag_start..], b">")
+            .map(|n| tag_start + n)
+            .unwrap_or(lower.len());
+        if let Some(label) = charset_attr_value(&lower[tag_start..tag_end]) {
+            return Some(label);
+        }
+        from = tag_end.max(tag_start + 1);
+    }
+    None
+}
+
+/// Read the `charset=` value out of one already-lowercased `<meta …>` tag.
+fn charset_attr_value(tag: &[u8]) -> Option<String> {
+    const KEY: &[u8] = b"charset=";
+    let mut from = 0usize;
+    while let Some(rel) = find(&tag[from..], KEY) {
+        let at = from + rel;
+        // A real declaration is always preceded by a delimiter; requiring
+        // that keeps framework attributes like `data-charset=` from being
+        // mistaken for the document's own encoding.
+        let inside_longer_attr_name = at
+            .checked_sub(1)
+            .is_some_and(|i| tag[i].is_ascii_alphanumeric() || tag[i] == b'-' || tag[i] == b'_');
+        if !inside_longer_attr_name {
+            let value: Vec<u8> = tag[at + KEY.len()..]
+                .iter()
+                .copied()
+                .skip_while(|b| matches!(b, b'"' | b'\'' | b' '))
+                .take_while(|b| !matches!(b, b'"' | b'\'' | b' ' | b';' | b'/' | b'>'))
+                .collect();
+            if !value.is_empty() {
+                return String::from_utf8(value).ok();
+            }
+        }
+        from = at + KEY.len();
+    }
+    None
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Convenience: extract and stringify directly to markdown via `html2md`.
@@ -446,6 +534,70 @@ mod tests {
             occurrences, 1,
             "the mobile/desktop hero variant should collapse to one copy, got markdown: {md}"
         );
+    }
+
+    /// `æ ø å` and `é` as ISO-8859-1 / windows-1252 single bytes. These are
+    /// not valid UTF-8, so a `str::from_utf8` fetcher saw the whole page as
+    /// unreadable and reported "no content".
+    const LATIN1_BODY: &[u8] =
+        b"<html><head><title>Kommune</title></head><body><main><p>Kafeen \xe5pner \
+          klokken ti. V\xe6rvarselet for \xf8ya er klart, og caf\xe9en holder \xe5pent \
+          hele helgen.</p></main></body></html>";
+
+    #[test]
+    fn decodes_latin1_body_declared_in_content_type() {
+        let out = decode_html_body(LATIN1_BODY, Some("text/html; charset=iso-8859-1"));
+        assert!(out.from_header, "header label should be honoured");
+        assert!(out.text.contains("åpner"));
+        assert!(out.text.contains("Værvarselet"));
+        assert!(out.text.contains("øya"));
+        assert!(out.text.contains("café"));
+    }
+
+    #[test]
+    fn decodes_latin1_body_declared_only_in_meta_tag() {
+        let body = b"<html><head><meta charset=\"ISO-8859-1\"><title>K</title></head>\
+             <body><p>Kafeen \xe5pner, og v\xe6rvarselet for \xf8ya er klart.</p></body></html>";
+        // No Content-Type at all — the document's own declaration is the
+        // only signal, which is the shape a bare file/proxy fetch has.
+        let out = decode_html_body(body, None);
+        assert!(out.text.contains("åpner"));
+        assert!(out.text.contains("værvarselet"));
+        assert!(out.text.contains("øya"));
+    }
+
+    #[test]
+    fn decodes_via_legacy_http_equiv_meta() {
+        let label = meta_charset(
+            b"<html><head><meta http-equiv=\"Content-Type\" \
+              content=\"text/html; charset=windows-1252\"></head>",
+        );
+        assert_eq!(label.as_deref(), Some("windows-1252"));
+    }
+
+    #[test]
+    fn meta_charset_ignores_lookalike_attribute_names() {
+        // `data-charset` is a framework attribute, not a declaration; picking
+        // it up would decode the page with whatever the app happened to store.
+        let label = meta_charset(b"<meta name=\"x\" data-charset=\"gbk\">");
+        assert_eq!(label, None);
+        let label = meta_charset(b"<meta data-charset=\"gbk\" charset=\"utf-8\">");
+        assert_eq!(label.as_deref(), Some("utf-8"));
+    }
+
+    #[test]
+    fn decode_falls_back_to_sniff_with_no_header_and_no_meta() {
+        let out = decode_html_body(LATIN1_BODY, None);
+        assert!(!out.from_header);
+        assert!(out.text.contains("åpner"), "sniff should recover latin-1");
+    }
+
+    #[test]
+    fn utf8_body_round_trips_unchanged() {
+        let body = "<html><body><p>Profesjonelle løsninger for næringen.</p></body></html>";
+        let out = decode_html_body(body.as_bytes(), Some("text/html; charset=utf-8"));
+        assert_eq!(out.text, body);
+        assert_eq!(out.encoding, "UTF-8");
     }
 
     #[test]

@@ -148,6 +148,9 @@ pub fn normalize(
             })),
         ));
     }
+    // Subscription tool decisions are constrained proposals executed only by
+    // the gateway. The separate orchestration, vision and browsing paths still
+    // lack this connection-aware contract and remain unavailable.
     if is_codex_subscription
         && (req.zdr
             || req
@@ -160,15 +163,12 @@ pub fn normalize(
             || req.deep_research
             || req.plan_mode
             || !req.tools.is_empty()
-            || req
-                .features
-                .iter()
-                .any(|feature| matches!(feature.as_str(), "agentic" | "tools")))
+            || req.features.iter().any(|feature| feature == "agentic"))
     {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "openai-codex-subscription supports text-only, non-ZDR chat without tools",
+                "error": "openai-codex-subscription supports text-only, non-ZDR chat without image generation, browsing, deep research, plan mode, or agentic tool specs",
             })),
         ));
     }
@@ -346,6 +346,32 @@ mod tests {
         assert!(
             normalize(&req).is_err(),
             "subscription provider must not run tools"
+        );
+    }
+
+    #[test]
+    fn subscription_provider_allows_the_tools_feature_but_not_agentic() {
+        // `tools` (the FEATURE, distinct from the `req.tools` client-declared
+        // specs covered above) enables sse.rs's server-side builtins
+        // (get_weather, code_interpreter, ...) via a tool-decision round that
+        // now runs through Verevon Balance for a subscription turn, never the
+        // broker — see `subscription_tool_round` in sse.rs. `agentic` has no
+        // such substitute (the orchestration-backed plan-mode run path) and
+        // must stay rejected.
+        let mut req = make_request("hello", None);
+        req.provider = Some("openai-codex-subscription".to_owned());
+        req.subscription_connection_id = Some("conn_example".to_owned());
+
+        req.features = vec!["tools".to_owned()];
+        assert!(
+            normalize(&req).is_ok(),
+            "the tools feature must reach a subscription turn for get_weather/code_interpreter parity"
+        );
+
+        req.features = vec!["tools".to_owned(), "agentic".to_owned()];
+        assert!(
+            normalize(&req).is_err(),
+            "agentic must still be rejected for a subscription turn"
         );
     }
 

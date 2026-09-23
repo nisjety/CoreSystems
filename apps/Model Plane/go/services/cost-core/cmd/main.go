@@ -69,15 +69,22 @@ type envelope struct {
 // usagePayload is the inner payload of a USAGE_ENVELOPE event. cost_usd and
 // run_id are optional: the gateway does not always emit them, in which case
 // they default to zero/empty and cost is derived elsewhere.
+//
+// CacheReadInputTokens / CacheCreationInputTokens are cache-token telemetry
+// (a native-compaction migration prerequisite); older gateway builds that
+// predate this field simply omit the JSON keys, which decodes to the correct
+// zero value here -- no version gate needed.
 type usagePayload struct {
-	RequestID    string  `json:"request_id"`
-	OrgID        string  `json:"org_id"`
-	UserID       string  `json:"user_id"`
-	RunID        string  `json:"run_id"`
-	Model        string  `json:"model"`
-	InputTokens  int64   `json:"input_tokens"`
-	OutputTokens int64   `json:"output_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
+	RequestID                string  `json:"request_id"`
+	OrgID                    string  `json:"org_id"`
+	UserID                   string  `json:"user_id"`
+	RunID                    string  `json:"run_id"`
+	Model                    string  `json:"model"`
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	CostUSD                  float64 `json:"cost_usd"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
 }
 
 func main() {
@@ -413,17 +420,19 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 	}
 
 	entry := ledger.Entry{
-		OrgID:          subjectOrgID,
-		UserID:         firstNonEmpty(p.UserID, env.UserID),
-		ProducerID:     env.Producer,
-		RunID:          p.RunID,
-		RequestID:      firstNonEmpty(p.RequestID, env.CorrelationID),
-		Model:          p.Model,
-		InputTokens:    p.InputTokens,
-		OutputTokens:   p.OutputTokens,
-		CostUSD:        p.CostUSD,
-		IdempotencyKey: env.IdempotencyKey,
-		CreatedAt:      createdAt,
+		OrgID:                    subjectOrgID,
+		UserID:                   firstNonEmpty(p.UserID, env.UserID),
+		ProducerID:               env.Producer,
+		RunID:                    p.RunID,
+		RequestID:                firstNonEmpty(p.RequestID, env.CorrelationID),
+		Model:                    p.Model,
+		InputTokens:              p.InputTokens,
+		OutputTokens:             p.OutputTokens,
+		CostUSD:                  p.CostUSD,
+		IdempotencyKey:           env.IdempotencyKey,
+		CreatedAt:                createdAt,
+		CacheReadInputTokens:     p.CacheReadInputTokens,
+		CacheCreationInputTokens: p.CacheCreationInputTokens,
 	}
 	if err := ledger.ValidateEntry(entry); err != nil {
 		return ledger.Entry{}, err

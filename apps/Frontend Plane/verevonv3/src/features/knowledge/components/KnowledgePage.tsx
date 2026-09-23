@@ -23,6 +23,7 @@ import {
   RotateCcw,
   Search,
   Table2,
+  Trash2,
   type LucideProps,
 } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component, untrack } from 'solid-js'
@@ -76,6 +77,7 @@ import {
 // finished ingesting) and then never again, leaving "Tracked web sources"
 // stuck on stale/empty data until a manual reload.
 import {
+  deleteDocument,
   listSharePointDrives,
   listSharePointFolders,
   listSharePointSites,
@@ -506,6 +508,50 @@ export default function KnowledgePage() {
       return null
     } finally {
       setOperatingMapLoading(false)
+    }
+  }
+
+  /**
+   * Remove one document from the knowledge base.
+   *
+   * Until this existed the knowledge base was append-only from the product:
+   * chat attachments are ingested as durable org-wide documents, and nothing in
+   * the UI could take one back out — a source pack uploaded once kept surfacing
+   * in unrelated conversations' knowledge search. Deletion is irreversible and
+   * affects everyone in the organization, so it is confirmed first and names
+   * the document being removed.
+   */
+  async function handleDeleteDocument(sourceId: string, title: string) {
+    const confirmed = window.confirm(
+      i18n.tr(
+        `Slette «${title}» fra kunnskapsbasen?\n\nDokumentet fjernes for hele organisasjonen og kan ikke gjenopprettes. Det vil ikke lenger dukke opp i kunnskapssøk.`,
+        `Delete "${title}" from the knowledge base?\n\nThe document is removed for the whole organization and cannot be restored. It will no longer appear in knowledge search.`,
+      ),
+    )
+    if (!confirmed) return
+    setBusyAction('delete-document')
+    setNotice(null)
+    try {
+      await deleteDocument(activeOrgId, sourceId)
+      // Clear the selection before refetching: the panel renders the selected
+      // source, and holding an id that no longer exists shows an empty detail
+      // pane instead of the list's next entry.
+      setSelectedSourceId(null)
+      await loadKnowledgeWorkspace()
+      setNotice({
+        tone: 'good',
+        message: i18n.tr(`«${title}» er slettet fra kunnskapsbasen.`, `"${title}" was deleted from the knowledge base.`),
+      })
+    } catch (error) {
+      setNotice({
+        tone: 'warn',
+        message: translateApiError(error, i18n.tr, {
+          no: `«${title}» kunne ikke slettes.`,
+          en: `"${title}" could not be deleted.`,
+        }),
+      })
+    } finally {
+      setBusyAction(null)
     }
   }
 
@@ -958,6 +1004,7 @@ export default function KnowledgePage() {
               selectedSource={selectedSource()}
               sources={visibleKnowledge()!.sources}
               onSelectSource={setSelectedSourceId}
+              onDeleteSource={handleDeleteDocument}
             />
           </Show>
         </Show>
@@ -1688,6 +1735,7 @@ function ChunksCanvas(props: {
   selectedSource: LiveKnowledgeSource | null
   sources: LiveKnowledgeSource[]
   onSelectSource: (sourceId: string) => void
+  onDeleteSource: (sourceId: string, title: string) => void
 }) {
   const i18n = useI18n()
   return (
@@ -1715,7 +1763,7 @@ function ChunksCanvas(props: {
           </Show>
         </div>
       </section>
-      <ChunksPanel source={props.selectedSource} />
+      <ChunksPanel source={props.selectedSource} onDelete={props.onDeleteSource} />
     </main>
   )
 }
@@ -1939,7 +1987,10 @@ function GraphInspectorPanel(props: {
   )
 }
 
-function ChunksPanel(props: { source: LiveKnowledgeSource | null }) {
+function ChunksPanel(props: {
+  source: LiveKnowledgeSource | null
+  onDelete: (sourceId: string, title: string) => void
+}) {
   const i18n = useI18n()
   return (
     <Show
@@ -1954,7 +2005,17 @@ function ChunksPanel(props: { source: LiveKnowledgeSource | null }) {
     >
       {(source) => (
         <section class="verevon-panel knowledge-chunks-panel">
-          <h2>{source.title}</h2>
+          <div class="knowledge-chunks-panel__header">
+            <h2>{source.title}</h2>
+            <button
+              type="button"
+              class="verevon-button verevon-button--ghost knowledge-chunks-panel__delete"
+              onClick={() => props.onDelete(source.id, source.title)}
+            >
+              <Trash2 class="size-4" />
+              {i18n.tr('Slett fra kunnskapsbasen', 'Delete from knowledge base')}
+            </button>
+          </div>
           <p>{source.description}</p>
           <div class="knowledge-tag-row">
             <For each={source.tags.concat(source.related).slice(0, 4)}>

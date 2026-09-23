@@ -694,6 +694,7 @@ impl ProviderRouter for OpenAiProvider {
         info!(model = %req.model, provider = "openai", "infer completed");
 
         Ok(InferResponse {
+            compaction_summary: String::new(),
             request_id: req.request_id.clone(),
             content,
             model_used,
@@ -705,6 +706,12 @@ impl ProviderRouter for OpenAiProvider {
             provider_used: String::new(),
             residency: String::new(),
             token_confidence,
+            // OpenAI-family usage carries no prompt-cache legs comparable to
+            // Anthropic's (this adapter does not parse
+            // `prompt_tokens_details.cached_tokens`); 0 is exact, not a
+            // placeholder.
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         })
     }
 
@@ -803,6 +810,7 @@ impl ProviderRouter for OpenAiProvider {
                             );
                             let _ = tx
                                 .send(InferChunk {
+                                    compaction_summary: String::new(),
                                     reasoning_delta: String::new(),
                                     request_id: request_id.clone(),
                                     delta: String::new(),
@@ -820,6 +828,11 @@ impl ProviderRouter for OpenAiProvider {
                                     provider_used: String::new(),
                                     residency: String::new(),
                                     token_confidence: token_logprobs.summarize(),
+                                    // This adapter does not parse OpenAI's
+                                    // `prompt_tokens_details.cached_tokens`; 0
+                                    // is exact, not a placeholder.
+                                    cache_read_input_tokens: 0,
+                                    cache_creation_input_tokens: 0,
                                 })
                                 .await;
                             return;
@@ -867,6 +880,7 @@ impl ProviderRouter for OpenAiProvider {
                             // only on [DONE] / stream end so the usage chunk is read.
                             if !delta.is_empty() {
                                 let chunk = InferChunk {
+                                    compaction_summary: String::new(),
                                     request_id: request_id.clone(),
                                     delta,
                                     done: false,
@@ -879,6 +893,8 @@ impl ProviderRouter for OpenAiProvider {
                                     residency: String::new(),
                                     // Answer-level; carried on the final chunk.
                                     token_confidence: None,
+                                    cache_read_input_tokens: 0,
+                                    cache_creation_input_tokens: 0,
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -897,6 +913,7 @@ impl ProviderRouter for OpenAiProvider {
             // would misreport an incomplete answer as a clean one.
             let _ = tx
                 .send(InferChunk {
+                    compaction_summary: String::new(),
                     reasoning_delta: String::new(),
                     request_id,
                     delta: String::new(),
@@ -917,6 +934,8 @@ impl ProviderRouter for OpenAiProvider {
                     // covers the tokens that actually arrived, which is what
                     // the caller scored.
                     token_confidence: token_logprobs.summarize(),
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 })
                 .await;
         });
@@ -1069,6 +1088,7 @@ mod tests {
             provider_hint: String::new(),
             model: model.to_owned(),
             messages: vec![crate::provider::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "hello".to_owned(),
                 name: String::new(),

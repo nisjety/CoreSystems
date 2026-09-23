@@ -1,5 +1,7 @@
 # AI-first creed — status, 2026-08-28
 
+> **Execution update — 2026-09-19:** The ratios below describe dated snapshots, not current product coverage. [The readiness assessment](PRODUCT_RECORDING_READINESS_2026-09-19.md) confirmed 167 registered action IDs and eight admitted mutation IDs; neither is universal task parity. [Q05–Q07](PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) verifies isolated scenario execution and scoped inbox/quote reads, with Visma/populated business knowledge still open. [Q08–Q10](PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) records current experience/media readiness. No connected ERP or flawless-product claim follows from the historical percentages.
+
 Four clauses, each re-derived from the current code and live databases rather
 than carried forward from the prior audit. Source commands are noted so the
 numbers can be regenerated, not just trusted.
@@ -958,3 +960,158 @@ engineering initiative across the plane boundaries that own those operations,
 not a single sitting — continuing to lower that bar isn't on the table, but
 grinding through it, plane by plane, action by action, is exactly the next
 piece of work.
+
+---
+
+## Re-verification — 2026-09-17
+
+All four clauses re-derived from the current code and the live databases,
+using the same commands the 2026-08-28 sections name. No code was changed.
+
+### Clause 1 · Contract — **slipped back under target: ~78.5% (157 of 200)**
+
+- Registry: **157** distinct ids in `src/shared/actions/action-registry.ts`
+  (was 155).
+- Mutating operations: **200** `method: POST|PUT|PATCH|DELETE` call sites
+  across **39** client modules in `src/shared/api/**/*.ts`, excluding tests
+  (was 188 across 39). The module count matching the earlier figure exactly is
+  the corroboration that the same thing is being measured.
+- Twelve new mutating operations landed with only two new contracts behind
+  them. This is precisely the drift Clause 1's own text warned about
+  ("the ratio held only because both sides grew together") — and this time it
+  did not hold. **Target ≥80% is no longer met.**
+- Next: enumerate the 12 uncovered operations (a registry-ids-vs-call-sites
+  diff) and write their entries the same way the 2026-08-28 batches did —
+  mechanical work, and the contract test will confirm each dispatcher exists.
+
+### Clause 2 · Capability — 8 of 200, **~4.0%**
+
+The eligible set is unchanged (`MODEL_EXECUTABLE_ACTION_IDS` still holds the
+same eight). The percentage moved down only because the denominator grew.
+`social.decide_approval`, `social.schedule_post` and
+`tickets.record_csat_outcome` remain built, locally verified, committed and
+**not pushed** — still pending a real green CI run before admission, exactly
+as recorded at session close-out.
+
+### Clause 3 · Parity — tracks Clause 2, ~4.0%
+
+Unchanged in mechanism; moves for free with Capability.
+
+### Clause 4 · Witness — **the factual basis is stale**
+
+The 2026-08-28 finding rests on `runs = 0, threads = 0, messages = 0` in
+session-core. Live today:
+
+```
+runs      = 184
+threads   = 86
+messages  = 330
+```
+
+Session-core now holds substantial real activity (chat, deep research and
+agentic runs from the intervening sessions). The statement "0 runs, ever" is
+false today and should not be repeated. The event log also holds 147
+`RUN_COMPLETED`, 36 `RUN_FAILED` and 1 `RUN_CANCELLED` — the console has plenty
+to witness.
+
+What has **not** changed is the routing gap that was the sharper half of the
+finding: `AgentRunConsole` still reads `runs-client` (`AgentRunConsole.tsx:87`,
+`listRuns` at `:259`), and the ticket lane still never opens a session-core run,
+so a governed action that lands only in conversation-core's tables still has no
+path onto this console.
+
+Next: (1) confirm in an authenticated browser session that the console actually
+renders these 184 runs — that could not be done in this pass without a session
+bearer, and the number being non-zero is not the same as the surface showing
+it; (2) close the ticket-lane routing gap so conversation-core receipts become
+witnessable. The clause stays "unproven" until (1) is done, but for the right
+reason now rather than a stale one.
+
+---
+
+## 2026-09-17, continued — Contract closed back over target, Capability's tractable backlog moved once more, Witness (1) done
+
+### Clause 1 · Contract — **78.5% → 83.5% (167 of 200), target re-met**
+
+The 12-new/2-covered drift from earlier the same day was exactly 10 genuinely
+uncovered operations (12 landed, 2 already had contracts — the doc's own
+arithmetic already implied this). All 10 were in modules previously recorded
+as fully closed (`chat-client.ts`, `knowledge-client.ts`, `spaces-client.ts` —
+spaces alone accounted for 8 of 10), confirming this was the exact "grew
+without a contract" drift Clause 1 warns about, not a new category of gap.
+
+Closed: `chat.upload_document`, `knowledge.register_sharepoint_source`,
+`spaces.update_thread_presentation`, `spaces.mark_read`,
+`spaces.record_presence`, `spaces.set_agent_state`, `spaces.revoke_agent`,
+`spaces.create_room` (a new, distinct registry id from
+`spaces.create_personal_space` — same route/handler, but the registered zod
+input for the personal-space id had no `kind` discriminator, so room creation
+was semantically uncovered even though the URL wasn't new), `spaces.add_member`,
+`spaces.remove_member`. Every dispatcher reuses the real, already-tested owner
+handler (bumped to `pub(crate)` where needed) — zero new Rust business logic,
+matching every prior batch's pattern.
+
+Verified independently: action-surface contract test passes with the registry
+now at 167 ids ↔ 167 dispatchers (was 157↔157); `cargo check` on the gateway
+crate clean; the full gateway `domains::` sweep **374 passed, 0 failed** (was
+307 as of the last full count, growth consistent with both this batch and
+concurrent unrelated work in the same tree); the frontend action-registry
+suite passes (one transient vitest-worker timeout on the first attempt, caused
+by CPU contention with a concurrent `cargo test` compile — resolved on retry,
+not a real regression).
+
+**Scoping note for whoever commits this**: the four core files (registry,
+dispatchers, handlers, plus the org.restore test below) are individually
+clean, but this working tree currently carries a large amount of *other*,
+already-in-progress uncommitted work (a capability-bearer fix, a new
+`correct_memory` dispatcher, a new document-delete route, chat-node changes)
+from concurrent sessions — none of it caused by this batch, none of it should
+be swept in by an unscoped `git add`.
+
+### Clause 2 · Capability — the tractable backlog moved again: `org.restore`'s forged-actor gap closed
+
+Of the remaining partial-credit candidates, `org.restore` was the strongest:
+its owner-side mechanism (`org-core`'s `RestoreOrganization`, real idempotent
+fencing) already has a genuine, **pushed and CI-live** Postgres integration
+test (`.github/workflows/org-service.yml`, confirmed merged to `origin/main`
+via `git merge-base --is-ancestor`) — unlike the three built-but-unpushed
+candidates from the prior session (`social.decide_approval`,
+`social.schedule_post`, `tickets.record_csat_outcome`, still pending a push).
+What was missing was purely gateway-side: `require_org_admin`'s role check had
+zero tests anywhere in the crate, for org.restore or its siblings alike.
+
+Added two tests to `orgs/deletion.rs`'s existing test module: a non-admin
+member in the correct org, and an admin authorized for the *wrong* org, both
+proving a stable `403 forbidden` **before** `proxy_json` ever reaches org-core
+(both assert on real membership fixtures against the actual `restore` handler,
+with `org_core_url` pointed at an unreachable address — a gate that stopped
+working would hang or 502, never return a clean instant 403). `cargo test
+domains::orgs::deletion::tests` — 5 passed (2 new + 3 pre-existing URL-format
+tests), 0.01s, no `DATABASE_URL` gate, genuinely exercised.
+
+**Not admitted to `MODEL_EXECUTABLE_ACTION_IDS`** — as with the prior
+recalibration round, proving the test exists is kept separate from the
+decision to formally admit it. `soft_delete` was deliberately left untouched
+(same reasoning as before: irreversible, deserves its own explicit policy
+call, not bundled into a test-writing pass). Capability itself stays 8/200 —
+this closes evidence, not eligibility, until someone makes that separate call.
+
+### Clause 4 · Witness — (1) done, live, in an authenticated session
+
+Opened `/chat` as the real, already-authenticated `Ima Fernandes Da Costa` /
+AQUATIQ AS session and picked an existing thread with real agentic history:
+the Work ("Arbeid") panel rendered **12 real work items** — a code-interpreter
+call, several web-search calls with real relevance-gate notes and timestamps,
+a "Get statistics" call (including an honest surfaced upstream 502) — plus a
+genuine 79%-confidence answer with a citation. This is live, first-party
+confirmation that the console renders real run activity, not just a non-zero
+row count in a database.
+
+Separately (a `/agents/runs` code read, not a live click-through): confirmed
+`AgentRunConsole`'s history rail has exactly two scopes — `'thread'` (the
+current conversation's own runs) and `'system'`, which its own code comment
+defines as **"the org's cron-fired runs"**, not an aggregate of every run
+org-wide. So there genuinely is no single page listing all 184 runs at once —
+this confirms the doc's own framing ("the console has plenty to witness," not
+"shows one flat list") rather than exposing a new gap. (2), the ticket-lane
+routing gap itself, was not touched this pass.

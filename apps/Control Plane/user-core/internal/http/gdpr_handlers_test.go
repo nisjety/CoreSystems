@@ -35,7 +35,7 @@ func newGDPRTestContext(t *testing.T, method, path, body, userID, role string) (
 
 // TestHardEraseRequiresConfirm is the core safety guard: an authorized
 // hard-erase request WITHOUT confirm:true must be rejected (400) and must NOT
-// reach the (nil) service — proving the confirm gate fires before any work.
+// reach the (nil) service — proving the confirmation gate fires before any work.
 func TestHardEraseRequiresConfirm(t *testing.T) {
 	s := &Server{} // userService nil — a service call would panic, so reaching it fails loudly.
 
@@ -133,7 +133,7 @@ func TestHardEraseAdminCanTargetAnotherUser(t *testing.T) {
 	}
 }
 
-// TestActorRole covers the audit actor_role labelling.
+// TestActorRole covers the audit actor_role labeling.
 func TestActorRole(t *testing.T) {
 	if got := actorRole(true, false); got != "admin" {
 		t.Errorf("admin actor = %q, want admin", got)

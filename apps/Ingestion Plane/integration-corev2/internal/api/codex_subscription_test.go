@@ -42,7 +42,7 @@ func TestCodexSubscriptionInferIsScopedAndNeverLeasesAToken(t *testing.T) {
 		CodexSubscriptions: manager,
 	})
 
-	body := `{"organizationId":"org-1","userId":"user-1","connectionId":"conn-subscription","requestId":"req-1","model":"gpt-codex","messages":[{"role":"user","content":"hello"}]}`
+	body := `{"organizationId":"org-1","userId":"user-1","connectionId":"conn-subscription","requestId":"req-1","model":"gpt-5.6-terra","outputSchema":{"type":"object"},"messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/internal/model-subscriptions/openai-codex/infer", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-API-Key", "codex-subscription-test-key")
@@ -66,6 +66,9 @@ func TestCodexSubscriptionInferIsScopedAndNeverLeasesAToken(t *testing.T) {
 		t.Fatalf("response=%+v invocations=%d", decoded.Data.Response, runner.invocations)
 	}
 
+	if string(runner.lastRequest.OutputSchema) != `{"type":"object"}` || runner.lastRequest.Model != "gpt-5.6-terra" || runner.lastRequest.ConnectionID != "conn-subscription" {
+		t.Fatal("structured output lost the verified subscription route")
+	}
 	// A service caller cannot substitute another user for the same opaque id.
 	mismatch := httptest.NewRequest(http.MethodPost, "/internal/model-subscriptions/openai-codex/infer", strings.NewReader(strings.Replace(body, "user-1", "user-2", 1)))
 	mismatch.Header.Set("Content-Type", "application/json")
@@ -199,6 +202,7 @@ func TestCodexSubscriptionInferMarksMissingAuthenticationForReconnect(t *testing
 }
 
 type apiCodexRunner struct {
+	lastRequest codexsubscription.InvokeRequest
 	invocations int
 	invokeErr   error
 }
@@ -209,6 +213,7 @@ func (r *apiCodexRunner) BeginDeviceLogin(context.Context, string) (codexsubscri
 
 func (r *apiCodexRunner) Invoke(_ context.Context, _ string, request codexsubscription.InvokeRequest) (codexsubscription.InvokeResponse, error) {
 	r.invocations++
+	r.lastRequest = request
 	if r.invokeErr != nil {
 		return codexsubscription.InvokeResponse{}, r.invokeErr
 	}

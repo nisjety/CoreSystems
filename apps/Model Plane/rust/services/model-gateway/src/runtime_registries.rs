@@ -224,8 +224,23 @@ impl McpRegistry {
 
 #[derive(Debug, Deserialize)]
 struct CatalogMcpResponse {
-    #[serde(default)]
+    /// `deserialize_with`, not a bare `#[serde(default)]`: serde's `default`
+    /// fills a MISSING key and rejects an explicit `null`, and "no servers
+    /// registered" is exactly when a JSON producer is most likely to send one
+    /// (Go marshals a nil slice as `null` — capability-core did, and an empty
+    /// registry 503'd the entire MCP surface). Both sides are fixed; this half
+    /// means a future producer regressing to `null` degrades to "no servers"
+    /// instead of taking the feature down.
+    #[serde(default, deserialize_with = "null_as_empty_vec")]
     servers: Vec<CatalogMcpServer>,
+}
+
+fn null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// The tenant capability-core uses for servers offered to every org. Its rows

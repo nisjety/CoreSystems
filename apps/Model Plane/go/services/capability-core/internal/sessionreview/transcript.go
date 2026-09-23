@@ -47,6 +47,10 @@ func (s *SessionCoreTranscriptSource) Fetch(
 	if err != nil {
 		return "", nil, fmt.Errorf("sessionreview: list conversation for thread %s: %w", ref.ThreadID, err)
 	}
+	transcript := RenderTranscript(convo.GetMessages())
+	if transcript == "" {
+		return "", nil, nil
+	}
 	skills, err := s.client.ListAgentSkills(ctx, &mpv1.ListAgentSkillsRequest{
 		OrgId:       ref.OrgID,
 		EnabledOnly: false,
@@ -54,7 +58,7 @@ func (s *SessionCoreTranscriptSource) Fetch(
 	if err != nil {
 		return "", nil, fmt.Errorf("sessionreview: list agent skills for org %s: %w", ref.OrgID, err)
 	}
-	return RenderTranscript(convo.GetMessages()), toExistingSkills(skills.GetSkills()), nil
+	return transcript, toExistingSkills(skills.GetSkills()), nil
 }
 
 // RenderTranscript renders conversation turns as a readable transcript for the
@@ -62,6 +66,11 @@ func (s *SessionCoreTranscriptSource) Fetch(
 // format — refine if review quality calls for richer rendering (e.g. tool
 // call/result framing).
 func RenderTranscript(msgs []*mpv1.SessionMessage) string {
+	for _, m := range msgs {
+		if m.GetMetadata().GetFields()["source_scope"].GetStringValue() == "conversation" {
+			return ""
+		}
+	}
 	var b strings.Builder
 	for _, m := range msgs {
 		b.WriteString(strings.ToUpper(m.GetRole()))

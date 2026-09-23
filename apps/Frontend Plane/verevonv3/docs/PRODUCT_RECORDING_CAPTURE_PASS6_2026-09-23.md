@@ -1,0 +1,37 @@
+# Recording pass 6: complete project journey, separate note and readable plan
+
+**Release remains blocked.** The project scenario now has five consecutive complete private browser journeys on the final gateway image and a private edited preview from the fifth passing take. Earlier runs exposed source-validation timeouts and two false rejections in the browser oracle; the final fixes need broader qualification. None of the four scenarios has a qualified five-run **release** streak. The 20 public media fields remain empty. Every live inference in this pass used only `gpt-5.6-terra` through `openai-codex-subscription`, with no Claude, Verevon Balanced, API fallback or automatic capture retry.
+
+## Changes kept
+
+- A request for a new sourced internal note must create a **separate checked artifact**. The tool loop does not offer `update_artifact` for that pending request, rejects a colliding ID/title, and preserves the prior plan. Reading the sole existing artifact returns its full content, then the author proceeds to `create_artifact`. The project browser test now verifies separate IDs and receipts plus both saved artifacts after reload. This closes the v30 defect where a superficially green browser run overwrote the plan with the note.
+- The subscription tool schema requires at least one call when a tool is required and constrains named-tool choices. This fixed v29's `subscription proposal violates tool choice or call limit` route failure while keeping the same Terra subscription connection.
+- The plan author now uses one compact, four-column table so task/date, role, dependency and completion criterion fit the recorded result panel. Guidance and local checks keep conditional schedule dates separate from actual approval, target dates separate from decision dates, and repair ownership separate from verification ownership. The source reviewer remains high-effort on the priority Terra subscription tier and still independently checks the complete corrected document under the original 90-second artifact deadline.
+- The short-note author is instructed to keep two risks and one first decision source-bound, preserve conditions on technical repairs, and avoid invented approval or delivery state.
+- The project oracle accepts source-faithful Norwegian ways to say repair time was not specified. It still rejects an invented minimum repair duration. The recording exporter now normalizes the final caption endpoint to avoid floating-point rounding rejecting a valid edit plan.
+
+Temporary fixture-scoped diagnostic logging was used to identify specific unsupported claims and removed from the final source. No unchecked draft was published when a review timed out.
+
+## No-retry private project evidence
+
+| Takes | Result and lesson |
+| --- | --- |
+| v26–v30 | v26 saved a plan but answered the REGI note only in chat. v27–v28 exposed first-draft/source-oracle problems. v29's follow-up hit the subscription tool schema defect. v30's browser test passed but the note overwrote the plan; it is **not** a valid complete journey. |
+| v31–v34 | Three complete passes on one build; v34 timed out after a second full recheck found another unsupported claim. The series broke at 3. |
+| v35–v36 | A higher-effort author passed once, then timed out on the next first draft. The higher-effort author experiment was removed; high-effort source review was retained. |
+| v37–v40 | Compact drafting passed three complete journeys on one build, then v40 timed out after repeated source rechecks. A 179.68-second raw v37 take yielded a labeled 34.68-second private preview. |
+| v41–v42 | The four-column plan passed once and became fully readable at 1440×900; the next take timed out on a third source review. A 207.48-second raw v41 take yielded a labeled 34.44-second private preview with captions. |
+| v43–v45 | Diagnostic build: v43 and v44 passed; v45 timed out. Fixture-scoped logs identified three recurring first-draft errors: an unknown decision called unconfirmed, verification assigned to the repair owner, and a pilot target date attached to the project-lead decision. |
+| v46–v48 | v46 passed on a clean build. v47 was falsely rejected by the oracle despite explicitly saying repair duration was not specified; that wording check was fixed. v48's plan passed, but the separate note needed repeated source repairs and timed out. |
+| v49–v52 | Three complete passes after note guidance, then v52's truthful “Varighet for feilretting er ikke oppgitt” was falsely rejected by the oracle. The same saved plan called the 28 September internal review date “vedtatt” without source approval; a focused local date-label guard and author guidance now prevent that overclaim. The v52 take remains failed. |
+| v53–v57 | **Five consecutive complete private passes** on final gateway image `sha256:d5c2ceba6f568d1c018984032cda28cd4bed0a77668830ea0f3883bce91ed9c6`, with the same fixtures, `gpt-5.6-terra` subscription route and no automatic retry. Each passed initial plan, distinct checked REGI note and server reload. This is a private rehearsal series, not the qualified release series. |
+
+All raw reports and failed takes are retained privately under `C:/Users/ImaFernandesDaCosta/.codex/visualizations/2026/09/19/01a0b94f-be34-7aa3-8714-e90cb61181bc/recordings-pass8/`. The latest private preview is `project-preview-v57/short.mp4`; its `raw.webm`, `captions.vtt`, `raw-captions.vtt`, poster and `media-review.json` are in the same directory. It shows actual UI output from the fifth accepted take on the final gateway image and is explicitly labeled **not publication approved**. The prior v37 and v41 previews are retained as historical evidence, not counted toward the final-build series.
+
+## Verification and next gates
+
+- Gateway library: **1,281 passed, one ignored**, including the new approval-label regression. Inference Core after the required-tool schema fix: **292 passed**. Frontend strict TypeScript passed. The private recording exporter decoded both the 137.88-second raw v57 file and 34.52-second edited film, verified their hash/length and retained the original 25 fps source. Frame review confirmed the four-column table, separate status note and both artifacts after reload. A successful media export is not an editorial approval.
+- The final build completed five fresh private full journeys after the date-label guard. Observed plan response times were **44.0–116.0 s** (median 60.3 s); note response times were **29.3–45.5 s** (median 35.3 s). Five observations are too few to establish a product p95, and the 116-second plan is materially slow for a marketing demonstration. Do not count passes from earlier image IDs toward a release streak or reinterpret the v47/v52 failed browser reports as passing captures after an oracle fix.
+- Select a stable release build and run all four exact scenarios with unchanged fixtures, no automatic retries, and five consecutive complete passes each. Then set and measure product p50/p95 latency targets, test recovery and durability across restart/new browser, check mobile/desktop and accessibility, and review every raw/edited film and caption against what the app actually did. Public media fields and site claims stay unapproved until those gates are met.
+
+See the [maintained recording plan](../apps/verevon-web/plans/product-recordings/README.md), [manifest](../apps/verevon-web/plans/product-recordings/manifest.json) and [previous pass](PRODUCT_RECORDING_CAPTURE_PASS5_2026-09-23.md).

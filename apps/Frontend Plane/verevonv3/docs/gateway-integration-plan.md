@@ -404,13 +404,26 @@ routes sit behind the session middleware.
 |---|---|
 | `POST /api/v1/search/web` | quarry-edge `POST /v1/search` (keyword) or `POST /v1/scrape` (URL / bare-domain input); normalized to `{mode,results,answer,citations}` / `{mode:"fetch",url,title,description,excerpt}` |
 | `POST /api/v1/search/images` | quarry-edge `POST /v1/search/images` → sanitized `{images:[{url,thumbnailUrl,imageUrl,title}]}` |
-| `POST /api/v1/search/videos` | SearXNG `GET /search?categories=videos&format=json` (`SEARXNG_URL`) → embeddable `{videos:[…]}` |
+| `POST /api/v1/search/videos` | quarry-edge `POST /v1/search/videos` → sanitized embeddable `{videos:[{url,title,thumbnailUrl,embedUrl,author,length}]}` |
 | `GET /api/v1/search/suggestions` | autocomplete-core `GET /v1/suggestions` (`AUTOCOMPLETE_CORE_URL` + `AUTOCOMPLETE_INTERNAL_TOKEN`; degrades to an empty list when unconfigured) |
 | `POST /api/v1/search/answer/stream` (SSE) | quarry-edge `POST /v1/answer/stream` — re-streams `citations`/`delta`/`done`/`error` verbatim |
 
-Config added to `config.rs`: `SEARXNG_URL` (default `http://searxng:8080`), `AUTOCOMPLETE_CORE_URL`
-(default `http://autocomplete-core:3219`), `AUTOCOMPLETE_INTERNAL_TOKEN` (optional). This promotes
-`autocomplete-core` from §E "later (deployment unverified)" to a live (graceful-degrade) upstream.
+Config added to `config.rs`: `AUTOCOMPLETE_CORE_URL` (default `http://autocomplete-core:3219`),
+`AUTOCOMPLETE_INTERNAL_TOKEN` (optional). This promotes `autocomplete-core` from §E "later
+(deployment unverified)" to a live (graceful-degrade) upstream.
+
+**`SEARXNG_URL` is no longer a gateway upstream (closed 2026-09-15).** Until then `videos` was the one
+route in this table that skipped quarry-edge and called SearXNG itself — and, being the only handler in
+`search.rs` with no `AuthenticatedUser` extension, it could mint no quarry token and so reached the
+provider with no org scope, no cache, no host-diversity cap and no metered unit. It was authenticated
+by the session guard but never attributed. It now proxies `POST /v1/search/videos` like its siblings;
+`sanitize_videos` stays BFF-side because trimming results to embeddable fields is this layer's job.
+The gateway keeps no SearXNG reachability of its own: `searxng_url` in `config.rs` is now unread — the
+compiler says so (`field 'searxng_url' is never read`) — and is pending deletion together with the five
+test-fixture `AppState` literals that still name it (`main.rs`, `domains/browser.rs`,
+`domains/chat/shared.rs`, `domains/orchestration.rs`, `onboarding/crawl_preview/stream_e2e.rs`). Do not
+reintroduce a direct provider call here, even as a fallback: an un-attributed path is the defect
+whether or not the attributed one also runs.
 
 ### A.10 Ingestions domain — `domains/ingestions/` (BUILT — 8 routes, additive)
 

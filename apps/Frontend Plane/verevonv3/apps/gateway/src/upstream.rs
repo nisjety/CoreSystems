@@ -1624,6 +1624,7 @@ pub(crate) async fn proxy_sse_stream(
         None,
         None,
         None,
+        None,
         last_event_id,
         actor,
         zdr,
@@ -1639,6 +1640,11 @@ pub(crate) async fn proxy_sse_stream_with_session(
     body: Option<Value>,
     bearer_token: Option<&str>,
     session_bearer: Option<&str>,
+    // See F-14, docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: without this,
+    // model-gateway's moderation.rs never sees a bearer for the PII/
+    // injection-defense policy lookup and fails closed (redacts
+    // unconditionally) on every resumed/replayed chat stream too.
+    capability_bearer: Option<&str>,
     last_event_id: Option<&str>,
     actor: Option<(&str, &str)>,
     zdr: bool,
@@ -1650,6 +1656,7 @@ pub(crate) async fn proxy_sse_stream_with_session(
         body,
         bearer_token,
         None,
+        capability_bearer,
         None,
         None,
         None,
@@ -1671,6 +1678,12 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
     body: Option<Value>,
     bearer_token: Option<&str>,
     data_plane_bearer: Option<&str>,
+    // See F-14, docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: the org's PII and
+    // injection-defense policies live in capability-core and are looked up by
+    // model-gateway keyed off this bearer. Absent it, moderation.rs fails
+    // closed (redacts everything, including PII the user typed themselves)
+    // rather than consult the org's actual policy.
+    capability_bearer: Option<&str>,
     inference_bearer: Option<&str>,
     execution_bearer: Option<&str>,
     cost_bearer: Option<&str>,
@@ -1692,6 +1705,12 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
     {
         req = req.header("x-data-plane-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = capability_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-capability-authorization", format!("Bearer {token}"));
     }
     if let Some(token) = ingestion_bearer
         .map(str::trim)

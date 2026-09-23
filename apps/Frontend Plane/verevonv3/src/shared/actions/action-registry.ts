@@ -294,6 +294,57 @@ const spaceRequestPersonalDeletionInput = z.object({
   idempotencyKey: z.string().trim().min(1).max(160),
 })
 
+const spaceUpdateThreadPresentationInput = z
+  .object({
+    spaceRef: z.string().min(1),
+    threadId: z.string().min(1),
+    title: z.string().trim().max(200).optional(),
+    pinned: z.boolean().optional(),
+  })
+  .refine((value) => value.title !== undefined || value.pinned !== undefined, {
+    message: "Provide either 'title' or 'pinned'",
+  })
+
+const spaceMarkReadInput = z.object({
+  spaceRef: z.string().min(1),
+})
+
+const spaceRecordPresenceInput = z.object({
+  spaceRef: z.string().min(1),
+  status: z.enum(['online', 'typing', 'offline']).optional(),
+})
+
+const spaceSetAgentStateInput = z.object({
+  spaceRef: z.string().min(1),
+  bindingRef: z.string().min(1),
+  status: z.enum(['active', 'paused']),
+})
+
+const spaceRevokeAgentInput = z.object({
+  spaceRef: z.string().min(1),
+  bindingRef: z.string().min(1),
+})
+
+// A distinct id from spaces.create_personal_space even though both post to
+// the same route and handler (domains/spaces.rs's create_personal_space,
+// which dispatches on the body's `kind`): the registered personal-space
+// schema has no `kind` field, so it could not express a room create, and a
+// room needs a non-empty `name` where a personal Space's is optional.
+const spaceCreateRoomInput = z.object({
+  kind: z.literal('room'),
+  name: z.string().trim().min(1),
+})
+
+const spaceAddMemberInput = z.object({
+  spaceRef: z.string().min(1),
+  memberId: z.string().min(1),
+})
+
+const spaceRemoveMemberInput = z.object({
+  spaceRef: z.string().min(1),
+  memberId: z.string().min(1),
+})
+
 const inboxFollowConversationInput = z.object({
   conversationId: z.string().min(1),
   following: z.boolean(),
@@ -535,6 +586,18 @@ const connectSourceInput = z.object({
   options: z.record(z.string(), z.unknown()).optional(),
   /** A browser selection only; the BFF resolves all import authority. */
   spaceRef: z.string().trim().min(1).max(256).optional(),
+})
+
+const knowledgeRegisterSharePointSourceInput = z.object({
+  kind: z.enum(['drive', 'site_pages']).optional(),
+  siteId: z.string().trim().min(1),
+  siteWebUrl: z.string().trim().optional(),
+  driveId: z.string().trim().optional(),
+  driveName: z.string().trim().optional(),
+  driveType: z.string().trim().optional(),
+  tenantId: z.string().trim().optional(),
+  folderId: z.string().trim().optional(),
+  folderPath: z.string().trim().optional(),
 })
 
 const knowledgeCreateDocumentInput = z.object({
@@ -988,6 +1051,11 @@ const chatSaveThreadSnapshotInput = z.object({
   preview: z.string().trim().optional(),
 })
 
+const chatUploadDocumentInput = z.object({
+  title: z.string().trim().min(1),
+  content: z.string().trim().min(1),
+})
+
 const audioFormat = z.enum(['webm', 'ogg', 'wav', 'mp3'])
 
 const audioTranscribeInput = z.object({
@@ -1318,6 +1386,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: connectSourceInput,
     outputSchema: jobOutput,
+  },
+  {
+    id: 'knowledge.register_sharepoint_source',
+    label: 'Register SharePoint source',
+    description: 'Register a SharePoint or OneDrive library as a finspo-core source and start its first sync.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: knowledgeRegisterSharePointSourceInput,
+    outputSchema: envelopeStatusOutput,
   },
   {
     id: 'operating_map.generate',
@@ -1966,6 +2045,94 @@ export const actionRegistry = [
     requiresApproval: true,
     reversible: false,
     inputSchema: spaceRequestPersonalDeletionInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.update_thread_presentation',
+    label: 'Update Space thread presentation',
+    description: 'Retitle or pin a post in a room. Only the member who started the post may change it.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceUpdateThreadPresentationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.mark_read',
+    label: 'Mark Space read',
+    description: 'Advance the caller\'s own read marker for a Space to now.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceMarkReadInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.record_presence',
+    label: 'Record Space presence',
+    description: '"I am here" — and, in the same answer, who else is. A heartbeat the room already polls on.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceRecordPresenceInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.set_agent_state',
+    label: 'Pause or resume Space agent',
+    description: 'Pause or resume one bound agent in this room only. Gated to the room\'s owner or manager. Use spaces.revoke_agent to remove it instead.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceSetAgentStateInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.revoke_agent',
+    label: 'Revoke Space agent',
+    description: 'Revoke a bound agent from this room. The binding record survives for audit history; reinstating means binding again through the grant flow.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: spaceRevokeAgentInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.create_room',
+    label: 'Create room',
+    description: 'Create a named shared room. It starts with its creator and grows by explicit grant; it does not inherit the organization\'s roster.',
+    ownerPlane: 'application',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: spaceCreateRoomInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.add_member',
+    label: 'Add Space member',
+    description: 'Add one person to a named room. Gated to the room\'s owner or manager; the person must already be in the organization.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceAddMemberInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.remove_member',
+    label: 'Remove Space member',
+    description: 'Remove one person from a named room. The room\'s registered owner cannot be removed this way.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceRemoveMemberInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -2725,6 +2892,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatSubmitFeedbackInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.upload_document',
+    label: 'Upload chat document',
+    description: 'Ingest an attached text document as a durable Data Plane document so later turns can retrieve it. Refused under ZDR.',
+    ownerPlane: 'data',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatUploadDocumentInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.extract_document',
+    label: 'Read chat attachment',
+    description: 'Extract a bounded document in memory for this turn without storing it in organization knowledge.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: z.object({ filename: z.string().min(1).max(255), content_base64: z.string().min(1).max(1_400_000), content_type: z.string().max(128).optional() }),
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -1,4 +1,8 @@
 import { defineConfig, devices } from '@playwright/test'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { productCaptureSettings } from './tests/e2e/product-capture-policy'
 
 /**
  * Authenticated cross-plane E2E harness (audit proof-ladder L4).
@@ -51,6 +55,13 @@ const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
  * project — the specs themselves are stack-agnostic.
  */
 const CHAT_WORKSPACE_SPECS = /chat-workspace\.spec\.ts/
+const PRODUCT_READINESS_SPECS = /product-(?:readiness|scenarios|memory|connected|experience|latency)\.spec\.ts/
+const PRODUCT_RECORDING_SPEC = /product-recording\.spec\.ts/
+if (process.env.PRODUCT_RECORDING_CAPTURE === '1' && process.env.PRODUCT_RECORDING_MODE === 'rehearsal') throw new Error('Do not combine release capture and rehearsal flags')
+const capture = productCaptureSettings(process.env.PRODUCT_RECORDING_MODE || (process.env.PRODUCT_RECORDING_CAPTURE === '1' ? 'release' : undefined),
+  JSON.parse(readFileSync(new URL('./apps/verevon-web/plans/product-recordings/manifest.json', import.meta.url), 'utf8')),
+  process.env.PRODUCT_RECORDING_OUTPUT, resolve(fileURLToPath(new URL('.', import.meta.url)), '../../..'))
+const RECORD_PRODUCT_MEDIA = Boolean(capture)
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -59,7 +70,8 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  retries: capture ? 0 : process.env.CI ? 1 : 0,
+  ...(capture ? { outputDir: capture.outputDir } : {}),
   reporter: process.env.CI ? [['github'], ['list']] : [['list']],
   use: {
     baseURL: BASE_URL,
@@ -76,7 +88,7 @@ export default defineConfig({
     {
       name: 'e2e',
       testMatch: /.*\.spec\.ts/,
-      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS],
+      testIgnore: [BROWSER_WORKSPACE_SPECS, CHAT_WORKSPACE_SPECS, PRODUCT_READINESS_SPECS, PRODUCT_RECORDING_SPEC],
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
@@ -96,6 +108,24 @@ export default defineConfig({
       testMatch: CHAT_WORKSPACE_SPECS,
       dependencies: ['local-setup'],
       use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE },
+    },
+    {
+      name: 'product-recording',
+      testMatch: PRODUCT_RECORDING_SPEC,
+      dependencies: ['local-setup'],
+      timeout: 300_000,
+      use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE,
+        viewport: { width: 1440, height: 900 }, actionTimeout: 15_000,
+        video: capture ? { mode: 'on', size: { width: 1440, height: 900 } } : 'off' },
+    },
+    {
+      name: 'product-readiness',
+      testMatch: PRODUCT_READINESS_SPECS,
+      dependencies: ['local-setup'],
+      // Filming adds deliberate reading holds; provider/check deadlines are unchanged.
+      timeout: capture ? 300_000 : 240_000,
+      use: { ...devices['Desktop Chrome'], baseURL: LOCAL_BASE_URL, storageState: LOCAL_STORAGE_STATE, viewport: { width: 1440, height: RECORD_PRODUCT_MEDIA ? 900 : 1000 }, actionTimeout: 15_000,
+        video: RECORD_PRODUCT_MEDIA ? { mode: 'on', size: { width: 1440, height: 900 } } : 'off' },
     },
   ],
 })

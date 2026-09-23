@@ -41,6 +41,25 @@ func TestCostCaseInsensitiveAndClamped(t *testing.T) {
 	approx(t, r.Cost("gpt-4o-mini", -5, -5), 0.0)
 }
 
+func TestCostWithCacheZeroCacheTokensMatchesCost(t *testing.T) {
+	r := Default()
+	// Purely additive: every existing caller passes 0 cache tokens and must
+	// see byte-for-byte the same figure Cost always returned.
+	approx(t, r.CostWithCache("claude-sonnet", 1_000, 500, 0, 0), r.Cost("claude-sonnet", 1_000, 500))
+}
+
+func TestCostWithCacheAppliesTheTenXCacheReadDiscount(t *testing.T) {
+	r := Default()
+	// claude-sonnet: 3.00 / 15.00 per 1M. 8_520 input_tokens folds in an
+	// 8_000-token cache read (Anthropic's total_input_tokens fold-in): 520
+	// fresh tokens at the full rate, 8_000 cached tokens at a 10x discount.
+	got := r.CostWithCache("claude-sonnet", 8_520, 42, 8_000, 400)
+	want := 520.0/1_000_000.0*3.0 + // fresh input, full rate
+		8_000.0/1_000_000.0*3.0*0.1 + // cached input, 10x discount
+		42.0/1_000_000.0*15.0 // output, unaffected
+	approx(t, got, want)
+}
+
 func TestRatesIncludesDefaultFirst(t *testing.T) {
 	r := Default()
 	rates := r.Rates()

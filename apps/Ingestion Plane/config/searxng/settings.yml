@@ -22,18 +22,172 @@ general:
   privacypolicy_url: false
   donation_url: false
   contact_url: false
-  enable_metrics: false
+  # Without metrics the per-engine error counters and /stats stay empty, so an
+  # engine that answers every request with a CAPTCHA page is indistinguishable
+  # from one nobody queried — which is how the single-sourced results below
+  # went unnoticed. Counters are in-process and local to this container;
+  # nothing is reported anywhere.
+  enable_metrics: true
 
 search:
   # safe_search: 0 = off, 1 = moderate, 2 = strict
   safe_search: 0
   autocomplete: ""
+  # Fallback only. The caller (model-gateway, via quarry-edge) now sends an
+  # explicit per-query language, which is the robust fix for non-English
+  # queries; this value applies just to requests that carry none of their own.
   default_lang: "en"
   # JSON must be listed here or SearXNG returns 403 on format=json requests.
   # quarry-runtime/src/serp/searxng.rs sends ?format=json — do not remove it.
   formats:
     - html
     - json
+
+# ---------------------------------------------------------------------------
+# Engines
+# ---------------------------------------------------------------------------
+#
+# Entries below are merged BY NAME into SearXNG's stock engine list
+# (settings_loader.update_settings -> update_dict), so each entry carries only
+# the keys it changes. A name matching no stock entry is APPENDED verbatim
+# rather than rejected, so a typo silently ships a half-defined engine that
+# fails only at query time. Check a name before adding it:
+#   docker exec ingestion-searxng grep -n "name: <engine>" \
+#     /usr/local/searxng/searx/settings.yml
+#
+# ### DO NOT ADD A `network:` KEY TO ANY ENGINE IN THIS BLOCK ###
+#
+# searx/search/processors/abstract.py keys an engine's suspension state by
+# `id()` of its Network object, so engines sharing one object share ONE
+# suspension bucket and a single 429 or CAPTCHA suspends every engine in it.
+# searx/network/network.py decides which object an engine gets: omitting
+# `network:` mints a fresh Network for that engine alone, while `network: <str>`
+# aliases the object another engine already owns. Every entry below omits the
+# key deliberately — independent failure domains are the entire reason this
+# block exists. DuckDuckGo, Startpage and Brave all fail on this egress, and
+# before the split their failures suspended engines that work.
+#
+# A stock `network:` also cannot be undone from here. update_dict merges
+# recursively, so `network: {}` against a stock `network: brave` iterates an
+# empty mapping and leaves the string in place (a silent no-op), while a
+# non-empty dict against a str raises TypeError at load. Disabling the engine
+# that carries the key is the only lever — see brave.* below.
+#
+# Weights come from a live probe of this egress (own_n = results actually
+# attributed to that engine, not merely returned alongside it) and express
+# relative trust, not rank. Engines that returned nothing, were blocked, or
+# crashed on nb-NO are deliberately absent and stay at their stock disabled
+# state: mojeek, mwmbl, yep, qwant, dogpile, fireball, tusksearch, yahoo,
+# presearch, sogou, quark, marginalia.
+engines:
+
+  # --- verified working on this egress -------------------------------------
+  #
+  # google cse and bing carry the query; the rest exist so that a bad day for
+  # either one still leaves the result set with more than one source. That
+  # redundancy is the point — this stack previously ran on `google cse` alone
+  # and a thin result set was indistinguishable from a quarry-edge bug.
+
+  - name: google cse
+    weight: 1.0
+
+  - name: bing
+    disabled: false
+    weight: 1.0
+
+  - name: yandex
+    disabled: false
+    weight: 0.6
+
+  - name: seznam
+    disabled: false
+    weight: 0.5
+
+  # Has no Norwegian locale upstream, so it answers nb-NO queries in English.
+  # Kept anyway at low weight: an off-language result is still a real result
+  # and still breaks the single-source failure mode.
+  - name: privacywall
+    disabled: false
+    weight: 0.5
+
+  - name: naver
+    disabled: false
+    weight: 0.3
+
+  # Small-web index returning a handful of results the large engines do not
+  # have. Low weight because the volume is tiny; enabled because that
+  # non-overlap is exactly what a single-sourced result set lacks.
+  - name: wiby
+    disabled: false
+    weight: 0.3
+
+  # The only Norwegian-native engine in the image — it indexes nb-NO content as
+  # a first-class language rather than reaching it through an English index.
+  - name: abcnyheter
+    disabled: false
+    weight: 0.4
+
+  # Narrowed to `science` so it never joins a general search, and the one
+  # source here that dates its results. Stock ships `timeout: 30`, above
+  # outgoing.max_request_timeout (20.0), which pinned every science search to
+  # that ceiling. Note searx/search/__init__.py takes the MAX engine timeout
+  # across the engines in a search as that search's deadline, so raising any
+  # single engine here slows every query it takes part in — do not bump these
+  # to "give an engine room".
+  - name: crossref
+    disabled: false
+    categories: [science]
+    weight: 0.4
+    timeout: 15.0
+
+  # --- fail on this egress, kept enabled on purpose -------------------------
+  #
+  # These answer with a CAPTCHA page (duckduckgo, startpage) or 429 (brave)
+  # from the address this deployment sits behind. That is an IP-reputation
+  # property of the address, not of the engines: behind a different egress they
+  # answer normally, and pruning them here would bake one deployment's bad
+  # address into a config every deployment shares. They are safe to leave on
+  # only because each now owns its suspension bucket per the rule above.
+
+  - name: duckduckgo
+    disabled: false
+    weight: 1.0
+
+  - name: startpage
+    disabled: false
+    weight: 1.0
+
+  - name: brave
+    disabled: false
+    weight: 1.0
+
+  # `brave` itself declares no `network:`, but these three each declare
+  # `network: brave` and ship ENABLED, which places them in brave's suspension
+  # bucket. quarry does query categories=images and categories=news
+  # (quarry-runtime/src/serp.rs), so this is live traffic whose 429s suspend
+  # `brave` along with them. We use none of the three verticals, and their
+  # stock `network: brave` cannot be overridden from this file, so switching
+  # them off is the only way to stop them holding brave's bucket down.
+  - name: brave.images
+    disabled: true
+
+  - name: brave.videos
+    disabled: true
+
+  - name: brave.news
+    disabled: true
+
+  # The official paid Brave Search API — a different product from the scraped
+  # `brave` engine above and not subject to its 429. Left inert: braveapi.init()
+  # raises on an empty key, which de-registers the engine but logs an exception
+  # on every startup, whereas `inactive: true` skips loading it silently. An
+  # operator turns it on by setting api_key here and dropping `inactive`.
+  #
+  # Doing so does NOT decide who may use it. WHICH TENANTS may reach Brave
+  # (non-ZDR, Balance/Genius only) is enforced in quarry; SearXNG has no tenant
+  # concept, so this file must never be treated as where that entitlement lives.
+  - name: braveapi
+    inactive: true
 
 server:
   # SEARXNG_SECRET env var overrides this at runtime; value here is a fallback.

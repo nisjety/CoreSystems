@@ -13,11 +13,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func newErasurePostgresFixture(t *testing.T) (*pgxpool.Pool, *Repository) {
+// newIsolatedSchemaPool creates a throwaway schema for the test and returns a
+// pool pinned to it via search_path. The schema is dropped on test cleanup.
+func newIsolatedSchemaPool(t *testing.T, schemaPrefix string) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping erasure saga PostgreSQL test")
+		t.Skip("TEST_DATABASE_URL not set; skipping PostgreSQL fixture test")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, dsn)
@@ -26,7 +28,7 @@ func newErasurePostgresFixture(t *testing.T) (*pgxpool.Pool, *Repository) {
 	}
 	t.Cleanup(admin.Close)
 
-	schema := fmt.Sprintf("user_erasure_saga_%d", time.Now().UnixNano())
+	schema := fmt.Sprintf("%s%d", schemaPrefix, time.Now().UnixNano())
 	if !regexp.MustCompile(`^[a-z0-9_]+$`).MatchString(schema) {
 		t.Fatalf("unsafe fixture schema %q", schema)
 	}
@@ -45,6 +47,13 @@ func newErasurePostgresFixture(t *testing.T) (*pgxpool.Pool, *Repository) {
 		t.Fatalf("open fixture pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	return pool
+}
+
+func newErasurePostgresFixture(t *testing.T) (*pgxpool.Pool, *Repository) {
+	t.Helper()
+	pool := newIsolatedSchemaPool(t, "user_erasure_saga_")
+	ctx := context.Background()
 
 	fixtureSchema := `
 		CREATE TABLE users (

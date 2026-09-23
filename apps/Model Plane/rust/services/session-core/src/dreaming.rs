@@ -11,9 +11,22 @@
 //! when extraction is unconfigured or inference is down, so the loop degrades to
 //! its previous behaviour rather than stopping. Both write the same
 //! `agent_memory` rows through the same `dream_runs` ledger.
+//!
+//! # Write-time grounding
+//!
+//! Before a candidate whose `key` does not already exist is stored, an
+//! optional grounding pass (behind `MEMORY_GROUNDING_ENABLED`; see
+//! [`crate::memory_grounding`]) checks whether it duplicates, extends or
+//! corrects an existing same-scope memory and stores it accordingly, without
+//! ever overwriting or deleting the row it acts on. See
+//! [`ground_candidates`]/[`apply_grounded_candidates`] and
+//! `migrations/0037_agent_memory_lineage.sql`. With the flag off, `dream_once`
+//! takes the exact code path it always has — [`persist_candidates`] and
+//! [`upsert_agent_memory`] are untouched by grounding's existence.
 
 use crate::dream_extractor::{DreamExtractor, WindowMessage, LLM_SOURCE_LINK};
 use crate::letta_adapter::LettaMemoryAdapter;
+use crate::memory_grounding::{ExistingMatch, GroundingAction, GroundingClassifier};
 use chrono::{DateTime, Utc};
 use metrics::{counter, histogram};
 use mp_ids::new_ulid;
@@ -106,6 +119,17 @@ pub(crate) struct MemorySearchRow {
     pub score: f32,
     pub updated_at: DateTime<Utc>,
     pub provenance: MemoryProvenance,
+    /// True when `query` literally appears in this row's content or key.
+    ///
+    /// pgstore's candidate pool is ordered by `confidence` — a self-reported
+    /// certainty about the FACT, unrelated to whether the fact answers THIS
+    /// query — so most of the pool is not a relevance signal at all, only
+    /// background noise a caller should treat as a last resort. This flag is
+    /// what lets a caller (`memory_grpc::merge_memory_search_results`) tell
+    /// the two apart: an exact-match row genuinely IS relevance-ranked
+    /// (better match → better rank among exact matches) and can be fused
+    /// with a semantic backend's results via RRF; a non-match row cannot.
+    pub exact_match: bool,
 }
 
 struct PendingMessage {
@@ -115,6 +139,7 @@ struct PendingMessage {
     content: String,
     org_id: String,
     user_id: String,
+    conversation_only: bool,
 }
 
 pub(crate) async fn run(pool: PgPool, letta: Option<LettaMemoryAdapter>) -> anyhow::Result<()> {
@@ -128,19 +153,29 @@ pub(crate) async fn run(pool: PgPool, letta: Option<LettaMemoryAdapter>) -> anyh
         .unwrap_or(100i64)
         .clamp(1, 1_000);
     let extractor = DreamExtractor::from_env();
+    let grounding = GroundingClassifier::from_env();
     let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     info!(
         interval_secs,
         batch_size,
         llm_extraction = extractor.is_some(),
+        memory_grounding = grounding.is_some(),
         "Dreaming Core loop started"
     );
 
     loop {
         tick.tick().await;
         let start = Instant::now();
-        match dream_once(&pool, letta.as_ref(), extractor.as_ref(), batch_size).await {
+        match dream_once(
+            &pool,
+            letta.as_ref(),
+            extractor.as_ref(),
+            grounding.as_ref(),
+            batch_size,
+        )
+        .await
+        {
             Ok(processed) => {
                 counter!("mp_session_dream_runs_total", "status" => "ok").increment(1);
                 histogram!("mp_session_dream_duration_seconds")
@@ -163,6 +198,7 @@ pub(crate) async fn dream_once(
     pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
     extractor: Option<&DreamExtractor>,
+    grounding: Option<&GroundingClassifier>,
     limit: i64,
 ) -> anyhow::Result<i64> {
     let messages = load_pending_messages(pool, limit).await?;
@@ -176,6 +212,17 @@ pub(crate) async fn dream_once(
         let Some(last) = group.last() else { continue };
         let org_id = last.org_id.clone();
         let thread_id = last.thread_id.clone();
+
+        if last.conversation_only {
+            let mut tx = pool.begin().await?;
+            for message in &group {
+                record_dream_run(&mut tx, &org_id, &thread_id, "skipped_conversation_scope", 0, 0, Some(&message.message_id)).await?;
+                processed += 1;
+            }
+            tx.commit().await?;
+            info!(%thread_id, messages = group.len(), "memory extraction skipped: conversation-only source scope");
+            continue;
+        }
 
         // Attached to the newest message of the group: that is the turn whose
         // arrival justified re-reading the window, and source_links should point
@@ -196,36 +243,95 @@ pub(crate) async fn dream_once(
                 merge_extracted(&mut candidates, &extracted);
             }
 
-            let mut tx = pool.begin().await?;
-            let (saved, persisted) = persist_candidates(
-                &mut tx,
-                &message.org_id,
-                &message.user_id,
-                &message.thread_id,
-                &message.message_id,
-                &candidates,
-            )
-            .await?;
-            record_dream_run(
-                &mut tx,
-                &message.org_id,
-                &message.thread_id,
-                "background_scan",
-                i64::try_from(candidates.len()).unwrap_or(i64::MAX),
-                saved,
-                Some(&message.message_id),
-            )
-            .await?;
-            tx.commit().await?;
-            sync_persisted_candidates_to_letta(
-                letta,
-                &message.org_id,
-                &message.user_id,
-                &message.thread_id,
-                &candidates,
-                &persisted,
-            )
-            .await;
+            // Grounding's lookups (a bounded read plus, when configured, a
+            // semantic search and an LLM classification) are network calls and
+            // must never run with a Postgres transaction held open across
+            // them -- so, when enabled, they happen here, before `pool.begin()`,
+            // and only the resulting decision is applied inside the
+            // transaction below. With the flag off this whole branch does not
+            // exist at runtime: the `else` arm is `persist_candidates`
+            // unchanged, exactly as it was before grounding existed.
+            let (_saved, persisted) = if let Some(classifier) = grounding {
+                let actions = ground_candidates(
+                    pool,
+                    letta,
+                    classifier,
+                    &message.org_id,
+                    &message.user_id,
+                    &message.thread_id,
+                    &candidates,
+                )
+                .await;
+                let mut tx = pool.begin().await?;
+                let result = apply_grounded_candidates(
+                    &mut tx,
+                    &message.org_id,
+                    &message.user_id,
+                    &message.thread_id,
+                    &message.message_id,
+                    &candidates,
+                    &actions,
+                )
+                .await?;
+                record_dream_run(
+                    &mut tx,
+                    &message.org_id,
+                    &message.thread_id,
+                    "background_scan",
+                    i64::try_from(candidates.len()).unwrap_or(i64::MAX),
+                    result.0,
+                    Some(&message.message_id),
+                )
+                .await?;
+                tx.commit().await?;
+                result
+            } else {
+                let mut tx = pool.begin().await?;
+                let result = persist_candidates(
+                    &mut tx,
+                    &message.org_id,
+                    &message.user_id,
+                    &message.thread_id,
+                    &message.message_id,
+                    &candidates,
+                )
+                .await?;
+                record_dream_run(
+                    &mut tx,
+                    &message.org_id,
+                    &message.thread_id,
+                    "background_scan",
+                    i64::try_from(candidates.len()).unwrap_or(i64::MAX),
+                    result.0,
+                    Some(&message.message_id),
+                )
+                .await?;
+                tx.commit().await?;
+                result
+            };
+            if grounding.is_some() {
+                sync_persisted_candidates_to_letta_for_grounding(
+                    pool,
+                    letta,
+                    &message.org_id,
+                    &message.user_id,
+                    &message.thread_id,
+                    &candidates,
+                    &persisted,
+                )
+                .await;
+            } else {
+                sync_persisted_candidates_to_letta(
+                    pool,
+                    letta,
+                    &message.org_id,
+                    &message.user_id,
+                    &message.thread_id,
+                    &candidates,
+                    &persisted,
+                )
+                .await;
+            }
             processed += 1;
         }
     }
@@ -272,6 +378,11 @@ async fn extraction_window(
         role: message.role.clone(),
         content: message.content.clone(),
     }));
+    // A late assistant reply must not re-teach a fact after the user erased
+    // its originating statement. An extraction needs eligible user evidence.
+    if !window.iter().any(|message| message.role == "user") {
+        window.clear();
+    }
     window
 }
 
@@ -293,6 +404,7 @@ fn merge_extracted(candidates: &mut Vec<DreamMemoryCandidate>, extracted: &[Drea
 }
 
 pub(crate) async fn sync_persisted_candidates_to_letta(
+    pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
     org_id: &str,
     user_id: &str,
@@ -315,6 +427,7 @@ pub(crate) async fn sync_persisted_candidates_to_letta(
                 Some(memory_id),
             )
             .await;
+        crate::memory_control::erase_late_mirror(pool, letta, org_id, user_id, memory_id).await;
     }
 }
 
@@ -331,12 +444,224 @@ fn correlated_thread_candidates<'a>(
         .collect()
 }
 
+/// Same mirroring `sync_persisted_candidates_to_letta` does for thread-scoped
+/// candidates, widened to `user`-scoped ones too.
+///
+/// The investigation behind this module found that `scope = "user"` Dreaming
+/// candidates are never indexed into Letta by the plain sync above, so
+/// grounding's semantic tier (`ground_one_candidate`'s call to
+/// `LettaMemoryAdapter::list_detailed` for user-scope candidates) would query
+/// an index that never has anything in it — an empty result that looks
+/// exactly like "no duplicate exists" while actually meaning "never asked."
+/// This is that prerequisite fix, kept as a SEPARATE function rather than a
+/// widening of the original so the flag-off path's Letta traffic is
+/// byte-for-byte unchanged: this is only ever called from the
+/// grounding-enabled branch of `dream_once`.
+pub(crate) async fn sync_persisted_candidates_to_letta_for_grounding(
+    pool: &PgPool,
+    letta: Option<&LettaMemoryAdapter>,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    candidates: &[DreamMemoryCandidate],
+    persisted: &[PersistedMemoryId],
+) {
+    let Some(letta) = letta else {
+        return;
+    };
+
+    for entry in persisted {
+        let Some(candidate) = candidates.get(entry.candidate_index) else {
+            continue;
+        };
+        let owner = (candidate.scope == "user").then_some(user_id);
+        letta
+            .index(
+                org_id,
+                thread_id,
+                memory_topic(candidate.scope, candidate.kind),
+                &candidate.content,
+                owner,
+                Some(entry.memory_id.as_str()),
+            )
+            .await;
+        crate::memory_control::erase_late_mirror(pool, letta, org_id, user_id, &entry.memory_id).await;
+    }
+}
+
+/// How many existing same-scope memories grounding compares a candidate
+/// against before falling back to a semantic search. Same latest-first
+/// ordering as `load_agent_memory_context_rows`, and a small, flat LIMIT
+/// rather than `search_agent_memory`'s wide 200-row relevance pool: this is a
+/// pre-write dedup check on a background loop, not a query answering a user's
+/// question, and it runs once per ungrounded candidate.
+const GROUNDING_CANDIDATE_POOL: i64 = 20;
+
+struct GroundingPoolRow {
+    id: String,
+    key: String,
+    content: String,
+}
+
+/// Existing same-scope memories to compare a new candidate against, in the
+/// same partition the unique index already enforces --
+/// `agent_memory_org_session_scope_key_uq` `(org_id, session_id, scope, key)`
+/// for thread-scoped candidates, `agent_memory_org_scope_key_uq`
+/// `(org_id, scope, owner, key)` for the rest -- just without requiring `key`
+/// to match. Filtered to `is_latest = true`: a row already superseded is not
+/// something grounding should compare against or supersede a second time.
+async fn grounding_candidate_pool(
+    pool: &PgPool,
+    org_id: &str,
+    owner: &str,
+    candidate: &DreamMemoryCandidate,
+) -> Result<Vec<GroundingPoolRow>, sqlx::Error> {
+    let rows = if let Some(session_id) = candidate.session_id.as_deref() {
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT id, key, content FROM agent_memory \
+             WHERE org_id = $1 AND session_id = $2 AND scope = $3 \
+               AND is_latest = true AND review_state = 'accepted' \
+             ORDER BY updated_at DESC LIMIT $4",
+        )
+        .bind(org_id)
+        .bind(session_id)
+        .bind(candidate.scope)
+        .bind(GROUNDING_CANDIDATE_POOL)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT id, key, content FROM agent_memory \
+             WHERE org_id = $1 AND session_id IS NULL AND scope = $2 AND owner = $3 \
+               AND is_latest = true AND review_state = 'accepted' \
+             ORDER BY updated_at DESC LIMIT $4",
+        )
+        .bind(org_id)
+        .bind(candidate.scope)
+        .bind(owner)
+        .bind(GROUNDING_CANDIDATE_POOL)
+        .fetch_all(pool)
+        .await?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, key, content)| GroundingPoolRow { id, key, content })
+        .collect())
+}
+
+/// Ground every candidate of one message against existing memory before any
+/// of it is written. No transaction is open while this runs -- see the
+/// module doc and the call site in `dream_once`.
+pub(crate) async fn ground_candidates(
+    pool: &PgPool,
+    letta: Option<&LettaMemoryAdapter>,
+    classifier: &GroundingClassifier,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    candidates: &[DreamMemoryCandidate],
+) -> Vec<GroundingAction> {
+    let mut actions = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        actions.push(
+            ground_one_candidate(pool, letta, classifier, org_id, user_id, thread_id, candidate)
+                .await,
+        );
+    }
+    actions
+}
+
+async fn ground_one_candidate(
+    pool: &PgPool,
+    letta: Option<&LettaMemoryAdapter>,
+    classifier: &GroundingClassifier,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    candidate: &DreamMemoryCandidate,
+) -> GroundingAction {
+    let owner = if candidate.scope == "user" { user_id } else { "" };
+
+    let pool_rows = match grounding_candidate_pool(pool, org_id, owner, candidate).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            warn!(%error, "memory grounding candidate lookup failed; adding without grounding");
+            return GroundingAction::Add;
+        }
+    };
+
+    // Tier 1: an exact key match is the SAME identity the existing unique
+    // index already dedups on. `upsert_agent_memory`'s own ON CONFLICT
+    // handles it exactly as well as grounding could (content refresh,
+    // `GREATEST(confidence)`), so grounding stands down and lets that path
+    // run rather than asking a classifier a question that is already answered.
+    if pool_rows.iter().any(|row| row.key == candidate.key) {
+        return GroundingAction::Add;
+    }
+
+    // Tier 2: cheap, deterministic near-match on a normalized key fragment.
+    let mut matches: Vec<ExistingMatch> = pool_rows
+        .iter()
+        .filter(|row| crate::memory_grounding::keys_loosely_match(&row.key, &candidate.key))
+        .map(|row| ExistingMatch {
+            id: row.id.clone(),
+            content: row.content.clone(),
+        })
+        .collect();
+
+    // Tier 3: semantic recall, when configured. A degraded, timed-out or
+    // empty outcome is read as "unknown" here, never as "confirmed no
+    // duplicate" -- it simply contributes no additional matches, and whatever
+    // tier 2 already found still stands. `list_detailed` (never thread-scoped)
+    // is used for `user`-scope candidates since the fact they might duplicate
+    // could have been written from any thread; `search_detailed` (thread-
+    // scoped) for `thread`-scope ones, matching `search_memory`'s own choice
+    // of the two RPCs for the same distinction.
+    if let Some(letta) = letta {
+        let mut entries = if candidate.scope == "thread" {
+            letta
+                .search_detailed(org_id, thread_id, user_id, &candidate.content, &[], 5)
+                .await
+                .entries
+        } else {
+            letta.list_detailed(org_id, user_id, 5).await.entries
+        };
+        if crate::memory_control::filter_forgotten(pool, org_id, user_id, &mut entries).await.is_err() {
+            entries.clear();
+        }
+        for entry in entries {
+            if entry.memory_id.is_empty() || matches.iter().any(|m| m.id == entry.memory_id) {
+                continue;
+            }
+            matches.push(ExistingMatch {
+                id: entry.memory_id,
+                content: entry.content,
+            });
+        }
+    }
+
+    matches.truncate(crate::memory_grounding::MAX_MATCHES);
+
+    if matches.is_empty() {
+        // Nothing looks related by any signal available -- genuinely new.
+        return GroundingAction::Add;
+    }
+
+    classifier
+        .classify(org_id, &candidate.content, candidate.scope, &matches)
+        .await
+}
+
 pub(crate) fn extract_memory_candidates(
     role: &str,
     content: &str,
     thread_id: &str,
 ) -> Vec<DreamMemoryCandidate> {
-    let normalized = collapse_whitespace(content);
+    let content = if role.trim().eq_ignore_ascii_case("user") {
+        crate::dream_extractor::strip_document_blocks(content)
+    } else { content.to_owned() };
+    let normalized = collapse_whitespace(&content);
     if normalized.is_empty() {
         return Vec::new();
     }
@@ -357,7 +682,7 @@ pub(crate) async fn persist_candidates(
     message_id: &str,
     candidates: &[DreamMemoryCandidate],
 ) -> Result<(i64, Vec<PersistedMemoryId>), sqlx::Error> {
-    if candidates.is_empty() {
+    if candidates.is_empty() || !crate::memory_control::permits_extraction(tx, org_id, user_id, message_id).await? {
         return Ok((0, Vec::new()));
     }
 
@@ -397,6 +722,200 @@ pub(crate) async fn persist_candidates(
     Ok((saved, persisted))
 }
 
+/// [`persist_candidates`]'s grounding-aware sibling: writes each candidate
+/// according to a precomputed [`GroundingAction`] (from [`ground_candidates`],
+/// run before this transaction was opened) instead of always calling
+/// [`upsert_agent_memory`] directly. `persist_candidates` itself is untouched
+/// -- this is a parallel path, not a modification of it, so the flag-off
+/// behaviour it backs stays byte-for-byte identical to before this module
+/// existed.
+pub(crate) async fn apply_grounded_candidates(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    candidates: &[DreamMemoryCandidate],
+    actions: &[GroundingAction],
+) -> Result<(i64, Vec<PersistedMemoryId>), sqlx::Error> {
+    if candidates.is_empty() || !crate::memory_control::permits_extraction(tx, org_id, user_id, message_id).await? {
+        return Ok((0, Vec::new()));
+    }
+
+    let base_source_links = vec![
+        format!("thread:{thread_id}"),
+        format!("message:{message_id}"),
+    ];
+    let mut saved = 0i64;
+    let mut persisted = Vec::with_capacity(candidates.len());
+
+    for (candidate_index, (candidate, action)) in candidates.iter().zip(actions.iter()).enumerate() {
+        let mut source_links = if candidate.inferred {
+            let mut links = base_source_links.clone();
+            links.push(LLM_SOURCE_LINK.to_owned());
+            links
+        } else {
+            base_source_links.clone()
+        };
+        let owner = if candidate.scope == "user" {
+            user_id
+        } else {
+            ""
+        };
+
+        let memory_id = match action {
+            GroundingAction::Noop => String::new(),
+            GroundingAction::Add => {
+                upsert_agent_memory(tx, org_id, owner, candidate, &source_links).await?
+            }
+            GroundingAction::Extend { target_id, content } => {
+                source_links.push("lineage:extend".to_owned());
+                write_lineage_memory(tx, org_id, owner, candidate, &source_links, target_id, content)
+                    .await?
+            }
+            GroundingAction::Supersede { target_id, content } => {
+                source_links.push("lineage:supersede".to_owned());
+                write_lineage_memory(tx, org_id, owner, candidate, &source_links, target_id, content)
+                    .await?
+            }
+        };
+        saved += i64::from(!memory_id.is_empty());
+        if !memory_id.is_empty() {
+            persisted.push(PersistedMemoryId {
+                candidate_index,
+                memory_id,
+            });
+        }
+    }
+
+    Ok((saved, persisted))
+}
+
+/// Writes an EXTEND or SUPERSEDE decision: flips `target_id`'s `is_latest` to
+/// `false`, then inserts a brand new row carrying `content`, `supersedes_id =
+/// target_id` and `is_latest = true` -- in this same transaction, so a reader
+/// can never observe both states or neither. Never deletes or overwrites
+/// `target_id`'s row.
+///
+/// If `target_id` no longer has `is_latest = true` (raced by a concurrent
+/// writer, already superseded by an earlier candidate this same cycle, or a
+/// stale classifier answer for a row deleted since) this falls back to an
+/// ordinary [`upsert_agent_memory`] ADD rather than creating a lineage row
+/// that points at a fact no longer treated as current -- never guessing at a
+/// lineage that might not hold any more.
+///
+/// The insert itself is an upsert with the same `ON CONFLICT` targets
+/// [`upsert_agent_memory`] uses, not a plain `INSERT`: `candidate.key` is
+/// guaranteed different from `target_id`'s own key (an exact match would have
+/// taken the tier-1 fast path in `ground_one_candidate` and never reached
+/// here), but it could rarely still collide with some OTHER unrelated
+/// existing row's key, and merging into that row is a far safer outcome than
+/// a hard constraint-violation error aborting the whole Dreaming cycle for
+/// this message.
+///
+/// Known, narrow, and deliberately accepted limitation: if a key that was
+/// previously superseded (`is_latest` flipped to `false` by an earlier
+/// grounding decision) is later written again by the ordinary, ungrounded
+/// exact-key path (ADD's ordinary `upsert_agent_memory`, taken when tier 1
+/// above matches it), that row's content refreshes but `is_latest` is left as
+/// `upsert_agent_memory` already leaves any column it does not mention:
+/// unchanged, i.e. still `false`. The alternative -- having the ordinary
+/// upsert always force `is_latest = true` -- risks the opposite and larger
+/// failure this feature exists to prevent: a plain re-write reviving a
+/// deliberately retired row alongside whatever superseded it, producing two
+/// competing `is_latest = true` rows again. Retiring a key is treated as
+/// closer to permanent than reviving it is treated as safe.
+async fn write_lineage_memory(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    owner: &str,
+    candidate: &DreamMemoryCandidate,
+    source_links: &[String],
+    target_id: &str,
+    content: &str,
+) -> Result<String, sqlx::Error> {
+    let flipped = sqlx::query(
+        "UPDATE agent_memory SET is_latest = false, updated_at = now() \
+         WHERE id = $1 AND org_id = $2 AND is_latest = true",
+    )
+    .bind(target_id)
+    .bind(org_id)
+    .execute(&mut **tx)
+    .await?;
+
+    let mut resolved = candidate.clone();
+    resolved.content = content.to_owned();
+
+    if flipped.rows_affected() == 0 {
+        return upsert_agent_memory(tx, org_id, owner, &resolved, source_links).await;
+    }
+
+    if resolved.session_id.is_some() {
+        let row: (String,) = sqlx::query_as(
+            "INSERT INTO agent_memory \
+             (id, org_id, session_id, scope, key, content, kind, confidence, owner, source_links, review_state, supersedes_id, is_latest) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'accepted', $11, true) \
+             ON CONFLICT (org_id, session_id, scope, key) WHERE session_id IS NOT NULL \
+             DO UPDATE SET \
+               content = EXCLUDED.content, \
+               kind = EXCLUDED.kind, \
+               confidence = GREATEST(agent_memory.confidence, EXCLUDED.confidence), \
+               owner = EXCLUDED.owner, \
+               source_links = EXCLUDED.source_links, \
+               review_state = 'accepted', \
+               supersedes_id = EXCLUDED.supersedes_id, \
+               is_latest = true, \
+               updated_at = now() \
+             RETURNING id",
+        )
+        .bind(new_ulid())
+        .bind(org_id)
+        .bind(resolved.session_id.as_deref())
+        .bind(resolved.scope)
+        .bind(&resolved.key)
+        .bind(&resolved.content)
+        .bind(resolved.kind)
+        .bind(resolved.confidence)
+        .bind(owner)
+        .bind(source_links)
+        .bind(target_id)
+        .fetch_one(&mut **tx)
+        .await?;
+        return Ok(row.0);
+    }
+
+    let row: (String,) = sqlx::query_as(
+        "INSERT INTO agent_memory \
+         (id, org_id, session_id, scope, key, content, kind, confidence, owner, source_links, review_state, supersedes_id, is_latest) \
+         VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, 'accepted', $10, true) \
+         ON CONFLICT (org_id, scope, owner, key) WHERE session_id IS NULL \
+         DO UPDATE SET \
+           content = EXCLUDED.content, \
+           kind = EXCLUDED.kind, \
+           confidence = GREATEST(agent_memory.confidence, EXCLUDED.confidence), \
+           owner = EXCLUDED.owner, \
+           source_links = EXCLUDED.source_links, \
+           review_state = 'accepted', \
+           supersedes_id = EXCLUDED.supersedes_id, \
+           is_latest = true, \
+           updated_at = now() \
+         RETURNING id",
+    )
+    .bind(new_ulid())
+    .bind(org_id)
+    .bind(resolved.scope)
+    .bind(&resolved.key)
+    .bind(&resolved.content)
+    .bind(resolved.kind)
+    .bind(resolved.confidence)
+    .bind(owner)
+    .bind(source_links)
+    .bind(target_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.0)
+}
+
 pub(crate) async fn record_dream_run(
     tx: &mut Transaction<'_, Postgres>,
     org_id: &str,
@@ -428,11 +947,12 @@ async fn load_pending_messages(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<PendingMessage>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
-        "SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id \
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool)>(
+        "SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation' \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
          WHERE m.role IN ('user', 'assistant') \
+           AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS ( \
              SELECT 1 FROM dream_runs d \
              WHERE d.thread_id = m.thread_id \
@@ -448,13 +968,14 @@ async fn load_pending_messages(
     Ok(rows
         .into_iter()
         .map(
-            |(message_id, thread_id, role, content, org_id, user_id)| PendingMessage {
+            |(message_id, thread_id, role, content, org_id, user_id, conversation_only)| PendingMessage {
                 message_id,
                 thread_id,
                 role,
                 content,
                 org_id,
                 user_id,
+                conversation_only,
             },
         )
         .collect())
@@ -476,8 +997,10 @@ async fn load_preceding_context(
     let mut rows = sqlx::query_as::<_, (String, String)>(
         "SELECT m.role, m.content \
          FROM messages m \
+         JOIN threads t ON t.id = m.thread_id \
          WHERE m.thread_id = $1 \
            AND m.role IN ('user', 'assistant') \
+           AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND (m.created_at, m.sequence) < ( \
              SELECT b.created_at, b.sequence FROM messages b WHERE b.id = $2 \
            ) \
@@ -521,6 +1044,7 @@ pub(crate) async fn load_agent_memory_context_rows(
          FROM agent_memory \
          WHERE org_id = $1 \
            AND review_state = 'accepted' \
+           AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND ( \
                 session_id = $2 \
@@ -569,11 +1093,37 @@ pub(crate) struct AgentMemorySearch<'a> {
     pub(crate) updated_after: Option<DateTime<Utc>>,
 }
 
+/// SQL candidate pool size, before relevance is scored and the result is
+/// truncated back down to the caller's requested `limit`.
+///
+/// The `WHERE` clause below has no relevance filter at all — it returns up to
+/// `LIMIT` rows regardless of match quality — so whatever ordering picks the
+/// first `LIMIT` rows decides which candidates ever reach the exact-match
+/// scoring below. At the old behaviour (candidate pool == requested limit,
+/// typically 5-10), a relevant row sitting past the cutoff under
+/// `confidence DESC, updated_at DESC` was silently excluded before its
+/// content was ever compared against the query.
+///
+/// This is not a narrow edge case: live data shows most rows in a real org
+/// share the same confidence value (the extractor defaults to 0.85 for
+/// almost everything it writes — see the LEARNING_SYSTEM_REDESIGN doc's
+/// duplicate-key finding), so a caller-scaled widening (e.g. `limit * 4`)
+/// still leaves most of a tied block outside the window — an org of 24
+/// memories can have 21 tied at the same confidence, and a relevant one can
+/// sit at position 23. The candidate pool is therefore a flat, generous
+/// constant rather than scaled to the caller's `limit`: exact-match
+/// promotion needs to see the WHOLE realistic candidate space to work at
+/// all, and 200 rows is a trivial, index-backed query regardless of a org's
+/// history size — this bounds cost, it does not chase it down to the
+/// caller's typically-small `limit`.
+const MAX_CANDIDATE_POOL: i64 = 200;
+
 pub(crate) async fn search_agent_memory(
     pool: &PgPool,
     request: &AgentMemorySearch<'_>,
 ) -> Result<Vec<MemorySearchRow>, sqlx::Error> {
     let limit = i64::from(request.limit.clamp(1, 50));
+    let candidate_limit = MAX_CANDIDATE_POOL.max(limit);
     let filters = normalize_topic_filters(request.topic_filter);
     let query = request.query.trim();
 
@@ -596,6 +1146,7 @@ pub(crate) async fn search_agent_memory(
          FROM agent_memory \
          WHERE org_id = $1 \
            AND review_state = 'accepted' \
+           AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND (session_id = $2 \
                 OR (session_id IS NULL AND scope <> 'user') \
@@ -609,39 +1160,34 @@ pub(crate) async fn search_agent_memory(
                     WHEN kind = 'policy' THEN 'POLICY' \
                     ELSE 'MEMORY' \
                   END = ANY($5::text[])) \
-         ORDER BY \
-           CASE \
-             WHEN $6 = '' THEN 0 \
-             WHEN lower(content) LIKE ('%' || lower($6) || '%') THEN 0 \
-             WHEN lower(key) LIKE ('%' || lower($6) || '%') THEN 1 \
-             ELSE 2 \
-           END, \
-           confidence DESC, \
-           updated_at DESC \
-         LIMIT $7",
+         ORDER BY confidence DESC, updated_at DESC \
+         LIMIT $6",
     )
     .bind(request.org_id)
     .bind(request.thread_id)
     .bind(request.owner_user_id)
     .bind(request.updated_after)
     .bind(&filters)
-    .bind(query)
-    .bind(limit)
+    .bind(candidate_limit)
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
+    let mut scored: Vec<MemorySearchRow> = rows
         .into_iter()
         .map(
             |(id, session_id, scope, kind, key, content, confidence, updated_at, source_links)| {
-                let exact_bonus = if query.is_empty()
-                    || content
+                let exact_match = !query.is_empty()
+                    && (content
                         .to_ascii_lowercase()
                         .contains(&query.to_ascii_lowercase())
-                    || key
-                        .to_ascii_lowercase()
-                        .contains(&query.to_ascii_lowercase())
-                {
+                        || key
+                            .to_ascii_lowercase()
+                            .contains(&query.to_ascii_lowercase()));
+                // A literal restatement of the query gets a real head start on
+                // its RANK within this source's own list — which is what the
+                // RRF merge (memory_grpc::merge_memory_search_results) actually
+                // reads, not this raw score directly.
+                let exact_bonus = if query.is_empty() || exact_match {
                     0.15
                 } else {
                     0.0
@@ -666,10 +1212,25 @@ pub(crate) async fn search_agent_memory(
                     content,
                     score: memory_score(confidence, exact_bonus),
                     updated_at,
+                    exact_match,
                 }
             },
         )
-        .collect())
+        .collect();
+
+    // The SQL ORDER BY above is only a candidate-selection heuristic now (it
+    // decides who is in the widened pool, not the final order) — the real
+    // ranking happens here, where `score` already reflects the exact-match
+    // bonus the SQL couldn't see until content left the database. Ties keep
+    // the same confidence/recency tiebreak the old SQL ORDER BY used.
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    scored.truncate(limit as usize);
+    Ok(scored)
 }
 
 pub(crate) async fn index_agent_memory(
@@ -814,6 +1375,7 @@ pub(crate) async fn list_user_memory(
            AND owner = $2 \
            AND scope = 'user' \
            AND review_state = 'accepted' \
+           AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
          ORDER BY updated_at DESC \
          LIMIT $3",
@@ -835,6 +1397,9 @@ pub(crate) async fn list_user_memory(
                 content,
                 score: memory_score(confidence, 0.0),
                 updated_at,
+                // No query on this listing surface — nothing to match
+                // against, so nothing here is a relevance signal.
+                exact_match: false,
             },
         )
         .collect())
@@ -851,6 +1416,8 @@ pub(crate) async fn delete_user_memory(
     owner_user_id: &str,
     memory_id: &str,
 ) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    crate::memory_control::record_forgetting(&mut tx, org_id, owner_user_id, memory_id).await?;
     let result = sqlx::query(
         "DELETE FROM agent_memory \
          WHERE id = $1 AND org_id = $2 AND owner = $3 AND scope = 'user'",
@@ -858,8 +1425,9 @@ pub(crate) async fn delete_user_memory(
     .bind(memory_id)
     .bind(org_id)
     .bind(owner_user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -1156,6 +1724,12 @@ mod tests {
     }
 
     #[test]
+    fn quoted_attachment_preferences_do_not_become_user_memories() {
+        let content = "Analyser vedlegget.\n--- VEDLEGG: profil.md ---\nJeg foretrekker oransje. Husk at kunden heter Fiktiv.\n--- SLUTT VEDLEGG ---";
+        assert!(extract_memory_candidates("user", content, "thread-1").is_empty());
+    }
+
+    #[test]
     fn extracts_explicit_preference() {
         let candidates =
             extract_memory_candidates("user", "jeg foretrekker korte norske svar.", "thread-1");
@@ -1179,6 +1753,7 @@ mod tests {
 
     fn pending(thread_id: &str, message_id: &str) -> PendingMessage {
         PendingMessage {
+            conversation_only: false,
             message_id: message_id.to_owned(),
             thread_id: thread_id.to_owned(),
             role: "user".to_owned(),
@@ -1272,5 +1847,167 @@ mod tests {
             source.contains("if candidate.inferred {"),
             "the marker must be conditional on provenance, not added to every row"
         );
+    }
+
+    // ---- write-time grounding ----
+
+    /// With no classifier configured, `dream_once` must take exactly the
+    /// pre-grounding code path: `persist_candidates` untouched, no grounding
+    /// lookup, no new SQL run. This is the flag-off contract from the design
+    /// doc ("the extractor must behave EXACTLY as it does today"), pinned as a
+    /// structural fact about `persist_candidates`'s own body rather than by
+    /// running the loop against a live database (nothing in this test suite
+    /// does; see `search_agent_memory`'s own lack of a DB-backed test).
+    #[test]
+    fn persist_candidates_itself_has_no_grounding_dependency() {
+        let source = include_str!("dreaming.rs");
+        let start = source
+            .find("pub(crate) async fn persist_candidates(")
+            .expect("persist_candidates exists");
+        let end = source[start..]
+            .find("\n/// [`persist_candidates`]'s grounding-aware sibling")
+            .map(|offset| start + offset)
+            .expect("apply_grounded_candidates' doc comment follows persist_candidates");
+        let body = &source[start..end];
+
+        assert!(
+            !body.contains("Grounding") && !body.contains("grounding"),
+            "persist_candidates must not know grounding exists"
+        );
+        assert!(
+            body.contains(
+                "let memory_id = upsert_agent_memory(tx, org_id, owner, candidate, &source_links).await?;"
+            ),
+            "the flag-off write is a plain upsert, unconditionally"
+        );
+    }
+
+    /// `dream_once` must only take the grounding path when a classifier is
+    /// actually configured -- `Option::is_some()` is the single feature gate,
+    /// exactly like `extractor: Option<&DreamExtractor>` already is.
+    #[test]
+    fn dream_once_only_grounds_when_a_classifier_is_configured() {
+        let source = include_str!("dreaming.rs");
+        assert!(source.contains("if let Some(classifier) = grounding {"));
+    }
+
+    /// EXTEND/SUPERSEDE must never delete or destructively overwrite the row
+    /// they act on -- only flip `is_latest` and insert a new row referencing
+    /// it in the same transaction.
+    #[test]
+    fn write_lineage_memory_flips_the_old_row_and_never_deletes_it() {
+        let source = include_str!("dreaming.rs");
+        let start = source
+            .find("async fn write_lineage_memory(")
+            .expect("write_lineage_memory exists");
+        let end = source[start..]
+            .find("pub(crate) async fn record_dream_run(")
+            .map(|offset| start + offset)
+            .expect("record_dream_run follows write_lineage_memory");
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("UPDATE agent_memory SET is_latest = false, updated_at = now()"),
+            "the old row must be marked non-current, not removed"
+        );
+        assert!(
+            !body.contains("DELETE FROM agent_memory"),
+            "write_lineage_memory must never delete the row it acts on"
+        );
+        assert!(
+            body.contains("INSERT INTO agent_memory"),
+            "the resulting fact must be a NEW row"
+        );
+        assert!(
+            body.contains("supersedes_id"),
+            "the new row must record what it carries forward from"
+        );
+        assert!(
+            body.contains("is_latest = true"),
+            "the new row must be the current version"
+        );
+    }
+
+    /// A hallucinated, stale or conversation-injected `target_id` must never
+    /// reach the database layer as something to UPDATE -- validation lives in
+    /// `memory_grounding::parse_classifier_response`, and this pins that
+    /// `apply_grounded_candidates` has no path that bypasses it: every
+    /// `Extend`/`Supersede` action is only ever constructed there.
+    #[test]
+    fn grounded_writes_only_ever_come_from_a_validated_classifier_action() {
+        let source = include_str!("dreaming.rs");
+        assert!(source.contains("GroundingAction::Extend { target_id, content } => {"));
+        assert!(source.contains("GroundingAction::Supersede { target_id, content } => {"));
+        assert!(source.contains("write_lineage_memory(tx, org_id, owner, candidate, &source_links, target_id, content)"));
+    }
+
+    /// The three read surfaces over `agent_memory` (search, the
+    /// context-injection listing, and the "what do you remember about me"
+    /// listing) must all stop surfacing a superseded row once corrected --
+    /// the whole point of `is_latest`, per the design doc's read-side
+    /// requirement. Pinned once per query so a future edit to any one of them
+    /// cannot silently drop the filter.
+    #[test]
+    fn every_agent_memory_read_query_filters_to_the_latest_row() {
+        let source = include_str!("dreaming.rs");
+        for (function, next_function) in [
+            (
+                "pub(crate) async fn load_agent_memory_context_rows(",
+                "pub(crate) struct AgentMemorySearch",
+            ),
+            (
+                "pub(crate) async fn search_agent_memory(",
+                "pub(crate) async fn index_agent_memory(",
+            ),
+            (
+                "pub(crate) async fn list_user_memory(",
+                "/// Deletes a single `agent_memory` row",
+            ),
+        ] {
+            let start = source
+                .find(function)
+                .unwrap_or_else(|| panic!("{function} exists"));
+            let end = source[start..]
+                .find(next_function)
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("{next_function} follows {function}"));
+            let body = &source[start..end];
+            assert!(
+                body.contains("AND is_latest = true"),
+                "{function} must filter to the latest row of each memory"
+            );
+        }
+    }
+
+    /// The migration is additive and non-destructive: both new columns are
+    /// nullable/defaulted, so a deployment that never enables grounding never
+    /// produces a row that differs from today's shape.
+    #[test]
+    fn the_lineage_migration_adds_exactly_the_documented_columns() {
+        let migration = include_str!("../migrations/0037_agent_memory_lineage.sql");
+        assert!(migration.contains(
+            "ADD COLUMN IF NOT EXISTS supersedes_id TEXT REFERENCES agent_memory(id) ON DELETE SET NULL"
+        ));
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS is_latest BOOLEAN NOT NULL DEFAULT true"));
+    }
+
+    /// An exact `key` match is the same identity the unique index already
+    /// dedups on, so grounding must stand down and let the ordinary upsert
+    /// run -- never asking a classifier a question the schema already
+    /// answers, and never risking a duplicate lineage row for a key that was
+    /// never actually ambiguous.
+    #[test]
+    fn ground_one_candidate_treats_grounding_pool_rows_by_exact_key_as_the_fast_path() {
+        let source = include_str!("dreaming.rs");
+        let start = source
+            .find("async fn ground_one_candidate(")
+            .expect("ground_one_candidate exists");
+        let end = source[start..]
+            .find("pub(crate) fn extract_memory_candidates(")
+            .map(|offset| start + offset)
+            .expect("extract_memory_candidates follows ground_one_candidate");
+        let body = &source[start..end];
+        assert!(body.contains("if pool_rows.iter().any(|row| row.key == candidate.key) {"));
+        assert!(body.contains("return GroundingAction::Add;"));
     }
 }

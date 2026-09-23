@@ -31,6 +31,43 @@ func TestStore_RecordAndGetUsage(t *testing.T) {
 	}
 }
 
+// Cache-token telemetry (native-compaction migration prerequisite): the
+// in-memory rollup accumulates the two cache legs the same way it already
+// accumulates InputTokens/OutputTokens.
+func TestStore_RecordAndGetUsageRollsUpCacheTokens(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+
+	mustRecord(t, s, Entry{
+		OrgID: "org1", UserID: "u1", InputTokens: 8_520, OutputTokens: 42,
+		CacheReadInputTokens: 8_000, CacheCreationInputTokens: 400,
+	})
+	mustRecord(t, s, Entry{
+		OrgID: "org1", UserID: "u1", InputTokens: 20, OutputTokens: 5,
+		CacheReadInputTokens: 15, CacheCreationInputTokens: 0,
+	})
+
+	u, err := s.GetUsage(ctx, "org1", "u1")
+	if err != nil {
+		t.Fatalf("GetUsage: %v", err)
+	}
+	if u.TotalCacheReadInputTokens != 8_015 || u.TotalCacheCreationInputTokens != 400 {
+		t.Fatalf("cache token rollup = %d/%d, want 8015/400",
+			u.TotalCacheReadInputTokens, u.TotalCacheCreationInputTokens)
+	}
+	// An entry that never mentions cache usage must roll up to exact zero,
+	// not silently drop the whole entry.
+	uncached := Entry{OrgID: "org2", UserID: "u9", InputTokens: 10, OutputTokens: 5}
+	mustRecord(t, s, uncached)
+	u2, err := s.GetUsage(ctx, "org2", "u9")
+	if err != nil {
+		t.Fatalf("GetUsage(org2): %v", err)
+	}
+	if u2.TotalCacheReadInputTokens != 0 || u2.TotalCacheCreationInputTokens != 0 {
+		t.Fatalf("uncached rollup = %+v, want zero cache totals", u2)
+	}
+}
+
 func TestStore_GetUsageNotFound(t *testing.T) {
 	s := NewStore()
 	_, err := s.GetUsage(context.Background(), "missing", "u")

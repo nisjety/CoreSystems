@@ -494,7 +494,23 @@ mod tests {
     /// applies, the allowlist applies, and the inherited environment is GONE.
     #[tokio::test]
     async fn cwd_applies_and_the_inherited_environment_is_replaced() {
-        let parent_home = std::env::var("HOME").expect("the test runner has HOME set");
+        // A variable the parent definitely has and no shell can invent.
+        // HOME is NOT usable as the probe: MSYS/Git-Bash's `sh.exe` synthesises
+        // it from the Windows user even when spawned with a fully cleared
+        // environment (verified: with only PATH passed, the child reports
+        // USERPROFILE absent — so the clear worked — yet HOME present). Probing
+        // HOME therefore fails on a developer host while the invariant it
+        // stands for is intact, which is exactly the kind of red test that
+        // stops being read.
+        let canary = std::env::vars()
+            .map(|(key, _)| key)
+            .find(|key| {
+                !key.eq_ignore_ascii_case("home")
+                    && !key.eq_ignore_ascii_case("path")
+                    && key != "VEREVON_EXEC_TEST"
+            })
+            .expect("the test runner has an environment");
+        let parent_home = std::env::var("HOME").unwrap_or_default();
         let dir = std::env::temp_dir().join(format!("verevon-exec-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create test dir");
         let canonical = std::fs::canonicalize(&dir).expect("canonicalize test dir");
@@ -503,7 +519,9 @@ mod tests {
             "sh",
             &args(&[
                 "-c",
-                "printf '%s|%s|%s' \"$(pwd -P)\" \"$VEREVON_EXEC_TEST\" \"${HOME:-absent}\"",
+                &format!(
+                    "printf '%s|%s|%s' \"$(pwd -P)\" \"$VEREVON_EXEC_TEST\" \"${{{canary}:-absent}}\""
+                ),
             ]),
             &dir,
             // PATH must be in the allowlist or `sh` itself could not be resolved
@@ -517,10 +535,30 @@ mod tests {
         .await
         .expect("spawn sh");
         std::fs::remove_dir_all(&dir).expect("cleanup test dir");
+        // Compared field by field rather than against one formatted path.
+        // `canonicalize` renders a Windows path (`C:\...`, sometimes with a
+        // `\?\` prefix) while the shell reports its own (`/c/...`), so a
+        // whole-string equality failed on developer machines for a reason that
+        // had nothing to do with the three invariants below — and a test that
+        // is red for a spurious reason stops being read. The unique directory
+        // name is what actually proves the cwd applied, in any path syntax.
+        let workspace = dir
+            .file_name()
+            .expect("the test workspace has a name")
+            .to_string_lossy()
+            .into_owned();
+        let fields: Vec<&str> = out.stdout.split('|').collect();
+        assert_eq!(fields.len(), 3, "unexpected probe output: {}", out.stdout);
+        assert!(
+            fields[0].ends_with(&workspace),
+            "the per-call workspace must be the cwd, got {} (canonical {})",
+            fields[0],
+            canonical.display()
+        );
+        assert_eq!(fields[1], "injected", "the env allowlist must apply");
         assert_eq!(
-            out.stdout,
-            format!("{}|injected|absent", canonical.display()),
-            "cwd and the env allowlist must apply, and inherited HOME must be gone"
+            fields[2], "absent",
+            "the inherited environment must be gone: the child still sees {canary}"
         );
         assert!(
             !out.stdout.contains(&parent_home),

@@ -1920,7 +1920,7 @@ async fn space_read_marker(
 /// first, so someone removed from a room stops appearing in it. Application is
 /// only ever told the caller's own identity — presence cannot be written for
 /// anyone else.
-async fn record_space_presence(
+pub(crate) async fn record_space_presence(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -2049,7 +2049,7 @@ async fn record_space_presence(
 /// else: not which threads exist, not what they say. The same lifecycle and
 /// membership checks as every other Space read run first, so a former member
 /// cannot keep advancing a marker in a room they were removed from.
-async fn mark_space_read(
+pub(crate) async fn mark_space_read(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -2169,7 +2169,7 @@ async fn mark_space_read(
 /// post is the next slice: it needs a Space-authorized presentation write in
 /// Session Core, mirroring how a room reply is admitted through a Control
 /// `model.thread.append` decision, and is deliberately not faked here.
-async fn space_thread_presentation(
+pub(crate) async fn space_thread_presentation(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
@@ -3500,7 +3500,7 @@ async fn apply_room_membership(
 }
 
 /// `POST /api/v1/spaces/{space_ref}/members` — add one person to a named room.
-async fn add_space_member(
+pub(crate) async fn add_space_member(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -3515,7 +3515,7 @@ async fn add_space_member(
 }
 
 /// `DELETE /api/v1/spaces/{space_ref}/members/{member_id}` — remove one person.
-async fn remove_space_member(
+pub(crate) async fn remove_space_member(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path((space_ref, member_id)): Path<(String, String)>,
@@ -3618,7 +3618,7 @@ async fn apply_space_agent_state(
 /// than a third status here: it is the one irreversible option, it is the one
 /// that changes Control's roster, and putting it behind its own verb keeps a
 /// mistyped status from removing an agent.
-async fn set_space_agent_state(
+pub(crate) async fn set_space_agent_state(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path((space_ref, binding_ref)): Path<(String, String)>,
@@ -3647,7 +3647,7 @@ async fn set_space_agent_state(
 /// audit history and never renders it as a participant. What is removed is the
 /// agent's membership in Control's roster, which is what actually stops it
 /// acting here.
-async fn revoke_space_agent(
+pub(crate) async fn revoke_space_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path((space_ref, binding_ref)): Path<(String, String)>,

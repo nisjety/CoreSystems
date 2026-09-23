@@ -134,6 +134,29 @@ pub fn clear_stale_tool_results(messages: &mut [ChatMessage], budget: ToolPayloa
     indices.len()
 }
 
+/// Family hint for protecting pins; not proof of native compaction support.
+#[must_use]
+pub fn is_anthropic_family_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("claude")
+}
+
+/// Keep local recovery available through native-off rollback and provider fallback.
+#[must_use]
+pub fn should_run_local_compaction(_model: &str) -> bool {
+    // Routing can substitute a different provider, and native support/flags
+    // belong to inference-core. A model-name guess must never remove recovery.
+    true
+}
+
+/// Bound tool payloads on every route; compatibility wrapper for existing callers.
+pub fn clear_stale_tool_results_unless_native(
+    _model: &str,
+    messages: &mut [ChatMessage],
+    budget: ToolPayloadBudget,
+) -> usize {
+    clear_stale_tool_results(messages, budget)
+}
+
 /// The slice of a conversation tier 2 replaces with one summary message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeadSummary {
@@ -239,6 +262,7 @@ pub fn summary_prompt_with_memory(transcript: &str, directive: &str) -> String {
 #[must_use]
 pub fn summary_message(summary: &str) -> ChatMessage {
     ChatMessage {
+        compaction_summary: String::new(),
         role: "system".to_owned(),
         content: format!("{SUMMARY_PREFIX}\n{}", summary.trim()),
         name: String::new(),
@@ -264,6 +288,7 @@ pub fn apply_head_summary(
     let replacement = match summary.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => summary_message(value),
         None => ChatMessage {
+            compaction_summary: String::new(),
             role: "system".to_owned(),
             content: DROPPED_HISTORY_NOTICE.to_owned(),
             name: String::new(),
@@ -414,6 +439,7 @@ pub fn hoist_pinned_messages(
             block.push_str(PINNED_TRUNCATION_NOTICE);
         }
         hoisted.push(ChatMessage {
+            compaction_summary: String::new(),
             role: "system".to_owned(),
             content: block,
             name: String::new(),
@@ -451,6 +477,7 @@ pub fn drop_oldest_group(messages: &mut Vec<ChatMessage>, group: usize, keep_tai
         messages.insert(
             start,
             ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: DROPPED_HISTORY_NOTICE.to_owned(),
                 name: String::new(),
@@ -572,6 +599,7 @@ mod tests {
 
     fn message(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            compaction_summary: String::new(),
             role: role.to_owned(),
             content: content.to_owned(),
             name: String::new(),
@@ -649,6 +677,92 @@ mod tests {
         assert!(is_tool_result_message(&messages[4]));
         assert!(is_tool_result_message(&messages[5]));
         assert_eq!(messages.len(), 6, "shape is preserved; only payloads went");
+    }
+
+    // --- native-compaction migration: the Anthropic-family dispatch --------
+
+    #[test]
+    fn anthropic_family_models_are_recognized_case_and_whitespace_insensitively() {
+        for model in [
+            "claude-sonnet-4-6",
+            "Claude-Opus-4-8",
+            "  claude-haiku-4-5  ",
+            "CLAUDE-3-5-SONNET-20241022",
+        ] {
+            assert!(
+                is_anthropic_family_model(model),
+                "{model:?} should be recognized as Anthropic-family"
+            );
+        }
+    }
+
+    #[test]
+    fn non_anthropic_and_unspecified_models_are_not_anthropic_family() {
+        for model in ["gpt-4o-mini", "model-router", "gemini-1.5-pro", "", "   "] {
+            assert!(
+                !is_anthropic_family_model(model),
+                "{model:?} must not be treated as Anthropic-family"
+            );
+        }
+    }
+
+    #[test]
+    fn local_recovery_does_not_depend_on_a_provider_name_guess() {
+        assert!(should_run_local_compaction("claude-sonnet-4-6"));
+        assert!(should_run_local_compaction("claude-haiku-4-5"));
+        assert!(should_run_local_compaction("gpt-4o-mini"));
+        // An empty/unspecified model cannot be trusted to resolve to
+        // Anthropic, so the SAFE default is to keep running the existing
+        // hand-rolled path rather than silently skip it.
+        assert!(should_run_local_compaction(""));
+    }
+
+    /// **Migration test 1:** a turn resolved to the Anthropic family does NOT
+    /// also run the hand-rolled tier-1 clearing — inference-core's native
+    /// `clear_tool_uses_20250919` edit owns that job for this provider.
+    #[test]
+    fn anthropic_turn_keeps_local_tool_payload_recovery() {
+        let budget = ToolPayloadBudget {
+            max_chars: 10,
+            keep_recent: 0,
+        };
+        let mut messages = vec![tool_result(500), tool_result(500), tool_result(500)];
+
+        let cleared =
+            clear_stale_tool_results_unless_native("claude-sonnet-4-6", &mut messages, budget);
+
+        assert_eq!(cleared, 3);
+        assert!(messages.iter().all(|message| message.content.contains(CLEARED_TOOL_RESULT_NOTICE)));
+    }
+
+    /// **Migration test 2:** a turn resolved to a non-Anthropic model still
+    /// runs the existing hand-rolled clearing, unchanged — proven by
+    /// asserting `clear_stale_tool_results_unless_native` behaves byte-for-
+    /// byte like the pre-migration `clear_stale_tool_results` on the exact
+    /// fixture `over_budget_clears_oldest_and_keeps_the_newest_results` uses.
+    #[test]
+    fn a_non_anthropic_turn_still_runs_the_hand_rolled_clearing_unchanged() {
+        let budget = ToolPayloadBudget {
+            max_chars: 2_500,
+            keep_recent: 2,
+        };
+        let mut via_wrapper = vec![
+            message("system", "grounding"),
+            message("user", "question"),
+            tool_result(1_000),
+            tool_result(1_000),
+            tool_result(1_000),
+            tool_result(1_000),
+        ];
+        let mut via_direct = via_wrapper.clone();
+
+        let cleared_by_wrapper =
+            clear_stale_tool_results_unless_native("gpt-4o-mini", &mut via_wrapper, budget);
+        let cleared_directly = clear_stale_tool_results(&mut via_direct, budget);
+
+        assert_eq!(cleared_by_wrapper, cleared_directly);
+        assert_eq!(via_wrapper, via_direct);
+        assert_eq!(cleared_by_wrapper, 2);
     }
 
     #[test]

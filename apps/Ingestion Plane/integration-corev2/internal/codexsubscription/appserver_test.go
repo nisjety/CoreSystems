@@ -66,6 +66,44 @@ func TestTurnStartParamsIncludesOptionalPriorityTier(t *testing.T) {
 	}
 }
 
+func TestTurnStartForwardsStructuredOutputAsData(t *testing.T) {
+	schema := json.RawMessage(`{"type":"object","properties":{"content":{"type":"string"}},"required":["content"],"additionalProperties":false}`)
+	request := InvokeRequest{Model: "gpt-5.6-terra", OutputSchema: schema}
+	encoded, err := json.Marshal(turnStartParams("thread", request))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params map[string]any
+	if err := json.Unmarshal(encoded, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params["outputSchema"].(map[string]any)["type"] != "object" {
+		t.Fatal("schema was not forwarded as a JSON object")
+	}
+	if _, present := turnStartParams("thread", InvokeRequest{})["outputSchema"]; present {
+		t.Fatal("plain text should omit outputSchema")
+	}
+	thread := threadStartParams("/isolated/workspace", request)
+	config := thread["config"].(map[string]any)
+	if config["features.shell_tool"] != false || config["features.unified_exec"] != false || config["web_search"] != "disabled" || config["forced_login_method"] != "chatgpt" {
+		t.Fatal("broker native execution must be disabled")
+	}
+	if thread["model"] != "gpt-5.6-terra" || thread["sandbox"] != "read-only" || thread["approvalPolicy"] != "never" || thread["ephemeral"] != true {
+		t.Fatal("structured output changed model or execution policy")
+	}
+}
+
+func TestServingModelMustMatchBeforeStartingATurn(t *testing.T) {
+	for _, item := range [][2]string{{"", "openai"}, {"gpt-5.6-sol", "openai"}, {"gpt-5.6-terra", "azure"}, {"gpt-5.6-terra", ""}} {
+		if validateServingModel("gpt-5.6-terra", item[0], item[1]) == nil {
+			t.Fatal("changed or missing route accepted")
+		}
+	}
+	if err := validateServingModel("gpt-5.6-terra", "gpt-5.6-terra", "openai"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPersistedAuthReadyRequiresNonEmptyAuthJSON(t *testing.T) {
 	home := t.TempDir()
 	ready, err := persistedAuthReady(home)

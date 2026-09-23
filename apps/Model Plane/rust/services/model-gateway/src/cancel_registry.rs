@@ -73,6 +73,11 @@ impl CancelRegistry {
         self.inner.remove(request_id);
     }
 
+    /// Internal cooperative polling; callers use the already-authorized run id.
+    pub(crate) fn is_cancelled(&self, request_id: &str) -> bool {
+        self.inner.get(request_id).is_some_and(|entry| entry.flag.load(Ordering::Relaxed))
+    }
+
     /// Number of currently-tracked active streams.
     #[must_use]
     pub fn active(&self) -> usize {

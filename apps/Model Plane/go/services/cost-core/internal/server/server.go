@@ -47,40 +47,46 @@ func (s *Server) SetPricing(p *pricing.Resolver) {
 
 // recordRequest is the JSON body accepted by the record endpoint.
 type recordRequest struct {
-	OrgID          string  `json:"org_id"`
-	UserID         string  `json:"user_id"`
-	RunID          string  `json:"run_id"`
-	RequestID      string  `json:"request_id"`
-	Model          string  `json:"model"`
-	InputTokens    int64   `json:"input_tokens"`
-	OutputTokens   int64   `json:"output_tokens"`
-	CostUSD        float64 `json:"cost_usd"`
-	IdempotencyKey string  `json:"idempotency_key"`
+	OrgID                    string  `json:"org_id"`
+	UserID                   string  `json:"user_id"`
+	RunID                    string  `json:"run_id"`
+	RequestID                string  `json:"request_id"`
+	Model                    string  `json:"model"`
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	CostUSD                  float64 `json:"cost_usd"`
+	IdempotencyKey           string  `json:"idempotency_key"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
 }
 
 // usageResponse is the JSON shape returned by the usage/run/aggregate endpoints.
 type usageResponse struct {
-	OrgID             string  `json:"org_id"`
-	UserID            string  `json:"user_id,omitempty"`
-	RunID             string  `json:"run_id,omitempty"`
-	TotalInputTokens  int64   `json:"total_input_tokens"`
-	TotalOutputTokens int64   `json:"total_output_tokens"`
-	TotalCostUSD      float64 `json:"total_cost_usd"`
-	EntryCount        int64   `json:"entry_count"`
+	OrgID                         string  `json:"org_id"`
+	UserID                        string  `json:"user_id,omitempty"`
+	RunID                         string  `json:"run_id,omitempty"`
+	TotalInputTokens              int64   `json:"total_input_tokens"`
+	TotalOutputTokens             int64   `json:"total_output_tokens"`
+	TotalCostUSD                  float64 `json:"total_cost_usd"`
+	EntryCount                    int64   `json:"entry_count"`
+	TotalCacheReadInputTokens     int64   `json:"total_cache_read_input_tokens"`
+	TotalCacheCreationInputTokens int64   `json:"total_cache_creation_input_tokens"`
 }
 
 // entryResponse is the JSON shape of a single ledger entry in a list.
 type entryResponse struct {
-	OrgID        string    `json:"org_id"`
-	UserID       string    `json:"user_id"`
-	ProducerID   string    `json:"producer_id,omitempty"`
-	RunID        string    `json:"run_id,omitempty"`
-	RequestID    string    `json:"request_id,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	InputTokens  int64     `json:"input_tokens"`
-	OutputTokens int64     `json:"output_tokens"`
-	CostUSD      float64   `json:"cost_usd"`
-	CreatedAt    time.Time `json:"created_at"`
+	OrgID                    string    `json:"org_id"`
+	UserID                   string    `json:"user_id"`
+	ProducerID               string    `json:"producer_id,omitempty"`
+	RunID                    string    `json:"run_id,omitempty"`
+	RequestID                string    `json:"request_id,omitempty"`
+	Model                    string    `json:"model,omitempty"`
+	InputTokens              int64     `json:"input_tokens"`
+	OutputTokens             int64     `json:"output_tokens"`
+	CostUSD                  float64   `json:"cost_usd"`
+	CreatedAt                time.Time `json:"created_at"`
+	CacheReadInputTokens     int64     `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64     `json:"cache_creation_input_tokens"`
 }
 
 // budgetCheckRequest is the JSON body accepted by the budget-check endpoint.
@@ -217,15 +223,17 @@ func (s *Server) handleRecord(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry := ledger.Entry{
-		OrgID:          req.OrgID,
-		UserID:         req.UserID,
-		RunID:          req.RunID,
-		RequestID:      req.RequestID,
-		Model:          req.Model,
-		InputTokens:    req.InputTokens,
-		OutputTokens:   req.OutputTokens,
-		CostUSD:        req.CostUSD,
-		IdempotencyKey: req.IdempotencyKey,
+		OrgID:                    req.OrgID,
+		UserID:                   req.UserID,
+		RunID:                    req.RunID,
+		RequestID:                req.RequestID,
+		Model:                    req.Model,
+		InputTokens:              req.InputTokens,
+		OutputTokens:             req.OutputTokens,
+		CostUSD:                  req.CostUSD,
+		IdempotencyKey:           req.IdempotencyKey,
+		CacheReadInputTokens:     req.CacheReadInputTokens,
+		CacheCreationInputTokens: req.CacheCreationInputTokens,
 	}
 	if authenticated && principal.PrincipalType == "service" {
 		entry.ProducerID = principal.ActorID
@@ -401,16 +409,18 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	for i := range entries {
 		e := entries[i]
 		out = append(out, entryResponse{
-			OrgID:        e.OrgID,
-			UserID:       e.UserID,
-			ProducerID:   e.ProducerID,
-			RunID:        e.RunID,
-			RequestID:    e.RequestID,
-			Model:        e.Model,
-			InputTokens:  e.InputTokens,
-			OutputTokens: e.OutputTokens,
-			CostUSD:      e.CostUSD,
-			CreatedAt:    e.CreatedAt,
+			OrgID:                    e.OrgID,
+			UserID:                   e.UserID,
+			ProducerID:               e.ProducerID,
+			RunID:                    e.RunID,
+			RequestID:                e.RequestID,
+			Model:                    e.Model,
+			InputTokens:              e.InputTokens,
+			OutputTokens:             e.OutputTokens,
+			CostUSD:                  e.CostUSD,
+			CreatedAt:                e.CreatedAt,
+			CacheReadInputTokens:     e.CacheReadInputTokens,
+			CacheCreationInputTokens: e.CacheCreationInputTokens,
 		})
 	}
 	writeJSON(w, map[string]any{"entries": out, "count": len(out)})
@@ -561,7 +571,7 @@ func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 		return err
 	}
 	if e.CostUSD == 0 && (e.InputTokens > 0 || e.OutputTokens > 0) && s.pricing != nil {
-		e.CostUSD = s.pricing.Cost(e.Model, e.InputTokens, e.OutputTokens)
+		e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
 	}
 	if err := ledger.ValidateEntry(e); err != nil {
 		return err
@@ -582,6 +592,8 @@ func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 		"input_tokens", e.InputTokens,
 		"output_tokens", e.OutputTokens,
 		"cost_usd", fmt.Sprintf("%.8f", e.CostUSD),
+		"cache_read_input_tokens", e.CacheReadInputTokens,
+		"cache_creation_input_tokens", e.CacheCreationInputTokens,
 	)
 	return nil
 }
@@ -606,13 +618,15 @@ func decodeRequestJSON(w http.ResponseWriter, r *http.Request, target any) error
 
 func usageFromLedger(u *ledger.Usage) usageResponse {
 	return usageResponse{
-		OrgID:             u.OrgID,
-		UserID:            u.UserID,
-		RunID:             u.RunID,
-		TotalInputTokens:  u.TotalInputTokens,
-		TotalOutputTokens: u.TotalOutputTokens,
-		TotalCostUSD:      u.TotalCostUSD,
-		EntryCount:        u.EntryCount,
+		OrgID:                         u.OrgID,
+		UserID:                        u.UserID,
+		RunID:                         u.RunID,
+		TotalInputTokens:              u.TotalInputTokens,
+		TotalOutputTokens:             u.TotalOutputTokens,
+		TotalCostUSD:                  u.TotalCostUSD,
+		EntryCount:                    u.EntryCount,
+		TotalCacheReadInputTokens:     u.TotalCacheReadInputTokens,
+		TotalCacheCreationInputTokens: u.TotalCacheCreationInputTokens,
 	}
 }
 

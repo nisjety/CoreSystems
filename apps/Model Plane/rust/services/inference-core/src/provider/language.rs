@@ -450,11 +450,13 @@ impl LanguageAnalyticsProvider for LlmLanguageProvider {
                 },
                 messages: vec![
                     ChatMessage {
+                        compaction_summary: String::new(),
                         role: "system".to_owned(),
                         content: "Return strict JSON only. Do not include markdown.".to_owned(),
                         name: String::new(),
                     },
                     ChatMessage {
+                        compaction_summary: String::new(),
                         role: "user".to_owned(),
                         content: prompt,
                         name: String::new(),

@@ -62,6 +62,8 @@ describe("runAssist", () => {
 						metadata: { interactiveRetention: { zdr: false } },
 					});
 				}
+				if (url === "/api/v1/knowledge/search")
+					return jsonResponse({ results: [], total: 0 });
 				if (url === "/api/v1/chat/invoke") {
 					return jsonResponse({
 						content: "I can help with the missing delivery.",
@@ -377,6 +379,117 @@ describe("runAssist", () => {
 				([input]) => String(input) === "/api/v1/knowledge/search",
 			),
 		).toBe(true);
+	});
+
+	it("grounds a draft in Knowledge using the latest customer turn, not the caller's instruction", async () => {
+		const fetchMock = vi.fn(
+			async (input: RequestInfo | URL, init?: RequestInit) => {
+				const url = String(input);
+				if (url === "/api/v1/orgs/org-draft-knowledge")
+					return jsonResponse({ id: "org-draft-knowledge", metadata: {} });
+				if (url === "/api/v1/knowledge/search") {
+					expect(JSON.parse(String(init?.body))).toMatchObject({
+						query: "The shipment is delayed and I want a refund.",
+					});
+					return jsonResponse({
+						results: [
+							{
+								id: "doc-1",
+								title: "Refund policy",
+								excerpt: "Refunds within 30 days",
+								path: "/wiki/refunds",
+								score: 0.9,
+								kind: "wiki",
+							},
+						],
+						total: 1,
+					});
+				}
+				if (url === "/api/v1/chat/invoke")
+					return jsonResponse({ content: "Drafted reply", sources: [] });
+				throw new Error(`Unexpected request ${url}`);
+			},
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		await runAssist(
+			"org-draft-knowledge",
+			"draft",
+			[
+				{ agent: false, body: "The shipment is delayed and I want a refund." },
+				{ agent: true, body: "Let me check that for you." },
+			],
+			{
+				instruction:
+					"Prepare the customer reply needed for the recommended next action.",
+				contextPack: buildModelContextPack({
+					route: "/inbox",
+					visibleItems: [],
+					support: { permissions: ["support.read"] },
+				}),
+			},
+		);
+
+		const invoke = fetchMock.mock.calls.find(
+			([input]) => String(input) === "/api/v1/chat/invoke",
+		);
+		const body = JSON.parse(String(invoke?.[1]?.body)) as { content: string };
+		expect(body.content).toContain(
+			"Refund policy (/wiki/refunds) — Refunds within 30 days",
+		);
+	});
+
+	it("grounds a resolution plan in Knowledge as well as a draft", async () => {
+		const fetchMock = vi.fn(
+			async (input: RequestInfo | URL, _init?: RequestInit) => {
+				void _init;
+				const url = String(input);
+				if (url === "/api/v1/orgs/org-resolution-knowledge")
+					return jsonResponse({
+						id: "org-resolution-knowledge",
+						metadata: {},
+					});
+				if (url === "/api/v1/knowledge/search")
+					return jsonResponse({
+						results: [
+							{
+								id: "doc-2",
+								title: "Delivery SLA",
+								excerpt: "Two business days",
+								path: "/wiki/sla",
+								score: 0.9,
+								kind: "wiki",
+							},
+						],
+						total: 1,
+					});
+				if (url === "/api/v1/chat/invoke")
+					return jsonResponse({ content: '{"summary":"Needs review"}' });
+				throw new Error(`Unexpected request ${url}`);
+			},
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		await runAssist(
+			"org-resolution-knowledge",
+			"resolution",
+			[{ agent: false, body: "Where is my package?" }],
+			{
+				contextPack: buildModelContextPack({
+					route: "/inbox",
+					visibleItems: [],
+					support: { permissions: ["support.read"] },
+				}),
+			},
+		);
+
+		const invoke = fetchMock.mock.calls.find(
+			([input]) => String(input) === "/api/v1/chat/invoke",
+		);
+		const body = JSON.parse(String(invoke?.[1]?.body)) as { content: string };
+		expect(body.content).toContain(
+			"Delivery SLA (/wiki/sla) — Two business days",
+		);
 	});
 
 	it("does not invoke a model when the canonical retention posture cannot be read", async () => {

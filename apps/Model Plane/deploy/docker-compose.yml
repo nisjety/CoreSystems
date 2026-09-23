@@ -1,5 +1,14 @@
 name: model-plane
 
+# BUILD AND START THIS STACK WITH ./build-verevon-services.sh (--from model),
+# never a bare `docker compose build|up` here. Some values are owned by Control
+# Plane and live only in its persisted secrets (SESSION_CORE_GDPR_NATS_PASSWORD,
+# for one -- control-shared-nats authorizes that user, so this plane must NOT
+# keep its own copy); the script resolves that chain in `plane_env_files`. A
+# hand-assembled `--env-file` list either fails on an unset required variable or
+# starts a service against a drifted duplicate. Both happened on 2026-09-14:
+# session-core failed NATS auth ~240x/min for as long as the duplicate existed.
+
 x-build-metadata: &build-metadata
   SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION build arg required for image provenance}
   BUILD_DATE: ${BUILD_DATE:?BUILD_DATE build arg required for image provenance}
@@ -361,24 +370,19 @@ services:
       #   the intent layer's cheapest mode; the REPORT is written by the turn's
       #   own model, never this one.
       DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-verevon-budget}
-      # Local semantic-response cache (Dragonfly exact-match). Default ON,
-      # pointing at the Model Plane Dragonfly; set empty to disable. Exact
-      # (org+user+model+prompt) match only — no embeddings and no cross-plane
-      # calls; the vector-similarity tier is owned by Data Plane v2 and layered
-      # on separately. There is deliberately NO hosted third-party tier: the
-      # managed Redis LangCache backend was removed because it POSTed the
-      # fully-assembled prompt and the model's answer to an outside host with no
-      # TTL and no delete path, so erasure could not reach the copy.
-      SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379}
-      SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
-      # Semantic (vector) cache tier — owned by Data Plane v2 (embeddings +
-      # Qdrant). With this AND SEMANTIC_CACHE_URL set (default), the gateway
-      # LAYERS them: a fast Dragonfly exact-match hit first, then a DPv2
-      # /v1/cache/semantic/* (HTTP) fallback that also warms the exact tier.
-      # Off by default → exact-match only. DATAPLANE_INTERNAL_KEY (above)
-      # authorizes the call; the HTTP base reuses the same retrieval-engine the
-      # graph-grounding path already targets.
-      SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
+      # SEMANTIC_CACHE_URL/SEMANTIC_CACHE_TTL_SECS/SEMANTIC_CACHE_DATAPLANE_ENABLED
+      # were removed 2026-09-17 — the code that read them (model-gateway's
+      # langcache module) was already reduced to a documentation tombstone on
+      # 2026-09-16, and the local Dragonfly exact-match tier itself was removed
+      # before that, for a structural reason (the assembled prompt is not a pure
+      # function of the question, because of unconditional per-turn memory-recall
+      # blocks — see langcache.rs). These three had been inert env vars since
+      # then, and SEMANTIC_CACHE_URL was interpolating a live Dragonfly credential
+      # (MODEL_DRAGONFLY_PASSWORD) into a variable nothing consumed, failing the
+      # whole compose file if that secret was absent. See
+      # docs/CACHE_COMPACTION_AUDIT_2026-09-17.md §4.4. DATAPLANE_RETRIEVAL_HTTP_URL
+      # (below)/DATAPLANE_INTERNAL_KEY (above) stay — they are real, live inputs to
+      # retrieval.rs's grounding path, not part of the dead cache.
       DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
       # shipping-core (Ingestion Plane) — backs the shipping_get_quotes plain-
       # chat builtin. Without this the gateway falls back to localhost:8080,
@@ -410,6 +414,15 @@ services:
       # sending a request that can only 401.
       INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
       SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      # The shared inbox, for the inbox_search / inbox_get_conversation read
+      # tools. Same internal-key + x-org-id leg as the other Application Plane
+      # cores; read-only, and org-scoped from the verified request.
+      CONVERSATION_CORE_URL: ${CONVERSATION_CORE_URL:-http://conversation-core-go:3160}
+      # Signs this service's reads as conversation-core's `model-gateway`
+      # principal. Owned by apps/Application Plane/conversation-core/.env and
+      # read from there through the launcher — never copied into this plane,
+      # because a second copy is how the delegation tokens drift.
+      CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN: ${CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN:-}
       # Control Plane owns per-org quotas (`org_quotas`); the gateway reads the
       # spend/token ceiling and hands it to cost-core's budget check. Resolved by
       # COMPOSE SERVICE NAME on inter-plane-bus (org-core has no alias there),
@@ -525,6 +538,13 @@ services:
       INFERENCE_CORE_ADDR: ${INFERENCE_CORE_ADDR:-http://model-plane-inference-core-1:9092}
       DREAMING_LLM_EXTRACTION: ${DREAMING_LLM_EXTRACTION:-1}
       DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
+      # Write-time memory grounding (memory_grounding.rs). Off by default --
+      # set MEMORY_GROUNDING_ENABLED=1 to let Dreaming classify a candidate as
+      # ADD/EXTEND/SUPERSEDE/NOOP against existing same-scope memories instead
+      # of always inserting. Reuses INFERENCE_CORE_ADDR/AUTH_CORE_URL/
+      # SESSION_CORE_SERVICE_ID/SESSION_CORE_SERVICE_API_KEY already set above.
+      MEMORY_GROUNDING_ENABLED: ${MEMORY_GROUNDING_ENABLED:-0}
+      MEMORY_GROUNDING_MODEL: ${MEMORY_GROUNDING_MODEL:-claude-haiku-4-5}
       CONTEXT_RECENT_MESSAGES: "20"
       COMPACTION_THRESHOLD: "80000"
       # P0.4 residency: region stamped onto every run record at StartRun.
@@ -612,6 +632,7 @@ services:
       SESSION_CORE_URL: http://model-plane-session-core-1:9091
       ROUTER_POLICY_REFRESH_SECS: ${ROUTER_POLICY_REFRESH_SECS:-60}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_NATIVE_CONTEXT_MANAGEMENT: ${ANTHROPIC_NATIVE_CONTEXT_MANAGEMENT:-true}
       # Azure AI Foundry Claude (claude-ai project). When set, the `anthropic`
       # provider slot routes claude-* models to <endpoint>/anthropic/v1/messages
       # (native Anthropic body + x-api-key auth) instead of api.anthropic.com.
@@ -786,6 +807,15 @@ services:
       # host-published development ports are part of the service contract.
       # Social workspace tools (list_social_accounts / publish_social_post).
       SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      # The shared inbox, for the inbox_search / inbox_get_conversation read
+      # tools. Same internal-key + x-org-id leg as the other Application Plane
+      # cores; read-only, and org-scoped from the verified request.
+      CONVERSATION_CORE_URL: ${CONVERSATION_CORE_URL:-http://conversation-core-go:3160}
+      # Signs this service's reads as conversation-core's `model-gateway`
+      # principal. Owned by apps/Application Plane/conversation-core/.env and
+      # read from there through the launcher — never copied into this plane,
+      # because a second copy is how the delegation tokens drift.
+      CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN: ${CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN:-}
       INFERENCE_CORE_ADDR: http://inference-core:9092
       # model-gateway gRPC — governed loop fetches/proxies an org's registered
       # MCP tools (ListMcpTools + ProxyMcpTool). Same model-plane-network, so the
@@ -1093,6 +1123,14 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       CAPABILITY_CORE_SERVICE_ID: ${CAPABILITY_CORE_SERVICE_ID:-capability-core}
       CAPABILITY_CORE_SERVICE_API_KEY: ${CAPABILITY_CORE_SERVICE_API_KEY:-}
+      # llmreviewer's DefaultModel ("claude-sonnet-4-20250514") is inference-
+      # core's DEFAULT_ANTHROPIC_MODEL constant (rust/services/inference-core/
+      # src/provider/anthropic.rs) -- the direct-API dated-snapshot name, not
+      # one of this environment's actual Azure deployments
+      # (AZURE_ANTHROPIC_DEPLOYMENTS below). Every azure-anthropic call for it
+      # 404s ("DeploymentNotFound"). Pin the review call to a real deployment
+      # explicitly rather than relying on the shared default.
+      LEARNING_REVIEW_MODEL: ${LEARNING_REVIEW_MODEL:-claude-sonnet-4-5}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with

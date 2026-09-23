@@ -5,6 +5,7 @@ use tracing::warn;
 pub mod anthropic;
 pub mod artifact_ref;
 pub mod codex_subscription;
+mod codex_subscription_tools;
 pub mod doc_intel;
 pub mod fallback;
 pub mod intent;
@@ -147,6 +148,9 @@ pub struct InferRequest {
     /// not is a hard 400 rather than a silent no-op. See
     /// `anthropic::supports_extended_thinking`.
     pub thinking_budget_tokens: i32,
+    /// Optional speed tier for supported subscription models. It does not
+    /// select a provider or reduce the requested reasoning effort.
+    pub prefer_priority_service_tier: bool,
     /// Opaque Integration Core connection id for a user-owned subscription.
     /// This is a routing reference, never a ChatGPT OAuth credential. It is
     /// included in the prompt-cache scope so two connections cannot share a
@@ -190,6 +194,8 @@ pub struct ToolCall {
 /// A single chat message.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChatMessage {
+    #[serde(skip)]
+    pub compaction_summary: String,
     pub role: String,
     pub content: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -221,6 +227,7 @@ pub struct TokenConfidence {
 /// Unified inference response.
 #[derive(Debug, Clone, Default)]
 pub struct InferResponse {
+    pub compaction_summary: String,
     pub request_id: String,
     pub content: String,
     pub model_used: String,
@@ -238,11 +245,22 @@ pub struct InferResponse {
     pub residency: String,
     /// The serving model's own token-level certainty, when it reports logprobs.
     pub token_confidence: Option<TokenConfidence>,
+    /// Tokens served from the provider's prompt cache (0 when not cached, or
+    /// the provider does not support prompt caching). Already folded into
+    /// `input_tokens` above (see `anthropic::total_input_tokens`); carried
+    /// separately so cache-hit rate and cost savings are observable
+    /// (cache-token telemetry, a native-compaction migration prerequisite).
+    pub cache_read_input_tokens: i32,
+    /// Tokens newly written to the provider's prompt cache by this request (0
+    /// when not cached). Same fold-in relationship to `input_tokens` as
+    /// `cache_read_input_tokens`.
+    pub cache_creation_input_tokens: i32,
 }
 
 /// A single streaming chunk.
 #[derive(Debug, Clone)]
 pub struct InferChunk {
+    pub compaction_summary: String,
     pub request_id: String,
     pub delta: String,
     pub done: bool,
@@ -270,6 +288,16 @@ pub struct InferChunk {
     /// token counts and provenance above follow, and for the same reason: it
     /// is a property of the completed answer, not of one delta.
     pub token_confidence: Option<TokenConfidence>,
+    /// Tokens served from the provider's prompt cache, populated on the FINAL
+    /// chunk only (same rule as `input_tokens`/`output_tokens` above). 0 when
+    /// not cached, or the provider does not support prompt caching. Already
+    /// folded into `input_tokens`; carried separately so cache-hit rate and
+    /// cost savings are observable on the streaming path (previously the
+    /// actual telemetry gap — see [`InferResponse::cache_read_input_tokens`]).
+    pub cache_read_input_tokens: i32,
+    /// Tokens newly written to the provider's prompt cache by this request,
+    /// populated on the FINAL chunk only. 0 when not cached.
+    pub cache_creation_input_tokens: i32,
 }
 
 /// A unified embedding request used internally across providers.

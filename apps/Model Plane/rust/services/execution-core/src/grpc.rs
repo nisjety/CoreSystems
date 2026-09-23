@@ -498,6 +498,7 @@ fn scheduled_inference_request(
         model: "verevon-balance".to_owned(),
         messages: vec![
             pb::ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content:
                     "Execute one bounded scheduled step. Do not call tools or external effects."
@@ -505,6 +506,7 @@ fn scheduled_inference_request(
                 name: String::new(),
             },
             pb::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: goal.to_owned(),
                 name: String::new(),
@@ -601,6 +603,33 @@ fn authenticated_browser_request<T>(value: T, bearer: &str) -> Result<Request<T>
 /// session-core cannot durably create the approval record. Callers must return
 /// the error before they checkpoint or expose `AwaitingApproval` state.
 #[allow(clippy::result_large_err)]
+/// A lazily-connected channel that cannot hang on an unreachable peer.
+///
+/// `connect_lazy` on a bare `Endpoint` applies NO bound to establishing the
+/// connection, so a call against a peer that is down waits on the OS TCP stack
+/// — which refuses fast on Linux and retries SYN for seconds on Windows. That
+/// difference is why this looked like a flaky test rather than the missing
+/// bound it is: `direct_hitl_rejects_an_undurable_approval_pause` asserts a
+/// direct human-in-the-loop approval fails FAST when `orchestration-core` is
+/// unreachable, because the alternative is a run that neither pauses nor
+/// proceeds while a human waits on it. Every other channel in this crate
+/// already bounds itself this way (`auth.rs`, `capability_client.rs`,
+/// `capability_policy.rs`); these four were the exception.
+///
+/// Connection setup is bounded for every peer. A per-REQUEST timeout is the
+/// caller's business and deliberately not set here: session and capability
+/// calls are short, but an inference or browser call can legitimately run for
+/// minutes, and a blanket request timeout would abort exactly the work this
+/// service exists to do.
+fn lazy_bounded_channel(url: String) -> Result<tonic::transport::Channel, tonic::transport::Error> {
+    Ok(tonic::transport::Endpoint::from_shared(url)?
+        .connect_timeout(GRPC_CONNECT_TIMEOUT)
+        .connect_lazy())
+}
+
+/// Matches the 3 s used by every other outbound channel in this crate.
+const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 async fn create_durable_approval(
     session_channel: &tonic::transport::Channel,
     approval: pb::CreateApprovalRequest,
@@ -1270,8 +1299,7 @@ pub async fn serve(
         .unwrap_or_else(|_| "http://browser-broker:9095".to_owned());
     let capability_url = std::env::var("CAPABILITY_CORE_ADDR")
         .unwrap_or_else(|_| "http://capability-core:9097".to_owned());
-    let capability_channel =
-        tonic::transport::Endpoint::from_shared(capability_url)?.connect_lazy();
+    let capability_channel = lazy_bounded_channel(capability_url)?;
     let capability_policy = Arc::new(crate::capability_policy::GrpcCapabilityPolicy::from_env(
         capability_channel,
     )?);
@@ -1358,9 +1386,9 @@ async fn serve_with_listener(
     backend_id: String,
     sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
 ) -> anyhow::Result<()> {
-    let session_channel = tonic::transport::Endpoint::from_shared(session_url)?.connect_lazy();
-    let inference_channel = tonic::transport::Endpoint::from_shared(inference_url)?.connect_lazy();
-    let browser_channel = tonic::transport::Endpoint::from_shared(browser_url)?.connect_lazy();
+    let session_channel = lazy_bounded_channel(session_url)?;
+    let inference_channel = lazy_bounded_channel(inference_url)?;
+    let browser_channel = lazy_bounded_channel(browser_url)?;
 
     readiness.set_grpc_ready(true);
     let _readiness_guard = ReadinessGuard(readiness);
@@ -1775,13 +1803,15 @@ mod auth_tests {
             .expect("bind ephemeral listener");
         let address = listener.local_addr().expect("listener address");
         drop(listener);
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
-            .expect("endpoint")
-            .connect_lazy();
+        // Built through the SAME helper production uses: a channel the test
+        // bounded by itself would prove nothing about the service.
+        let channel = lazy_bounded_channel(format!("http://{address}")).expect("endpoint");
         let state = StateStore::new();
 
+        // Comfortably above GRPC_CONNECT_TIMEOUT and far below "hangs": the
+        // point is that SOME application-level bound exists, not its exact value.
         let error = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            GRPC_CONNECT_TIMEOUT + Duration::from_secs(5),
             create_durable_approval(
                 &channel,
                 pb::CreateApprovalRequest {

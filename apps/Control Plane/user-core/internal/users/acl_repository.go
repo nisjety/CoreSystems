@@ -338,11 +338,9 @@ func (r *AclRepository) Delete(ctx context.Context, grantID string) error {
 	return nil
 }
 
-// GetByID retrieves a single grant by primary key (back-compat).
-func (r *AclRepository) GetByID(ctx context.Context, grantID string) (*DocumentAcl, error) {
-	row := r.db.Pool.QueryRow(ctx,
-		`SELECT grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by, granted_at
-		 FROM resource_grants WHERE grant_id = $1`, grantID)
+// scanDocumentAcl scans a single resource_grants row into a DocumentAcl,
+// mapping pgx.ErrNoRows to a "document acl not found" error.
+func scanDocumentAcl(row pgx.Row) (*DocumentAcl, error) {
 	g := &ResourceGrant{}
 	if err := row.Scan(&g.GrantID, &g.OrgID, &g.ResourceType, &g.ResourceID,
 		&g.SubjectType, &g.SubjectID, &g.Role, &g.GrantedBy, &g.GrantedAt); err != nil {
@@ -352,6 +350,14 @@ func (r *AclRepository) GetByID(ctx context.Context, grantID string) (*DocumentA
 		return nil, fmt.Errorf("failed to get resource grant: %w", err)
 	}
 	return grantToDocumentAcl(g), nil
+}
+
+// GetByID retrieves a single grant by primary key (back-compat).
+func (r *AclRepository) GetByID(ctx context.Context, grantID string) (*DocumentAcl, error) {
+	row := r.db.Pool.QueryRow(ctx,
+		`SELECT grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by, granted_at
+		 FROM resource_grants WHERE grant_id = $1`, grantID)
+	return scanDocumentAcl(row)
 }
 
 // ListByDocument returns all user grants on a document (back-compat).
@@ -385,13 +391,5 @@ func (r *AclRepository) GetByUser(ctx context.Context, orgID, documentID, userID
 		 FROM resource_grants
 		 WHERE org_id=$1 AND resource_type=$2 AND resource_id=$3 AND subject_type=$4 AND subject_id=$5`,
 		orgID, resourceTypeDocument, documentID, subjectTypeUser, userID)
-	g := &ResourceGrant{}
-	if err := row.Scan(&g.GrantID, &g.OrgID, &g.ResourceType, &g.ResourceID,
-		&g.SubjectType, &g.SubjectID, &g.Role, &g.GrantedBy, &g.GrantedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("document acl not found: %w", pgx.ErrNoRows)
-		}
-		return nil, fmt.Errorf("failed to get resource grant: %w", err)
-	}
-	return grantToDocumentAcl(g), nil
+	return scanDocumentAcl(row)
 }

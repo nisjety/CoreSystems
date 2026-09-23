@@ -4,7 +4,7 @@ import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { FeedbackWidget } from '@/features/core/components/FeedbackWidget'
+import { FeedbackWidget, OPEN_FEEDBACK_EVENT } from '@/features/core/components/FeedbackWidget'
 import { I18nProvider } from '@/shared/i18n'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
@@ -27,6 +27,25 @@ afterEach(() => {
 })
 
 describe('FeedbackWidget', () => {
+  it('keeps chat content clear and opens feedback only from an explicit menu action', () => {
+    setSessionUser({ id: 'user-1', email: 'ada@example.com', name: 'Ada', emailVerified: true })
+    flush()
+    markSessionOnboardingComplete({ id: 'org-1', name: 'Verevon', role: 'member' })
+    flush()
+    renderWidget('/chat')
+    expect(screen.queryByRole('button', { name: 'Tilbakemelding' })).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    window.dispatchEvent(new Event(OPEN_FEEDBACK_EVENT))
+    flush()
+    expect(screen.getByRole('dialog', { name: 'Meld friksjon' })).toBeTruthy()
+    const pageDismiss = vi.fn((event: KeyboardEvent) => { if (!event.defaultPrevented) throw new Error('Feedback Escape reached the page dismissal') })
+    document.addEventListener('keydown', pageDismiss)
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    document.removeEventListener('keydown', pageDismiss)
+    expect(pageDismiss).toHaveBeenCalledTimes(1)
+    flush()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
   it('does not render the trigger when there is no active organization', () => {
     renderWidget()
 

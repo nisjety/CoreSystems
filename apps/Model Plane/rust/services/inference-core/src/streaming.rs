@@ -34,6 +34,11 @@ pub fn bridge_to_grpc(
                 // Present on the final chunk only, and only for providers that
                 // report logprobs; `None` reaches consumers as "unknown".
                 token_confidence: chunk.token_confidence.map(Into::into),
+                // Prompt-cache telemetry (final chunk only, 0 otherwise) --
+                // the streaming path's cache-hit observability.
+                cache_read_input_tokens: chunk.cache_read_input_tokens,
+                cache_creation_input_tokens: chunk.cache_creation_input_tokens,
+                compaction_summary: chunk.compaction_summary,
             };
             if tx.send(Ok(proto_chunk)).await.is_err() {
                 break;

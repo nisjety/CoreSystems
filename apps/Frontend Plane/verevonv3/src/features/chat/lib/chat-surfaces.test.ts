@@ -19,7 +19,7 @@ import {
   isChatSurfaceAvailable,
   type ChatSurfaceAvailability,
 } from './chat-surfaces'
-import { isWorkStep } from '../components/chat-normalizers'
+import { isWorkStep, normalizeStep } from '../components/chat-normalizers'
 
 const calm: ChatSurfaceAvailability = {
   sourceCount: 0,
@@ -60,6 +60,15 @@ describe('isWorkStep', () => {
     expect(isWorkStep({ id: 'no-marker-at-all' })).toBe(false)
     expect(isWorkStep({ id: `${turn}:something-new` })).toBe(false)
   })
+
+  it('keeps source review visible before any artifact or tool is published', () => {
+    const review = normalizeStep({ id: 'call-1:source-check', title: 'Kontrollerer utkastet mot kildene', status: 'running' }, turn)!
+    expect(isWorkStep(review)).toBe(true)
+    const state = { ...calm, stepCount: 1, workStepCount: [review].filter(isWorkStep).length }
+    expect(isChatSurfaceAvailable('steps', state)).toBe(true)
+    expect(chatSurfaceClaimsFocus('steps', state)).toBe(true)
+    expect(isWorkStep({ id: `${turn}:source-check` })).toBe(false)
+  })
 })
 
 describe('claimsFocus versus available', () => {
@@ -92,10 +101,28 @@ describe('claimsFocus versus available', () => {
     expect(chatSurfaceClaimsFocus('artifacts', { ...calm, artifactCount: 1 })).toBe(true)
   })
 
-  it('opens Sources for a citation, not for a bare grounding summary', () => {
+  it('opens Sources for a citation that was read, not for a bare grounding summary', () => {
     expect(isChatSurfaceAvailable('sources', { ...calm, hasGrounding: true })).toBe(true)
     expect(chatSurfaceClaimsFocus('sources', { ...calm, hasGrounding: true })).toBe(false)
-    expect(chatSurfaceClaimsFocus('sources', { ...calm, sourceCount: 1 })).toBe(true)
+    expect(
+      chatSurfaceClaimsFocus('sources', { ...calm, sourceCount: 1, readSourceCount: 1 }),
+    ).toBe(true)
+  })
+
+  it('offers Sources for a lead it never read, but does not open the panel for one', () => {
+    // Deep research can list two dozen candidates and read three. A lead is
+    // worth listing; it is not worth pulling the user out of the answer for,
+    // and the panel popping open on one reads as "here is your evidence" when
+    // nothing was fetched.
+    const leadsOnly = { ...calm, sourceCount: 24, readSourceCount: 0 }
+    expect(isChatSurfaceAvailable('sources', leadsOnly)).toBe(true)
+    expect(chatSurfaceClaimsFocus('sources', leadsOnly)).toBe(false)
+  })
+
+  it('treats an omitted readSourceCount as nothing read rather than guessing', () => {
+    // Same rule as workStepCount: a caller that cannot compute the narrower
+    // number gets the conservative answer, never a fallback to the wider one.
+    expect(chatSurfaceClaimsFocus('sources', { ...calm, sourceCount: 5 })).toBe(false)
   })
 
   it('never lets Trace or Chat claim focus', () => {

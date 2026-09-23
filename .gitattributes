@@ -17,3 +17,22 @@ Makefile text eol=lf
 makefile text eol=lf
 GNUmakefile text eol=lf
 *.mk text eol=lf
+
+# Source files: prettier defaults to endOfLine=lf, so a Windows checkout with
+# core.autocrlf=true makes eslint-plugin-prettier flag every CRLF line as
+# "Delete `␍`" (~35k phantom errors in auth-core alone). All blobs are already
+# stored LF (i/lf), so pinning eol=lf here only affects the working-tree
+# checkout and produces no blob changes.
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+
+# Deployment/contract files are read by Jest deployment-contract specs whose
+# assertions match on '\n'; a CRLF checkout makes those tests fail on Windows.
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sql text eol=lf
+Dockerfile text eol=lf

@@ -72,32 +72,14 @@ export function AiModelPicker(props: {
     (nextOrgId) => { setSelected(readAiModelSelection(nextOrgId)) },
   )
 
-  // A removed/disconnected subscription must not leave a picker claiming a
-  // route that can no longer run. Reset after both resources have settled.
-  createEffect(
-    () => ({
-      modelsLoading: models.loading,
-      subscriptionsLoading: subscriptions.loading,
-      connectionId: activeSubscription()?.id,
-      blocked: subscriptionBlocked(),
-      current: selected(),
-      orgId: props.orgId,
-      onChange: props.onChange,
-    }),
-    (state) => {
-      if (state.modelsLoading || state.subscriptionsLoading) return
-      if (state.current.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER || (state.connectionId && !state.blocked)) return
-      setSelected(DEFAULT_AI_MODEL_SELECTION)
-      rememberAiModelSelection(state.orgId, DEFAULT_AI_MODEL_SELECTION)
-      state.onChange?.(DEFAULT_AI_MODEL_SELECTION)
-      setOpen(false)
-    },
-  )
+  // Keep the user's explicit selection through an outage or disconnection.
+  // Sending through another provider requires a new user choice; the request
+  // resolver/backend reports an unavailable subscription instead.
 
   const selectedLabel = createMemo(() => {
     const current = selected()
     return verevonModeById(current.model)?.label
-      ?? flatModels().find((model) => model.id === current.model && model.provider === current.provider)?.name
+      ?? flatModels().find((model) => model.id === selected().model && model.provider === selected().provider)?.name
       ?? current.label
   })
 

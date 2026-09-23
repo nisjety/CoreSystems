@@ -262,6 +262,33 @@ pub(crate) async fn required_capability_token(
     required_token(state, user, headers, ModelServiceAudience::CapabilityCore).await
 }
 
+/// Best-effort `aud=capability-core` bearer for a chat-stream call site.
+///
+/// Unlike `required_inference_token`/`required_execution_token`/etc above —
+/// whose callers fail the whole turn on a mint error — a chat stream must
+/// keep working when capability-core is briefly unavailable. model-gateway's
+/// moderation.rs already fails closed (redacts everything) when this header
+/// is absent, so degrading to `None` here is safe; it only costs the org's
+/// configured PII/injection-defense policy for this one turn, instead of
+/// leaving that policy permanently unreachable from chat by construction
+/// (see docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9, finding F-14).
+pub(crate) async fn best_effort_capability_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Option<String> {
+    match required_capability_token(state, user, headers).await {
+        Ok(token) => Some(token),
+        Err(error) => {
+            tracing::warn!(
+                audience = error.audience.claim(),
+                "capability bearer mint failed for chat stream; PII/injection-defense policy lookup falls back to fail-closed redaction"
+            );
+            None
+        }
+    }
+}
+
 /// The user-bound `aud=sandbox-manager` credential, minted PER REQUEST for
 /// the Work tab (S4.2 §7).
 ///
@@ -532,6 +559,43 @@ pub(crate) async fn proxy_model_json_with_session(
     .await
 }
 
+/// Same as `proxy_model_json_with_session`, plus the `aud=capability-core`
+/// bearer — needed on the durable browser-event replay read (see F-14,
+/// docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9) so the org's PII/
+/// injection-defense policy is reachable there too, not just on the live
+/// stream. A dedicated wrapper rather than adding the parameter to
+/// `proxy_model_json_with_session` itself: that function has many unrelated
+/// callers outside the chat-stream path that have no capability bearer to
+/// give it.
+pub(crate) async fn proxy_model_json_with_session_and_capability(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    session_bearer: Option<&str>,
+    capability_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        capability_bearer,
+        None,
+        None,
+        None,
+        session_bearer,
+        None,
+        None,
+        user,
+    )
+    .await
+}
+
 pub(crate) async fn proxy_model_json_with_inference(
     state: &AppState,
     method: Method,
@@ -672,7 +736,8 @@ mod tests {
         apply_org_zdr_posture, data_plane_authorization_value, delegated_auth_unavailable,
         dev_bypass_model_token, is_space_scoped_turn, normalized_model_body,
         proxy_model_json_with_data_plane, proxy_model_json_with_data_plane_request_timeout,
-        proxy_model_json_with_session, sandbox_token,
+        proxy_model_json_with_session, proxy_model_json_with_session_and_capability,
+        sandbox_token,
     };
 
     fn test_state(allow_dev_auth_bypass: bool) -> AppState {
@@ -970,7 +1035,57 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("sandbox-token"),
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): `stream_chat` is the
+    // live chat-turn path — this confirms a successfully minted capability
+    // bearer reaches model-gateway on it as `x-capability-authorization`,
+    // which is what unblocks the org's PII/injection-defense policy lookup.
+    #[tokio::test]
+    async fn sse_proxy_forwards_the_capability_credential_in_its_own_header() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/invoke/stream"))
+            .and(header("authorization", "Bearer model-token"))
+            .and(header("x-capability-authorization", "Bearer capability-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: {}\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let response = crate::upstream::proxy_sse_stream_with_data_plane(
+            &state,
+            Method::POST,
+            &format!("{}/invoke/stream", server.uri()),
+            Some(json!({"content": "hello"})),
+            Some("model-token"),
+            None,
+            Some("capability-token"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
             None,
             None,
             false,
@@ -1018,6 +1133,61 @@ mod tests {
             None,
             Some("model-token"),
             Some("session-token"),
+            &user,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): the chat-stream call
+    // sites must forward `x-capability-authorization` on a successful mint so
+    // model-gateway's moderation.rs can consult the org's actual PII/
+    // injection-defense policy instead of always failing closed. This exercises
+    // `run_events_replay`'s proxy function directly, the same way
+    // `session_proxy_forwards_dedicated_credential_in_separate_header` above
+    // exercises the plain session-only variant.
+    #[tokio::test]
+    async fn session_proxy_with_capability_forwards_both_credentials_in_separate_headers() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/events/replay"))
+            .and(header("authorization", "Bearer model-token"))
+            .and(header("x-session-authorization", "Bearer session-token"))
+            .and(header("x-capability-authorization", "Bearer capability-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+        let (status, _) = proxy_model_json_with_session_and_capability(
+            &state,
+            Method::GET,
+            &format!("{}/events/replay", server.uri()),
+            None,
+            Some("model-token"),
+            Some("session-token"),
+            Some("capability-token"),
             &user,
         )
         .await;

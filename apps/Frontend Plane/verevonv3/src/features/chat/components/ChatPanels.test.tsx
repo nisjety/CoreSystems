@@ -1,20 +1,29 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render } from '@solidjs/testing-library'
-import { describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, waitFor } from '@solidjs/testing-library'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flush, createSignal } from 'solid-js'
-import { ContextWindowPanel, RunPlanPanel } from './ChatPanels'
+import { ChatTabs, ContextWindowPanel, RunPlanPanel, SourcesPanel, StepsPanel } from './ChatPanels'
 import * as orchestration from '@/shared/api/orchestration-client'
+import * as memoryClient from '@/shared/api/memory-client'
 import {
+  AnswerRegion,
   DiffView,
   MemoryRecallNotice,
   PlanApprovalControl,
   QueuedInputStrip,
+  ThinkingDots,
   ToolCallCard,
 } from './ChatMessages'
+import {
+  collectEvidenceSources,
+  formatElapsedWait,
+  partitionEvidenceSources,
+  spokenSourceTally,
+} from './chat-media-markdown'
 import type { RecalledMemory } from '@/shared/api/chat-client'
-import type { QueuedInput } from './chat-types'
-import { diffText, parseUnifiedDiff } from '@/shared/chat-nodes'
+import type { ChatTurn, Citation, QueuedInput } from './chat-types'
+import { deriveConversationNodes, diffText, parseUnifiedDiff } from '@/shared/chat-nodes'
 import type { ThreadContext } from '@/shared/api/chat-client'
 
 // RunPlanPanel's resource fires as soon as run and thread ids exist. Stubbed so
@@ -29,6 +38,24 @@ vi.mock('@/shared/api/orchestration-client', async (importOriginal) => {
     getLineage: vi.fn(async () => {
       throw new Error('subagent lineage not found')
     }),
+  }
+})
+
+// MemoryRecallNotice's per-entry Rediger/Glem controls call the real
+// mutations directly (no store round trip) — mocked here so the disclosure
+// tests stay deterministic and offline, same as the orchestration mock above.
+vi.mock('@/shared/api/memory-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/shared/api/memory-client')>()
+  return {
+    ...actual,
+    deleteMemory: vi.fn(async () => ({ deleted: true, degraded: false, degradationReason: '' })),
+    correctMemory: vi.fn(async () => ({
+      memoryId: 'mem-1-corrected',
+      deleted: true,
+      degraded: false,
+      degradationReason: '',
+    })),
+    listMemories: vi.fn(async () => ({ memories: [], degraded: false, degradationReason: '' })),
   }
 })
 
@@ -50,6 +77,17 @@ function open(container: HTMLElement) {
   fireEvent.click(toggle!)
   flush()
 }
+
+describe('StepsPanel terminal status', () => {
+  it('keeps a cancelled run stopped even when its earlier tool completed', () => {
+    const { container, unmount } = render(() => <StepsPanel turnStatus="stopped" steps={[
+      { id: 'count', title: 'Count words', detail: '17 words', status: 'done', createdAt: '2026-09-20T07:00:00Z' },
+    ]} onStopTask={() => {}} />)
+    expect(container.querySelector('.verevon-chat-steps-header p')?.textContent).toBe('Stoppet')
+    expect(container.querySelector<HTMLButtonElement>('.verevon-chat-steps-header button')?.disabled).toBe(true)
+    unmount()
+  })
+})
 
 describe('ContextWindowPanel', () => {
   it('summarises fill without expanding', () => {
@@ -251,7 +289,10 @@ describe('MemoryRecallNotice disclosure', () => {
     const { container, unmount } = render(() => (
       <MemoryRecallNotice count={1} memories={[memory()]} />
     ))
-    expect(container.textContent).toContain('Brukte 1 minne')
+    // F-05: recall runs on every turn regardless of relevance, so the count
+    // is what was fetched, not proof the model "used" it — "Hentet", not
+    // "Brukte" (see MemoryRecallNotice's summary()).
+    expect(container.textContent).toContain('Hentet 1 minne')
     // The contents are the follow-up, not the headline.
     expect(container.textContent).not.toContain('Foretrekker metriske enheter')
     unmount()
@@ -320,8 +361,179 @@ describe('MemoryRecallNotice disclosure', () => {
     const { container, unmount } = render(() => (
       <MemoryRecallNotice count={3} memories={[]} />
     ))
-    expect(container.textContent).toContain('Brukte 3 minner')
+    // F-05: "Hentet", not "Brukte" — see the other MemoryRecallNotice test above.
+    expect(container.textContent).toContain('Hentet 3 minner')
     expect(container.querySelector('button')).toBeNull()
+    unmount()
+  })
+})
+
+/**
+ * Per-entry "Rediger"/"Glem" — the matching Claude/ChatGPT give their own
+ * recalled-memory lists: correct or forget a wrong entry from where you see
+ * it, not a trip to a separate settings page.
+ */
+describe('MemoryRecallNotice correct/forget', () => {
+  const memory = (overrides: Partial<RecalledMemory> = {}): RecalledMemory => ({
+    memoryId: 'mem-1',
+    role: 'recall',
+    origin: 'stated',
+    label: 'USER',
+    preview: 'Foretrekker metriske enheter',
+    ...overrides,
+  })
+
+  afterEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const openList = (container: HTMLElement) => {
+    fireEvent.click(container.querySelector('.verevon-chat-memory-recall__toggle')!)
+    flush()
+  }
+
+  const actionButtons = (container: HTMLElement) =>
+    Array.from(container.querySelectorAll('.verevon-chat-memory-recall__action'))
+
+  it('only offers correct/forget on a personal ("USER"-topic) entry', () => {
+    const { container, unmount } = render(() => (
+      <MemoryRecallNotice
+        count={1}
+        threadId="thread-1"
+        memories={[memory({ role: 'inject', label: 'POLICY' })]}
+      />
+    ))
+    openList(container)
+    // DeleteMemory/IndexMemory both filter to `scope = 'user'` server-side —
+    // an org/workspace/policy entry could never actually be acted on, so the
+    // button must not be offered at all rather than silently no-op later.
+    expect(actionButtons(container)).toHaveLength(0)
+    unmount()
+  })
+
+  it('forgets a memory after a second confirming click, and updates the list in place', async () => {
+    const { container, unmount } = render(() => (
+      <MemoryRecallNotice count={1} threadId="thread-1" memories={[memory()]} />
+    ))
+    openList(container)
+    const forgetButton = actionButtons(container).find((el) => el.textContent?.includes('Glem'))!
+
+    // First click only arms it — nothing is deleted yet.
+    fireEvent.click(forgetButton)
+    flush()
+    expect(memoryClient.deleteMemory).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('Bekreft')
+
+    // Second click actually deletes.
+    fireEvent.click(forgetButton)
+    await waitFor(() => expect(memoryClient.deleteMemory).toHaveBeenCalledWith('mem-1'))
+    await waitFor(() =>
+      expect(container.textContent).not.toContain('Foretrekker metriske enheter'),
+    )
+    unmount()
+  })
+
+  it('surfaces an error and keeps the entry when forgetting fails', async () => {
+    vi.mocked(memoryClient.deleteMemory).mockRejectedValueOnce(new Error('nope'))
+    const { container, unmount } = render(() => (
+      <MemoryRecallNotice count={1} threadId="thread-1" memories={[memory()]} />
+    ))
+    openList(container)
+    const forgetButton = actionButtons(container).find((el) => el.textContent?.includes('Glem'))!
+    fireEvent.click(forgetButton)
+    flush()
+    fireEvent.click(forgetButton)
+    await waitFor(() => expect(memoryClient.deleteMemory).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(container.querySelector('.verevon-chat-memory-recall__error')).not.toBeNull(),
+    )
+    // The entry is still there — a failed delete must not vanish client-side.
+    expect(container.textContent).toContain('Foretrekker metriske enheter')
+    unmount()
+  })
+
+  it('corrects a memory: fetches the full content, saves under the new id, and updates the list', async () => {
+    vi.mocked(memoryClient.listMemories).mockResolvedValueOnce({
+      memories: [
+        {
+          memoryId: 'mem-1',
+          topic: 'USER',
+          content: 'Foretrekker metriske enheter, ikke imperial',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          provenance: 'stated',
+        },
+      ],
+      degraded: false,
+      degradationReason: '',
+    })
+    const { container, unmount } = render(() => (
+      <MemoryRecallNotice count={1} threadId="thread-1" memories={[memory()]} />
+    ))
+    openList(container)
+    const editButton = actionButtons(container).find((el) => el.textContent?.includes('Rediger'))!
+    fireEvent.click(editButton)
+    flush()
+
+    // The full stored content replaces the (possibly truncated) preview once
+    // it loads, so a correction can never accidentally re-truncate a longer
+    // memory down to its 160-char preview.
+    const textarea = await waitFor(() => {
+      const el = container.querySelector<HTMLTextAreaElement>(
+        '.verevon-chat-memory-recall__edit-textarea',
+      )
+      expect(el?.value).toBe('Foretrekker metriske enheter, ikke imperial')
+      return el!
+    })
+
+    fireEvent.input(textarea, { target: { value: 'Foretrekker metriske enheter, alltid' } })
+    flush()
+    const saveButton = actionButtons(container).find((el) => el.textContent?.includes('Lagre'))!
+    fireEvent.click(saveButton)
+
+    await waitFor(() =>
+      expect(memoryClient.correctMemory).toHaveBeenCalledWith(
+        'mem-1',
+        'thread-1',
+        'Foretrekker metriske enheter, alltid',
+      ),
+    )
+    await waitFor(() =>
+      expect(container.textContent).toContain('Foretrekker metriske enheter, alltid'),
+    )
+    // The corrected entry's id changed (no update-in-place RPC exists), and a
+    // second "Glem" now targets the NEW id, not the one that was replaced.
+    const forgetButton = await waitFor(() => {
+      const el = actionButtons(container).find((button) => button.textContent?.includes('Glem'))
+      expect(el).toBeDefined()
+      return el!
+    })
+    fireEvent.click(forgetButton)
+    flush()
+    fireEvent.click(forgetButton)
+    await waitFor(() =>
+      expect(memoryClient.deleteMemory).toHaveBeenCalledWith('mem-1-corrected'),
+    )
+    unmount()
+  })
+
+  it('disables saving a correction when there is no active thread to correct from', () => {
+    const { container, unmount } = render(() => (
+      <MemoryRecallNotice count={1} threadId={null} memories={[memory()]} />
+    ))
+    openList(container)
+    const editButton = actionButtons(container).find((el) => el.textContent?.includes('Rediger'))!
+    expect(editButton.hasAttribute('disabled')).toBe(true)
+    unmount()
+  })
+
+  it('does not offer to save a truncated preview when the full memory cannot be loaded', async () => {
+    vi.mocked(memoryClient.listMemories).mockRejectedValueOnce(new Error('unavailable'))
+    const { container, unmount } = render(() => <MemoryRecallNotice count={1} threadId="thread-1" memories={[memory()]} />)
+    openList(container)
+    fireEvent.click(actionButtons(container).find(el => el.textContent?.includes('Rediger'))!)
+    await waitFor(() => expect(container.textContent).toContain('Kunne ikke hente hele minnet'))
+    expect(container.querySelector('textarea')).toBeNull()
+    expect(memoryClient.correctMemory).not.toHaveBeenCalled()
     unmount()
   })
 })
@@ -466,6 +678,495 @@ describe('PlanApprovalControl', () => {
     ))
     expect(container.textContent).toContain('Fullmakten ble avvist')
     unmount()
+  })
+})
+
+/**
+ * F-16. A deep-research run lists every hit it found and reads a handful of
+ * them, and the panel used to render both as the same card — so "24 kilder"
+ * read as "24 pages were read" when three had been.
+ */
+const read = (overrides: Partial<Citation> = {}): Citation & { kind: 'web' } => ({
+  kind: 'web',
+  id: 'cite-1',
+  title: 'Mattilsynet om fiskehelse',
+  url: 'https://mattilsynet.no/fiskehelse',
+  snippet: 'Regelverket krever journalføring ved behandling.',
+  ...overrides,
+})
+// How the backend marks a hit it never fetched: both the id prefix and the
+// snippet marker, which is what the panel groups on.
+const unread = (overrides: Partial<Citation> = {}): Citation & { kind: 'web' } => ({
+  kind: 'web',
+  id: 'dr-unread-7',
+  title: 'Oppdrett i Rogaland',
+  url: 'https://example.no/rogaland',
+  snippet: '[not read: fetch timed out] Oversikt over anlegg i Rogaland.',
+  ...overrides,
+})
+/** An assistant turn carrying only the citations under test. */
+const turn = (citations: Citation[]): ChatTurn => ({
+  id: 'turn-1',
+  role: 'assistant',
+  content: 'Svar.',
+  createdAt: '2026-09-15T08:00:00.000Z',
+  streaming: false,
+  tools: [],
+  attachments: [],
+  citations,
+})
+
+describe('SourcesPanel read/unread grouping', () => {
+  it('separates the leads from the evidence and states both counts', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read(),
+          read({ id: 'cite-2', url: 'https://fiskeridir.no/a' }),
+          unread(),
+          unread({ id: 'dr-unread-8', url: 'https://example.no/b' }),
+          unread({ id: 'dr-unread-9', url: 'https://example.no/c' }),
+        ]}
+      />
+    ))
+    const text = container.textContent ?? ''
+    // The reader must never be able to believe five pages were read.
+    expect(text).toContain('2 av 5 kilder er lest')
+    expect(text).toContain('Ikke lest')
+    expect(text).toContain('ikke hentet')
+    // And the grouping has to be structural, not just a sentence: the three
+    // leads sit inside the secondary group, the two read sources outside it.
+    const grouped = container.querySelectorAll(
+      '.verevon-chat-source-group--unread .verevon-chat-source-card',
+    )
+    expect(grouped).toHaveLength(3)
+    expect(container.querySelectorAll('.verevon-chat-source-card')).toHaveLength(5)
+    unmount()
+  })
+
+  it('drops the wire marker from the snippet the reader sees', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel sources={[read(), unread()]} />
+    ))
+    const text = container.textContent ?? ''
+    // The heading now carries what the prefix used to say, in Norwegian.
+    expect(text).toContain('Oversikt over anlegg i Rogaland')
+    expect(text).not.toContain('not read')
+    unmount()
+  })
+
+  /** A lead whose snippet was nothing but the marker must render no paragraph. */
+  it('renders no snippet at all rather than an empty one', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel sources={[unread({ snippet: '[not read: 403]' })]} />
+    ))
+    expect(
+      container.querySelector('.verevon-chat-source-group--unread .verevon-chat-source-card p'),
+    ).toBeNull()
+    unmount()
+  })
+
+  /** The other boundary: a run that fetched nothing it found. */
+  it('states a zero tally rather than implying the list is evidence', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[unread(), unread({ id: 'dr-unread-8', url: 'https://example.no/b' })]}
+      />
+    ))
+    const text = container.textContent ?? ''
+    expect(text).toContain('0 av 2 kilder er lest')
+    // Nothing above the "Ikke lest" group, so no heading claiming read evidence.
+    expect(text).not.toContain('Lest og brukt')
+    expect(container.querySelectorAll(
+      '.verevon-chat-source-group--unread .verevon-chat-source-card',
+    )).toHaveLength(2)
+    unmount()
+  })
+
+  /** The ordinary case — a web-search turn that read what it cited — is untouched. */
+  it('stays a flat list with no headings when every source was read', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel sources={[read(), read({ id: 'cite-2', url: 'https://fiskeridir.no/a' })]} />
+    ))
+    const text = container.textContent ?? ''
+    expect(text).not.toContain('Ikke lest')
+    expect(text).not.toContain('kilder er lest')
+    expect(container.querySelector('.verevon-chat-source-group')).toBeNull()
+    unmount()
+  })
+
+  /** Knowledge grounding is retrieved as text — there is no fetch that could fail. */
+  it('never files internal knowledge as unread', () => {
+    expect(partitionEvidenceSources([
+      {
+        id: 'k1',
+        kind: 'knowledge',
+        title: 'Internrutine',
+        snippet: 'Rutine for avvik.',
+        provider: 'sharepoint',
+        sourceType: 'document',
+        documentId: 'doc-1',
+        href: '/knowledge/doc-1',
+        score: 0.81,
+      },
+    ]).unread).toHaveLength(0)
+  })
+
+  it('promotes a lead to read once the same page is fetched', () => {
+    // `collectEvidenceSources` dedupes by URL, and a page is normally cited as a
+    // lead before it is fetched — so plain first-write-wins would pin a source
+    // that WAS read under "Ikke lest" for the rest of the thread.
+    const url = 'https://example.no/rogaland'
+    const collected = collectEvidenceSources([
+      turn([unread({ url })]),
+      turn([read({ id: 'cite-9', url, snippet: 'Hentet og lest.' })]),
+    ])
+    expect(collected).toHaveLength(1)
+    expect(partitionEvidenceSources(collected).unread).toHaveLength(0)
+    expect(collected[0]?.snippet).toBe('Hentet og lest.')
+  })
+
+  it('does not let a later lead demote a source already read', () => {
+    const url = 'https://example.no/rogaland'
+    const collected = collectEvidenceSources([
+      turn([read({ id: 'cite-9', url, snippet: 'Hentet og lest.' })]),
+      turn([unread({ url })]),
+    ])
+    expect(partitionEvidenceSources(collected).read).toHaveLength(1)
+  })
+})
+
+describe('ChatTabs Kilder badge', () => {
+  it('counts the sources that were read, not the leads that were only found', () => {
+    const { container, unmount } = render(() => (
+      <ChatTabs
+        active="chat"
+        artifactCount={0}
+        sourceCount={24}
+        readSourceCount={3}
+        stepCount={0}
+        onChange={() => {}}
+      />
+    ))
+    const sources = [...container.querySelectorAll('[role="tab"]')].find((tab) =>
+      tab.textContent?.includes('Kilder'),
+    )
+    expect(sources?.querySelector('em')?.textContent).toBe('3')
+    expect(container.textContent).not.toContain('24')
+    unmount()
+  })
+
+  /** Without the read count — every other caller — the badge is unchanged. */
+  it('falls back to the total when no read count is supplied', () => {
+    const { container, unmount } = render(() => (
+      <ChatTabs active="chat" artifactCount={0} sourceCount={4} stepCount={0} onChange={() => {}} />
+    ))
+    const sources = [...container.querySelectorAll('[role="tab"]')].find((tab) =>
+      tab.textContent?.includes('Kilder'),
+    )
+    expect(sources?.querySelector('em')?.textContent).toBe('4')
+    unmount()
+  })
+})
+
+/**
+ * The number itself, end to end: what `ChatPage` derives for the badge is
+ * `partitionEvidenceSources(...).read.length`, and what the tab strip renders
+ * from it. Availability stays on the full list — an unread lead is still worth
+ * offering — so across these four cases only the NUMBER differs.
+ */
+describe('Kilder count', () => {
+  /** The count ChatPage's `readSourceCount` memo derives. */
+  const count = (sources: Array<Citation & { kind: 'web' }>) =>
+    partitionEvidenceSources(sources).read.length
+
+  /** What the tab strip renders for a given pair, or null when it renders none. */
+  const badge = (sourceCount: number, readSourceCount: number) => {
+    const { container, unmount } = render(() => (
+      <ChatTabs
+        active="chat"
+        artifactCount={0}
+        sourceCount={sourceCount}
+        readSourceCount={readSourceCount}
+        stepCount={0}
+        onChange={() => {}}
+      />
+    ))
+    const tab = [...container.querySelectorAll('[role="tab"]')].find((item) =>
+      item.textContent?.includes('Kilder'),
+    )
+    expect(tab, 'the Kilder tab must stay available whatever the read count').toBeTruthy()
+    const text = tab?.querySelector('em')?.textContent ?? null
+    unmount()
+    return text
+  }
+
+  it('counts every source when the turn read everything it cited', () => {
+    const sources = [read(), read({ id: 'cite-2', url: 'https://fiskeridir.no/a' })]
+    expect(count(sources)).toBe(2)
+    expect(badge(sources.length, count(sources))).toBe('2')
+  })
+
+  it('renders no number at all when the turn read none of its hits', () => {
+    // A `0` beside "Kilder" would read as "this panel is empty" — it is not,
+    // it holds two leads. The tab stays offered; only the claim goes away.
+    const sources = [unread(), unread({ id: 'dr-unread-8', url: 'https://example.no/b' })]
+    expect(count(sources)).toBe(0)
+    expect(badge(sources.length, 0)).toBeNull()
+  })
+
+  it('counts only the read half of a mixed list', () => {
+    const sources = [read(), unread(), unread({ id: 'dr-unread-8', url: 'https://example.no/b' })]
+    expect(count(sources)).toBe(1)
+    expect(badge(sources.length, count(sources))).toBe('1')
+  })
+
+  it('counts a legacy "[not read: …]" snippet as unread without the id prefix', () => {
+    // The id prefix arrived after the snippet marker, so a deep-research frame
+    // from an older gateway carries only the marker. Reading just one of the two
+    // markers inflates the badge straight back to the number F-16 was about.
+    const legacy = read({
+      id: 'cite-4',
+      url: 'https://example.no/legacy',
+      snippet: '[not read: 404] Fant ikke siden.',
+    })
+    expect(count([read(), legacy])).toBe(1)
+    expect(badge(2, count([read(), legacy]))).toBe('1')
+  })
+
+  /**
+   * The same count, spoken. `ChatPage`'s live region announced only that
+   * Verevon was working, so a screen-reader user got no equivalent of the
+   * visible "3 av 24" — the one number that says the other twenty-one were
+   * never read.
+   */
+  describe('spoken in the stream announcement', () => {
+    it('names both numbers while something went unread', () => {
+      const sources = [read(), unread(), unread({ id: 'dr-unread-8', url: 'https://example.no/b' })]
+      expect(spokenSourceTally(count(sources), sources.length)).toBe(' 1 av 3 kilder lest.')
+    })
+
+    it('names one number when every source was read', () => {
+      const sources = [read(), read({ id: 'cite-2', url: 'https://fiskeridir.no/a' })]
+      expect(spokenSourceTally(count(sources), sources.length)).toBe(' 2 kilder lest.')
+    })
+
+    it('says none of them were read rather than staying silent about it', () => {
+      const sources = [unread(), unread({ id: 'dr-unread-8', url: 'https://example.no/b' })]
+      expect(spokenSourceTally(count(sources), sources.length)).toBe(' 0 av 2 kilder lest.')
+    })
+
+    it('says nothing at all on a turn with no sources', () => {
+      // Otherwise the heartbeat reads "0 kilder lest" every ten seconds on every
+      // plain Ask turn, which is a metronome rather than information.
+      expect(spokenSourceTally(0, 0)).toBe('')
+    })
+  })
+})
+
+/**
+ * F-07. Some routes take 60-95 seconds before the first token, and a static
+ * "Tenker" over that long reads as a hung page.
+ */
+describe('ThinkingDots elapsed wait', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('stays wordless for an ordinary wait', () => {
+    vi.useFakeTimers()
+    const { container, unmount } = render(() => <ThinkingDots />)
+    vi.advanceTimersByTime(9_000)
+    flush()
+    expect(container.textContent).toContain('Tenker')
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')).toBeNull()
+    unmount()
+  })
+
+  it('names how long it has waited once the wait is long enough to read as a hang', () => {
+    vi.useFakeTimers()
+    const { container, unmount } = render(() => <ThinkingDots />)
+    vi.advanceTimersByTime(12_000)
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')?.textContent).toBe('12 s')
+    vi.advanceTimersByTime(63_000)
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')?.textContent).toBe('1 min 15 s')
+    // Nothing fabricated alongside it: no bar, no estimate, no invented phase.
+    expect(container.textContent).not.toContain('%')
+    unmount()
+  })
+
+  it('stops ticking when the answer arrives', () => {
+    vi.useFakeTimers()
+    const { unmount } = render(() => <ThinkingDots />)
+    expect(vi.getTimerCount()).toBe(1)
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  /**
+   * The remount. `<For>` keys on item identity and every derivation of the node
+   * list builds fresh objects, so a streaming turn rebuilds this indicator on
+   * each tool call — measured in this tree: two rows became four after a single
+   * re-derivation. A rebuilt indicator that restarted its own clock reset the
+   * counter every few hundred milliseconds on exactly the deep-research routes
+   * the counter exists for, so it never survived to the ten-second threshold.
+   */
+  it('counts from the turn it was handed, not from its own mount', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-15T08:00:42.000Z'))
+    const { container, unmount } = render(() => (
+      <ThinkingDots since="2026-09-15T08:00:00.000Z" />
+    ))
+    flush()
+    // No tick has run: a rebuilt indicator has to be right on its first frame,
+    // or it blinks back through zero once per rebuild.
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')?.textContent).toBe('42 s')
+    vi.advanceTimersByTime(20_000)
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')?.textContent).toBe('1 min 2 s')
+    unmount()
+  })
+
+  it('falls back to its own mount when the turn carries no usable start', () => {
+    vi.useFakeTimers()
+    const { container, unmount } = render(() => <ThinkingDots since="not a timestamp" />)
+    vi.advanceTimersByTime(12_000)
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')?.textContent).toBe('12 s')
+    unmount()
+  })
+
+  /**
+   * The wiring, not just the component: the turn's start has to reach the
+   * indicator. Rendering the answer region from a derived `pending` node is what
+   * fails if the region ever goes back to a bare `<ThinkingDots />` — both the
+   * derivation test and the component tests above still pass in that state.
+   */
+  it('reaches the indicator from a derived pending answer node', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-15T08:01:15.000Z'))
+    const node = deriveConversationNodes({
+      ...turn([]),
+      content: '',
+      status: 'waiting',
+      createdAt: '2026-09-15T08:00:00.000Z',
+    }).find((candidate) => candidate.kind === 'answer')
+    expect(node).toMatchObject({ answer: { state: 'pending' } })
+    const { container, unmount } = render(() => (
+      <AnswerRegion
+        answer={(node as Extract<typeof node, { kind: 'answer' }>).answer}
+        onRegenerate={() => {}}
+      />
+    ))
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')?.textContent).toBe('1 min 15 s')
+    unmount()
+  })
+
+  /**
+   * The progress half of F-07. Elapsed seconds say the page is not frozen; they
+   * do not say what is happening, which is what DeepSeek and ChatGPT put on
+   * screen while Verevon showed a spinner label.
+   */
+  it('names the tool that is running, beside the indicator', () => {
+    vi.useFakeTimers()
+    const { container, unmount } = render(() => (
+      <ThinkingDots activity={{ kind: 'tool-running', tool: 'Web search' }} />
+    ))
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__activity')?.textContent).toBe(
+      'Kjører Web search',
+    )
+    // Not gated behind the elapsed threshold: a running tool is worth showing
+    // from the first second, and it cannot be mistaken for a stall.
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')).toBeNull()
+    unmount()
+  })
+
+  /**
+   * The honest fallback, and the case the audit's own repro sits in: the
+   * subscription route reports no tool calls for its entire 90-second wait.
+   * Elapsed time is then all that is known, and the line must stay empty rather
+   * than fill with an invented phase.
+   */
+  it('shows elapsed time alone when no step information has arrived', () => {
+    vi.useFakeTimers()
+    const { container, unmount } = render(() => <ThinkingDots />)
+    vi.advanceTimersByTime(45_000)
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__activity')).toBeNull()
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')?.textContent).toBe('45 s')
+    expect(container.textContent).toBe('Tenker45 s')
+    unmount()
+  })
+
+  /**
+   * The wiring: a real streamed tool call has to reach the indicator through the
+   * derived node, not just through a hand-built prop.
+   */
+  it('carries the live tool call through the derived pending node', () => {
+    vi.useFakeTimers()
+    const node = deriveConversationNodes({
+      ...turn([]),
+      content: '',
+      status: 'waiting',
+      toolCalls: [
+        { id: 'tc-1', name: 'web_search', status: 'done' },
+        { id: 'tc-2', name: 'knowledge_search', status: 'running' },
+      ],
+    }).find((candidate) => candidate.kind === 'answer')
+    const { container, unmount } = render(() => (
+      <AnswerRegion
+        answer={(node as Extract<typeof node, { kind: 'answer' }>).answer}
+        onRegenerate={() => {}}
+      />
+    ))
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__activity')?.textContent).toBe(
+      'Kjører Knowledge search',
+    )
+    unmount()
+  })
+
+  it('derives no activity for a pending turn that has run nothing', () => {
+    const node = deriveConversationNodes({
+      ...turn([]),
+      content: '',
+      status: 'waiting',
+    }).find((candidate) => candidate.kind === 'answer')
+    expect(node).toMatchObject({ answer: { state: 'pending' } })
+    // The absent key, not an `activity: undefined` placeholder — `toEqual`
+    // treats those alike, so the shape is asserted directly.
+    const answer = (node as Extract<typeof node, { kind: 'answer' }>).answer
+    expect(Object.keys(answer)).toEqual(['state', 'since'])
+  })
+
+  it('does not count towards a start timestamp in the future', () => {
+    // Clock skew, not a wait that has not begun. Left unclamped this counts up
+    // to zero and the label stays hidden for however far ahead the stamp is.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-15T08:00:00.000Z'))
+    const { container, unmount } = render(() => (
+      <ThinkingDots since="2026-09-15T08:05:00.000Z" />
+    ))
+    vi.advanceTimersByTime(12_000)
+    flush()
+    expect(container.querySelector('.verevon-chat-thinking__elapsed')?.textContent).toBe('12 s')
+    unmount()
+  })
+})
+
+describe('formatElapsedWait', () => {
+  it('floors seconds so it never claims one that has not elapsed', () => {
+    expect(formatElapsedWait(0)).toBe('0 s')
+    expect(formatElapsedWait(10_900)).toBe('10 s')
+  })
+
+  it('breaks a long wait into minutes rather than counting to 95', () => {
+    expect(formatElapsedWait(60_000)).toBe('1 min 0 s')
+    expect(formatElapsedWait(95_400)).toBe('1 min 35 s')
   })
 })
 

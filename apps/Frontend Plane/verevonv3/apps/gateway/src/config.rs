@@ -69,6 +69,15 @@ pub(crate) struct AppState {
     pub(crate) conversation_core_url: String,
     pub(crate) conversation_core_service_token: String,
     pub(crate) social_core_url: String,
+    /// Never read in production, and that is the point: video search used to
+    /// call SearXNG straight from the BFF, bypassing quarry-edge's router,
+    /// cache, host-diversity cap, org scoping and billing. That bypass is
+    /// closed — every search vertical now proxies through quarry-edge — and
+    /// `search_videos`' regression test keeps it closed by pointing this field
+    /// at a mock that mounts nothing and asserting the mock received no
+    /// request at all. The tripwire only works while the field still exists,
+    /// so it is deliberately retained rather than deleted with its warning.
+    #[allow(dead_code, reason = "tripwire for the closed direct-to-SearXNG bypass; see doc comment")]
     pub(crate) searxng_url: String,
     pub(crate) autocomplete_core_url: String,
     pub(crate) autocomplete_token: String,

@@ -5,6 +5,7 @@ import { flush } from 'solid-js'
 import { describe, expect, it, vi } from 'vitest'
 import { ArtifactsPanel } from './ChatArtifactPanel'
 import { mergeArtifactVersion } from './chat-artifacts'
+import { collectArtifactItems } from './chat-media-markdown'
 import type { ArtifactPanelItem, ChatArtifact, ChatTurn } from './chat-types'
 
 function turn(overrides: Partial<ChatTurn> = {}): ChatTurn {
@@ -38,6 +39,23 @@ function versioned(revisions: Array<{ content: string; title: string; version: n
 }
 
 describe('ArtifactsPanel', () => {
+  it('navigates revisions restored on separate server turns, even out of order', () => {
+    const first: ChatArtifact = { content: 'Første serverutkast', title: 'Kundesvar', id: 'reply', kind: 'document', version: 1 }
+    const latest = { ...first, content: 'Revidert serverutkast', version: 2 }
+    const latestTurn = turn({ id: 'later', artifacts: [latest] })
+    const items = collectArtifactItems([latestTurn, turn({ artifacts: [first] })])
+    expect(items).toHaveLength(1)
+    expect(items[0]?.turn).toBe(latestTurn)
+    render(() => <ArtifactsPanel items={items} />)
+    expect(screen.getByText('Revidert serverutkast')).toBeTruthy()
+    screen.getByRole('button', { name: 'Forrige versjon' }).click()
+    flush()
+    expect(screen.getByText('Første serverutkast')).toBeTruthy()
+    screen.getByRole('button', { name: 'Neste versjon' }).click()
+    flush()
+    expect(screen.getByText('Revidert serverutkast')).toBeTruthy()
+  })
+
   it('shows the honest empty state when the conversation has no artifacts', () => {
     render(() => <ArtifactsPanel items={[]} />)
     expect(screen.getByText('Ingen artefakter ennå')).toBeTruthy()

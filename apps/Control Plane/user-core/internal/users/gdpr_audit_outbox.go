@@ -132,10 +132,7 @@ func auditRetryDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	seconds := attempt * attempt
-	if seconds > 300 {
-		seconds = 300
-	}
+	seconds := min(attempt*attempt, 300)
 	return time.Duration(seconds) * time.Second
 }
 
@@ -144,7 +141,7 @@ func (o *auditOutbox) run(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		for index := 0; index < 50; index++ {
+		for range 50 {
 			found, err := o.DispatchOne(ctx)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {

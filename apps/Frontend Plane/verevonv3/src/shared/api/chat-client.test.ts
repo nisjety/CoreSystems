@@ -395,6 +395,15 @@ describe('mid-run queued input', () => {
 })
 
 describe('chat-client tool wiring', () => {
+  it('carries conversation isolation and suppresses automatic support/web/agent context', () => {
+    const body = buildChatWireBody({ content: 'Finn oppfølging i innboksen', sourceScope: 'conversation', browseWeb: true, deepResearch: true, generateImage: true, planMode: true })
+    expect(body.features).toContain('conversation_only')
+    expect(body.features).not.toContain('agentic')
+    expect(body.support_context_query).toBeUndefined()
+    expect(body.browse_web).toBe(false)
+    expect(body.deep_research).toBe(false)
+    expect(body.generate_image).toBe(false)
+  })
   afterEach(() => {
     vi.unstubAllGlobals()
   })
@@ -441,7 +450,13 @@ describe('chat-client tool wiring', () => {
       attachments: [],
       tools: [],
     })
-    expect(body.features).not.toContain('tools')
+    // `tools` DOES stay on for a subscription turn: model-gateway routes the
+    // tool-decision round through Balance and only hands the answer off when
+    // a tool actually ran (sse.rs `subscription_tool_round`), so this is what
+    // lets a subscription turn reach get_weather/code_interpreter at all.
+    // `agentic` (the orchestration-backed plan-mode run path) is a separate,
+    // still-incompatible concern and stays off.
+    expect(body.features).toContain('tools')
     expect(body.features).not.toContain('agentic')
   })
 

@@ -26,6 +26,53 @@
 
 use mp_contracts::model_plane::v1::{MemoryEntry, MemoryProvenance};
 
+/// Header on the recalled-memory system block.
+///
+/// # Why the framing carries weight
+///
+/// The block used to open with "Relevant memory:", which asserts two things the
+/// recall cannot support: that the entries are relevant to THIS request, and
+/// that they are established fact. Recall is a similarity search over everything
+/// remembered about the user, so a new conversation gets the top few entries
+/// whether or not anything matches.
+///
+/// What that produced, measured on 2026-09-14: a project plan for a customer
+/// portal listed "Ekstra frakt ved dellevering (ordre FF-1042)" as an open
+/// question — an order from an unrelated conversation three hours earlier,
+/// recalled and written into a deliverable as if it belonged there.
+///
+/// So the block now says what these entries actually are (background about the
+/// person, possibly irrelevant) and what they may be used for (matching language
+/// and standing preferences), and states the one rule the failure needed: they
+/// are not a source, and they do not enter a deliverable on their own.
+pub const MEMORY_CONTEXT_HEADER: &str = concat!(
+    "Background about the person you are talking to, remembered from earlier ",
+    "conversations. This is context about THEM, not material for the current ",
+    "task, and it may well be irrelevant to this request.\n",
+    "Use it to match their working language, tone and standing preferences. Do ",
+    "NOT treat it as a source: do not restate it as fact, and do not carry any ",
+    "of it into a document, plan, report, draft or recommendation unless the ",
+    "user's current request or the material they supplied refers to it. If it ",
+    "conflicts with what the user says or supplies now, what they say now wins."
+);
+
+/// Build the system block that carries recalled memories into a prompt, or
+/// `None` when nothing was recalled.
+///
+/// Shared by both chat paths (`sse` and `grpc`) so the two cannot drift into
+/// framing the same entries differently.
+#[must_use]
+pub fn memory_context_block(entries: &[String]) -> Option<String> {
+    let body = entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| format!("- {entry}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!body.is_empty()).then(|| format!("{MEMORY_CONTEXT_HEADER}\n\n{body}"))
+}
+
 /// The role a recalled memory plays in the turn.
 ///
 /// Mirrors `DeepSeek`'s `ContextRole` split: `Recall` is material lifted out of

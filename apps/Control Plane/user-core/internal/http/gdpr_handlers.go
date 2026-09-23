@@ -123,8 +123,7 @@ func verifiedAuditOrgHint(c *gin.Context) string {
 // Returns false (writes nothing) for any other error, so the caller can fall
 // back to its own generic failure response.
 func writeSuccessionError(c *gin.Context, err error) bool {
-	var required *users.ErrSuccessorRequired
-	if errors.As(err, &required) {
+	if required, ok := errors.AsType[*users.ErrSuccessorRequired](err); ok {
 		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
 			"code":    "successor_required",
 			"message": "this user is the sole owner or admin of one or more organizations; a successor_user_id must be supplied before erasure can proceed",
@@ -132,8 +131,7 @@ func writeSuccessionError(c *gin.Context, err error) bool {
 		}})
 		return true
 	}
-	var invalid *users.ErrSuccessorInvalid
-	if errors.As(err, &invalid) {
+	if invalid, ok := errors.AsType[*users.ErrSuccessorInvalid](err); ok {
 		c.JSON(http.StatusConflict, gin.H{"error": gin.H{
 			"code":    "successor_invalid",
 			"message": invalid.Error(),
@@ -142,6 +140,32 @@ func writeSuccessionError(c *gin.Context, err error) bool {
 		return true
 	}
 	return false
+}
+
+// runErasurePreflight applies the gates shared by erasure and anonymize after
+// authorization: the capability gate, then the admin-succession pre-flight —
+// a sole owner/admin of one or more organizations must not self-erase (or be
+// erased) without first handing off to a validated successor. Runs BEFORE the
+// erasure saga is touched. Writes the refusal response and returns false when
+// the operation must not proceed.
+func (s *Server) runErasurePreflight(c *gin.Context, targetID, successorUserID string) bool {
+	// Capability gate after authz (+ confirm): if the auth-DB pool is not wired
+	// (AUTH_DATABASE_URL unset) refuse with an explicit 503 instead of attempting
+	// the proc and returning an opaque 500.
+	if !s.userService.ErasureAvailable() {
+		erasureUnavailable(c)
+		return false
+	}
+
+	if err := s.userService.EnsureSuccession(c.Request.Context(), targetID, successorUserID); err != nil {
+		if writeSuccessionError(c, err) {
+			return false
+		}
+		log.Error().Err(err).Str("subject_id", targetID).Msg("admin-succession pre-flight failed")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "succession_unavailable"})
+		return false
+	}
+	return true
 }
 
 // erasureUnavailable refuses an erasure/anonymize request with an explicit 503
@@ -186,23 +210,7 @@ func (s *Server) hardEraseUser(c *gin.Context) {
 		return
 	}
 
-	// Capability gate after authz + confirm: if the auth-DB pool is not wired
-	// (AUTH_DATABASE_URL unset) refuse with an explicit 503 instead of attempting
-	// the proc and returning an opaque 500.
-	if !s.userService.ErasureAvailable() {
-		erasureUnavailable(c)
-		return
-	}
-
-	// Admin-succession pre-flight: a sole owner/admin of one or more
-	// organizations must not self-erase (or be erased) without first handing
-	// off to a validated successor. Runs BEFORE the erasure saga is touched.
-	if err := s.userService.EnsureSuccession(c.Request.Context(), targetID, req.SuccessorUserID); err != nil {
-		if writeSuccessionError(c, err) {
-			return
-		}
-		log.Error().Err(err).Str("subject_id", targetID).Msg("admin-succession pre-flight failed")
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "succession_unavailable"})
+	if !s.runErasurePreflight(c, targetID, req.SuccessorUserID) {
 		return
 	}
 
@@ -249,18 +257,7 @@ func (s *Server) anonymizeUser(c *gin.Context) {
 		return
 	}
 
-	if !s.userService.ErasureAvailable() {
-		erasureUnavailable(c)
-		return
-	}
-
-	// Admin-succession pre-flight: see hardEraseUser for the full rationale.
-	if err := s.userService.EnsureSuccession(c.Request.Context(), targetID, req.SuccessorUserID); err != nil {
-		if writeSuccessionError(c, err) {
-			return
-		}
-		log.Error().Err(err).Str("subject_id", targetID).Msg("admin-succession pre-flight failed")
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "succession_unavailable"})
+	if !s.runErasurePreflight(c, targetID, req.SuccessorUserID) {
 		return
 	}
 

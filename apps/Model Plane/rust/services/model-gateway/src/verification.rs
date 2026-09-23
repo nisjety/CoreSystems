@@ -51,6 +51,9 @@ pub enum VerificationDecision {
     SkipUnscored,
     /// The turn already gathered evidence of its own.
     SkipAlreadyEvidenced,
+    /// The exact output already received a bounded attachment source review.
+    /// This avoids duplicate post-hoc inference without inflating its score.
+    SkipSourceReviewed,
     /// Too long for one query to represent.
     SkipAnswerTooLong,
     /// Turned off by the operator.
@@ -74,6 +77,7 @@ impl VerificationDecision {
             Self::SkipScoredHighEnough => "skip:scored_high_enough",
             Self::SkipUnscored => "skip:unscored",
             Self::SkipAlreadyEvidenced => "skip:already_evidenced",
+            Self::SkipSourceReviewed => "skip:source_reviewed",
             Self::SkipAnswerTooLong => "skip:answer_too_long",
             Self::SkipDisabled => "skip:disabled",
             Self::SkipBudgetExhausted => "skip:budget_exhausted",

@@ -39,6 +39,7 @@ impl ProviderRouterDyn for MockProvider {
             )));
         }
         Ok(InferResponse {
+            compaction_summary: String::new(),
             request_id: req.request_id.clone(),
             content: format!("from {}", self.name),
             model_used: req.model.clone(),
@@ -60,6 +61,7 @@ impl ProviderRouterDyn for MockProvider {
         tokio::spawn(async move {
             let _ = tx
                 .send(InferChunk {
+                    compaction_summary: String::new(),
                     reasoning_delta: String::new(),
                     request_id,
                     delta: format!("stream from {name}"),
@@ -71,6 +73,8 @@ impl ProviderRouterDyn for MockProvider {
                     provider_used: String::new(),
                     residency: String::new(),
                     token_confidence: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 })
                 .await;
         });
@@ -106,6 +110,7 @@ fn sample_request() -> InferRequest {
         provider_hint: String::new(),
         model: "test-model".to_owned(),
         messages: vec![ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: "hello".to_owned(),
             name: String::new(),

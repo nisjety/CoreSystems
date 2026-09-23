@@ -495,6 +495,18 @@ is still required.**
 
 ### RAG-6 [medium] — retrieval-rag
 
+**Status (2026-09-15): resolved in source; the dead `searxng_url` field is pending deletion.**
+quarry-edge gained `POST /v1/search/videos` next to `images` (`quarry-edge/src/routes.rs`,
+`search_routes.rs` — same Bearer scope, same 501-with-hint when SearXNG is unconfigured, plus a
+`SEARCH_QUERY` meter the images route had been missing), and `search_videos` is now an ordinary
+`post_quarry` call taking the `AuthenticatedUser` extension and minting a quarry token exactly as
+`search_images` does. `sanitize_videos` stays BFF-side — trimming results to embeddable fields is this
+layer's job — but it now reads the edge's `thumbnail_src`, not SearXNG's raw `thumbnail`. The BFF's
+`web_search_*` failure codes are relabelled `video_search_*` on this route so the SPA's existing
+translation still applies. `state.searxng_url` is unread as of this change (the compiler reports
+`field 'searxng_url' is never read`); its deletion is blocked only on five test-fixture `AppState`
+literals outside the search domain, listed in `docs/gateway-integration-plan.md` §A.9.
+
 **Gateway:** The verevonv3 BFF calls a search backend directly. `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:451-512` (`search_videos`) builds `GET {state.searxng_url}/search?categories=videos&format=json&safesearch=1` with its own `reqwest` client, 15s timeout, and local result sanitizer (`sanitize_videos`, `search.rs:791+`). The module header at `search.rs:9` documents the exception: "`videos` → SearXNG `/search?categories=videos`" while every sibling route (`web`, `images`, `similar`, `suggest`, `answer/stream`) goes to `quarry_edge_url`. No `org_id` is sent.
 
 **Already exists:** quarry-edge owns the SearXNG verticals and already implements this exact pattern for images: `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs:596-680` (`images`) — "focused SearXNG image search", "Reuses the configured `searxng_url`", returns 501-with-hint when unconfigured — routed at `quarry-edge/src/routes.rs:158`, behind the `search:read` scope check at `quarry-edge/src/auth.rs:464`, with quarry-edge's response cache/TTL policy (`quarry-edge/src/cache.rs:101`) and rate-limit mapping. Master matrix §2 line 83 makes quarry-edge the "Public REST/SSE, request normalization, ZDR guards, cache admission" boundary.
@@ -534,7 +546,18 @@ multi-replica deployments.
 
 ### BI-3 [medium] — browser-ingestion
 
-**Gateway:** `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:472` — `search_videos` builds `format!("{}/search", state.searxng_url)` and queries SearXNG directly with `categories=videos`, `format=json`, `safesearch=1`, then shapes the raw provider JSON via `sanitize_videos`. The handler takes no `AuthenticatedUser`, so no org reaches the provider call.
+**Status (2026-09-15): resolved in source — same fix as RAG-6, which describes this bypass from the
+retrieval side; see there for detail.** Video search now enters quarry-edge at `POST /v1/search/videos`
+and therefore inherits the boundary work this finding said it lacked: org scoping and attribution from
+the forwarded user/token, the edge's cache and rate-limit mapping, and one metered `SEARCH_QUERY` unit
+per query. The two-pointers-can-drift concern is gone with it — the gateway no longer reads a SearXNG
+URL at all, so Quarry's instance is the only one the product can reach. Note the fallback-chain point
+in the paragraph below is only partly addressed: `/v1/search/videos` is a focused SearXNG vertical like
+`/v1/search/images`, not a `smart_router` fan-out, so a SearXNG outage still fails the VIDEOS tab while
+web search survives. That is now a property of one provider path inside the edge rather than of a
+second, un-attributed client in the BFF, and is tracked as such.
+
+**Gateway (historical):** `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:472` — `search_videos` built `format!("{}/search", state.searxng_url)` and queried SearXNG directly with `categories=videos`, `format=json`, `safesearch=1`, then shaped the raw provider JSON via `sanitize_videos`. The handler took no `AuthenticatedUser`, so no org reached the provider call.
 
 **Already exists:** SearXNG is a Quarry-owned search provider: `apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/serp.rs:422-476` is the `SearchProvider` impl (same `categories` query param at `serp.rs:448` and `:549` for images), sitting behind `smart_router.rs`'s Tantivy→SearXNG→Brave fan-out and `rerank.rs`'s `RerankingSearchProvider`. The very same BFF file routes every other search mode correctly to `quarry_edge_url` — `search.rs:235` `/v1/search`, `:327` `/v1/search/similar`, `:381` `/v1/search/images`, `:425` `/v1/search/suggest`, `:588` `/v1/answer/stream` — and its own module doc (`search.rs:3-5`) states "All web search infrastructure lives inside quarry-edge".
 

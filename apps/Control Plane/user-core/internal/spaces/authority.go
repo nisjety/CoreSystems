@@ -103,7 +103,7 @@ func (r RecipientAudienceRegistration) Validate() error {
 
 func (r Registration) Validate() error {
 	if strings.TrimSpace(r.SpaceRef) == "" || strings.TrimSpace(r.OrgID) == "" || strings.TrimSpace(r.OwnerPrincipalID) == "" {
-		return fmt.Errorf("Space registration identity is required")
+		return fmt.Errorf("space registration identity is required")
 	}
 	switch r.Kind {
 	case KindPersonal, KindRoom, KindProject, KindCase:
@@ -111,7 +111,7 @@ func (r Registration) Validate() error {
 		return fmt.Errorf("unknown Space kind %q", r.Kind)
 	}
 	if r.LifecycleRevision <= 0 {
-		return fmt.Errorf("Space lifecycle revision must be positive")
+		return fmt.Errorf("space lifecycle revision must be positive")
 	}
 	if _, err := r.RegistrationState(); err != nil {
 		return err
@@ -196,16 +196,12 @@ func (p EffectPolicy) Validate() error {
 		"residency": p.Residency, "deletion_scope": p.DeletionScope,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("Space effect policy %s is required", name)
+			return fmt.Errorf("space effect policy %s is required", name)
 		}
 	}
 	return nil
 }
 
-// CurrentMembership is a current Control-owned membership fact. It is useful
-// to a resolver only as one component of effective access: callers must still
-// intersect recipient, policy, and owner-resource authorization before an
-// effect. The database result is deliberately not a signed access decision.
 // RosterMember is one participant of a Space as shown to another participant.
 //
 // `SubjectType` distinguishes a person from a service/agent identity, so the UI
@@ -287,10 +283,10 @@ const maxSpaceMembers = 5000
 
 func (m MembershipReplacement) Validate() error {
 	if strings.TrimSpace(m.SpaceRef) == "" {
-		return fmt.Errorf("Space reference is required")
+		return fmt.Errorf("space reference is required")
 	}
 	if len(m.Members) > maxSpaceMembers {
-		return fmt.Errorf("Space membership exceeds %d subjects", maxSpaceMembers)
+		return fmt.Errorf("space membership exceeds %d subjects", maxSpaceMembers)
 	}
 	seen := make(map[string]struct{}, len(m.Members))
 	for _, member := range m.Members {
@@ -301,7 +297,7 @@ func (m MembershipReplacement) Validate() error {
 			return fmt.Errorf("unknown Space member subject type %q", member.SubjectType)
 		}
 		if subjectID == "" {
-			return fmt.Errorf("Space member subject id is required")
+			return fmt.Errorf("space member subject id is required")
 		}
 		switch role {
 		case "viewer", "editor", "manager", "owner":
@@ -339,6 +335,10 @@ func (m MembershipReplacement) Validate() error {
 	return nil
 }
 
+// CurrentMembership is a current Control-owned membership fact. It is useful
+// to a resolver only as one component of effective access: callers must still
+// intersect recipient, policy, and owner-resource authorization before an
+// effect. The database result is deliberately not a signed access decision.
 type CurrentMembership struct {
 	SpaceRef  string            `json:"space_ref"`
 	OrgID     string            `json:"org_id"`
@@ -367,7 +367,7 @@ func (m CurrentMembership) Validate() error {
 
 func (r AuthorityRevision) Validate() error {
 	if r.Authority <= 0 || r.Membership <= 0 || r.Privacy <= 0 || r.RecipientAudience <= 0 || r.Entitlement <= 0 {
-		return fmt.Errorf("Space authority revisions must be positive")
+		return fmt.Errorf("space authority revisions must be positive")
 	}
 	return nil
 }

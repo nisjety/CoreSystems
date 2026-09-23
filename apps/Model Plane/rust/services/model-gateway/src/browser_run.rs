@@ -350,6 +350,7 @@ async fn browser_run_start(
         &session_bearer,
         None,
         None,
+        false,
     )
     .await
     .map_err(|error| {

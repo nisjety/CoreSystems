@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -35,6 +36,28 @@ func isReplaceableAvatar(value string) bool {
 		return true
 	}
 	return strings.HasPrefix(lower, "data:image/") && (!strings.Contains(lower, ";base64,") || len(trimmed) < 800)
+}
+
+// placeholderNameUpdate returns name when it should replace the user's
+// placeholder (or empty) display name, nil otherwise.
+func placeholderNameUpdate(user *User, name string) *string {
+	if name == "" {
+		return nil
+	}
+	hasPlaceholderName := strings.TrimSpace(user.Name) == "" || user.Name == "User"
+	if hasPlaceholderName && user.Name != name {
+		return &name
+	}
+	return nil
+}
+
+// placeholderAvatarUpdate returns avatar when it should replace the user's
+// placeholder avatar, nil otherwise.
+func placeholderAvatarUpdate(user *User, avatar string) *string {
+	if avatar != "" && isReplaceableAvatar(user.Avatar) && user.Avatar != avatar {
+		return &avatar
+	}
+	return nil
 }
 
 const (
@@ -73,8 +96,8 @@ type SharedPublisher interface {
 type Service struct {
 	repo             *Repository
 	bcryptCost       int
-	betterAuthClient interface{}        // Better Auth client (optional, can be nil)
-	eventPublisher   interface{}        // NATS publisher (optional, can be nil)
+	betterAuthClient any                // Better Auth client (optional, can be nil)
+	eventPublisher   any                // NATS publisher (optional, can be nil)
 	sharedPublisher  SharedPublisher    // cross-plane events on verevon-nats
 	auditOutbox      *auditOutbox       // durable verevon.audit.v2.control.user-core.* delivery
 	cache            *rediscache.Client // optional, nil if Redis disabled
@@ -87,7 +110,7 @@ type Service struct {
 
 // NewService creates a new user service
 // betterAuthClient, eventPublisher, and cache are optional (can be nil)
-func NewService(repo *Repository, betterAuthClient interface{}, eventPublisher interface{}, cache ...*rediscache.Client) *Service {
+func NewService(repo *Repository, betterAuthClient any, eventPublisher any, cache ...*rediscache.Client) *Service {
 	var auditStore auditOutboxStore
 	if repo != nil {
 		auditStore = repo
@@ -201,7 +224,7 @@ func (s *Service) GetUser(ctx context.Context, id string) (*User, error) {
 
 	// Populate cache on miss
 	if s.cache != nil {
-		if b, merr := json.Marshal(user); merr == nil {
+		if b, marshalErr := json.Marshal(user); marshalErr == nil {
 			_ = s.cache.Set(ctx, userIDKeyPrefix+id, string(b), userCacheTTL)
 		}
 	}
@@ -246,19 +269,14 @@ func (s *Service) GetOrCreateUser(ctx context.Context, id, email, name, avatar s
 			}
 		}
 
-		if name != "" {
-			hasPlaceholderName := strings.TrimSpace(user.Name) == "" || user.Name == "User"
-			if hasPlaceholderName && user.Name != name {
-				updateParams.Name = &name
-				needsUpdate = true
-			}
+		if v := placeholderNameUpdate(user, name); v != nil {
+			updateParams.Name = v
+			needsUpdate = true
 		}
 
-		if avatar != "" {
-			if isReplaceableAvatar(user.Avatar) && user.Avatar != avatar {
-				updateParams.Avatar = &avatar
-				needsUpdate = true
-			}
+		if v := placeholderAvatarUpdate(user, avatar); v != nil {
+			updateParams.Avatar = v
+			needsUpdate = true
 		}
 
 		if needsUpdate {
@@ -281,7 +299,7 @@ func (s *Service) GetOrCreateUser(ctx context.Context, id, email, name, avatar s
 			user = existingByEmail
 			if existingByEmail.ID != id {
 				reassigned, reassignErr := s.repo.ReassignID(ctx, existingByEmail.ID, id)
-				if reassignErr == nil {
+				if reassignErr == nil && reassigned != nil {
 					user = reassigned
 					if s.cache != nil {
 						_ = s.cache.Del(ctx, userIDKeyPrefix+existingByEmail.ID)
@@ -293,18 +311,13 @@ func (s *Service) GetOrCreateUser(ctx context.Context, id, email, name, avatar s
 
 			updateParams := UpdateUserParams{ID: user.ID}
 			needsUpdate := false
-			if name != "" {
-				hasPlaceholderName := strings.TrimSpace(user.Name) == "" || user.Name == "User"
-				if hasPlaceholderName && user.Name != name {
-					updateParams.Name = &name
-					needsUpdate = true
-				}
+			if v := placeholderNameUpdate(user, name); v != nil {
+				updateParams.Name = v
+				needsUpdate = true
 			}
-			if avatar != "" {
-				if isReplaceableAvatar(user.Avatar) && user.Avatar != avatar {
-					updateParams.Avatar = &avatar
-					needsUpdate = true
-				}
+			if v := placeholderAvatarUpdate(user, avatar); v != nil {
+				updateParams.Avatar = v
+				needsUpdate = true
 			}
 			if needsUpdate {
 				if updatedUser, updateErr := s.repo.Update(ctx, updateParams); updateErr == nil {
@@ -340,13 +353,13 @@ func (s *Service) GetOrCreateUser(ctx context.Context, id, email, name, avatar s
 
 	// Populate cache for newly created user
 	if s.cache != nil {
-		if b, merr := json.Marshal(created); merr == nil {
+		if b, marshalErr := json.Marshal(created); marshalErr == nil {
 			_ = s.cache.Set(ctx, userIDKeyPrefix+created.ID, string(b), userCacheTTL)
 		}
 	}
 
 	// Publish registration event if this is a new user
-	if created.ID == id && (email != "" || name != "") {
+	if created.ID == id {
 		s.publishUserRegistered(ctx, created.ID, created.Email, created.Name, "oauth")
 	}
 
@@ -380,7 +393,7 @@ func (s *Service) GetUserByEmail(ctx context.Context, email string) (*User, erro
 
 	// Populate cache on miss
 	if s.cache != nil {
-		if b, merr := json.Marshal(user); merr == nil {
+		if b, marshalErr := json.Marshal(user); marshalErr == nil {
 			_ = s.cache.Set(ctx, userIDKeyPrefix+user.ID, string(b), userCacheTTL)
 			_ = s.cache.Set(ctx, "user:email:"+user.Email, user.ID, userCacheTTL)
 		}
@@ -634,7 +647,7 @@ func (s *Service) VerifyPassword(ctx context.Context, email, password string) (*
 // ============================================
 
 // GetSettings retrieves a category's settings for a user, returning defaults if no row exists.
-func (s *Service) GetSettings(ctx context.Context, userID, category string, defaults map[string]interface{}) (map[string]interface{}, error) {
+func (s *Service) GetSettings(ctx context.Context, userID, category string, defaults map[string]any) (map[string]any, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user ID is required")
 	}
@@ -646,18 +659,14 @@ func (s *Service) GetSettings(ctx context.Context, userID, category string, defa
 		return defaults, nil
 	}
 	// Merge: start from defaults so any new keys added in future defaults are present
-	merged := make(map[string]interface{}, len(defaults))
-	for k, v := range defaults {
-		merged[k] = v
-	}
-	for k, v := range row.Settings {
-		merged[k] = v
-	}
+	merged := make(map[string]any, len(defaults))
+	maps.Copy(merged, defaults)
+	maps.Copy(merged, row.Settings)
 	return merged, nil
 }
 
 // UpsertSettings saves a partial or full settings map for a user + category.
-func (s *Service) UpsertSettings(ctx context.Context, userID, category string, settings map[string]interface{}) (map[string]interface{}, error) {
+func (s *Service) UpsertSettings(ctx context.Context, userID, category string, settings map[string]any) (map[string]any, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user ID is required")
 	}
@@ -707,7 +716,7 @@ func (s *Service) LinkProviderAccount(ctx context.Context, params UpsertProvider
 
 	// Fetch user to get email for event
 	if user, uErr := s.repo.GetByID(ctx, params.UserID); uErr == nil && user != nil {
-		// Publish provider link event (Ingestion Plane subscribes to setup M365)
+		// Publish provider link event (Ingestion Plane subscribes to set up M365)
 		tenantID := ""
 		if tid, ok := params.Metadata["tenant_id"].(string); ok {
 			tenantID = tid
@@ -739,11 +748,11 @@ func (s *Service) MarkOnboardingComplete(ctx context.Context, email string) erro
 	if err := s.repo.MarkOnboardingComplete(ctx, email); err != nil {
 		return err
 	}
-	// Evict the cached user record, which still carries onboarding_complete=false
-	// — the HTTP handler's GetOrCreateUser re-primed it moments before this
-	// write, so without eviction GetSessionContext keeps answering PROFILE_READY
-	// for up to userCacheTTL and bounces a freshly-completed user from the
-	// dashboard back into onboarding.
+	// Evict the cached user record, which still carries onboarding_complete=false.
+	// The HTTP handler's GetOrCreateUser re-primed it moments before this write,
+	// so without eviction GetSessionContext keeps answering PROFILE_READY for up
+	// to userCacheTTL. That bounces a freshly-completed user from the dashboard
+	// back into onboarding.
 	if s.cache != nil {
 		if user, lookupErr := s.repo.GetByEmail(ctx, email); lookupErr == nil {
 			_ = s.cache.Del(ctx, userIDKeyPrefix+user.ID)
@@ -780,8 +789,8 @@ func (s *Service) MarkOnboardingCompleteByID(ctx context.Context, userID string)
 // (Named `View` to avoid colliding with the existing `Service` package's
 // historical `OnboardingStatus` enum strings.)
 type OnboardingStateView struct {
-	Step  string                 `json:"step"`
-	State map[string]interface{} `json:"state,omitempty"`
+	Step  string         `json:"step"`
+	State map[string]any `json:"state,omitempty"`
 }
 
 // GetOnboardingState returns the persisted state for userID. An empty
@@ -940,7 +949,7 @@ func (s *Service) RemoveMembership(ctx context.Context, userID, orgID string) er
 // ============================================
 
 // publishUserRegistered publishes aqencia.controlplane.user.registered.
-// Ingestion Plane subscribes to setup M365 and other provider integrations.
+// Ingestion Plane subscribes to set up M365 and other provider integrations.
 func (s *Service) publishUserRegistered(ctx context.Context, userID, email, name, provider string) {
 	if s.sharedPublisher == nil {
 		return
@@ -965,7 +974,7 @@ func (s *Service) publishUserDeleted(ctx context.Context, userID, email string) 
 }
 
 // publishProviderLinked publishes aqencia.controlplane.user.provider_linked.
-// Ingestion Plane subscribes to setup M365, Google, and other cloud integrations.
+// Ingestion Plane subscribes to set up M365, Google, and other cloud integrations.
 func (s *Service) publishProviderLinked(ctx context.Context, userID, email, provider, tenantID string) {
 	if s.sharedPublisher == nil {
 		return

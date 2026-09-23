@@ -23,9 +23,31 @@ use serde::Deserialize;
 /// carries only the fields needed to decide whether provider-bound user input
 /// must be redacted; credentials and arbitrary `config_json` never enter the
 /// gateway's prompt path.
+///
+/// `deserialize_with = "null_as_empty_vec"` on `policies`: capability-core's
+/// list endpoint is fixed to never emit `{"policies": null}` for an org with
+/// none configured (see registry_apis.go), but this side must not re-depend
+/// on the other service's internals staying bug-free forever — a stray
+/// `null` here should degrade to "no policies" (still fail-closed for
+/// redaction, since no policy matches) rather than fail the whole parse and
+/// land in the `Err(error)` branch with a "malformed response" warning that
+/// hides the real, benign cause behind a decode error.
+///
+/// Plain `#[serde(default)]` does NOT cover this — it only substitutes a
+/// default for a field that is ABSENT from the object, not one present and
+/// explicitly `null` (the exact gotcha `runtime_registries.rs`'s sibling
+/// `null_as_empty_vec` already exists to close for the MCP-catalog list).
 #[derive(Debug, Deserialize)]
 struct SafetyPolicyList {
+    #[serde(deserialize_with = "null_as_empty_vec")]
     policies: Vec<SafetyPolicy>,
+}
+
+fn null_as_empty_vec<'de, D>(deserializer: D) -> Result<Vec<SafetyPolicy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Vec<SafetyPolicy>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -799,6 +821,42 @@ mod tests {
                 Some("delegated-capability-token"),
             )
             .await
+        );
+    }
+
+    /// The bug this covers: capability-core's `/api/v1/safety` used to marshal
+    /// a Go nil slice as JSON `null` for any org with no safety policies
+    /// configured (every org, until one is explicitly set up) — and
+    /// `Vec<SafetyPolicy>` without `#[serde(default)]` refused to parse a bare
+    /// `null`, so "no policies configured" and "the response was corrupt" were
+    /// indistinguishable here, and both landed in fail-closed redaction with a
+    /// misleading "malformed" warning. Both sides are now fixed: Go always
+    /// emits `[]`, and this struct tolerates `null` regardless. With no
+    /// explicit "pii" feature flag, `{"policies": null}` must now resolve to
+    /// "no redaction required", not "malformed".
+    #[tokio::test]
+    async fn a_null_policies_list_is_empty_not_malformed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/safety"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "policies": null })),
+            )
+            .mount(&capability_core)
+            .await;
+
+        assert!(
+            !pii_redaction_required(
+                &[],
+                &reqwest::Client::new(),
+                &capability_core.uri(),
+                Some("delegated-capability-token"),
+            )
+            .await,
+            "a genuinely empty policy list must not be treated as a decode failure"
         );
     }
 

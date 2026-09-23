@@ -191,6 +191,48 @@ async fn terminalize_prepared_failure(
     }
 }
 
+/// Safe public explanations for private draft failures. Keep an elapsed deadline
+/// distinct from a rejected candidate without exposing source/provider text.
+fn tool_phase_failure(reason: &str) -> (&'static str, &'static str) {
+    match reason {
+        crate::result_validation::VALIDATION_TIMEOUT => (
+            crate::result_validation::VALIDATION_TIMEOUT,
+            "Arbeidet med utkastet tok for lang tid. Dette utkastet er ikke publisert. Prøv igjen.",
+        ),
+        crate::result_validation::VALIDATION_FAILED => (
+            crate::result_validation::VALIDATION_FAILED,
+            "Et utkast kunne ikke kontrolleres mot kildene innen forsøksgrensen. Dette utkastet er ikke publisert. Prøv igjen med en mindre endring eller tydeligere kilder.",
+        ),
+        "subscription_route_unavailable" => (
+            "subscription_route_unavailable",
+            "Den valgte ChatGPT-abonnementstilkoblingen kunne ikke fullføre. Koble til abonnementet på nytt og prøv igjen. Ingen annen modell er brukt.",
+        ),
+        _ => ("audit_persistence_failed", "Tool action could not be durably audited"),
+    }
+}
+
+fn checked_stream_failure(reason: &str, norwegian: bool) -> (&'static str, &'static str) {
+    match (reason, norwegian) {
+        (crate::result_validation::VALIDATION_TIMEOUT, true) => (
+            crate::result_validation::VALIDATION_TIMEOUT,
+            "Kontrollen av svaret tok for lang tid. Svaret er ikke publisert. Prøv igjen.",
+        ),
+        (crate::result_validation::VALIDATION_TIMEOUT, false) => (
+            crate::result_validation::VALIDATION_TIMEOUT,
+            "Checking the answer took too long. The answer has not been published. Please try again.",
+        ),
+        (crate::result_validation::VALIDATION_FAILED, true) => (
+            crate::result_validation::VALIDATION_FAILED,
+            "Svaret kunne ikke kontrolleres mot kravene og kildene innen forsøksgrensen. Prøv igjen.",
+        ),
+        (crate::result_validation::VALIDATION_FAILED, false) => (
+            crate::result_validation::VALIDATION_FAILED,
+            "The answer could not be checked against the requirements and sources within the retry limit. Please try again.",
+        ),
+        _ => ("inference_stream_error", "The inference stream ended unexpectedly."),
+    }
+}
+
 /// What the client is told about a known failure, given whether its durable
 /// terminalization succeeded. Pure so the pre-stream and in-stream paths cannot
 /// drift: a caller must never be told the turn failed cleanly when the run was
@@ -307,6 +349,61 @@ async fn emit_and_buffer(
     *seq += 1;
 }
 
+/// True when a model turn's final chunk carries no usable answer after a
+/// genuine user prompt — the condition F-01 (chat-parity audit §3.1) needs
+/// caught BEFORE the empty output is scored and verified like a real answer.
+///
+/// Two independent signals, either sufficient on its own:
+/// - inference-core's explicit `stop_reason: "stream_error"` (set by e.g.
+///   `codex_subscription.rs` when the subscription broker fails mid-stream —
+///   a well-formed `done` chunk with `delta: ""` that looks, to everything
+///   downstream, exactly like a model that chose to answer with nothing);
+/// - belt-and-suspenders: the accumulated `assistant_output` is empty even
+///   under a stop reason that does not explicitly say so, since an empty
+///   answer to a real question is never a legitimate outcome for this
+///   direct-stream path (tool rounds already ran to completion before this,
+///   final, text-generation round).
+///
+/// Gated on a non-empty prompt so a turn that asked nothing at all — not
+/// something this path currently produces, but a cheap invariant to state —
+/// is never misreported as a provider failure.
+fn stream_ended_with_no_content(prompt: &str, stop_reason: &str, assistant_output: &str) -> bool {
+    !prompt.trim().is_empty() && (stop_reason == "stream_error" || assistant_output.trim().is_empty())
+}
+
+/// Auxiliary calls inherit the subscription selected for the turn. They must
+/// never spend another provider's quota just because their default is cheaper.
+fn subscription_scoped_request(mut request: InferRequest, route: &InferRequest) -> InferRequest {
+    if !route.subscription_connection_id.is_empty() {
+        request.model.clone_from(&route.model);
+        request.provider_hint.clone_from(&route.provider_hint);
+        request.subscription_connection_id.clone_from(&route.subscription_connection_id);
+        request.zdr = route.zdr;
+        request.min_privacy_tier = route.min_privacy_tier;
+        request.min_residency.clone_from(&route.min_residency);
+    }
+    request
+}
+
+#[cfg(test)]
+mod subscription_route_tests {
+    use super::*;
+    #[test]
+    fn auxiliary_calls_preserve_subscription_identity_and_privacy() {
+        let route = InferRequest { model:"gpt-5.6-terra".into(), provider_hint:"openai-codex-subscription".into(),
+            subscription_connection_id:"connection".into(), min_privacy_tier:2, min_residency:"eu".into(), zdr:true, ..Default::default() };
+        let scoped = subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &route);
+        assert_eq!(scoped.model,route.model);
+        assert_eq!(scoped.provider_hint,route.provider_hint);
+        assert_eq!(scoped.subscription_connection_id,route.subscription_connection_id);
+        assert_eq!(scoped.min_privacy_tier,route.min_privacy_tier);
+        assert_eq!(scoped.min_residency,route.min_residency);
+        assert!(scoped.zdr);
+        let ordinary=subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &InferRequest::default());
+        assert_eq!(ordinary.model,"gpt-4o-mini");
+    }
+}
+
 pub async fn invoke_stream_sse(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -339,6 +436,12 @@ pub async fn invoke_stream_sse(
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let sandbox_bearer = sandbox_bearer.map(|Extension(bearer)| bearer);
     let features = req.features.clone();
+    let conversation_only = features.iter().any(|f| f == "conversation_only");
+    if conversation_only && (req.deep_research || req.generate_image
+        || features.iter().any(|f| f == "agentic")) {
+        return error_stream(&request_id, "source_scope_conflict",
+            "Conversation-only tasks support drafting and calculation. Start a new conversation to use connected tools.", false);
+    }
     // Normalize and validate BEFORE branching: an unknown tier numeric must
     // fail closed on both the durable and the persistence-free path, and the
     // ZDR branch threads the same floor onto its inference call.
@@ -399,7 +502,7 @@ pub async fn invoke_stream_sse(
                 false,
             );
         }
-        let grounding = if crate::retrieval::wants_grounding(&features) {
+        let grounding = if !conversation_only && crate::retrieval::wants_grounding(&features) {
             let Some(bearer) = data_plane_bearer.as_ref() else {
                 return error_stream(
                     &request_id,
@@ -554,6 +657,9 @@ pub async fn invoke_stream_sse(
     // `stream_buffer::scoped_stream_key`.
     let buffer_key = crate::stream_buffer::scoped_stream_key(&org_clone, &user_clone, &req_id);
     let model_clone = model.clone();
+    // `mut`: cleared, later in this function, only on the narrow subscription
+    // tool-hand-off path (see `subscription_handed_off`) — every other path
+    // leaves both exactly as normalized.
     let provider_hint = normalized.provider_hint.clone();
     let subscription_connection_id = normalized.subscription_connection_id.clone();
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
@@ -569,7 +675,7 @@ pub async fn invoke_stream_sse(
         .map(str::trim)
         .filter(|k| !k.is_empty())
     {
-        Some(key) => match state.idempotency.claim(key) {
+        Some(key) => match state.idempotency.claim(&org_id, &user_id, key) {
             crate::idempotency_registry::Claim::Cached(v) => {
                 return replay_cached_stream(v, request_id);
             }
@@ -667,6 +773,7 @@ pub async fn invoke_stream_sse(
         &model_bearer,
         req.space_context.as_ref(),
         req.space_append_context.as_ref(),
+        conversation_only,
     )
     .await
     {
@@ -827,7 +934,7 @@ pub async fn invoke_stream_sse(
     // even when the caller didn't opt in (see below), so a plain chat turn
     // still checks the org's knowledge base before falling back to an
     // ungrounded answer.
-    let explicit_grounding_requested = crate::retrieval::wants_grounding(&features);
+    let explicit_grounding_requested = !conversation_only && crate::retrieval::wants_grounding(&features);
     if explicit_grounding_requested && data_plane_bearer.is_none() {
         return prepared_direct_failure_stream(
             &state,
@@ -850,7 +957,7 @@ pub async fn invoke_stream_sse(
         req.content.clone()
     };
 
-    let context_assembly_messages = load_context_assembly_messages(
+    let context_assembly_messages = if conversation_only { None } else { load_context_assembly_messages(
         &state,
         &session_run.thread_id,
         &session_run.run_id,
@@ -860,7 +967,7 @@ pub async fn invoke_stream_sse(
         data_plane_bearer.as_ref(),
         sovereign_retrieval,
     )
-    .await;
+    .await };
     let recent_thread_messages = load_recent_thread_messages(
         &state,
         &org_id,
@@ -871,7 +978,10 @@ pub async fn invoke_stream_sse(
         &SummarizerContext {
             request_id: &request_id,
             model: &model,
+            provider_hint: &provider_hint,
+            subscription_connection_id: &subscription_connection_id,
             zdr: effective_zdr,
+            conversation_only,
             min_privacy_tier: min_privacy_tier_wire,
             inference_bearer: &inference_bearer,
         },
@@ -884,6 +994,11 @@ pub async fn invoke_stream_sse(
     let is_first_exchange = !recent_thread_messages
         .iter()
         .any(|message| message.role == "assistant");
+    // Read here, before the history is moved into the prompt: whether
+    // load-time compaction left a marker decides if `reattach_context` is
+    // offered at all (see the builtin-tool merge below).
+    let thread_was_compacted =
+        crate::tool_loop::history_was_compacted(&recent_thread_messages);
     // `assembly_supplied_grounding` is deliberately NOT "assembly ran". Assembly
     // almost always returns something (identity, history), so the old boolean was
     // effectively always true and suppressed the grounding path below.
@@ -897,6 +1012,7 @@ pub async fn invoke_stream_sse(
                 .collect();
             if recent_thread_messages.is_empty() {
                 combined.push(ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: user_content.clone(),
                     name: String::new(),
@@ -914,7 +1030,7 @@ pub async fn invoke_stream_sse(
     // now; only the gRPC Invoke path had it. Skipped for trivial prompts
     // ("ja", "thanks!") where recalled context can only derail the reply, and
     // timeout-bounded so a slow backend costs the recall, never the turn.
-    let memory_recall_status = if crate::memory_prefetch::is_trivial_prompt(&req.content) {
+    let memory_recall_status = if conversation_only || crate::memory_prefetch::is_trivial_prompt(&req.content) {
         None
     } else {
         let (memory_entries, recall_status) = fetch_chat_memory_context(
@@ -925,7 +1041,8 @@ pub async fn invoke_stream_sse(
             &model_bearer,
         )
         .await;
-        if !memory_entries.is_empty() {
+        if let Some(memory_block) = crate::memory_provenance::memory_context_block(&memory_entries)
+        {
             // Same block format as grpc.rs's `build_messages`, so both paths
             // present memory identically to the model. Inserted after the
             // leading system context (assembly/grounding stay first) and
@@ -937,8 +1054,9 @@ pub async fn invoke_stream_sse(
             messages.insert(
                 insert_at,
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
-                    content: format!("Relevant memory:\n{}", memory_entries.join("\n---\n")),
+                    content: memory_block,
                     name: String::new(),
                 },
             );
@@ -969,7 +1087,7 @@ pub async fn invoke_stream_sse(
             }
             None => None,
         }
-    } else if !assembly_supplied_grounding {
+    } else if !conversation_only && !assembly_supplied_grounding {
         // Best-effort fallback: assembly returned no Data Plane evidence for this
         // thread, so directly check Data Plane before concluding there is no
         // grounding at all. Degrades silently (no bearer, no error) — a
@@ -1040,13 +1158,14 @@ pub async fn invoke_stream_sse(
             messages.insert(
                 0,
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: context_block,
                     name: String::new(),
                 },
             );
         }
-    } else if !assembly_supplied_grounding && crate::retrieval::is_effectively_empty(&grounding) {
+    } else if !conversation_only && !assembly_supplied_grounding && crate::retrieval::is_effectively_empty(&grounding) {
         // Neither session-core context assembly nor a direct Data Plane
         // retrieval found anything for this turn — tell the model to be
         // honest about that instead of silently guessing from general
@@ -1054,6 +1173,7 @@ pub async fn invoke_stream_sse(
         messages.insert(
             0,
             ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE.to_owned(),
                 name: String::new(),
@@ -1066,6 +1186,11 @@ pub async fn invoke_stream_sse(
     // unrelated lookup succeeding. See temporal_awareness_message's doc
     // comment for the failure this closes.
     messages.insert(0, temporal_awareness_message());
+    if let Some(calendar) = crate::calendar_context::reference_calendar(&messages) {
+        messages.insert(0, ChatMessage {
+            role: "system".to_owned(), content: calendar, ..Default::default()
+        });
+    }
     // Identity context: who the model is talking to. Inserted last of the
     // position-0 messages so it lands FIRST overall, ahead of the grounding
     // content it primes — the model should know "we"/"our" means org_name
@@ -1089,7 +1214,7 @@ pub async fn invoke_stream_sse(
     let SkillContext {
         blocks: skill_context,
         requested_ids: requested_skill_ids,
-    } = fetch_skill_context(
+    } = if conversation_only { SkillContext::default() } else { fetch_skill_context(
         &state,
         &model_bearer,
         &org_id,
@@ -1097,7 +1222,7 @@ pub async fn invoke_stream_sse(
         &req.content,
         &req.skill_ids,
     )
-    .await;
+    .await };
     // Remember which skills this turn injected, keyed by the request_id the SPA
     // already has. A thumbs-up has to credit the skills that actually shaped the
     // answer, and the client must not be trusted to name them — so the mapping
@@ -1137,6 +1262,7 @@ pub async fn invoke_stream_sse(
         messages.insert(
             insert_at,
             ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: format!(
                     "You have access to the following skills relevant to this request. Apply their guidance when it fits:\n\n{joined}"
@@ -1160,8 +1286,28 @@ pub async fn invoke_stream_sse(
         messages.insert(
             insert_at,
             ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: directive.to_owned(),
+                name: String::new(),
+            },
+        );
+    }
+    // Response discipline: reuse figures verbatim, keep explicit limits, and
+    // say when a tool failed. Standing guidance, so it sits with the other
+    // system context rather than in history. See the constant's doc for the
+    // three observed failures it answers.
+    {
+        let insert_at = messages
+            .iter()
+            .position(|message| message.role != "system")
+            .unwrap_or(messages.len());
+        messages.insert(
+            insert_at,
+            ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: crate::tool_loop::RESPONSE_DISCIPLINE_NOTICE.to_owned(),
                 name: String::new(),
             },
         );
@@ -1181,6 +1327,11 @@ pub async fn invoke_stream_sse(
     // infer → execute via gateway handlers → inject results), then stream the
     // final answer with tools withheld. Reuses gateway tool handlers — no new
     // runtime. Inference outage degrades to a normal ungrounded answer.
+    if let Some(inventory) = state.artifact_versions.inventory_context(&session_run.thread_id) {
+        messages.insert(0, ChatMessage {
+            role: "system".to_owned(), content: inventory, ..Default::default()
+        });
+    }
     let client_requested_web_search =
         req.browse_web || req.tools.iter().any(|tool| tool.name == "web_search");
     // `should_force_web_search` used to be evaluated further down (see its call
@@ -1198,8 +1349,8 @@ pub async fn invoke_stream_sse(
     // searches, and the loop afterwards must be able to close a named gap the
     // report could not fill.
     let deep_research_requested = req.deep_research;
-    let web_search_available =
-        client_requested_web_search || web_search_signal || deep_research_requested;
+    let web_search_available = !conversation_only &&
+        (client_requested_web_search || web_search_signal || deep_research_requested);
     let mut tool_defs: Vec<ToolDefinition> = if features.iter().any(|f| f == "tools") {
         let mut defs: Vec<ToolDefinition> = req
             .tools
@@ -1214,8 +1365,19 @@ pub async fn invoke_stream_sse(
         // Advertise the gateway's built-in agent tools, but keep public web
         // search behind the explicit Search toggle. Dedupe by name — a
         // client-declared spec wins.
+        // Recovery is offered only when there is something to recover. With
+        // the tool always on the menu, the model called it in threads that had
+        // never been compacted — three times in one short conversation — and
+        // each call returned "no earlier message matches", which it then
+        // treated as evidence (RUN-LOG finding 15). The load-time compaction
+        // leaves a marker in the history; that marker is the gate. The
+        // provider-rejection retry path compacts later and re-adds the tool
+        // runs on the final, tool-less inference and needs no offer.
         for builtin in crate::tool_loop::builtin_tool_defs() {
             if builtin.name == "web_search" && !web_search_available {
+                continue;
+            }
+            if builtin.name == "reattach_context" && !thread_was_compacted {
                 continue;
             }
             if !defs.iter().any(|d| d.name == builtin.name) {
@@ -1238,6 +1400,14 @@ pub async fn invoke_stream_sse(
             tool_defs.push(web_search);
         }
     }
+    if conversation_only {
+        tool_defs.retain(|tool| crate::tool_loop::conversation_tool_allowed(&tool.name));
+        messages.insert(0, ChatMessage {
+            role: "system".to_owned(),
+            content: crate::source_validation::CONVERSATION_SCOPE_NOTICE.to_owned(),
+            ..Default::default()
+        });
+    }
     // Tool-argument elicitation guidance, gated on the FINAL offered set (after
     // the client/builtin merge and the web_search append above) so the prompt
     // never warns about a tool this turn cannot call. Inserted before the first
@@ -1258,7 +1428,7 @@ pub async fn invoke_stream_sse(
     // the prepared run, so the enqueue endpoint never has to trust a
     // client-supplied thread — see `queued_input::enqueue_for`.
     let queued_inputs = state.queued_inputs.clone();
-    queued_inputs.register(&request_id, &org_id, &user_id, &session_run.thread_id);
+    queued_inputs.register(&request_id, &org_id, &user_id, &session_run.thread_id, conversation_only);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let session_state = state.clone();
@@ -1305,6 +1475,12 @@ pub async fn invoke_stream_sse(
     // back: with a 12-round tool budget a multi-step ERP question showed a dead
     // spinner for the entire phase and then dumped everything at once.
     tokio::spawn(async move {
+        // Keep tool writes private until the assistant message is durable.
+        let committed_artifacts = session_state.artifact_versions.clone();
+        let artifact_base = committed_artifacts.fork_thread(&session_thread_id);
+        let mut session_state = session_state;
+        session_state.artifact_versions = artifact_base.fork_thread(&session_thread_id);
+
         // One monotonic SSE `id:` counter for EVERY frame this stream emits —
         // text and rich events alike. Declared at the top of the task because a
         // resume cursor is only meaningful if all frames share one sequence;
@@ -1408,7 +1584,7 @@ pub async fn invoke_stream_sse(
         // buffered events when a sink is supplied, which is what guarantees
         // nothing is emitted twice.
         let sink =
-            crate::sse_events::RichEventSink::new(tx.clone(), features.clone(), req_id.clone());
+            crate::sse_events::RichEventSink::staging_artifacts(tx.clone(), features.clone(), req_id.clone());
 
         // Starts as the requested id (possibly a `verevon-*` mode); the tool phase
         // replaces it with the concrete model it resolved.
@@ -1517,7 +1693,7 @@ pub async fn invoke_stream_sse(
             && !deep_research_ran
             && tool_defs.iter().any(|tool| tool.name == "web_search")
         {
-            let forced = crate::tool_loop::run_forced_web_search(
+            let forced = crate::tool_loop::run_forced_web_search_for_model(
                 &session_state,
                 &req_id,
                 &session_run_for_terminal.run_id,
@@ -1529,6 +1705,12 @@ pub async fn invoke_stream_sse(
                     .as_ref()
                     .map(VerifiedCapabilityBearer::as_str),
                 effective_zdr,
+                // The model the USER asked for, never a substitution: it is the
+                // tier signal for the paid-provider grant and for the page-read
+                // budget. No substitution has happened at this point — this runs
+                // before the tool rounds — but naming the requested model is what
+                // keeps that true if one is ever added above.
+                &model_clone,
                 messages,
                 &tool_phase_query,
                 Some(&sink),
@@ -1563,8 +1745,17 @@ pub async fn invoke_stream_sse(
             // suppression rejects a verbatim retry.
         }
 
+        let previous_artifacts: Vec<_> = session_state.artifact_versions.known_in_thread(&session_thread_id)
+            .into_iter().filter_map(|artifact| {
+                let version = session_state.artifact_versions.current_version(&session_thread_id, &artifact.id)?;
+                let content = session_state.artifact_versions.content_of(&session_thread_id, &artifact.id)?;
+                Some(crate::result_validation::ArtifactSnapshot { id: artifact.id, version,
+                    content_hash: crate::result_validation::content_hash(&content) })
+            }).collect();
+        let subscription_tool_round = !subscription_connection_id.trim().is_empty();
+        let mut artifact_checks = Vec::new();
         if !tool_defs.is_empty() {
-            let rounds = crate::tool_loop::run_tool_rounds(
+            let rounds = crate::tool_loop::run_tool_rounds_for_model(
                 &session_state,
                 &req_id,
                 &session_run_for_terminal.run_id,
@@ -1591,6 +1782,9 @@ pub async fn invoke_stream_sse(
                 sovereign_retrieval,
                 min_privacy_tier_wire,
                 &model_clone,
+                &model_clone,
+                &provider_hint,
+                &subscription_connection_id,
                 messages,
                 tool_defs,
                 "auto".to_owned(),
@@ -1599,32 +1793,52 @@ pub async fn invoke_stream_sse(
                 Some(&sink),
             )
             .await;
-            let Ok(rounds) = rounds else {
+            let rounds = match rounds { Ok(rounds) => rounds, Err(reason) => {
+                if reason == "client_cancelled" {
+                    emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
+                        crate::sse_events::ChatEvent::Stopped { reason: "client cancelled".to_owned() }).await;
+                    if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
+                        &session_state, &session_run_for_terminal, &session_bearer).await {
+                        tracing::warn!(%error, "failed to terminalize cancelled artifact check");
+                    }
+                    finish_stream_registrations(&cancels, &queued_inputs, &req_id);
+                    return;
+                }
+                let (failure_code, failure_message) = tool_phase_failure(reason);
+                // A failed draft still needs an honest durable reply. Persist
+                // only this fixed explanation, never the private candidate.
+                if !effective_zdr {
+                    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+                        &session_state, &session_thread_id, failure_message, &session_bearer,
+                        session_agent_name.as_deref(), None).await {
+                        tracing::warn!(%error, request_id = %req_id, "failed to persist draft failure explanation");
+                    }
+                }
                 emit_prepared_failure(
                     &tx,
                     &session_state,
                     &session_run_for_terminal,
                     &session_bearer,
                     &req_id,
-                    "audit_persistence_failed",
-                    "Tool action could not be durably audited",
+                    failure_code,
+                    failure_message,
                     true,
                 )
                 .await;
                 finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
-            };
+            }};
+            artifact_checks = rounds.result_checks;
             turn_evidence.tool_successes += rounds.tool_successes;
             turn_evidence.tool_failures += rounds.tool_failures;
             turn_evidence.web_citations += rounds.web_citations;
             messages = rounds.messages;
-            // Answer with the model that did the work. Re-resolving here would
-            // classify a tool-heavy turn as trivial — tools are withheld from the
-            // answer call by design — and hand it to the cheapest tier, which
-            // never saw the tool definitions and therefore tells the user the
-            // system has no access to an integration it just queried.
-            if let Some(tool_phase_model) = rounds.resolved_model {
-                answer_model = tool_phase_model;
+            // Intent modes retain their resolved model. A subscription remains
+            // pinned to the selected model and connection throughout the turn.
+            if !subscription_tool_round {
+                if let Some(tool_phase_model) = rounds.resolved_model {
+                    answer_model = tool_phase_model;
+                }
             }
         }
 
@@ -1655,97 +1869,120 @@ pub async fn invoke_stream_sse(
             ..Default::default()
         };
 
-        // Cache-augmented generation. The key is the FULLY ASSEMBLED prompt —
-        // history, injected memory, the date-stamped temporal message, the lot —
-        // scoped to (org, user, model), so a hit means the model would have seen
-        // byte-identical input. Only turns whose answer is reproducible from that
-        // prompt are eligible; see `TurnCacheability` for why a tool or grounded
-        // turn is not.
+        // No response cache is consulted here, deliberately. A prompt-keyed
+        // answer cache used to sit at exactly this point and was removed
+        // (2026-09-16) because it could not be both correct and capable of
+        // hitting; `langcache.rs` carries the full record.
         //
-        // This lives here rather than earlier on purpose: the durable run is
-        // already prepared and heartbeating, so a cache hit takes the same
-        // terminalization path as a real answer and cannot strand a run.
-        let cacheability = crate::langcache::TurnCacheability {
-            zdr: effective_zdr,
-            used_tools: turn_evidence.tool_successes > 0 || turn_evidence.tool_failures > 0,
-            // Citations, not `is_some()`. `grounding` is `Some` whenever the
-            // turn ASKED for grounding, retrieved or not, so testing presence
-            // marked every ordinary chat turn ineligible and the cache stored
-            // nothing at all. What disqualifies a turn is evidence that can go
-            // stale underneath it — which is citations, the same signal the
-            // confidence scorer counts.
-            // Citations EMITTED, not grounding requested. `grounding` is `Some`
-            // whenever the turn asked for grounding, retrieved or not, and
-            // `assembly_supplied_grounding` is true on nearly every turn in a
-            // deployment with Data Plane wired up — gating on either made the
-            // cache store nothing at all, which is how this was found.
-            //
-            // Assembled context is prompt text with no event of its own, so a
-            // text-only replay of it is faithful. Citations are not: they went
-            // out as `citation` events this cache cannot reproduce.
-            emitted_citations: turn_evidence.web_citations > 0
-                || grounding
-                    .as_ref()
-                    .is_some_and(|grounding| !grounding.citations.is_empty()),
-            structured_output: !grpc_req.structured_output_schema.is_empty(),
-        };
-        let cache_scope_prompt = cacheability
-            .is_cacheable()
-            .then(|| render_cache_prompt(&grpc_req.messages));
-        // Which exclusion fired, at debug. Without this a cache that never
-        // stores anything is indistinguishable from a cache that is switched
-        // off, and both look like "no hits".
-        tracing::debug!(
-            request_id = %req_id,
-            cacheable = cache_scope_prompt.is_some(),
-            zdr = cacheability.zdr,
-            used_tools = cacheability.used_tools,
-            emitted_citations = cacheability.emitted_citations,
-            structured_output = cacheability.structured_output,
-            "response-cache eligibility"
-        );
-        if let (Some(prompt), Some(cache)) =
-            (cache_scope_prompt.as_deref(), crate::langcache::global())
-        {
-            let scope = crate::langcache::CacheScope {
-                org_id: &org_clone,
-                user_id: &user_clone,
-                model: &answer_model,
-            };
-            if let Some(cached) = cache.lookup(prompt, scope, effective_zdr).await {
-                tracing::info!(request_id = %req_id, "invoke_stream served from the response cache");
-                serve_cached_answer(
-                    &tx,
-                    &session_state,
-                    &session_run_for_terminal,
-                    &session_bearer,
-                    &inference_bearer,
-                    &req_id,
-                    &org_clone,
-                    &features,
-                    &answer_model,
-                    &title_user_content,
-                    &cached.answer,
-                    // The score this answer earned when it was generated. A
-                    // replay cannot re-derive it — no tokens, no retrieval, no
-                    // provider logprobs — so re-scoring would report a
-                    // different number for identical text.
-                    cached.confidence,
-                    is_first_exchange,
-                    start,
-                )
-                .await;
-                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
-                return;
-            }
-        }
+        // The short version: the key was the FULLY ASSEMBLED prompt, which
+        // carries the per-user memory block inserted above and session-core's
+        // context-assembly block — two recency-ordered top-N windows over a
+        // store that is written to after most turns. Measured: the same
+        // question asked twice, each as the first message of a fresh thread,
+        // produced two entries and zero hits, the assembled prompt having grown
+        // 187 characters in between. Dropping those blocks from the key is what
+        // would make a hit possible, and it is precisely what must not happen —
+        // injected memory is in the prompt in order to change the answer, so a
+        // key blind to it can serve an answer built from a memory set the caller
+        // no longer has, with nothing to detect it. Keeping them in the key is
+        // correct and cannot hit.
+        //
+        // What a hit would have covered is already covered, correctly and
+        // cheaply: `idempotency_registry` (claimed at the top of this handler)
+        // dedupes double-submit and replays a completed answer for a repeated
+        // client key without hashing a 17 KB prompt, and `stream_buffer` covers
+        // resume. Re-adding a prompt-keyed cache here means re-deriving the
+        // whole argument first.
 
         // Prompt-too-long recovery: twelve rounds of up to 8k-char tool results
         // can outgrow the provider's input limit. Shed the oldest history and
         // retry instead of handing the user a hard error — bounded, because a
         // prompt rejected for any other reason must not loop.
+        let result_receipt = std::sync::Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let recorded = sink.recorded_artifacts();
+        artifact_checks.retain(|check| recorded.iter().any(|artifact| check["artifactId"] == artifact.id
+            && check["contentHash"] == crate::result_validation::content_hash(&artifact.content)));
+        let artifact_completion = crate::result_validation::revision_completion(
+            &tool_phase_query, &previous_artifacts, &recorded, turn_evidence.tool_failures)
+            .map(|(summary, receipt)| (summary, serde_json::to_value(receipt).unwrap_or_default()))
+            .or_else(|| {
+                // Questions inside attached evidence are not a second request
+                // for a chat answer. Classify only the user's instruction.
+                let instruction = tool_phase_query.split("\n\n--- VEDLEGG: ").next().unwrap_or(&tool_phase_query).to_lowercase();
+                let summary_language = crate::result_validation::summary_request_language(&instruction);
+                let draft_only = crate::result_validation::draft_only_response(&instruction);
+                if recorded.len() != 1 || artifact_checks.len() != 1
+                    || turn_evidence.tool_failures > 0 || (!draft_only && instruction.contains('?'))
+                    || (!draft_only && ["forklar", "explain", "fortell", "tell me", "svar på", "answer", "hvorfor", "why"].iter().any(|word| instruction.contains(word)))
+                    || (summary_language.is_none() && !["lag ", "bruk ", "gjør ", "skriv ", "create ", "draft ", "write ", "make ", "turn "].iter().any(|prefix| instruction.starts_with(prefix))) { return None; }
+                let artifact = &recorded[0];
+                if previous_artifacts.iter().any(|before| before.id == artifact.id) { return None; }
+                let summary = if summary_language == Some(true) || ["lag ", "bruk ", "gjør ", "skriv "].iter().any(|prefix| instruction.starts_with(prefix)) {
+                    "Utkastet er klart for gjennomgang i Resultat."
+                } else { "The draft is ready for review in Result." }.to_owned();
+                let receipt = serde_json::json!({"schemaVersion":1,"scope":"artifact_creation_binding", "artifactId":artifact.id,
+                    "version":artifact.version,"contentHash":crate::result_validation::content_hash(&artifact.content),
+                    "instructionHash":crate::result_validation::content_hash(&tool_phase_query),"summaryHash":crate::result_validation::content_hash(&summary)});
+                Some((summary, receipt))
+            });
+        let deterministic_completion = artifact_completion.is_some();
+        let hold_artifact_answer = !recorded.is_empty();
+        let word_range = crate::result_validation::WordRange::from_user_prompt(&tool_phase_query)
+            .filter(|_| sink.recorded_artifacts().is_empty() && grpc_req.structured_output_schema.is_empty());
+        if let Some(range) = &word_range {
+            let norwegian = tool_phase_query.to_lowercase().contains("chatten");
+            emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
+                crate::sse_events::ChatEvent::StepUpdate {
+                    id: format!("{req_id}:word-range"),
+                    title: if norwegian { "Skriver og kontrollerer svaret" } else { "Writing and checking the answer" }.to_owned(),
+                    detail: format!("{}–{} {}", range.minimum, range.maximum, if norwegian { "ord" } else { "words" }),
+                    status: "running".to_owned(),
+                }).await;
+        }
         let mut length_retries: usize = 0;
-        let stream = loop {
+        let stream: Option<std::pin::Pin<Box<dyn Stream<Item = Result<mp_contracts::model_plane::v1::InferChunk, tonic::Status>> + Send>>> =
+        if let Some((summary, mut receipt)) = artifact_completion {
+            receipt["artifactChecks"] = serde_json::Value::Array(artifact_checks.clone());
+            *result_receipt.lock().expect("new result receipt mutex") = Some(receipt);
+            Some(Box::pin(futures::stream::iter([Ok(mp_contracts::model_plane::v1::InferChunk {
+                request_id: req_id.clone(), delta: summary, done: true,
+                stop_reason: "end_turn".to_owned(), ..Default::default()
+            })])))
+        } else if let Some(range) = word_range {
+            let request = grpc_req.clone();
+            let client = session_state.inference_client.clone();
+            let bearer = inference_bearer.clone();
+            let prompt = tool_phase_query.clone();
+            let receipt = result_receipt.clone();
+            let cancelled = cancel_flag.clone();
+            // Release only the checked candidate. The existing terminal path
+            // still owns persistence, replay, heartbeat and run state.
+            Some(Box::pin(futures::stream::once(async move {
+                let check = crate::result_validation::check_with_repair(request, &prompt, range, |candidate| {
+                    let mut client = client.clone();
+                    let authenticated = authenticated_inference_request(candidate, &bearer);
+                    async move {
+                        crate::result_validation::infer_candidate(&mut client, authenticated).await
+                    }
+                });
+                let stopped = async {
+                    while !cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                };
+                let (chunk, checked) = tokio::select! {
+                    _ = stopped => return Err(tonic::Status::cancelled("client cancelled")),
+                    result = tokio::time::timeout(std::time::Duration::from_secs(60), check) =>
+                        result.map_err(|_| tonic::Status::deadline_exceeded(crate::result_validation::VALIDATION_TIMEOUT))??,
+                };
+                if !checked.matches(&chunk.delta) {
+                    return Err(tonic::Status::failed_precondition(crate::result_validation::VALIDATION_FAILED));
+                }
+                *receipt.lock().map_err(|_| tonic::Status::internal("result receipt unavailable"))? =
+                    Some(serde_json::to_value(checked).map_err(|_| tonic::Status::internal("result receipt unavailable"))?);
+                Ok(chunk)
+            })))
+        } else { loop {
             let attempt = session_state
                 .inference_client
                 .clone()
@@ -1755,7 +1992,7 @@ pub async fn invoke_stream_sse(
                 ))
                 .await;
             let error = match attempt {
-                Ok(response) => break Some(response.into_inner()),
+                Ok(response) => break Some(Box::pin(response.into_inner()) as std::pin::Pin<Box<dyn Stream<Item = Result<mp_contracts::model_plane::v1::InferChunk, tonic::Status>> + Send>>),
                 Err(error) => error,
             };
             if !crate::compaction::is_context_length_status(&error) {
@@ -1809,7 +2046,7 @@ pub async fn invoke_stream_sse(
                 remaining_messages = grpc_req.messages.len(),
                 "provider rejected the prompt as too long; retrying with older history dropped"
             );
-        };
+        }};
 
         let Some(mut grpc_stream) = stream else {
             // Grounding, citations, and every tool event already went out above,
@@ -1941,6 +2178,7 @@ pub async fn invoke_stream_sse(
                         .await;
                     }
                     assistant_output.push_str(&chunk.delta);
+                    if hold_artifact_answer { continue; }
                     let sse_chunk = SseChunk {
                         request_id: chunk.request_id.clone(),
                         delta: chunk.delta.clone(),
@@ -1987,8 +2225,8 @@ pub async fn invoke_stream_sse(
                              provider changed the contract this loop assumes"
                         );
                     }
-                    if !chunk.delta.is_empty() {
-                        assistant_output.push_str(&chunk.delta);
+                    assistant_output.push_str(&chunk.delta);
+                    if !chunk.delta.is_empty() && !hold_artifact_answer {
                         let sse_chunk = SseChunk {
                             request_id: chunk.request_id.clone(),
                             delta: chunk.delta.clone(),
@@ -2018,6 +2256,14 @@ pub async fn invoke_stream_sse(
 
                     let input_tokens = u32::try_from(chunk.input_tokens).unwrap_or(0);
                     let output_tokens = u32::try_from(chunk.output_tokens).unwrap_or(0);
+                    // Cache-token telemetry (final chunk only, 0 otherwise —
+                    // same rule as the token counts above): already folded
+                    // into `input_tokens`, carried separately so cache-hit
+                    // rate and savings are observable on the usage envelope.
+                    let cache_read_tokens =
+                        u32::try_from(chunk.cache_read_input_tokens).unwrap_or(0);
+                    let cache_creation_tokens =
+                        u32::try_from(chunk.cache_creation_input_tokens).unwrap_or(0);
                     // Provenance comes off the final chunk: which deployment
                     // answered and under what residency, stamped on the usage
                     // envelope below.
@@ -2044,6 +2290,54 @@ pub async fn invoke_stream_sse(
                             "inference stream ended without a proper termination signal; \
                              the answer may be truncated"
                         );
+                    }
+
+                    // F-01 (chat-parity audit §3.1): a mid-stream broker
+                    // failure (e.g. the subscription broker in inference-core's
+                    // `codex_subscription.rs`) sends a well-formed `done` chunk
+                    // with `delta: ""` and `stop_reason: "stream_error"` —
+                    // until now indistinguishable here from a model that chose
+                    // to answer with nothing. Nothing downstream caught it: the
+                    // empty output was scored and verified exactly like a real
+                    // answer, so the user saw only a low confidence banner
+                    // ("fant ingen dekning") with no hint that the provider,
+                    // not the knowledge base, was the actual problem. Catch it
+                    // HERE, before scoring, and report it the same honest way
+                    // the gRPC-`Err` branch below already does for a harder
+                    // transport failure — do NOT let an empty answer reach the
+                    // verification-only path silently. Gated on a non-empty
+                    // user prompt so a turn that never asked anything (nothing
+                    // this direct-stream path currently produces) cannot be
+                    // misreported as a provider failure.
+                    if stream_ended_with_no_content(
+                        &tool_phase_query,
+                        &chunk.stop_reason,
+                        &assistant_output,
+                    ) {
+                        tracing::warn!(
+                            request_id = %req_id,
+                            stop_reason = %chunk.stop_reason,
+                            "inference stream produced no assistant content after a non-empty \
+                             prompt; reporting a stream error instead of scoring an empty answer"
+                        );
+                        failure_code = "inference_stream_error";
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: failure_code.to_owned(),
+                            message: "The model did not return an answer this time. Please try again."
+                                .to_owned(),
+                            retryable: true,
+                        };
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            event,
+                        )
+                        .await;
+                        break;
                     }
 
                     // The answer is final, so score it — and if it scored low,
@@ -2081,11 +2375,18 @@ pub async fn invoke_stream_sse(
                         weak_retrieval,
                         certainty,
                     );
+                    // A deterministic version receipt is not model-generated
+                    // factual prose. Do not attach an invented confidence score.
+                    if deterministic_completion { confidence = None; }
                     // Every guardrail lives in one decision so the reason is
                     // loggable: "we did not check" and "we checked and found
                     // nothing" are different facts about a low score.
                     let mut verification_decision =
                         crate::verification::decide(confidence, evidence, output_tokens);
+                    if result_receipt.lock().ok().and_then(|receipt| receipt.clone())
+                        .is_some_and(|receipt| crate::result_validation::has_bound_source_review(&receipt, &assistant_output)) {
+                        verification_decision = crate::verification::VerificationDecision::SkipSourceReviewed;
+                    }
                     // Claimed only once the cheap checks have already said yes,
                     // so a turn that was never going to verify does not consume
                     // the org's allowance.
@@ -2151,6 +2452,7 @@ pub async fn invoke_stream_sse(
                                         })
                                         .collect();
                                     verdict = judge_sources(
+                                        &grpc_req,
                                         &session_state,
                                         &req_id,
                                         &org_clone,
@@ -2252,6 +2554,7 @@ pub async fn invoke_stream_sse(
                                     })
                                     .collect();
                                 verdict = judge_sources(
+                                    &grpc_req,
                                     &session_state,
                                     &req_id,
                                     &org_clone,
@@ -2292,6 +2595,7 @@ pub async fn invoke_stream_sse(
                             && crate::verification::self_consistency_applies(output_tokens, verdict)
                         {
                             let samples = resample_answer(
+                                &grpc_req,
                                 &session_state,
                                 &req_id,
                                 &org_clone,
@@ -2342,15 +2646,26 @@ pub async fn invoke_stream_sse(
                         .await;
                     }
 
+                    let _artifact_commit_guard = committed_artifacts.lock_commit(&session_thread_id).await;
+                    if sink.recorded_artifacts().iter().any(|artifact|
+                        !committed_artifacts.unchanged_from(&artifact_base, &session_thread_id, &artifact.id)) {
+                        failure_code = "artifact_revision_conflict";
+                        emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
+                            crate::sse_events::ChatEvent::Error { code: failure_code.to_owned(),
+                                message: "Dokumentet ble oppdatert av en annen kjøring. Last inn den nyeste versjonen og prøv endringen igjen.".to_owned(),
+                                retryable: true }).await;
+                        break;
+                    }
                     if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
                         &session_state,
                         &session_thread_id,
                         &assistant_output,
                         &session_bearer,
                         session_agent_name.as_deref(),
-                        crate::session_flow::turn_evidence_metadata(
+                        crate::session_flow::with_compaction_summary(crate::session_flow::with_result_receipt(crate::session_flow::turn_evidence_metadata(
                             session_grounding.as_ref(),
                             &sink.recorded_citations(),
+                            &sink.recorded_artifacts(),
                             // Scored, and where applicable verified, just
                             // above — so the durable turn carries the same
                             // number the stream reported, and a reader who
@@ -2366,7 +2681,7 @@ pub async fn invoke_stream_sse(
                                     }
                                 }),
                             },
-                        ),
+                        ), result_receipt.lock().ok().and_then(|receipt| receipt.clone()).as_ref()), &chunk.compaction_summary, effective_zdr),
                     )
                     .await
                     {
@@ -2425,6 +2740,48 @@ pub async fn invoke_stream_sse(
                     }
                     terminal_assigned = true;
 
+                    // The exact text and its receipt are now in the durable
+                    // assistant message. Publish only the last selected version
+                    // of each artifact, through the normal resumable stream.
+                    for artifact in sink.recorded_artifacts() {
+                        if !effective_zdr {
+                        committed_artifacts.seed_persisted(&session_thread_id, &artifact.id,
+                            &artifact.title, &artifact.content, artifact.version);
+                        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&artifact.kind) {
+                            committed_artifacts.remember_kind(&session_thread_id, &artifact.id, kind);
+                        }
+                        }
+                        emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
+                            crate::sse_events::ChatEvent::Artifact { id: artifact.id, kind: artifact.kind,
+                                title: artifact.title, content: artifact.content, version: artifact.version }).await;
+                    }
+                    if hold_artifact_answer {
+                        let data = serde_json::to_string(&SseChunk { request_id: req_id.clone(),
+                            delta: assistant_output.clone(), done: false, model_used: model_used.clone(),
+                            input_tokens: 0, output_tokens: 0 }).unwrap_or_default();
+                        stream_buffers.append(&buffer_key, seq, "chunk", &data).await;
+                        if client_connected {
+                            let _ = tx.send(Ok(Event::default().id(seq.to_string()).event("chunk").data(data))).await;
+                        }
+                        seq += 1;
+                    }
+
+                    let receipt = result_receipt.lock().ok().and_then(|receipt| receipt.clone());
+                    if let Some(receipt) = receipt {
+                        if receipt["scope"] == "direct_answer_word_range" {
+                            let norwegian = tool_phase_query.to_lowercase().contains("chatten");
+                            emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
+                                crate::sse_events::ChatEvent::StepUpdate {
+                                    id: format!("{req_id}:word-range"),
+                                    title: if norwegian { "Ordgrense kontrollert" } else { "Word range checked" }.to_owned(),
+                                    detail: format!("{} {}", receipt["words"], if norwegian { "ord" } else { "words" }),
+                                    status: "done".to_owned(),
+                                }).await;
+                        }
+                        emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
+                            crate::sse_events::ChatEvent::ResultReceipt { receipt }).await;
+                    }
+
                     // A resumable terminal frame and terminal-success telemetry
                     // are legal only after Session Core durably acknowledged the
                     // matching CompleteStep. Otherwise a reconnect could see
@@ -2454,6 +2811,8 @@ pub async fn invoke_stream_sse(
                         min_privacy_tier_wire,
                         provider_used,
                         residency,
+                        cache_read_tokens,
+                        cache_creation_tokens,
                     );
                     if let Err(e) = publisher
                         .publish(&subjects::usage_subject(&org_clone), &usage_envelope)
@@ -2492,6 +2851,8 @@ pub async fn invoke_stream_sse(
                             &model_used,
                             i64::from(input_tokens),
                             i64::from(output_tokens),
+                            i64::from(cache_read_tokens),
+                            i64::from(cache_creation_tokens),
                         )
                         .await;
                     // Evidence is COUNTED, not a boolean: tool successes/failures
@@ -2558,35 +2919,16 @@ pub async fn invoke_stream_sse(
                     )
                     .await;
 
-                    // Store the finished answer under the same key the lookup
-                    // used. `cache_prompt` is `Some` only when the turn passed
-                    // every `TurnCacheability` exclusion, so a tool or grounded
-                    // turn cannot be written here by accident.
-                    if let (Some(prompt), Some(cache)) =
-                        (cache_scope_prompt.as_deref(), crate::langcache::global())
-                    {
-                        if !assistant_output.trim().is_empty() {
-                            cache
-                                .store(
-                                    prompt,
-                                    crate::langcache::CacheScope {
-                                        org_id: &org_clone,
-                                        user_id: &user_clone,
-                                        model: &answer_model,
-                                    },
-                                    // Stored WITH the score, so a replay of this
-                                    // answer reports what it earned rather than
-                                    // what its text alone suggests.
-                                    &crate::langcache::CachedAnswer::new(
-                                        assistant_output.clone(),
-                                        confidence,
-                                    ),
-                                    effective_zdr,
-                                )
-                                .await;
-                        }
-                    }
+                    // The finished answer used to be written to the prompt-keyed
+                    // response cache here. Nothing reads such an entry (see the
+                    // note where the lookup used to be), so the write was a copy
+                    // of the answer text living outside every erasure path for
+                    // the TTL, bought for nothing.
 
+                    // A checked document already supplies its title. Reuse it
+                    // only here, after durable completion; optional inference
+                    // must not delay a completed artifact by another timeout.
+                    // Other first exchanges retain the normal title generator.
                     // AI thread title (ChatGPT-style): on the thread's FIRST
                     // exchange only, one cheap non-streaming inference
                     // summarizes question + answer into a 3–6 word title,
@@ -2600,7 +2942,11 @@ pub async fn invoke_stream_sse(
                     // re-checked so a future re-route cannot persist a title
                     // derived from a no-retention exchange.
                     if is_first_exchange && !effective_zdr {
-                        if let Some(title) = generate_thread_title(
+                        let title = if deterministic_completion {
+                            let artifacts = sink.recorded_artifacts();
+                            (artifacts.len() == 1).then(|| sanitize_thread_title(&artifacts[0].title)).flatten()
+                        } else { generate_thread_title(
+                            &grpc_req,
                             &session_state,
                             &req_id,
                             &org_clone,
@@ -2608,8 +2954,8 @@ pub async fn invoke_stream_sse(
                             &assistant_output,
                             &inference_bearer,
                         )
-                        .await
-                        {
+                        .await };
+                        if let Some(title) = title {
                             let event = crate::sse_events::ChatEvent::Title { title };
                             emit_and_buffer(
                                 &tx,
@@ -2631,15 +2977,20 @@ pub async fn invoke_stream_sse(
                     // can reasonably suggest what to ask next. Gated on:
                     //   * never ZDR (defensive; ZDR never reaches this branch
                     //     at all, it takes `zdr_direct_stream` above), and
+                    //   * not a deterministic artifact receipt: that result
+                    //     already exposes the document's own editing surface;
+                    //     optional generated chips must not hold `done` back,
                     //   * not a near-empty/failed answer (`confidence` below
                     //     `FOLLOW_UPS_MIN_CONFIDENCE`) — suggesting follow-ups
                     //     to a non-answer wastes a call and reads as broken.
                     // A merely low-but-not-empty (hedged) answer still gets
                     // chips; only a genuinely empty completion does not.
                     if !effective_zdr
+                        && !deterministic_completion
                         && confidence.is_none_or(|score| score >= FOLLOW_UPS_MIN_CONFIDENCE)
                     {
                         let suggestions = generate_follow_ups(
+                            &grpc_req,
                             &session_state,
                             &req_id,
                             &org_clone,
@@ -2682,10 +3033,11 @@ pub async fn invoke_stream_sse(
                 }
                 Err(e) => {
                     tracing::error!(error = %e, request_id = %req_id, "gRPC stream error");
-                    failure_code = "inference_stream_error";
+                    let (code, message) = checked_stream_failure(e.message(), tool_phase_query.to_lowercase().contains("chatten"));
+                    failure_code = code;
                     let event = crate::sse_events::ChatEvent::Error {
                         code: failure_code.to_owned(),
-                        message: "The inference stream ended unexpectedly.".to_owned(),
+                        message: message.to_owned(),
                         retryable: true,
                     };
                     emit_and_buffer(
@@ -2982,11 +3334,13 @@ async fn load_context_assembly_messages(
     Some(ContextAssemblyMessages {
         messages: vec![
             ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: context.block,
                 name: String::new(),
             },
             ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: current_user_content.to_owned(),
                 name: String::new(),
@@ -3124,7 +3478,10 @@ fn is_current_user_thread_segment(
 struct SummarizerContext<'a> {
     request_id: &'a str,
     model: &'a str,
+    provider_hint: &'a str,
+    subscription_connection_id: &'a str,
     zdr: bool,
+    conversation_only: bool,
     /// Caller-selected minimum privacy tier, already normalized to the wire
     /// numeric (0 = no constraint) so every derived InferRequest carries the
     /// caller's floor without re-deriving it.
@@ -3357,6 +3714,56 @@ fn record_memory_prefetch_outcome(outcome: &'static str) {
     metrics::counter!(MEMORY_PREFETCH_OUTCOME_METRIC, "outcome" => outcome).increment(1);
 }
 
+/// Seed the artifact version store from one persisted turn's `metadata.artifacts`
+/// (the shape `session_flow::turn_evidence_metadata` writes: a list of
+/// `{id, kind, title, content, version}`). Tolerant by design — a turn without
+/// artifacts, an older metadata shape, or a malformed entry is simply skipped.
+fn rehydrate_persisted_artifacts(
+    state: &AppState,
+    thread_id: &str,
+    metadata: Option<&prost_types::Struct>,
+) {
+    use prost_types::value::Kind;
+
+    let Some(list) = metadata
+        .and_then(|metadata| metadata.fields.get("artifacts"))
+        .and_then(|value| match &value.kind {
+            Some(Kind::ListValue(list)) => Some(&list.values),
+            _ => None,
+        })
+    else {
+        return;
+    };
+    for entry in list {
+        let Some(Kind::StructValue(fields)) = &entry.kind else {
+            continue;
+        };
+        let text = |key: &str| match fields.fields.get(key).and_then(|v| v.kind.as_ref()) {
+            Some(Kind::StringValue(s)) if key == "content" => s.clone(),
+            Some(Kind::StringValue(s)) => s.trim().to_owned(),
+            _ => String::new(),
+        };
+        let version = match fields.fields.get("version").and_then(|v| v.kind.as_ref()) {
+            Some(Kind::NumberValue(n)) if n.is_finite() && *n >= 1.0 => *n as u32,
+            _ => continue,
+        };
+        let id = text("id");
+        if id.is_empty() {
+            continue;
+        }
+        state.artifact_versions.seed_persisted(
+            thread_id,
+            &id,
+            &text("title"),
+            &text("content"),
+            version,
+        );
+        if let Some(kind) = crate::artifacts::ArtifactKind::parse(&text("kind")) {
+            state.artifact_versions.remember_kind(thread_id, &id, kind);
+        }
+    }
+}
+
 async fn load_recent_thread_messages(
     state: &AppState,
     org_id: &str,
@@ -3407,13 +3814,21 @@ async fn load_recent_thread_messages(
                 matches!(message.role.as_str(), "system" | "user" | "assistant")
                     && !message.content.trim().is_empty()
             })
-            .map(|message| crate::compaction::IdentifiedMessage {
+            .map(|message| {
+                // Restore this turn's artifacts into the process-local version
+                // store, so a model-gateway restart does not strand every open
+                // conversation's `update_artifact` (see
+                // `ArtifactVersionStore::seed_persisted`).
+                rehydrate_persisted_artifacts(state, thread_id, message.metadata.as_ref());
+                crate::compaction::IdentifiedMessage {
                 id: message.message_id,
                 message: ChatMessage {
+                    compaction_summary: crate::session_flow::persisted_compaction_summary(message.metadata.as_ref()),
                     role: message.role,
                     content: message.content,
                     name: String::new(),
                 },
+            }
             })
             .collect(),
         Err(error) => {
@@ -3436,12 +3851,18 @@ async fn load_recent_thread_messages(
             // empty id matches no pin.
             id: String::new(),
             message: ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: current_user_content.to_owned(),
                 name: String::new(),
             },
         }),
     }
+
+    // Keep message-count recovery available on every route. Native token-based
+    // compaction is independently negotiated by inference-core after routing;
+    // a family name does not establish serving support or an enabled flag.
+    let run_local_compaction = crate::compaction::should_run_local_compaction(summarizer.model);
 
     // How far the load-time shedder will reach. Measured with the real planner
     // over a role-only projection -- `plan_head_summary` reads only the length
@@ -3450,17 +3871,22 @@ async fn load_recent_thread_messages(
     let shape: Vec<ChatMessage> = loaded
         .iter()
         .map(|entry| ChatMessage {
+            compaction_summary: String::new(),
             role: entry.message.role.clone(),
             content: String::new(),
             name: String::new(),
         })
         .collect();
-    let protect_below = crate::compaction::plan_head_summary(
-        &shape,
-        MAX_THREAD_CONTEXT_MESSAGES,
-        COMPACTED_TAIL_MESSAGES,
-    )
-    .map_or(0, |head| head.end);
+    let protect_below = if crate::compaction::is_anthropic_family_model(summarizer.model) {
+        // Native compaction may replace any earlier turn inside the provider.
+        // Explicit pins stay in top-level system context in either mode.
+        loaded.len()
+    } else if run_local_compaction {
+        crate::compaction::plan_head_summary(&shape, MAX_THREAD_CONTEXT_MESSAGES, COMPACTED_TAIL_MESSAGES)
+            .map_or(0, |head| head.end)
+    } else {
+        0
+    };
 
     // Counted with the same filters the hoist applies -- including the index
     // bound -- so the log cannot claim a pin the hoist declined.
@@ -3494,17 +3920,26 @@ async fn load_recent_thread_messages(
     // gone. Summarize the head into one retained message instead; if the
     // summarizer is unavailable, `apply_head_summary` degrades to that same
     // truncation (plus an honest marker) rather than failing the turn.
-    if let Some(head) = crate::compaction::plan_head_summary(
-        &messages,
-        MAX_THREAD_CONTEXT_MESSAGES,
-        COMPACTED_TAIL_MESSAGES,
-    ) {
+    //
+    // This also protects native-off and provider-fallback routes. Native
+    // compaction separately handles large inputs below the message-count cap.
+    if let Some(head) = run_local_compaction
+        .then(|| {
+            crate::compaction::plan_head_summary(
+                &messages,
+                MAX_THREAD_CONTEXT_MESSAGES,
+                COMPACTED_TAIL_MESSAGES,
+            )
+        })
+        .flatten()
+    {
         let transcript = crate::compaction::render_head_transcript(&messages, head);
         // `on_pre_compress`: let memory flag what the summarizer must not drop
         // before the head is destroyed. Best-effort — an empty directive
         // yields exactly the pre-hook prompt.
-        let memory_directive =
-            fetch_compaction_memory_directive(state, org_id, thread_id, &transcript, bearer).await;
+        let memory_directive = if summarizer.conversation_only { String::new() } else {
+            fetch_compaction_memory_directive(state, org_id, thread_id, &transcript, bearer).await
+        };
         // Bounded because this runs BEFORE the stream opens: an unbounded
         // summarization call would reintroduce the dead spinner that moving the
         // tool phase into the stream task just removed. On timeout we take the
@@ -3516,6 +3951,8 @@ async fn load_recent_thread_messages(
                 &format!("{}-compaction", summarizer.request_id),
                 org_id,
                 summarizer.model,
+                summarizer.provider_hint,
+                summarizer.subscription_connection_id,
                 &crate::compaction::summary_prompt_with_memory(&transcript, &memory_directive),
                 summarizer.zdr,
                 summarizer.min_privacy_tier,
@@ -4132,6 +4569,7 @@ fn generated_image_state_message(messages: &[ChatMessage]) -> Option<ChatMessage
     });
 
     has_generated_image.then(|| ChatMessage {
+        compaction_summary: String::new(),
         role: "system".to_owned(),
         content: "Conversation state: the assistant already generated an image artifact in this thread. If the user asks whether an image was made, answer yes and reference generated-image.png."
             .to_owned(),
@@ -4214,6 +4652,7 @@ async fn mark_run_plan_mode(state: &AppState, org_id: &str, run_id: &str, sessio
 fn temporal_awareness_message() -> ChatMessage {
     let today = Utc::now().format("%Y-%m-%d");
     ChatMessage {
+        compaction_summary: String::new(),
         role: "system".to_owned(),
         content: format!(
             "Today's real date is {today}. Your training data has a cutoff before this date, so anything that changes over time — population counts, prices, exchange rates, software versions, current office-holders, schedules, sports results, or any other figure that could be stale — may no longer match what you remember. When the web_search tool is available this turn, use it before stating such a fact so your answer reflects the present, not your training snapshot. When it is not available, do not state a time-sensitive fact as current, unqualified truth: say what you know from training and clearly note it may be outdated (for example, \"as of my training data, roughly X — this may have changed\") rather than presenting a remembered figure as if it were verified today."
@@ -4274,6 +4713,7 @@ fn authored_instructions_message(state: &AppState, req: &InvokeRequest) -> Optio
         return None;
     }
     Some(ChatMessage {
+        compaction_summary: String::new(),
         role: "system".to_owned(),
         content: sections.join("\n\n"),
         name: String::new(),
@@ -4310,6 +4750,7 @@ fn agent_persona_message(req: &InvokeRequest) -> Option<ChatMessage> {
         ));
     }
     Some(ChatMessage {
+        compaction_summary: String::new(),
         role: "system".to_owned(),
         content,
         name: String::new(),
@@ -4336,182 +4777,11 @@ fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
         ),
     };
     Some(ChatMessage {
+        compaction_summary: String::new(),
         role: "system".to_owned(),
         content,
         name: String::new(),
     })
-}
-/// Canonical rendering of an assembled prompt, used as the cache key's body.
-///
-/// Role-labelled and newline-separated rather than JSON: two message lists that
-/// differ only in a field the model never sees must produce the same key, and
-/// two that differ in a single character must not. Everything the model reads —
-/// system prompts, injected memory, thread history, the date-stamped temporal
-/// message, and the current question — is in here, which is what makes a hit
-/// mean "the model would have seen byte-identical input".
-fn render_cache_prompt(messages: &[ChatMessage]) -> String {
-    let mut rendered = String::new();
-    for message in messages {
-        rendered.push_str(&message.role);
-        rendered.push('\u{1f}');
-        rendered.push_str(&message.content);
-        rendered.push('\u{1e}');
-    }
-    rendered
-}
-
-/// Emit a cached answer as if it had just been generated.
-///
-/// It takes the same durable path as a real answer — persist the assistant turn,
-/// then terminalize the prepared run — because the run was already prepared and
-/// is already heartbeating by the time the cache is consulted. Returning early
-/// without those two steps would leave it `running` forever with no worker.
-///
-/// Usage is reported with zero tokens and the real elapsed time. That is the
-/// truth: no tokens were bought, and the latency is what the user waited.
-#[allow(clippy::too_many_arguments)] // one cohesive emission, mirrors run_infer_fallback
-async fn serve_cached_answer(
-    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
-    state: &AppState,
-    run: &crate::session_flow::SessionRun,
-    session_bearer: &VerifiedModelBearer,
-    inference_bearer: &VerifiedInferenceBearer,
-    request_id: &str,
-    org_id: &str,
-    features: &[String],
-    model: &str,
-    user_content: &str,
-    cached: &str,
-    cached_confidence: Option<f64>,
-    is_first_exchange: bool,
-    start: std::time::Instant,
-) {
-    // One chunk, not a fake token-by-token replay: the answer already exists, and
-    // pretending to generate it would be theatre the client cannot distinguish
-    // from a real stream.
-    let chunk = SseChunk {
-        request_id: request_id.to_owned(),
-        delta: cached.to_owned(),
-        done: false,
-        model_used: model.to_owned(),
-        input_tokens: 0,
-        output_tokens: 0,
-    };
-    let data = serde_json::to_string(&chunk).unwrap_or_default();
-    let _ = tx
-        .send(Ok(Event::default().id("0").event("chunk").data(data)))
-        .await;
-
-    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
-        state,
-        &run.thread_id,
-        cached,
-        session_bearer,
-        None,
-        // A cached-answer replay has no grounding of its own; the turn that
-        // originally produced this answer persisted its own evidence.
-        None,
-    )
-    .await
-    {
-        tracing::warn!(%error, request_id = %request_id, "failed to persist a cached assistant message");
-    }
-    if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
-        state,
-        run,
-        crate::session_flow::DirectInferenceTerminal::Completed,
-        session_bearer,
-    )
-    .await
-    {
-        tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize a cache-served run");
-        let event = crate::sse_events::ChatEvent::Error {
-            code: "session_terminalization_failed".to_owned(),
-            message: "Unable to finalize the chat run.".to_owned(),
-            retryable: true,
-        };
-        let _ = tx.send(Ok(event.to_sse(request_id))).await;
-        return;
-    }
-
-    let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let usage = crate::sse_events::ChatEvent::Usage {
-        input_tokens: 0,
-        output_tokens: 0,
-        cost_usd: Some(0.0),
-        latency_ms,
-        // A cached answer is exactly as good as it was when it was generated —
-        // so it reports the score it earned then, replayed alongside the text.
-        // Re-deriving one here cannot see what that turn saw (the provider's
-        // logprobs, the tools it ran, anything verification found), so the same
-        // answer would read 0.88 live and 0.72 replayed.
-        //
-        // The fallback covers entries stored before the score travelled with
-        // them: score the text the way an ungrounded answer of this length
-        // scores, rather than inventing a bonus or a penalty for being cached.
-        confidence: cached_confidence.or_else(|| {
-            crate::confidence::score(
-                cached,
-                0,
-                u32::try_from(answer_token_budget()).unwrap_or(0),
-                crate::confidence::Evidence::default(),
-            )
-        }),
-    };
-    if usage.should_emit(features) {
-        let _ = tx.send(Ok(usage.to_sse(request_id))).await;
-    }
-
-    // A cached turn must be the same TURN, not just the same text. The first
-    // version of this returned right after `usage`, which silently dropped the
-    // thread title and the follow-up chips on exactly the repeat-question path
-    // the cache exists to speed up — the answer arrived faster and the
-    // conversation got worse. Both are cheap non-streaming calls with the same
-    // swallow-on-failure posture as the live path, and neither is cached
-    // itself, so they are regenerated here rather than stored.
-    if is_first_exchange {
-        if let Some(title) = generate_thread_title(
-            state,
-            request_id,
-            org_id,
-            user_content,
-            cached,
-            inference_bearer,
-        )
-        .await
-        {
-            let event = crate::sse_events::ChatEvent::Title { title };
-            let _ = tx.send(Ok(event.to_sse(request_id))).await;
-        }
-    }
-    let suggestions = generate_follow_ups(
-        state,
-        request_id,
-        org_id,
-        user_content,
-        cached,
-        inference_bearer,
-    )
-    .await;
-    if !suggestions.is_empty() {
-        let event = crate::sse_events::ChatEvent::FollowUps { suggestions };
-        let _ = tx.send(Ok(event.to_sse(request_id))).await;
-    }
-
-    let done = SseChunk {
-        request_id: request_id.to_owned(),
-        delta: String::new(),
-        done: true,
-        model_used: model.to_owned(),
-        // Zero on purpose, and true: a cache hit buys no tokens. A client
-        // summing usage across a thread should see this turn cost nothing.
-        input_tokens: 0,
-        output_tokens: 0,
-    };
-    let data = serde_json::to_string(&done).unwrap_or_default();
-    let _ = tx
-        .send(Ok(Event::default().id("1").event("done").data(data)))
-        .await;
 }
 
 /// Fallback used when `InferStream` is unavailable: call the (working)
@@ -4552,6 +4822,7 @@ async fn run_infer_fallback(
     // `grpc_req` is consumed by the call below; keep its floor for the usage
     // envelope so the fallback stamps the same provenance as the live stream.
     let min_privacy_tier = grpc_req.min_privacy_tier;
+    let fallback_zdr = grpc_req.zdr;
     let result = state
         .inference_client
         .clone()
@@ -4569,6 +4840,11 @@ async fn run_infer_fallback(
             };
             let input_tokens = u32::try_from(resp.input_tokens).unwrap_or(0);
             let output_tokens = u32::try_from(resp.output_tokens).unwrap_or(0);
+            // Cache-token telemetry, same fold-in relationship as the
+            // streaming path above.
+            let cache_read_tokens = u32::try_from(resp.cache_read_input_tokens).unwrap_or(0);
+            let cache_creation_tokens =
+                u32::try_from(resp.cache_creation_input_tokens).unwrap_or(0);
 
             let mut seq: u64 = 0;
             for piece in chunk_for_stream(&resp.content, 48) {
@@ -4637,14 +4913,15 @@ async fn run_infer_fallback(
                 // The fallback path runs no tool loop, so retrieval grounding
                 // is the only evidence it can have — and it runs no
                 // verification pass either, so there is no verdict to record.
-                crate::session_flow::turn_evidence_metadata(
+                crate::session_flow::with_compaction_summary(crate::session_flow::turn_evidence_metadata(
                     grounding,
+                    &[],
                     &[],
                     crate::session_flow::TurnQuality {
                         confidence,
                         verification: None,
                     },
-                ),
+                ), &resp.compaction_summary, fallback_zdr),
             )
             .await
             {
@@ -4717,6 +4994,8 @@ async fn run_infer_fallback(
                 min_privacy_tier,
                 resp.provider_used.clone(),
                 resp.residency.clone(),
+                cache_read_tokens,
+                cache_creation_tokens,
             );
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
@@ -4744,6 +5023,8 @@ async fn run_infer_fallback(
                     &model_used,
                     i64::from(input_tokens),
                     i64::from(output_tokens),
+                    i64::from(cache_read_tokens),
+                    i64::from(cache_creation_tokens),
                 )
                 .await;
             // Scored above, before the persist.
@@ -4822,6 +5103,26 @@ mod fallback_tests {
         chunk_for_stream, generated_image_mime, generated_image_size, image_generation_model,
         prepared_failure_report, COMPACTED_TAIL_MESSAGES, MAX_THREAD_CONTEXT_MESSAGES,
     };
+
+    #[test]
+    fn validation_deadlines_are_distinct_but_do_not_hide_terminalization_failure() {
+        use crate::result_validation::{VALIDATION_FAILED, VALIDATION_TIMEOUT};
+        let (code, message) = super::tool_phase_failure(VALIDATION_TIMEOUT);
+        assert_eq!(code, VALIDATION_TIMEOUT);
+        assert!(message.contains("tok for lang tid"));
+        assert!(message.contains("ikke publisert"));
+        assert!(!message.contains("forsøksgrensen"));
+        assert_eq!(prepared_failure_report(code, message, true, true), (code, message, true));
+        assert_eq!(prepared_failure_report(code, message, true, false).0, "session_terminalization_failed");
+        assert_eq!(super::tool_phase_failure(VALIDATION_FAILED).0, VALIDATION_FAILED);
+        assert_eq!(super::tool_phase_failure("subscription_route_unavailable").0, "subscription_route_unavailable");
+        assert_eq!(super::tool_phase_failure("audit_write_failed").0, "audit_persistence_failed");
+        for norwegian in [true, false] {
+            assert_eq!(super::checked_stream_failure(VALIDATION_TIMEOUT, norwegian).0, VALIDATION_TIMEOUT);
+            assert_eq!(super::checked_stream_failure(VALIDATION_FAILED, norwegian).0, VALIDATION_FAILED);
+            assert_eq!(super::checked_stream_failure("provider disconnected", norwegian).0, "inference_stream_error");
+        }
+    }
 
     #[test]
     fn a_terminalized_failure_reports_its_own_code() {
@@ -5205,6 +5506,8 @@ async fn direct_infer(
     request_id: &str,
     org_id: &str,
     model: &str,
+    provider_hint: &str,
+    subscription_connection_id: &str,
     content: &str,
     zdr: bool,
     min_privacy_tier: i32,
@@ -5217,8 +5520,10 @@ async fn direct_infer(
                 request_id: request_id.to_owned(),
                 org_id: org_id.to_owned(),
                 model: model.to_owned(),
-                provider_hint: String::new(),
+                provider_hint: provider_hint.to_owned(),
+                subscription_connection_id: subscription_connection_id.to_owned(),
                 messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: content.to_owned(),
                     name: String::new(),
@@ -5336,6 +5641,7 @@ const VERIFICATION_JUDGE_MAX_TOKENS: i32 = 8;
 /// failure path returns [`SourceVerdict::Unrelated`], the neutral verdict, so a
 /// judge that times out or errors can never raise a score.
 async fn judge_sources(
+    route: &InferRequest,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -5353,12 +5659,13 @@ async fn judge_sources(
     let response = tokio::time::timeout(
         VERIFICATION_JUDGE_TIMEOUT,
         client.infer(authenticated_inference_request(
-            InferRequest {
+            subscription_scoped_request(InferRequest {
                 request_id: format!("{request_id}-verify"),
                 org_id: org_id.to_owned(),
                 model: VERIFICATION_JUDGE_MODEL.to_owned(),
                 provider_hint: String::new(),
                 messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: crate::verification::entailment_prompt(question, answer, snippets),
                     name: String::new(),
@@ -5373,7 +5680,7 @@ async fn judge_sources(
                 // path's non-ZDR shortcut.
                 zdr,
                 ..Default::default()
-            },
+            }, route),
             inference_bearer,
         )),
     )
@@ -5402,6 +5709,7 @@ async fn judge_sources(
 /// Best-effort and bounded: any failure returns an empty sample set, and an
 /// empty set never debits.
 async fn resample_answer(
+    route: &InferRequest,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -5417,12 +5725,13 @@ async fn resample_answer(
         let response = tokio::time::timeout(
             VERIFICATION_JUDGE_TIMEOUT,
             client.infer(authenticated_inference_request(
-                InferRequest {
+                subscription_scoped_request(InferRequest {
                     request_id: format!("{request_id}-resample-{index}"),
                     org_id: org_id.to_owned(),
                     model: model.to_owned(),
                     provider_hint: String::new(),
                     messages: vec![ChatMessage {
+                        compaction_summary: String::new(),
                         role: "user".to_owned(),
                         content: question.to_owned(),
                         name: String::new(),
@@ -5432,7 +5741,7 @@ async fn resample_answer(
                     structured_output_schema: String::new(),
                     zdr,
                     ..Default::default()
-                },
+                }, route),
                 inference_bearer,
             )),
         )
@@ -5454,6 +5763,7 @@ async fn resample_answer(
 /// session-core run or thread — it must leave no mark in history or the run
 /// ledger. Best-effort: every failure path returns `None` after a debug log.
 async fn generate_thread_title(
+    route: &InferRequest,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -5465,12 +5775,13 @@ async fn generate_thread_title(
     let response = tokio::time::timeout(
         TITLE_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            InferRequest {
+            subscription_scoped_request(InferRequest {
                 request_id: format!("{request_id}-title"),
                 org_id: org_id.to_owned(),
                 model: TITLE_MODEL.to_owned(),
                 provider_hint: String::new(),
                 messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: thread_title_prompt(user_content, assistant_answer),
                     name: String::new(),
@@ -5484,7 +5795,7 @@ async fn generate_thread_title(
                 // this request only ever carries non-ZDR exchange content.
                 zdr: false,
                 ..Default::default()
-            },
+            }, route),
             inference_bearer,
         )),
     )
@@ -5539,6 +5850,7 @@ fn thread_title_prompt(user_content: &str, assistant_answer: &str) -> String {
 /// an empty `Vec` after a debug log (the caller then emits nothing, exactly
 /// like a call that produced no usable title).
 async fn generate_follow_ups(
+    route: &InferRequest,
     state: &AppState,
     request_id: &str,
     org_id: &str,
@@ -5550,12 +5862,13 @@ async fn generate_follow_ups(
     let response = tokio::time::timeout(
         FOLLOW_UPS_GENERATION_TIMEOUT,
         client.infer(authenticated_inference_request(
-            InferRequest {
+            subscription_scoped_request(InferRequest {
                 request_id: format!("{request_id}-follow-ups"),
                 org_id: org_id.to_owned(),
                 model: FOLLOW_UPS_MODEL.to_owned(),
                 provider_hint: String::new(),
                 messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: follow_ups_prompt(user_content, assistant_answer),
                     name: String::new(),
@@ -5568,7 +5881,7 @@ async fn generate_follow_ups(
                 // non-ZDR exchange content.
                 zdr: false,
                 ..Default::default()
-            },
+            }, route),
             inference_bearer,
         )),
     )
@@ -5775,6 +6088,8 @@ async fn zdr_direct_stream(
         &request_id,
         &org_id,
         &model,
+        "",
+        "",
         &content,
         true,
         min_privacy_tier,
@@ -6690,6 +7005,8 @@ fn build_usage_envelope(
     min_privacy_tier: i32,
     provider_used: String,
     residency: String,
+    cache_read_input_tokens: u32,
+    cache_creation_input_tokens: u32,
 ) -> Envelope {
     Envelope {
         event_id: new_ulid(),
@@ -6717,6 +7034,14 @@ fn build_usage_envelope(
             "provider_used": provider_used,
             "residency": residency,
             "min_privacy_tier": min_privacy_tier,
+            // Cache-token telemetry (native-compaction migration
+            // prerequisite): already folded into `input_tokens` above, but
+            // broken out so cache-hit rate and savings are queryable off the
+            // durable ledger (cost-core). 0 for a provider/path that does not
+            // report prompt-cache usage — never absent, so a consumer can
+            // always read it without an existence check.
+            "cache_read_input_tokens": cache_read_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
         }),
         zdr: false,
     }
@@ -7191,10 +7516,76 @@ mod tests {
         agent_persona_message, authored_instructions_message, build_stream_envelope,
         build_usage_envelope, classify_agentic_run_outcome, dispatch_never_reached_execution_core,
         is_confirmed_agent_dispatch_rejection, orchestration_event_to_step_update,
-        sanitize_follow_up_suggestions, sanitize_thread_title, AgenticRunOutcome,
+        sanitize_follow_up_suggestions, sanitize_thread_title, stream_ended_with_no_content,
+        AgenticRunOutcome,
     };
     use crate::http_routes::InvokeRequest;
     use crate::state::AppState;
+
+    #[tokio::test]
+    async fn durable_artifact_kind_survives_restart_and_stale_history_without_text_sniffing() {
+        use prost_types::{value::Kind, ListValue, Struct, Value};
+        let text = |value: &str| Value { kind: Some(Kind::StringValue(value.into())) };
+        let metadata = Struct { fields: [("artifacts".into(), Value { kind: Some(Kind::ListValue(ListValue { values: vec![Value { kind: Some(Kind::StructValue(Struct { fields: [
+            ("id".into(), text("campaign")), ("kind".into(), text("document")),
+            ("title".into(), text("Campaign")), ("content".into(), text("> Status: Draft\n\nContent")),
+            ("version".into(), Value { kind: Some(Kind::NumberValue(2.0)) }),
+        ].into_iter().collect() })) }] })) })].into_iter().collect() };
+        let state = AppState::new();
+        super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
+        assert_eq!(state.artifact_versions.kind_of("thread", "campaign"), Some(crate::artifacts::ArtifactKind::Document));
+        assert_eq!(state.artifact_versions.current_version("thread", "campaign"), Some(2));
+        assert_eq!(state.artifact_versions.kind_of("other", "campaign"), None);
+        state.artifact_versions.remember_kind("thread", "campaign", crate::artifacts::ArtifactKind::Code);
+        assert_eq!(state.artifact_versions.kind_of("thread", "campaign"), Some(crate::artifacts::ArtifactKind::Document));
+        state.artifact_versions.next_version("thread", "campaign");
+        state.artifact_versions.remember("thread", "campaign", "Campaign", "Newer plain prose");
+        super::rehydrate_persisted_artifacts(&state, "thread", Some(&metadata));
+        assert_eq!(state.artifact_versions.content_of("thread", "campaign").as_deref(), Some("Newer plain prose"));
+        assert_eq!(state.artifact_versions.kind_of("thread", "campaign"), Some(crate::artifacts::ArtifactKind::Document));
+    }
+
+    // ── F-01: a failed provider stream must be reported, never silently
+    // scored as an empty answer (chat-parity audit §3.1) ────────────────────
+
+    #[test]
+    fn explicit_stream_error_stop_reason_is_caught_even_with_nonempty_output() {
+        // Belt-and-suspenders: inference-core's explicit signal is trusted on
+        // its own, regardless of what (if anything) leaked into the output
+        // before the broker failed.
+        assert!(stream_ended_with_no_content(
+            "17 * 23?",
+            "stream_error",
+            "partial answer before the broker died"
+        ));
+    }
+
+    #[test]
+    fn empty_output_after_a_real_prompt_is_caught_even_without_the_explicit_flag() {
+        // The exact F-01 repro: a well-formed `done` chunk, `delta: ""`, and
+        // a stop_reason that does not say "stream_error" — the failure mode
+        // that used to fall straight into the verification-only path.
+        assert!(stream_ended_with_no_content("17 * 23?", "end_turn", ""));
+        assert!(stream_ended_with_no_content("17 * 23?", "end_turn", "   "));
+    }
+
+    #[test]
+    fn a_real_answer_with_an_ordinary_stop_reason_is_not_flagged() {
+        assert!(!stream_ended_with_no_content(
+            "17 * 23?",
+            "end_turn",
+            "391."
+        ));
+    }
+
+    #[test]
+    fn an_empty_prompt_is_never_reported_as_a_provider_failure() {
+        // Guards the "AFTER a non-empty user prompt" qualifier: nothing in
+        // this path currently sends an empty prompt, but the predicate must
+        // not misreport it as a stream error if that ever changes.
+        assert!(!stream_ended_with_no_content("", "end_turn", ""));
+        assert!(!stream_ended_with_no_content("   ", "stream_error", ""));
+    }
 
     fn invoke_request(extra: serde_json::Value) -> InvokeRequest {
         let mut body = serde_json::json!({
@@ -7580,10 +7971,53 @@ mod tests {
             0,
             String::new(),
             String::new(),
+            0,
+            0,
         );
         assert_eq!(env.correlation_id, "req-ABC");
         assert_eq!(env.producer, "model-gateway");
         assert!(env.idempotency_key.contains("req-ABC"));
+    }
+
+    /// Cache-token telemetry (native-compaction migration prerequisite): the
+    /// two new fields ride the payload alongside the existing token counts,
+    /// and a request that reports no cache usage stays exactly 0 — never
+    /// absent — so a consumer never needs an existence check.
+    #[test]
+    fn usage_envelope_carries_cache_token_telemetry() {
+        let env = build_usage_envelope(
+            "req-CACHE",
+            "org-1",
+            "user-1",
+            "claude-sonnet-4-6",
+            8_520,
+            42,
+            12,
+            0,
+            String::new(),
+            String::new(),
+            8_000,
+            400,
+        );
+        assert_eq!(env.payload["cache_read_input_tokens"], 8_000);
+        assert_eq!(env.payload["cache_creation_input_tokens"], 400);
+        // An uncached request reports exact zeros, not an absent field.
+        let uncached = build_usage_envelope(
+            "req-NOCACHE",
+            "org-1",
+            "user-1",
+            "claude-sonnet-4-6",
+            120,
+            42,
+            12,
+            0,
+            String::new(),
+            String::new(),
+            0,
+            0,
+        );
+        assert_eq!(uncached.payload["cache_read_input_tokens"], 0);
+        assert_eq!(uncached.payload["cache_creation_input_tokens"], 0);
     }
 
     /// The usage envelope carries the provenance receipt inputs (which
@@ -7602,6 +8036,8 @@ mod tests {
             4,
             "azure-norway-eu".to_owned(),
             "norway".to_owned(),
+            0,
+            0,
         );
         assert_eq!(env.payload["provider_used"], "azure-norway-eu");
         assert_eq!(env.payload["residency"], "norway");
@@ -7624,6 +8060,8 @@ mod tests {
             0,
             String::new(),
             String::new(),
+            0,
+            0,
         );
         assert_eq!(opened.correlation_id, usage.correlation_id);
         assert_eq!(opened.correlation_id, request_id);
@@ -7775,6 +8213,92 @@ mod tests {
         assert!(
             !blank.grounded,
             "a retrieval segment with no content is not evidence"
+        );
+    }
+
+    /// Why the chat path keys nothing on the assembled prompt.
+    ///
+    /// A prompt-keyed answer cache can only ever hit if the assembled prompt is a
+    /// function of the question. It is not. Both memory-bearing blocks in it —
+    /// the gateway's recalled-memory block and session-core's context assembly —
+    /// are recency-ordered top-N windows over a store the system writes to after
+    /// most turns, so the same question asked twice in two fresh threads produced
+    /// two different prompts (measured 2026-09-16: 17042 vs 17229 characters, two
+    /// stored entries, zero hits).
+    ///
+    /// Leaving these blocks OUT of a key is what would make a hit possible, and
+    /// it is the one thing that must not be done: they are in the prompt because
+    /// they change the answer, so a key blind to them can serve an answer built
+    /// from a memory set the caller no longer has, undetectably.
+    ///
+    /// Should this ever fail because assembly became a pure function of the
+    /// question, the trade changes and a prompt-keyed cache is worth
+    /// reconsidering. Until then it is a write with no reachable read.
+    #[test]
+    fn the_assembled_prompt_is_not_a_function_of_the_question() {
+        fn seg(kind: &str, content: &str) -> super::ContextSegment {
+            super::ContextSegment {
+                kind: kind.to_owned(),
+                content: content.to_owned(),
+                ..Default::default()
+            }
+        }
+        // The question is held constant throughout; only the user's memory set
+        // moves. What comes back is the memory-bearing part of the prompt as any
+        // prompt-derived key would have seen it.
+        fn prompt_for(question: &str, memories: &[&str], estimated_tokens: u32) -> String {
+            let recalled: Vec<String> = memories.iter().map(|m| (*m).to_owned()).collect();
+            let memory_block =
+                crate::memory_provenance::memory_context_block(&recalled).unwrap_or_default();
+            let assembly = super::build_context_assembly_block(
+                // `episodic` and `user` carry session-core's cross-thread memory
+                // rows (grpc.rs `bucket_memory_segments`), which is why one
+                // written memory moves this block too, not just the one above.
+                memories
+                    .iter()
+                    .map(|memory| seg("episodic", memory))
+                    .collect(),
+                estimated_tokens,
+                question,
+                question,
+            )
+            .block;
+            format!("{memory_block}\n{assembly}\nuser: {question}")
+        }
+
+        // The question that was actually measured asking twice.
+        let question = "Hva er hovedstaden i Frankrike?";
+
+        // Turn 1, fresh thread.
+        let before = prompt_for(question, &["Foretrekker korte svar."], 120);
+        assert_eq!(
+            before,
+            prompt_for(question, &["Foretrekker korte svar."], 120),
+            "identical inputs must render identically -- the drift below is the \
+             memory set moving, not nondeterminism in the rendering"
+        );
+
+        // Turn 2, another fresh thread, same question. Between the two the
+        // system wrote one memory, which is the ordinary case, not an edge one.
+        let after = prompt_for(
+            question,
+            &["Foretrekker korte svar.", "Jobber med ordre FF-1042."],
+            128,
+        );
+        assert_ne!(
+            before, after,
+            "the same question must still produce a different prompt once a \
+             memory has been written -- this is the drift that made every \
+             lookup a miss"
+        );
+
+        // And the drift is not confined to the recalled text: a derived token
+        // total is printed into the assembly block, so any upstream byte change
+        // moves the header too. Pure telemetry, and it used to sit in the key.
+        assert_ne!(
+            prompt_for(question, &["Foretrekker korte svar."], 121),
+            before,
+            "the estimated-token line moves the block with no change to content"
         );
     }
 

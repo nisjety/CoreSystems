@@ -146,11 +146,16 @@ pub fn build_router_with_readiness(
         // owning plane and cannot become an accidental browser data channel.
         .route("/v1/threads/:thread_id/events", get(replay_thread_events))
         // Memory management ("what do you remember about me") — user-scoped,
-        // backed by session-core's MemoryService.ListMemory/DeleteMemory.
-        // Named `/v1/memories` (plural) to avoid colliding with the unrelated
-        // `/v1/memory` capability-core proxy registered in proxy_routes()
-        // below.
-        .route("/v1/memories", get(list_memories))
+        // backed by session-core's MemoryService.ListMemory/DeleteMemory/
+        // IndexMemory. Named `/v1/memories` (plural) to avoid colliding with
+        // the unrelated `/v1/memory` capability-core proxy registered in
+        // proxy_routes() below.
+        //
+        // POST reuses IndexMemory — the same write path the Dreaming
+        // extractor itself indexes memories through — so the BFF's "correct a
+        // memory" flow (create the fix, then delete the original by id) has a
+        // real write to call instead of inventing new persistence here.
+        .route("/v1/memories", get(list_memories).post(create_memory))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
         // chat-parity §2: list models + per-model feature families for the picker.
         .route("/v1/models", get(list_models))
@@ -1846,11 +1851,13 @@ async fn browser_suggest_action(
                 provider_hint: req.provider.clone().unwrap_or_default(),
                 messages: vec![
                     ChatMessage {
+                        compaction_summary: String::new(),
                         role: "system".to_owned(),
                         content: BROWSER_SUGGEST_SYSTEM_PROMPT.to_owned(),
                         name: String::new(),
                     },
                     ChatMessage {
+                        compaction_summary: String::new(),
                         role: "user".to_owned(),
                         content: evidence,
                         name: String::new(),
@@ -2125,6 +2132,7 @@ async fn ai_chat(
         .messages
         .iter()
         .map(|m| ChatMessage {
+            compaction_summary: String::new(),
             role: m["role"].as_str().unwrap_or("user").to_owned(),
             content: m["content"].as_str().unwrap_or("").to_owned(),
             name: String::new(),
@@ -2298,11 +2306,13 @@ async fn recommend_plan(
     let context_json = serde_json::to_string(&req.context).unwrap_or_else(|_| "{}".to_owned());
     let messages = vec![
         ChatMessage {
+            compaction_summary: String::new(),
             role: "system".to_owned(),
             content: RECOMMEND_PLAN_SYSTEM_PROMPT.to_owned(),
             name: String::new(),
         },
         ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: format!("Locale: {locale}\nOnboarding signals (JSON):\n{context_json}"),
             name: String::new(),
@@ -3815,11 +3825,13 @@ async fn ai_dictate(
                 provider_hint: String::new(),
                 messages: vec![
                     ChatMessage {
+                        compaction_summary: String::new(),
                         role: "system".to_owned(),
                         content: system_prompt,
                         name: String::new(),
                     },
                     ChatMessage {
+                        compaction_summary: String::new(),
                         role: "user".to_owned(),
                         content: raw_text.clone(),
                         name: String::new(),
@@ -5556,10 +5568,73 @@ pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
         tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
         tonic::Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
         tonic::Code::Unavailable => StatusCode::BAD_GATEWAY,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        other => {
+            // F-11 (chat-parity audit §3.4, §3.10): every code not explicitly
+            // mapped above used to fall silently into a bare 500, which is how
+            // an unimplemented upstream RPC (F-15 — orchestrator-core's
+            // `GetRunProofBundle` returning `codes.Unimplemented`) became a
+            // "mystery 500" that took a cross-service log search to diagnose.
+            // Logging the real code and message here means the *next* one is
+            // diagnosable from model-gateway's own logs alone.
+            tracing::warn!(
+                grpc_code = ?other,
+                grpc_message = %error.message(),
+                "grpc_status_to_http: unmapped gRPC code, returning 500"
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     };
 
     (status, Json(json!({ "error": error.message() })))
+}
+
+#[cfg(test)]
+mod grpc_status_to_http_tests {
+    use super::*;
+
+    #[test]
+    fn explicitly_mapped_codes_keep_their_specific_status() {
+        let cases = [
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST),
+            (tonic::Code::NotFound, StatusCode::NOT_FOUND),
+            (
+                tonic::Code::FailedPrecondition,
+                StatusCode::PRECONDITION_FAILED,
+            ),
+            (tonic::Code::Unauthenticated, StatusCode::UNAUTHORIZED),
+            (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN),
+            (tonic::Code::DeadlineExceeded, StatusCode::GATEWAY_TIMEOUT),
+            (tonic::Code::Unavailable, StatusCode::BAD_GATEWAY),
+        ];
+        for (code, expected) in cases {
+            let status = tonic::Status::new(code, "detail");
+            let (http_status, _) = grpc_status_to_http(&status);
+            assert_eq!(http_status, expected, "{code:?} should map to {expected}");
+        }
+    }
+
+    /// F-11 / F-15 regression: an unmapped code — `Unimplemented` is exactly
+    /// what orchestrator-core returns for the never-implemented
+    /// `GetRunProofBundle` RPC — must still degrade to 500 (unchanged client
+    /// contract) but is now the case the added `tracing::warn!` covers, so a
+    /// future one is diagnosable from model-gateway's own logs. This test
+    /// cannot assert on the log line itself (no tracing subscriber is
+    /// installed in unit tests), so it locks the still-visible half of the
+    /// contract: the status code and the upstream message reaching the client.
+    #[test]
+    fn unmapped_code_falls_through_to_500_and_preserves_the_message() {
+        let status = tonic::Status::new(tonic::Code::Unimplemented, "GetRunProofBundle unimplemented");
+        let (http_status, Json(body)) = grpc_status_to_http(&status);
+        assert_eq!(http_status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "GetRunProofBundle unimplemented");
+    }
+
+    #[test]
+    fn internal_code_also_falls_through_to_500() {
+        let status = tonic::Status::new(tonic::Code::Internal, "boom");
+        let (http_status, _) = grpc_status_to_http(&status);
+        assert_eq!(http_status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }
 
 fn not_found(message: &str) -> HttpJsonError {
@@ -6828,8 +6903,8 @@ async fn invoke_queue_input(
         &claims.user_id,
         &body.content,
     );
-    let (pending, thread_id) = match outcome {
-        EnqueueOutcome::Queued { pending, thread_id } => (pending, thread_id),
+    let (pending, thread_id, conversation_only) = match outcome {
+        EnqueueOutcome::Queued { pending, thread_id, conversation_only } => (pending, thread_id, conversation_only),
         EnqueueOutcome::NoActiveStream => {
             return (
                 StatusCode::NOT_FOUND,
@@ -6892,6 +6967,7 @@ async fn invoke_queue_input(
         body.content.trim(),
         &bearer,
         body.space_append_context.as_ref(),
+        conversation_only,
     )
     .await;
     if let Err(error) = &persisted {
@@ -7981,6 +8057,90 @@ async fn list_memories(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateMemoryBody {
+    thread_id: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateMemoryHttpResponse {
+    memory_id: String,
+    degraded: bool,
+    degradation_reason: String,
+}
+
+/// Indexes a new personal ("USER"-topic) memory entry through session-core's
+/// `IndexMemory` RPC — the same write path `dreaming::index_agent_memory`
+/// already serves for the Dreaming extractor's own writes.
+///
+/// Topic is fixed to "USER" rather than caller-supplied: this route exists so
+/// the "what do you remember about me" surface can save a corrected
+/// replacement for an entry a reader is editing, never to let a client write
+/// an arbitrary org/workspace/policy fact. `thread_id` only proves the caller
+/// owns some real thread in this org (`IndexMemory` resolves the owning user
+/// from it); it is not retained on a "USER"-topic row, which is why the BFF's
+/// caller may pass whichever thread the edit happened to be read from.
+async fn create_memory(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<CreateMemoryBody>,
+) -> Result<Json<CreateMemoryHttpResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::IndexMemoryRequest;
+
+    let thread_id = body.thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+    let content = body.content.trim();
+    if content.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "content is required"})),
+        ));
+    }
+
+    let response = state
+        .memory_client
+        .clone()
+        .index_memory(authenticated_session_request(
+            IndexMemoryRequest {
+                thread_id: thread_id.to_owned(),
+                topic: "USER".to_owned(),
+                content: content.to_owned(),
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                memory_id: String::new(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_memory_error("session-core index_memory failed", &e))?
+        .into_inner();
+
+    if response.memory_id.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "code": "memory_not_found",
+                    "message": "thread not found for this org",
+                }
+            })),
+        ));
+    }
+
+    Ok(Json(CreateMemoryHttpResponse {
+        memory_id: response.memory_id,
+        degraded: response.degraded,
+        degradation_reason: response.degradation_reason,
+    }))
+}
+
 #[derive(Debug, Serialize)]
 struct DeleteMemoryHttpResponse {
     deleted: bool,
@@ -8040,6 +8200,11 @@ async fn invoke(
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
     Json(req): Json<InvokeRequest>,
 ) -> Result<Json<InvokeResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if req.features.iter().any(|f| f == "conversation_only") {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {
+            "code": "source_scope_requires_stream", "message": "Conversation-only tasks require the streaming chat endpoint."
+        }}))));
+    }
     let start = std::time::Instant::now();
 
     // Normalize and validate the request
@@ -8078,6 +8243,7 @@ async fn invoke(
                     provider_hint: normalized.provider_hint.clone(),
                     subscription_connection_id: normalized.subscription_connection_id.clone(),
                     messages: vec![mp_contracts::model_plane::v1::ChatMessage {
+                        compaction_summary: String::new(),
                         role: "user".to_owned(),
                         content: user_content,
                         name: String::new(),
@@ -8131,7 +8297,10 @@ async fn invoke(
         .map(str::trim)
         .filter(|k| !k.is_empty())
     {
-        Some(key) => match state.idempotency.claim(key) {
+        Some(key) => match state
+            .idempotency
+            .claim(&claims.org_id, &claims.user_id, key)
+        {
             crate::idempotency_registry::Claim::Cached(v) => {
                 return Ok(Json(InvokeResponse {
                     request_id: v.request_id,
@@ -8223,6 +8392,7 @@ async fn invoke(
         &model_bearer,
         normalized.space_context.as_ref(),
         normalized.space_append_context.as_ref(),
+        false,
     )
     .await
     .map_err(|error| {
@@ -8320,6 +8490,7 @@ async fn invoke(
                     provider_hint: normalized.provider_hint.clone(),
                     subscription_connection_id: normalized.subscription_connection_id.clone(),
                     messages: vec![ChatMessage {
+                        compaction_summary: String::new(),
                         role: "user".to_owned(),
                         content: user_content,
                         name: String::new(),
@@ -8425,6 +8596,8 @@ async fn invoke(
                 &infer_resp.model_used,
                 i64::from(infer_resp.input_tokens.max(0)),
                 i64::from(infer_resp.output_tokens.max(0)),
+                i64::from(infer_resp.cache_read_input_tokens.max(0)),
+                i64::from(infer_resp.cache_creation_input_tokens.max(0)),
             )
             .await,
         latency_ms,
@@ -8456,6 +8629,12 @@ async fn invoke(
             "provider_used": infer_resp.provider_used,
             "residency": infer_resp.residency,
             "min_privacy_tier": crate::normalize::min_privacy_tier_wire(&normalized),
+            // Cache-token telemetry (native-compaction migration
+            // prerequisite): already folded into `input_tokens` above, but
+            // broken out so cache-hit rate and savings are queryable off the
+            // durable ledger. 0 (never absent) when this turn used no cache.
+            "cache_read_input_tokens": infer_resp.cache_read_input_tokens,
+            "cache_creation_input_tokens": infer_resp.cache_creation_input_tokens,
         }),
         zdr: effective_zdr,
     };

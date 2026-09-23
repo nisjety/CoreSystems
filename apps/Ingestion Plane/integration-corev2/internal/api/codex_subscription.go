@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -287,6 +288,7 @@ func codexSubscriptionInvokeRequest(connection store.Connection, body codexSubsc
 		MaxTokens:       body.MaxTokens,
 		ReasoningEffort: strings.TrimSpace(body.ReasoningEffort),
 		ServiceTier:     strings.TrimSpace(body.ServiceTier),
+		OutputSchema:    body.OutputSchema,
 	}
 }
 
@@ -411,6 +413,7 @@ type codexSubscriptionInferBody struct {
 	MaxTokens       int                             `json:"maxTokens"`
 	ReasoningEffort string                          `json:"reasoningEffort"`
 	ServiceTier     string                          `json:"serviceTier"`
+	OutputSchema    json.RawMessage                 `json:"outputSchema,omitempty"`
 }
 
 func subscriptionError(c *fiber.Ctx, err error) error {

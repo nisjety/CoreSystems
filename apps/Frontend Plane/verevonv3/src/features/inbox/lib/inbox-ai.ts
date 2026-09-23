@@ -134,16 +134,35 @@ function asksForKnowledge(question: string): boolean {
   return /\b(knowledge|article|documentation|docs?|source|relevant|kunnskaps|artikkel|dokumentasjon|kilde)\b/i.test(question)
 }
 
+function knowledgeQuery(
+  mode: AssistMode,
+  messages: AssistMessage[],
+  opts: AssistOptions,
+): string | undefined {
+  if (mode === 'ask') {
+    const question = opts.question?.trim() || opts.instruction?.trim() || ''
+    return question && asksForKnowledge(question) ? question : undefined
+  }
+  // Search the customer's own words: `instruction` is often caller-supplied
+  // boilerplate, and `asksForKnowledge` gates on an operator asking for an
+  // article — phrasing a customer describing a problem never uses.
+  if (mode === 'draft' || mode === 'resolution') {
+    return [...messages].reverse().find((m) => !m.agent && !m.internal && m.body.trim())?.body.trim()
+  }
+  return undefined
+}
+
 async function addKnowledgeContext(
   orgId: string,
   mode: AssistMode,
+  messages: AssistMessage[],
   opts: AssistOptions,
 ): Promise<AssistOptions> {
-  const question = opts.question?.trim() || opts.instruction?.trim() || ''
-  if (mode !== 'ask' || !question || !asksForKnowledge(question) || !opts.contextPack) return opts
+  const query = knowledgeQuery(mode, messages, opts)
+  if (!query || !opts.contextPack) return opts
 
   try {
-    const result = await searchKnowledge(orgId, { query: question.slice(0, 240), limit: 5 })
+    const result = await searchKnowledge(orgId, { query: query.slice(0, 240), limit: 5 })
     const links = result.results.slice(0, 5).map((hit) => ({
       id: bounded(hit.id, 120),
       title: bounded(hit.title, 160) ?? 'Untitled knowledge result',
@@ -308,7 +327,7 @@ export async function runAssist(
   if (subscriptionBacked && !selectedModel.subscriptionConnectionId) {
     throw new SubscriptionAssistUnavailableError('subscription_connection_unavailable')
   }
-  const enrichedOpts = await addKnowledgeContext(orgId, mode, opts)
+  const enrichedOpts = await addKnowledgeContext(orgId, mode, messages, opts)
   const content = buildPrompt(mode, messages, enrichedOpts)
   const requestedThreadId = opts.threadId?.trim()
   const readOnlySupportAssist = mode === 'ask' || mode === 'outbound'

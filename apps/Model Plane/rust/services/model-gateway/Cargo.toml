@@ -24,6 +24,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+regex = "1"
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }

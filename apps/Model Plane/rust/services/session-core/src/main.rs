@@ -23,6 +23,8 @@ mod http_health;
 mod learning_events;
 mod letta_adapter;
 mod memory_erasure;
+mod memory_control;
+mod memory_grounding;
 mod memory_grpc;
 mod nats;
 mod nats_connection;

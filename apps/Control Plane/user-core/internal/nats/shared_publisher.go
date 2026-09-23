@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 	"time"
 
@@ -62,13 +63,10 @@ func NewSharedPublisher(sharedURL string, credentials SharedCredentials, clientN
 		nats.CustomInboxPrefix("_INBOX.USER_SHARED"),
 	}
 	user, password, token := strings.TrimSpace(credentials.User), strings.TrimSpace(credentials.Password), strings.TrimSpace(credentials.Token)
-	if (user == "") != (password == "") {
-		return nil, fmt.Errorf("shared NATS user/password must be configured together")
+	if err := validateScopedUserPassword(user, password, "shared NATS user/password", "shared NATS password"); err != nil {
+		return nil, err
 	}
 	if user != "" {
-		if len(password) < 32 {
-			return nil, fmt.Errorf("shared NATS password must contain at least 32 characters")
-		}
 		opts = append(opts, nats.UserInfo(user, password))
 	} else if token != "" {
 		if !credentials.AllowTokenFallback {
@@ -103,9 +101,7 @@ func (sp *SharedPublisher) Publish(ctx context.Context, subject string, payload 
 	}
 
 	enriched := make(map[string]any, len(payload)+2)
-	for k, v := range payload {
-		enriched[k] = v
-	}
+	maps.Copy(enriched, payload)
 	enriched["_source"] = sp.sourceName
 	enriched["_published_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 
@@ -126,7 +122,9 @@ func (sp *SharedPublisher) Publish(ctx context.Context, subject string, payload 
 // Close drains and closes the shared NATS connection.
 func (sp *SharedPublisher) Close() {
 	if sp != nil && sp.conn != nil {
-		sp.conn.Drain() //nolint:errcheck
+		if err := sp.conn.Drain(); err != nil {
+			log.Printf("⚠️  Shared NATS drain failed: %v", err)
+		}
 		log.Println("🔌 Shared NATS connection closed (user-core)")
 	}
 }
@@ -202,9 +200,10 @@ func (sp *SharedPublisher) PublishResourceGrantsChanged(
 // resource-scoped memory/run/thread authorization for this Space — org_id+
 // user_id ownership alone does not capture that a member was since removed
 // from, or restored to, the specific Space a run/thread happened in. Both
-// directions share one event/subject rather than two so a consumer can never
-// apply a stale revoke after a later restore purely from message reordering
-// on a fire-and-forget publish: the payload itself states the current fact.
+// directions share one event/subject rather than two. That way a consumer
+// can never apply a stale revoke after a later restore purely from message
+// reordering on a fire-and-forget publish, because the payload itself states
+// the current fact.
 func (sp *SharedPublisher) PublishSpaceMembershipChanged(ctx context.Context, spaceRef, orgID, subjectID string, active bool) {
 	sp.Publish(ctx, "aqencia.controlplane.space.membership_changed", map[string]any{
 		"space_ref":  spaceRef,
@@ -245,8 +244,8 @@ func (sp *SharedPublisher) PublishPlain(subject string, payload map[string]any) 
 }
 
 // PublishGDPRErasure publishes a locally outboxed erasure intent and waits
-// until the shared broker has accepted the write. The operation ledger keeps
-// retrying this method after transport failures; Nats-Msg-Id gives durable
+// until the shared broker has accepted the message write. The operation ledger
+// keeps retrying this method after transport failures; Nats-Msg-Id gives durable
 // stream configurations a stable deduplication key while plain subscribers
 // continue receiving the established subject.
 func (sp *SharedPublisher) PublishGDPRErasure(ctx context.Context, eventID string, payload []byte) error {

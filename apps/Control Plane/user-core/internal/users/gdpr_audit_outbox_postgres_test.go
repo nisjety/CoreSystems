@@ -2,48 +2,17 @@ package users
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestGDPRUserAuditOutboxPostgresLifecycle(t *testing.T) {
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping audit outbox PostgreSQL test")
-	}
+	pool := newIsolatedSchemaPool(t, "user_audit_outbox_")
 	ctx := context.Background()
-	admin, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("open admin pool: %v", err)
-	}
-	defer admin.Close()
-
-	schema := fmt.Sprintf("user_audit_outbox_%d", time.Now().UnixNano())
-	if !regexp.MustCompile(`^[a-z0-9_]+$`).MatchString(schema) {
-		t.Fatalf("unsafe fixture schema %q", schema)
-	}
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-		t.Fatalf("create fixture schema: %v", err)
-	}
-	t.Cleanup(func() { _, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE") })
-
-	config, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		t.Fatalf("parse fixture DSN: %v", err)
-	}
-	config.ConnConfig.RuntimeParams["search_path"] = schema
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		t.Fatalf("open fixture pool: %v", err)
-	}
-	defer pool.Close()
 
 	for _, migrationPath := range []string{
 		"../../migrations/014_gdpr_audit_outbox.up.sql",

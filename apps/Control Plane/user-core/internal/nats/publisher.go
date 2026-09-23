@@ -19,7 +19,7 @@ func NewPublisher(client *Client) *Publisher {
 }
 
 // PublishUserCreated publishes a user created event
-func (p *Publisher) PublishUserCreated(ctx context.Context, userID, email, name, status string, metadata map[string]interface{}) error {
+func (p *Publisher) PublishUserCreated(ctx context.Context, userID, email, name, status string, metadata map[string]any) error {
 	event := UserCreatedEvent{
 		Type:      SubjectUserCreated,
 		UserID:    userID,
@@ -40,7 +40,7 @@ func (p *Publisher) PublishUserCreated(ctx context.Context, userID, email, name,
 }
 
 // PublishUserUpdated publishes a user updated event
-func (p *Publisher) PublishUserUpdated(ctx context.Context, userID, email string, changes map[string]interface{}) error {
+func (p *Publisher) PublishUserUpdated(ctx context.Context, userID, email string, changes map[string]any) error {
 	event := UserUpdatedEvent{
 		Type:      SubjectUserUpdated,
 		UserID:    userID,
@@ -99,7 +99,7 @@ func (p *Publisher) PublishUserStatusChanged(ctx context.Context, userID, email,
 }
 
 // PublishProfileUpdated publishes a user profile updated event
-func (p *Publisher) PublishProfileUpdated(ctx context.Context, userID string, changes map[string]interface{}) error {
+func (p *Publisher) PublishProfileUpdated(ctx context.Context, userID string, changes map[string]any) error {
 	event := UserProfileUpdatedEventOut{
 		Type:      SubjectProfileUpdated,
 		UserID:    userID,
@@ -139,7 +139,7 @@ func (p *Publisher) PublishSessionCreated(ctx context.Context, sessionID, userID
 }
 
 // PublishActivityLogged publishes an activity logged event
-func (p *Publisher) PublishActivityLogged(ctx context.Context, userID, action, resource, ipAddress, userAgent string, details map[string]interface{}) error {
+func (p *Publisher) PublishActivityLogged(ctx context.Context, userID, action, resource, ipAddress, userAgent string, details map[string]any) error {
 	event := UserActivityLoggedEvent{
 		Type:      SubjectActivityLogged,
 		UserID:    userID,

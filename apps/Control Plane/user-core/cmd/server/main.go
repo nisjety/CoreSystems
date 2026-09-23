@@ -192,7 +192,7 @@ func main() {
 			log.Printf("⚠️  Warning: Redis unavailable — running without cache: %v", err)
 			redisClient = nil
 		} else {
-			defer redisClient.Close()
+			defer func() { _ = redisClient.Close() }()
 			log.Println("✅ Redis cache connected")
 		}
 	}
@@ -400,7 +400,7 @@ func main() {
 	} else if runActionAuthority != nil {
 		httpServer.SetRunActionAuthorityResolver(runActionAuthority)
 		httpServer.SetScheduledStepAuthorityResolver(runActionAuthority)
-		defer runActionAuthority.Close()
+		defer func() { _ = runActionAuthority.Close() }()
 		log.Println("✅ Control-to-Session Core run action authority client configured")
 	} else {
 		log.Println("ℹ️  Run action authority client not configured — agent owner actions remain fail-closed")

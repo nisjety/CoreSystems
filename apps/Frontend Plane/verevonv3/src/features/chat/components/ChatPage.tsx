@@ -47,10 +47,13 @@ import {
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
 import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
 import {
+  partitionEvidenceSources,
+  spokenSourceTally,
   shouldShowDateDivider,
 } from './chat-media-markdown'
 import { useChatController } from './use-chat-controller'
 import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
+import { deriveStreamActivity, streamActivityLabel } from '@/features/chat/lib/stream-activity'
 import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
@@ -85,6 +88,7 @@ export default function ChatPage() {
     feedbackNotice,
     dismissFeedbackNotice,
     regenerateLatest,
+    continueGeneration,
     rerunAsNewTurn,
     editAndResubmit,
     branchAt,
@@ -107,6 +111,8 @@ export default function ChatPage() {
     planApprovalPending,
     planApprovalError,
     browseWeb,
+    sourceScope,
+    setSourceScope,
     setBrowseWeb,
     temporaryChat,
     setTemporaryChat,
@@ -137,6 +143,12 @@ export default function ChatPage() {
     }
     return undefined
   })
+  const panelTurnStatus = () => {
+    const turn = activeRunTurn()
+    if (turn) return turn.status
+    if (!liveRunId()) return state.turns.filter((turn) => turn.role === 'assistant').at(-1)?.status
+    return undefined
+  }
 
   useChatShortcuts({ startNewChat })
 
@@ -164,6 +176,9 @@ export default function ChatPage() {
     <DashboardComposer
       appearance="chat"
       browseWeb={browseWeb()}
+      sourceScope={sourceScope()}
+      onSourceScopeChange={setSourceScope}
+      sourceScopeLocked={state.turns.length > 0}
       imageMode={imageMode()}
       message={input()}
       onBrowseWebChange={setBrowseWeb}
@@ -251,6 +266,18 @@ export default function ChatPage() {
   // counts as work (audit item 27 -- the header offered "Arbeid 4" for four
   // lifecycle rows). `isWorkStep` in chat-normalizers.ts owns the rule.
   const workStepCount = createMemo(() => state.taskSteps.filter(isWorkStep).length)
+  // What the Kilder badge counts. A deep-research turn lists every hit it found
+  // but reads a handful, and a badge showing the full list told the reader two
+  // dozen pages had been read (F-16). Availability is deliberately left on the
+  // full count above — an unread lead is still worth offering — so only the
+  // number narrows, and the panel itself states both.
+  const readSourceCount = createMemo(() => partitionEvidenceSources(evidenceSources()).read.length)
+  // What the Kilder badge shows, in one place. The grounding overview is a row
+  // of its own in the panel and was added inline at all three call sites; the
+  // spoken tally below has to be the same number as the visible one, and four
+  // copies of the expression is how those drift apart.
+  const sourceBadgeTotal = createMemo(() => evidenceSources().length + (latestGrounding() ? 1 : 0))
+  const sourceBadgeRead = createMemo(() => readSourceCount() + (latestGrounding() ? 1 : 0))
   const toolCallCount = createMemo(
     () => state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
   )
@@ -263,6 +290,7 @@ export default function ChatPage() {
       tab: activeTab(),
       availability: {
         sourceCount: evidenceSources().length,
+        readSourceCount: readSourceCount(),
         hasGrounding: Boolean(latestGrounding()),
         artifactCount: artifactItems().length,
         attachmentCount: conversationAttachments().length,
@@ -306,6 +334,7 @@ export default function ChatPage() {
       threadId: state.threadId,
       availability: {
         sourceCount: evidenceSources().length,
+        readSourceCount: readSourceCount(),
         hasGrounding: Boolean(latestGrounding()),
         artifactCount: artifactItems().length,
         attachmentCount: conversationAttachments().length,
@@ -351,32 +380,87 @@ export default function ChatPage() {
    * the opening of the answer once it lands.
    */
   const [streamAnnouncement, setStreamAnnouncement] = createSignal('')
+  const transcriptErrorTurn = createMemo(() => {
+    if (state.status !== 'error' || !state.error) return undefined
+    const latest = state.turns.findLast((turn) => turn.role === 'assistant')
+    // A failed turn can also contain partial output. Keep a distinct transport
+    // error visible; suppress only the notice already rendered in that turn.
+    return latest?.status === 'error' && latest.content.trim() === state.error.trim()
+      ? latest.id
+      : undefined
+  })
+  createEffect(
+    () => transcriptErrorTurn(),
+    (turnId) => {
+      if (!turnId) return
+      const frame = requestAnimationFrame(() => {
+        const messages = document.querySelectorAll<HTMLElement>(
+          '#verevon-chat-tabpanel-chat .verevon-chat-message--assistant',
+        )
+        messages.item(messages.length - 1)?.focus()
+      })
+      return () => cancelAnimationFrame(frame)
+    },
+  )
+  /**
+   * What the live region says about sources — the spoken equivalent of the
+   * badge's "3 av 24". Built from the same two memos the badge renders, so the
+   * number a screen reader hears and the number on screen cannot disagree.
+   */
+  const spokenTally = () => spokenSourceTally(sourceBadgeRead(), sourceBadgeTotal())
+  /**
+   * What the live region says the run is DOING — the spoken twin of the line
+   * beside the thinking indicator.
+   *
+   * Built from the same derivation and the same label function `ThinkingDots`
+   * renders, so the two cannot end up describing one wait differently. Empty
+   * when the stream has reported nothing yet, which is the honest state: the
+   * heartbeat then says only that work continues, exactly as before, rather
+   * than naming a phase nobody observed.
+   */
+  const spokenActivity = () => {
+    const pending = [...state.turns]
+      .reverse()
+      .find((turn) => turn.role === 'assistant' && turn.status === 'waiting')
+    const activity = deriveStreamActivity(pending?.toolCalls)
+    return activity ? ` ${streamActivityLabel(activity)}.` : ''
+  }
   createEffect(
     () => {
       const streaming = isStreaming()
-      const completedAnswer = streaming
-        ? ''
+      const completedTurn = streaming
+        ? undefined
         : [...state.turns]
             .reverse()
             .find((turn) => turn.role === 'assistant')
-            ?.content?.trim() ?? ''
-      return { completedAnswer, streaming }
+      return { completedAnswer: completedTurn?.content?.trim() ?? '', status: completedTurn?.status, streaming }
     },
-    ({ completedAnswer, streaming }) => {
+    ({ completedAnswer, status, streaming }) => {
       if (!streaming) {
         // The answer itself is in the transcript to navigate; this is the cue
-        // that it is there, plus enough of it to know whether it is worth reading.
-        setStreamAnnouncement(completedAnswer ? `Svar fullført. ${completedAnswer.slice(0, 180)}` : '')
+        // that it is there, plus enough of it to know whether it is worth
+        // reading — and, before the prose, what it was actually built on.
+        setStreamAnnouncement(
+          status === 'error' ? `Svaret mislyktes. ${completedAnswer.slice(0, 180)}`
+            : status === 'stopped' ? `Svaret ble stoppet. ${completedAnswer.slice(0, 180)}`
+            : status === 'waiting' ? 'Svaret er ikke fullført ennå.'
+            : completedAnswer
+            ? `Svar fullført.${spokenTally()} ${completedAnswer.slice(0, 180)}`
+            : '',
+        )
         return
       }
       setStreamAnnouncement('Verevon svarer …')
       // Ten seconds: frequent enough that a long run does not read as dead, rare
       // enough not to be a metronome. The text alternates because a live region
-      // drops a repeat of the string it is already showing.
+      // drops a repeat of the string it is already showing. The tally is read
+      // from the heartbeat rather than the opening line because at the moment a
+      // turn starts it still describes the PREVIOUS turn's sources.
       let tick = 0
       const heartbeat = setInterval(() => {
         tick += 1
-        setStreamAnnouncement(tick % 2 === 1 ? 'Arbeider fortsatt …' : 'Fortsatt underveis …')
+        const still = tick % 2 === 1 ? 'Arbeider fortsatt …' : 'Fortsatt underveis …'
+        setStreamAnnouncement(`${still}${spokenActivity()}${spokenTally()}`)
       }, 10_000)
       // Solid 2 runs a cleanup RETURNED from the effect fn; `onCleanup` inside
       // one is silently dropped.
@@ -488,6 +572,7 @@ export default function ChatPage() {
       <Match when={activeTab() === 'steps'}>
         <StepsPanel
           runId={liveRunId()}
+          turnStatus={panelTurnStatus()}
           steps={state.taskSteps}
           threadId={state.threadId}
           toolCalls={activeRunTurn()?.toolCalls}
@@ -560,7 +645,8 @@ export default function ChatPage() {
       artifactCount={artifactItems().length + conversationAttachments().length}
       includeChat={false}
       runAvailable={Boolean(liveRunId())}
-      sourceCount={evidenceSources().length + (latestGrounding() ? 1 : 0)}
+      sourceCount={sourceBadgeTotal()}
+      readSourceCount={sourceBadgeRead()}
       stepCount={state.taskSteps.length}
       workStepCount={workStepCount()}
       toolCallCount={toolCallCount()}
@@ -606,7 +692,8 @@ export default function ChatPage() {
             branchCount={state.branchCount}
             messageCount={state.turns.length}
             runAvailable={Boolean(liveRunId())}
-            sourceCount={evidenceSources().length + (latestGrounding() ? 1 : 0)}
+            sourceCount={sourceBadgeTotal()}
+            readSourceCount={sourceBadgeRead()}
             stepCount={state.taskSteps.length}
             workStepCount={workStepCount()}
             toolCallCount={toolCallCount()}
@@ -657,6 +744,7 @@ export default function ChatPage() {
                         onCopy={() => void copyTurn(row.turn)}
                         onEdit={(text) => void editAndResubmit(row.turn.id, text)}
                         onRegenerate={regenerateLatest}
+                        onContinue={() => continueGeneration(row.turn.id)}
                         onRerunAsNewTurn={() => void rerunAsNewTurn(row.turn.id)}
                         onFeedback={(rating, note) => submitTurnFeedback(row.turn.id, rating, note)}
                         onApprovalDecision={(approvalId, decision) =>
@@ -681,6 +769,7 @@ export default function ChatPage() {
                         version={row.version}
                         onSelectVersion={selectExchangeVersion}
                         editLocked={row.editLocked}
+                        threadId={state.threadId}
                       />
                     </>
                   )}
@@ -693,10 +782,10 @@ export default function ChatPage() {
                   only the live status of a delivery in flight.
                 */}
                 <QueuedInputStrip entries={state.queuedInputs} />
-                {/* Focus follows the error. `role="alert"` announces it, but a
-                    keyboard user was left wherever they were -- the open half of
-                    plan item 16. `tabindex=-1` keeps it out of the Tab order. */}
-                <Show when={state.error && state.status === 'error'}>
+                {/* The transcript's retry notice and live region already cover
+                    an identical error. Distinct errors still need this alert
+                    and keyboard focus, especially when partial output remains. */}
+                <Show when={state.error && state.status === 'error' && !transcriptErrorTurn()}>
                   <div
                     class="verevon-chat-error"
                     role="alert"

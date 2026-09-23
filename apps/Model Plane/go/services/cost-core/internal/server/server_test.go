@@ -63,6 +63,79 @@ func TestRecordThenUsage(t *testing.T) {
 	}
 }
 
+// Cache-token telemetry (native-compaction migration prerequisite): the
+// record endpoint accepts the two new fields, rolls them up on the usage
+// endpoint, and RecordUsage's auto-priced path applies the cache-read
+// discount rather than billing the whole folded input at the full rate.
+func TestRecordThenUsageWithCacheTokenTelemetry(t *testing.T) {
+	_, mux := newTestServer()
+
+	body := `{"org_id":"org1","user_id":"u1","run_id":"run1","model":"claude-sonnet","` +
+		`input_tokens":8520,"output_tokens":42,"cache_read_input_tokens":8000,` +
+		`"cache_creation_input_tokens":400,"idempotency_key":"k-cache"}`
+	rec := do(mux, http.MethodPost, "/api/v1/cost/record", body)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("record status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(mux, http.MethodGet, "/api/v1/usage?org_id=org1&user_id=u1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("usage status = %d", rec.Code)
+	}
+	var usage usageResponse
+	mustJSON(t, rec.Body.Bytes(), &usage)
+	if usage.TotalCacheReadInputTokens != 8_000 || usage.TotalCacheCreationInputTokens != 400 {
+		t.Fatalf("cache totals = %d/%d, want 8000/400",
+			usage.TotalCacheReadInputTokens, usage.TotalCacheCreationInputTokens)
+	}
+
+	rec = do(mux, http.MethodGet, "/api/v1/cost/entries?org_id=org1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("entries status = %d", rec.Code)
+	}
+	var listed struct {
+		Entries []entryResponse `json:"entries"`
+	}
+	mustJSON(t, rec.Body.Bytes(), &listed)
+	if len(listed.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(listed.Entries))
+	}
+	if listed.Entries[0].CacheReadInputTokens != 8_000 || listed.Entries[0].CacheCreationInputTokens != 400 {
+		t.Fatalf("listed entry cache tokens = %+v", listed.Entries[0])
+	}
+}
+
+// RecordUsage's auto-priced path (no pre-computed cost_usd) must apply the
+// cache-read discount, not bill the whole folded input_tokens at the full
+// rate.
+func TestRecordUsageDirectAppliesCacheReadDiscount(t *testing.T) {
+	srv := NewServer(ledger.NewStore())
+	entry := ledger.Entry{
+		OrgID: "org1", UserID: "u1", Model: "claude-sonnet",
+		InputTokens: 8_520, OutputTokens: 42,
+		CacheReadInputTokens: 8_000, CacheCreationInputTokens: 400,
+	}
+	if err := srv.RecordUsage(context.Background(), entry); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+	u, err := srv.ledger.GetUsage(context.Background(), "org1", "u1")
+	if err != nil {
+		t.Fatalf("GetUsage: %v", err)
+	}
+	// A naive full-rate charge on all 8,520 input tokens (default seed rate
+	// 3.00/1M) would be far higher than the actual discounted cost; assert
+	// the recorded cost sits strictly below that naive figure to pin the
+	// discount is really being applied by the auto-pricing path, not just by
+	// the Resolver in isolation (already covered in pricing_test.go).
+	naive := 8_520.0/1_000_000.0*3.0 + 42.0/1_000_000.0*15.0
+	if u.TotalCostUSD >= naive {
+		t.Fatalf("cost %.8f did not reflect the cache-read discount (naive full-rate cost would be %.8f)", u.TotalCostUSD, naive)
+	}
+	if u.TotalCostUSD <= 0 {
+		t.Fatalf("cost should still be positive, got %.8f", u.TotalCostUSD)
+	}
+}
+
 func TestRunUsageEndpoint(t *testing.T) {
 	_, mux := newTestServer()
 	_ = do(mux, http.MethodPost, "/api/v1/cost/record", `{"org_id":"org1","user_id":"a","run_id":"runX","cost_usd":1.0,"input_tokens":5}`)

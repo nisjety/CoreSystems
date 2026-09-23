@@ -40,6 +40,21 @@ const MAX_SNIPPET_CHARS: usize = 600;
 const MAX_ENTRIES: usize = 8;
 /// Max number of source cards shown in the chat UI.
 const SOURCE_LIMIT: usize = 5;
+/// Minimum characters of retrieved content a candidate needs before it may be
+/// attached as a clickable [`GroundingCitation`] (chat-parity audit F-13,
+/// §3.7): two "aquatiq.com" documents in the org's knowledge base carry only
+/// 63 and 84 characters of scraped content each, yet were cited as if they
+/// substantiated a confident, multi-paragraph answer — the UI attached a
+/// citation to text the source could not possibly support. 150 sits below a
+/// single real sentence (a genuinely thin-but-real snippet still clears it)
+/// and above stub-page boilerplate (a redirect notice, a bare nav label, a
+/// cookie banner) — the same usability-not-deletion gate
+/// `crate::deep_research::apply_relevance_gate` applies to web sources,
+/// mirrored here for internal knowledge-base sources: a candidate that fails
+/// this gate stays visible to the model in the context block (so it can say
+/// "found, but too thin to cite") but is withheld from `citations`, so it can
+/// never render as a source card the user could mistake for evidence.
+const MIN_CITABLE_CONTENT_CHARS: usize = 150;
 /// Max graph nodes included in the grounding payload.
 const GRAPH_NODE_LIMIT: usize = 6;
 /// Max graph community summaries included in the grounding payload.
@@ -429,8 +444,22 @@ fn add_context_entry(
     if crate::moderation::scan_injection(text) {
         *injection_flagged = true;
     }
-    entries.push(format!("[{}] {}", entries.len() + 1, snippet));
-    if seen.insert(doc_id.clone()) {
+    let number = entries.len() + 1;
+    // F-13 gate: the model still sees a too-thin source (so it can name it
+    // and say it was insufficient), but it never reaches `citations`, so the
+    // UI can never render it as a clickable, seemingly-substantiating card.
+    let citable = snippet.chars().count() >= MIN_CITABLE_CONTENT_CHARS;
+    if citable {
+        entries.push(format!("[{number}] {snippet}"));
+    } else {
+        entries.push(format!(
+            "[{number}] {snippet} — only {} characters were retrieved for this source; too \
+             little to substantiate an answer. You may mention it was found, but do not cite \
+             it or present it as evidence.",
+            snippet.chars().count()
+        ));
+    }
+    if citable && seen.insert(doc_id.clone()) {
         citations.push(GroundingCitation {
             id: doc_id,
             title: title.unwrap_or_else(|| "Internal knowledge".to_owned()),
@@ -1117,6 +1146,20 @@ mod tests {
         }
     }
 
+    /// Pads `prefix` out past [`MIN_CITABLE_CONTENT_CHARS`] so a fixture reads
+    /// as genuine retrieved content rather than a page stub — most of the
+    /// citation tests below predate the F-13 gate and originally used a
+    /// one-sentence fixture ("Alpha fact.", "Chunk one.") that the gate now
+    /// (correctly) treats as too thin to cite; this keeps their fixtures
+    /// realistic instead of quietly falling under the new floor.
+    fn citable(prefix: &str) -> String {
+        let mut text = prefix.to_owned();
+        while text.chars().count() < MIN_CITABLE_CONTENT_CHARS {
+            text.push_str(" Additional retrieved detail supporting this fact.");
+        }
+        text
+    }
+
     #[test]
     fn wants_grounding_matches_rag_family_flags() {
         assert!(wants_grounding(&["rag".to_owned()]));
@@ -1134,10 +1177,16 @@ mod tests {
 
     #[test]
     fn builds_numbered_context_and_citations() {
+        // Fixture text is padded past MIN_CITABLE_CONTENT_CHARS — this test
+        // exercises numbering/citation-building in general, not the F-13
+        // length gate itself (see the dedicated `sources_below_the_...` /
+        // `sources_at_or_above_the_...` tests below for that).
+        let alpha = citable("Alpha fact.");
+        let beta = citable("Beta fact.");
         let resp = RetrieveResponse {
             candidates: vec![
-                candidate("doc-1", "Alpha fact.", 0.9),
-                candidate("doc-2", "Beta fact.", 0.8),
+                candidate("doc-1", &alpha, 0.9),
+                candidate("doc-2", &beta, 0.8),
             ],
             sources: vec![
                 source("doc-1", "Alpha Doc", "https://kb/alpha"),
@@ -1156,7 +1205,7 @@ mod tests {
                 id: "doc-1".to_owned(),
                 title: "Alpha Doc".to_owned(),
                 url: "https://kb/alpha".to_owned(),
-                snippet: "Alpha fact.".to_owned(),
+                snippet: alpha,
             }
         );
     }
@@ -1204,6 +1253,8 @@ mod tests {
 
     #[test]
     fn context_pack_pinned_fact_precedes_candidates_and_is_cited() {
+        // Padded past MIN_CITABLE_CONTENT_CHARS — see `citable`'s doc comment.
+        let pinned_text = citable("Pinned organization policy.");
         let resp = RetrieveResponse {
             candidates: vec![candidate("doc-ranked", "Ranked result.", 0.91)],
             sources: vec![
@@ -1214,7 +1265,7 @@ mod tests {
                 facts: vec![ContextFact {
                     knowledge_id: "k-doc-pinned".to_owned(),
                     document_id: "doc-pinned".to_owned(),
-                    text: "Pinned organization policy.".to_owned(),
+                    text: pinned_text.clone(),
                     score: 1.0,
                     source_title: "Pinned policy".to_owned(),
                     source_type: "policy".to_owned(),
@@ -1238,11 +1289,15 @@ mod tests {
 
     #[test]
     fn dedupes_citations_by_document_id() {
-        // Two chunks from the same document → one citation, two context entries.
+        // Two chunks from the same document → one citation, two context
+        // entries. Padded past MIN_CITABLE_CONTENT_CHARS — see `citable`'s
+        // doc comment.
+        let chunk_one = citable("Chunk one.");
+        let chunk_two = citable("Chunk two.");
         let resp = RetrieveResponse {
             candidates: vec![
-                candidate("doc-1", "Chunk one.", 0.9),
-                candidate("doc-1", "Chunk two.", 0.85),
+                candidate("doc-1", &chunk_one, 0.9),
+                candidate("doc-1", &chunk_two, 0.85),
             ],
             sources: vec![source("doc-1", "Doc One", "https://kb/one")],
             ..Default::default()
@@ -1253,6 +1308,81 @@ mod tests {
         assert!(g.context_block.contains("[2] Chunk two."));
         assert_eq!(g.citations.len(), 1, "same document cited once");
         assert_eq!(g.citations[0].id, "doc-1");
+    }
+
+    /// F-13 regression (chat-parity audit §3.7): two real "aquatiq.com"
+    /// documents in the org's knowledge base held only 63 and 84 characters
+    /// of scraped content, yet were cited as if they substantiated a
+    /// confident, multi-paragraph answer — the UI attached a citation to text
+    /// the source could not possibly support. A source this thin must still
+    /// reach the model (so it can name it and say it found too little) but
+    /// must never become a clickable citation.
+    #[test]
+    fn sources_below_the_citability_gate_are_visible_but_never_cited() {
+        let resp = RetrieveResponse {
+            // 33 characters — the same order of magnitude as the audit's
+            // 63/84-char aquatiq.com stubs, well under the 150-char floor.
+            candidates: vec![candidate("doc-thin", "Aquatiq AS leverer skytjenester.", 0.7)],
+            sources: vec![source("doc-thin", "aquatiq.com", "https://www.aquatiq.com/")],
+            ..Default::default()
+        };
+
+        let g = build_grounding("hva leverer aquatiq", &resp);
+        assert!(
+            g.context_block.contains("Aquatiq AS leverer skytjenester."),
+            "the model must still see the thin source: {}",
+            g.context_block
+        );
+        assert!(
+            g.context_block.contains("too little"),
+            "the note must tell the model this source cannot substantiate a citation: {}",
+            g.context_block
+        );
+        assert!(
+            g.citations.is_empty(),
+            "a source this thin must never become a clickable citation"
+        );
+    }
+
+    /// The mirror of the test above: content that clears the floor is cited
+    /// exactly as before this fix — the gate must not become so strict that
+    /// it starts withholding real, substantive matches.
+    #[test]
+    fn sources_at_or_above_the_citability_gate_are_cited_normally() {
+        let text = citable("Aquatiq delivers five core service areas.");
+        let resp = RetrieveResponse {
+            candidates: vec![candidate("doc-1", &text, 0.9)],
+            sources: vec![source("doc-1", "aquatiq.com", "https://www.aquatiq.com/")],
+            ..Default::default()
+        };
+
+        let g = build_grounding("what does aquatiq deliver", &resp);
+        assert_eq!(g.citations.len(), 1);
+        assert_eq!(g.citations[0].id, "doc-1");
+    }
+
+    /// Exact-boundary check on `MIN_CITABLE_CONTENT_CHARS` itself: content of
+    /// exactly the floor length is citable (`>=`, not `>`); one character
+    /// short is not.
+    #[test]
+    fn citability_gate_is_exact_at_the_boundary() {
+        let exactly_at_floor = "x".repeat(MIN_CITABLE_CONTENT_CHARS);
+        let one_under = "x".repeat(MIN_CITABLE_CONTENT_CHARS - 1);
+        let resp = RetrieveResponse {
+            candidates: vec![
+                candidate("doc-at-floor", &exactly_at_floor, 0.9),
+                candidate("doc-under-floor", &one_under, 0.8),
+            ],
+            sources: vec![
+                source("doc-at-floor", "At floor", "https://kb/at-floor"),
+                source("doc-under-floor", "Under floor", "https://kb/under-floor"),
+            ],
+            ..Default::default()
+        };
+
+        let g = build_grounding("status", &resp);
+        assert_eq!(g.citations.len(), 1, "only the doc AT the floor is citable");
+        assert_eq!(g.citations[0].id, "doc-at-floor");
     }
 
     #[test]

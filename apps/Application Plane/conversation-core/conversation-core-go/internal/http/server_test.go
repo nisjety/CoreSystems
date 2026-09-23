@@ -21,6 +21,7 @@ import (
 const (
 	testGatewaySecret = "gateway-test-secret-at-least-32-bytes"
 	testIngestSecret  = "ingest-test-secret-at-least-32-bytes-1"
+	testModelSecret   = "model-gateway-test-secret-at-least-32b"
 )
 
 var conversationTestNonce atomic.Uint64
@@ -93,6 +94,7 @@ func testVerifier(t *testing.T) *delegation.Verifier {
 		Keys: map[string]string{
 			"verevon-gateway":     testGatewaySecret,
 			"conversation-ingest": testIngestSecret,
+			"model-gateway":       testModelSecret,
 		},
 	})
 	if err != nil {
@@ -155,6 +157,71 @@ func TestConversationAPIRoutesRejectUnsignedAndLegacySharedKeyRequests(t *testin
 		configure(request)
 		if response := performRequest(router, request); response.Code != stdhttp.StatusUnauthorized {
 			t.Fatalf("status = %d, want 401; body=%s", response.Code, response.Body.String())
+		}
+	}
+}
+
+// The Model Plane's chat runtime may read the inbox and may do nothing else.
+// These assert the two halves of that separately, because each could regress
+// on its own: the lane could grow a write, or the principal could be handed a
+// seat on the gateway group where every write already lives.
+func TestVerevonReadLaneServesOnlyOrganizationScopedReads(t *testing.T) {
+	router := newRouter(&Handler{}, testVerifier(t))
+
+	for _, path := range []string{"/internal/v1/verevon/conversations", "/internal/v1/verevon/conversations/conv-1"} {
+		request := httptest.NewRequest(stdhttp.MethodGet, path, nil)
+		signConversationRequest(t, request, nil, "model-gateway", testModelSecret, "user-1", "org-1", "")
+		// A nil-service Handler panics inside the handler, so reaching it at
+		// all is the assertion: anything the guards rejected answers 401/403/
+		// 400 instead, and a route that does not exist answers 404.
+		func() {
+			defer func() { _ = recover() }()
+			if response := performRequest(router, request); response.Code == stdhttp.StatusNotFound ||
+				response.Code == stdhttp.StatusUnauthorized ||
+				response.Code == stdhttp.StatusForbidden ||
+				response.Code == stdhttp.StatusBadRequest {
+				t.Errorf("%s: status = %d, want the request to reach the handler", path, response.Code)
+			}
+		}()
+	}
+}
+
+func TestVerevonReadLaneRefusesRequestsWithoutAVerifiedOrganization(t *testing.T) {
+	router := newRouter(&Handler{}, testVerifier(t))
+	request := httptest.NewRequest(stdhttp.MethodGet, "/internal/v1/verevon/conversations", nil)
+	signConversationRequest(t, request, nil, "model-gateway", testModelSecret, "user-1", "", "")
+
+	if response := performRequest(router, request); response.Code != stdhttp.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestModelGatewayPrincipalCannotReachTheGatewayAPIOrAnyWrite(t *testing.T) {
+	router := newRouter(&Handler{}, testVerifier(t))
+
+	// Reads on the gateway group: refused because the group is bound to
+	// verevon-gateway, not merely because of a role.
+	for _, path := range []string{"/api/v1/conversations", "/api/v1/conversations/conv-1", "/api/v1/tickets", "/api/v1/ai-actions"} {
+		request := httptest.NewRequest(stdhttp.MethodGet, path, nil)
+		signConversationRequest(t, request, nil, "model-gateway", testModelSecret, "user-1", "org-1", "admin")
+		if response := performRequest(router, request); response.Code != stdhttp.StatusForbidden {
+			t.Errorf("GET %s: status = %d, want 403", path, response.Code)
+		}
+	}
+
+	// Writes, including the ones an injected instruction would most want:
+	// sending a message and approving a proposed action.
+	body := []byte(`{"body_text":"hello"}`)
+	for _, path := range []string{
+		"/api/v1/conversations/conv-1/messages",
+		"/api/v1/ai-actions",
+		"/api/v1/ai-actions/action-1/approve",
+		"/internal/v1/verevon/conversations",
+	} {
+		request := httptest.NewRequest(stdhttp.MethodPost, path, bytes.NewReader(body))
+		signConversationRequest(t, request, body, "model-gateway", testModelSecret, "user-1", "org-1", "admin")
+		if response := performRequest(router, request); response.Code == stdhttp.StatusOK || response.Code == stdhttp.StatusCreated {
+			t.Errorf("POST %s: status = %d, want the write refused", path, response.Code)
 		}
 	}
 }

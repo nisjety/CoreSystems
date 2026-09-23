@@ -405,16 +405,15 @@ services:
             RATE_LIMIT_RPM: ${MP_RATE_LIMIT_RPM:-100}
             JWT_AUDIENCE: ${MP_JWT_AUDIENCE:-mp-gateway}
             JWT_SECRET: ${JWT_SECRET:-}
-            # Local semantic-response cache (Dragonfly exact-match) → mp-dragonfly.
-            # Empty to disable. There is no hosted third-party tier: the managed
-            # LangCache backend was removed because it shipped assembled prompts
-            # and answers to an outside host with no TTL and no delete path.
-            SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://mp-dragonfly:6379}
-            SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
-            # Semantic (vector) cache tier via Data Plane v2 (opt-in). With both this
-            # and SEMANTIC_CACHE_URL set, the gateway layers them: exact-match first,
-            # DPv2 semantic fallback (which warms the exact tier).
-            SEMANTIC_CACHE_DATAPLANE_ENABLED: ${SEMANTIC_CACHE_DATAPLANE_ENABLED:-false}
+            # SEMANTIC_CACHE_URL/SEMANTIC_CACHE_TTL_SECS/SEMANTIC_CACHE_DATAPLANE_ENABLED
+            # were removed 2026-09-17 — the code that read them (model-gateway's
+            # langcache module) was already reduced to a documentation tombstone on
+            # 2026-09-16; these three had been inert env vars since then, and
+            # SEMANTIC_CACHE_URL was interpolating a live Dragonfly credential into a
+            # variable nothing consumed. See docs/CACHE_COMPACTION_AUDIT_2026-09-17.md
+            # §4.4. DATAPLANE_RETRIEVAL_HTTP_URL/DATAPLANE_INTERNAL_KEY stay — they are
+            # real, live inputs to retrieval.rs's grounding path, not part of the dead
+            # cache.
             DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}
             DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
         networks:
@@ -920,9 +919,17 @@ services:
         environment:
             - QUARRY_EDGE__PORT=8082
             - QUARRY_EDGE__USER_AGENT=Quarry/2.0 (+https://triodelab.com/quarry)
-            - QUARRY_EDGE__BROWSER_PROVIDER=${QUARRY_EDGE_BROWSER_PROVIDER:-static}
-            - QUARRY_EDGE__BROWSERLESS_BASE_URL=${BROWSERLESS_URL:-}
-            - QUARRY_EDGE__BROWSERLESS_TOKEN=${BROWSERLESS_TOKEN:-}
+            # QUARRY_EDGE__BROWSER_PROVIDER / __BROWSERLESS_BASE_URL /
+            # __BROWSERLESS_TOKEN used to be set here and are deliberately gone:
+            # EdgeConfig (quarry-edge/src/config.rs) never read any of them, so
+            # they configured nothing while reading like the switch that decides
+            # whether page rendering is available. They cost real time — an audit
+            # concluded from BROWSER_PROVIDER=static that the browser fallback was
+            # unarmed, when the running service logs "browser driver registered
+            # (local chromiumoxide)" on every start. The driver is chosen at BUILD
+            # time by the `browser-agent` cargo feature (see deploy/compose/
+            # Dockerfile.edge), or at runtime by BROWSERBASE_API_KEY +
+            # BROWSERBASE_PROJECT_ID, which main.rs does read.
             - QUARRY_EDGE__CONTROL_BASE_URL=http://quarry-control:8081
             - QUARRY_EDGE__CONTROL_API_KEY=${QUARRY_CONTROL_API_KEY:-}
             - QUARRY_EDGE__RUNTIME_AUTH_TOKEN=${QUARRY_RUNTIME_AUTH_TOKEN:-}

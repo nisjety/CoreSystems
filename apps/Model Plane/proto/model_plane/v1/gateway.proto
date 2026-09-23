@@ -522,6 +522,18 @@ message WebSearchRequest {
   string intent = 5;
   // Zero Data Retention — disables Quarry cache/event persistence.
   bool zdr = 6;
+  // Whether this caller may use paid, externally-egressing search providers
+  // (Brave). SearXNG serves every tier; Brave is granted only to non-ZDR
+  // tenants on the Balance and Genius tiers.
+  //
+  // Deliberately a bool rather than a tier name. A tier string would put
+  // Verevon's product taxonomy inside the Ingestion Plane, and every tier
+  // added later would then default to whatever the edge's string match does
+  // with an unknown value — a silent security default set by a typo. A bool
+  // makes the grant explicit and the proto3 default (false) the fail-closed
+  // direction, so a caller that has not been taught about tiering yet gets
+  // free providers only.
+  bool allow_paid_providers = 7;
 }
 
 // WebSearchResult — single result row.

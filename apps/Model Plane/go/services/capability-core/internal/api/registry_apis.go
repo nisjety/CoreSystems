@@ -1215,7 +1215,15 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer rows.Close()
-		var servers []mcpServerRow
+		// Initialized, not `var servers []mcpServerRow`: a nil slice marshals as
+		// `null`, and an org with no MCP servers yet therefore answered
+		// `{"servers": null}`. model-gateway decodes this into
+		// `#[serde(default)] Vec<CatalogMcpServer>`, and serde's `default` covers
+		// a MISSING key, never an explicit null — so hydration failed with
+		// "error decoding response body" and every /api/v1/mcp/servers call
+		// returned 503 "capability registry is unavailable". The first server
+		// could never be connected, because having none was the failure.
+		servers := []mcpServerRow{}
 		for rows.Next() {
 			var s mcpServerRow
 			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.EndpointURL,
@@ -1661,7 +1669,20 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer rows.Close()
-		var policies []safetyPolicyRow
+		// Initialized, not `var policies []safetyPolicyRow`: a nil slice
+		// marshals as JSON `null`, and an org with no safety policies yet
+		// (every org, until one is explicitly configured — confirmed zero
+		// rows in `safety_policies` for this deployment) answered
+		// `{"policies": null}`. model-gateway's PII-redaction lookup
+		// (moderation.rs, F-14 chat-parity audit follow-up) deserializes this
+		// response into a non-optional `Vec<SafetyPolicy>` and a bare `null`
+		// fails that parse outright — "malformed", not "empty" — so the
+		// lookup fell back to fail-closed redaction on every single call,
+		// masking the real answer ("this org has no PII policy configured")
+		// behind a decode error. Same bug class as the MCP-registry null
+		// list this package already fixed once (see registry_apis.go's MCP
+		// servers handler) — a nil Go slice must never reach an API response.
+		policies := []safetyPolicyRow{}
 		for rows.Next() {
 			var p safetyPolicyRow
 			if err := rows.Scan(&p.ID, &p.OrgID, &p.Name, &p.Description, &p.Kind,

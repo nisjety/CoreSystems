@@ -61,6 +61,7 @@ export type ChatThreadHistoryInput = {
 }
 
 export type ChatThreadTranscriptTurn = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   attachments?: unknown[]
   artifacts?: unknown[]
   citations?: unknown[]

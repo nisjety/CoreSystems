@@ -37,9 +37,27 @@
 //!    *about* `TikTok` legitimately wants `tiktok.com`.
 //! 4. **An implied-domain bonus**: a Norwegian statistics question implies
 //!    `ssb.no`, a weather question implies `met.no` / `yr.no`.
+//! 5. **A Norwegian-authority bonus** for the small, named list of national
+//!    primary sources in [`NORWEGIAN_AUTHORITY_DOMAINS`]. Unlike (4) this is not
+//!    conditioned on the question's topic, so it is the weaker statement of the
+//!    two and the two never add — see [`assess_with_signals`].
+//! 6. **Engine agreement**: how many independent search engines returned this
+//!    same URL for this same query. Present only once Quarry populates
+//!    `SearchResult::engines`; until then it is a no-op by construction.
 //!
 //! Deliberately NOT here: an invented "ML score". Every number below is either
-//! Quarry's, a term-overlap ratio, or a constant with a written justification.
+//! Quarry's, a term-overlap ratio, a count of engines that actually returned the
+//! hit, or a constant with a written justification.
+//!
+//! ## Bonuses reorder; they never admit
+//!
+//! Signals (4), (5) and (6) are *preferences*. They say a hit is a better
+//! instance of something already worth reading — they do not say it is worth
+//! reading. So they are added only to a hit that already clears
+//! [`keep_threshold`] on its own case; see [`assess_with_signals`]. Sizing each
+//! one below the bar is not enough and never was: two of them at their
+//! configured ceilings sum past it, so "the bonus is smaller than the threshold"
+//! is a property of today's constants rather than of this code.
 //!
 //! ## Honesty contract
 //!
@@ -67,6 +85,18 @@ use std::sync::OnceLock;
 /// happened to excerpt. 0.7 rather than something harsher because provider
 /// snippets are usually query-focused, so snippet-only matches are mostly real.
 const SNIPPET_ONLY_CREDIT: f32 = 0.7;
+
+/// Credit for a question term found only in a reranker HIGHLIGHT.
+///
+/// A highlight is not another snippet: it is the passage the reranker picked out
+/// *because it matched this query*, so a term appearing there is evidence the
+/// page addresses the question rather than evidence the provider's excerpt
+/// happened to contain the word. That puts it above [`SNIPPET_ONLY_CREDIT`] and
+/// below a title match, which still says what the whole page is about. Highlights
+/// are absent on every provider that does not rerank, and an empty highlight list
+/// leaves this constant unused — scoring is then byte-identical to what it was
+/// before highlights were forwarded.
+const HIGHLIGHT_ONLY_CREDIT: f32 = 0.85;
 
 /// Weight on Quarry's reranker score when it supplied one; lexical overlap takes
 /// the remainder.
@@ -104,12 +134,69 @@ const PROFILE_PATH_PENALTY: f32 = 0.15;
 /// Bonus for a host the question's own topic implies.
 ///
 /// 0.25 lifts an authoritative hit over an equally-worded generic one, which is
-/// the ordering we want. It cannot *admit* an off-topic authority: 0.0 overlap
-/// plus 0.25 is still below [`DEFAULT_KEEP_THRESHOLD`], which is exactly why the
-/// live FHI-paper-for-a-weather-question case stays filtered.
+/// the ordering we want. It cannot *admit* an off-topic authority — and not
+/// because of its size: [`assess_with_signals`] adds it only to a hit that
+/// already clears [`DEFAULT_KEEP_THRESHOLD`] without it, which is why the live
+/// FHI-paper-for-a-weather-question case stays filtered at any value this
+/// constant is ever given.
 const DEFAULT_IMPLIED_DOMAIN_BONUS: f32 = 0.25;
 const MIN_IMPLIED_DOMAIN_BONUS: f32 = 0.0;
 const MAX_IMPLIED_DOMAIN_BONUS: f32 = 0.5;
+
+/// Bonus for a hit on one of [`NORWEGIAN_AUTHORITY_DOMAINS`].
+///
+/// **On its own this bonus can never admit anything**, and that is enforced by
+/// [`assess_with_signals`] rather than by this number: a page that shares not
+/// one word with the question never receives the bonus in the first place. The
+/// arithmetic used to be the only guard here, and it was not one — 0.15 plus a
+/// saturated engine-agreement bonus reached [`DEFAULT_KEEP_THRESHOLD`] exactly,
+/// which admitted an irrelevant hit on provenance and popularity alone.
+///
+/// 0.15 is then sized against the two numbers it has to sit between, which is an
+/// ordering question and no longer a safety one:
+///
+/// * A single question term found in a hit's *title* is worth `1/terms` of the
+///   lexical score — 0.33 for a three-term question. So a page that shares even
+///   one word of a short question already out-scores a Norwegian authority page
+///   that shares none, which is the ordering that keeps relevance ahead of
+///   provenance.
+/// * It is below [`DEFAULT_IMPLIED_DOMAIN_BONUS`] (0.25) because that one is the
+///   strictly stronger statement — "this host owns *this question's* subject"
+///   rather than "this host is a national primary source" — and below
+///   [`DEFAULT_SOFT_HOST_PENALTY`] (0.35), so a `.no` authority label can never
+///   cancel out the demotion a social hit takes.
+///
+/// It does not stack with the implied-domain bonus; see [`assess_with_signals`].
+const DEFAULT_NORWEGIAN_AUTHORITY_BONUS: f32 = 0.15;
+const MIN_NORWEGIAN_AUTHORITY_BONUS: f32 = 0.0;
+/// Capped at the implied-domain *default* rather than its ceiling: this signal is
+/// the weaker of the two claims, so no configuration should let it out-weigh a
+/// host the question's own topic implies.
+const MAX_NORWEGIAN_AUTHORITY_BONUS: f32 = 0.25;
+
+/// Bonus per independent search engine beyond the first that returned this same
+/// URL for this same query.
+///
+/// 0.05 per extra engine, and [`MAX_ENGINE_AGREEMENT_BONUS`] total. This is an
+/// observed fact, not a score: the edge federates several engines and reports
+/// which of them produced each hit, so "three engines independently surfaced this
+/// page for this query" is evidence of the same kind as Quarry's reranker score —
+/// something that happened, against this query — rather than a preference of
+/// ours. It is small because engine overlap is also a popularity effect: the four
+/// engines share crawl priors, so agreement is weaker evidence than a term match
+/// and much weaker than the reranker having read the page.
+const DEFAULT_ENGINE_AGREEMENT_CREDIT: f32 = 0.05;
+const MIN_ENGINE_AGREEMENT_CREDIT: f32 = 0.0;
+const MAX_ENGINE_AGREEMENT_CREDIT: f32 = 0.15;
+
+/// Ceiling on the total engine-agreement bonus, reached at four engines.
+///
+/// Agreement saturates: the difference between one engine and three is
+/// informative, the difference between five and eight is which federation the
+/// edge happened to fan out to that day. Capping at 0.15 also keeps this signal
+/// below the 0.25 an implied domain is worth, so a hit can never be carried by
+/// agreement alone past a hit that actually matches the question.
+const MAX_ENGINE_AGREEMENT_BONUS: f32 = 0.15;
 
 /// Score at or above which a hit may be read and cited.
 ///
@@ -203,6 +290,40 @@ const DEFAULT_SOFT_HOSTS: &[&str] = &[
 /// Path prefixes that identify a personal profile rather than a document.
 #[rustfmt::skip]
 const PROFILE_PATH_MARKERS: &[&str] = &["/in/", "/pub/", "/profile/", "/user/", "/users/", "/@"];
+
+/// Norwegian national primary sources, which this tenant prefers as evidence.
+///
+/// **This list is an editorial judgement, not a fact about the web.** Unlike
+/// [`IMPLIED_DOMAINS`], where each row encodes an ownership fact ("population
+/// statistics for Norway live at SSB"), membership here says only "for the
+/// Norwegian tenant this product serves, a page from this publisher is better
+/// evidence, at equal relevance, than a page from an arbitrary one". It was
+/// approved as a product decision and it is written down here, in one named
+/// place, precisely so that it can be argued with: **to change the policy, add
+/// or remove a line below** — there is no environment override, because an
+/// editorial judgement that differs per deployment is not one anybody can audit.
+///
+/// It is additive only. Nothing is ever excluded for being absent from this
+/// list, the bonus is [`DEFAULT_NORWEGIAN_AUTHORITY_BONUS`] and by construction
+/// too small to admit a hit that does not match the question, and any domain on
+/// earth can still out-score every entry here on term coverage alone.
+///
+/// Matching is on the registrable domain (see [`host_matches`]), so
+/// `data.ssb.no` counts and `ssb.no.evil.com` — a different registration that
+/// merely spells one of these into its own name — does not.
+#[rustfmt::skip]
+const NORWEGIAN_AUTHORITY_DOMAINS: &[&str] = &[
+    "ssb.no",           // Statistisk sentralbyrå — official statistics.
+    "snl.no",           // Store norske leksikon — the national encyclopaedia.
+    "lovdata.no",       // Statutes and regulations as enacted.
+    "regjeringen.no",   // Government and ministries.
+    "norges-bank.no",   // The central bank.
+    "nrk.no",           // The public broadcaster.
+    "brreg.no",         // Brønnøysundregistrene — company and entity registers.
+    "altinn.no",        // The public reporting portal.
+    "skatteetaten.no",  // The tax administration.
+    "mattilsynet.no",   // The food safety authority.
+];
 
 /// Topic trigger → hosts that topic implies, as authoritative Norwegian and EU
 /// primary sources.
@@ -398,6 +519,22 @@ cached_ratio!(
     MIN_IMPLIED_DOMAIN_BONUS,
     MAX_IMPLIED_DOMAIN_BONUS,
     "Bonus added for a host the question's topic implies."
+);
+cached_ratio!(
+    norwegian_authority_bonus,
+    "VEREVON_RELEVANCE_NORWEGIAN_AUTHORITY_BONUS",
+    DEFAULT_NORWEGIAN_AUTHORITY_BONUS,
+    MIN_NORWEGIAN_AUTHORITY_BONUS,
+    MAX_NORWEGIAN_AUTHORITY_BONUS,
+    "Bonus added for a Norwegian national primary source. The *size* is tunable; the LIST is not — see `NORWEGIAN_AUTHORITY_DOMAINS`."
+);
+cached_ratio!(
+    engine_agreement_credit,
+    "VEREVON_RELEVANCE_ENGINE_AGREEMENT_CREDIT",
+    DEFAULT_ENGINE_AGREEMENT_CREDIT,
+    MIN_ENGINE_AGREEMENT_CREDIT,
+    MAX_ENGINE_AGREEMENT_CREDIT,
+    "Bonus per independent engine beyond the first that returned the same URL for the same query."
 );
 
 /// How many top-scored hits survive when the gate would drop every one.
@@ -632,8 +769,20 @@ pub struct Verdict {
     pub provider: Option<f32>,
     /// Total penalty applied for the host class (0.0 when none applied).
     pub demotion: f32,
-    /// Bonus applied for an implied domain (0.0 when none applied).
+    /// Bonus **earned** for the host's standing — an implied domain, or a
+    /// Norwegian authority, whichever was larger (0.0 when neither applied). The
+    /// two do not add; see [`assess_with_signals`].
+    ///
+    /// Earned, not necessarily counted: it enters `score` only when the hit
+    /// already clears [`keep_threshold`] without it. Reporting what the host
+    /// earned either way is what lets a caller say "this IS a national primary
+    /// source, and it still could not answer the question".
     pub bonus: f32,
+    /// Bonus **earned** for independent engines agreeing on this URL (0.0 when
+    /// the edge supplied no engine list, which is every deployment until Quarry
+    /// ships the field). Counted into `score` under the same condition as
+    /// [`Verdict::bonus`].
+    pub agreement: f32,
     /// True when the host is in the soft class AND the question did not name it.
     pub soft_host: bool,
     /// True when the question had no content terms, so relevance was not judged.
@@ -642,6 +791,10 @@ pub struct Verdict {
 
 impl Verdict {
     /// True when this candidate may be read and cited.
+    ///
+    /// Reads `score`, which for a hit below the bar is exactly its own case —
+    /// [`assess_with_signals`] withholds every bonus from such a hit, so this
+    /// test can never be passed on provenance or popularity.
     #[must_use]
     pub fn kept(&self) -> bool {
         self.score >= keep_threshold()
@@ -677,20 +830,76 @@ fn path_of(url: &str) -> String {
         .map_or_else(|| "/".to_owned(), |at| without_scheme[at..].to_lowercase())
 }
 
-/// True when `host` is the soft-class host `entry`, or a subdomain of it.
+/// True when `host` is the registrable domain `entry`, or a subdomain of it.
+///
+/// The dot boundary is what separates a real subdomain from a lookalike:
+/// `data.ssb.no` ends with `.ssb.no` and matches, while `ssb.no.evil.com` — a
+/// separate registration that merely spells `ssb.no` into its own name — does
+/// not, because the match is anchored at the END of the host.
 fn host_matches(host: &str, entry: &str) -> bool {
     host == entry || host.ends_with(&format!(".{entry}"))
 }
 
+/// True when `url` is served by one of [`NORWEGIAN_AUTHORITY_DOMAINS`].
+///
+/// Public because a second consumer now gates on exactly this membership:
+/// [`crate::grounding`]'s authoritative short-circuit, which may end a search
+/// early when a national primary source has already answered the question in
+/// structured form. That decision has to be made against the SAME list and the
+/// same registrable-domain rule as the bonus below — a copied list drifts, and a
+/// looser match (`contains`) would let `ssb.no.evil.com` end a search.
+///
+/// The membership alone is never sufficient anywhere: here it is one of several
+/// conditions on a bonus that cannot admit a hit, and there it is one of four
+/// conditions that must all hold.
+#[must_use]
+pub fn is_norwegian_authority(url: &str) -> bool {
+    let host = host_of(url);
+    !host.is_empty()
+        && NORWEGIAN_AUTHORITY_DOMAINS
+            .iter()
+            .any(|entry| host_matches(&host, entry))
+}
+
+/// Total bonus for independent engines agreeing on this URL.
+///
+/// Counts DISTINCT engine names, case-folded: the edge fans out per sub-provider
+/// and a federation that lists the same engine twice has not corroborated
+/// anything. Empty (every deployment until Quarry populates the field) is 0.0, so
+/// the whole signal is inert rather than defaulted to something.
+fn engine_agreement(engines: &[String]) -> f32 {
+    let mut distinct: BTreeSet<String> = BTreeSet::new();
+    for engine in engines {
+        let name = engine.trim().to_lowercase();
+        if !name.is_empty() {
+            distinct.insert(name);
+        }
+    }
+    // reason: engine counts are single digits; usize→f32 loses no precision
+    #[allow(clippy::cast_precision_loss)]
+    let extra = distinct.len().saturating_sub(1) as f32;
+    (extra * engine_agreement_credit()).min(MAX_ENGINE_AGREEMENT_BONUS)
+}
+
 /// Lexical overlap: the share of the question's content terms present in the
-/// hit's title + snippet, with title matches worth more than snippet-only ones.
+/// hit's title + highlights + snippet, with title matches worth most and
+/// snippet-only ones worth least.
 ///
 /// Returns `None` when the question has no content terms to score against.
-fn lexical_overlap(question: &Question, title: &str, snippet: &str) -> Option<f32> {
+fn lexical_overlap(
+    question: &Question,
+    title: &str,
+    snippet: &str,
+    highlights: &[String],
+) -> Option<f32> {
     if question.terms.is_empty() {
         return None;
     }
     let title_stems = content_stems(title);
+    let highlight_stems: Vec<String> = highlights
+        .iter()
+        .flat_map(|highlight| content_stems(highlight))
+        .collect();
     let snippet_stems = content_stems(snippet);
 
     let mut credit = 0.0_f32;
@@ -700,6 +909,11 @@ fn lexical_overlap(question: &Question, title: &str, snippet: &str) -> Option<f3
             .any(|candidate| stems_match(term, candidate))
         {
             credit += 1.0;
+        } else if highlight_stems
+            .iter()
+            .any(|candidate| stems_match(term, candidate))
+        {
+            credit += HIGHLIGHT_ONLY_CREDIT;
         } else if snippet_stems
             .iter()
             .any(|candidate| stems_match(term, candidate))
@@ -713,25 +927,100 @@ fn lexical_overlap(question: &Question, title: &str, snippet: &str) -> Option<f3
     Some((credit / denominator).clamp(0.0, 1.0))
 }
 
-/// Score one candidate against one question.
+/// Score one candidate against one question, with no reranker highlights.
+///
+/// See [`assess_with_highlights`] for the formula; this is that function with an
+/// empty highlight list. Kept as its own entry point because [`Candidate`] is a
+/// struct literal at every call site: threading highlights as a field would make
+/// every caller — including ones with no highlights to give — restate them.
+#[must_use]
+pub fn assess(question: &Question, candidate: &Candidate<'_>) -> Verdict {
+    assess_with_highlights(question, candidate, &[])
+}
+
+/// Score one candidate against one question, counting the reranker's matched
+/// passages as evidence.
 ///
 /// The formula, in full:
 ///
 /// ```text
-/// lexical  = share of the question's content terms in title+snippet
-///            (title term = 1.0, snippet-only term = SNIPPET_ONLY_CREDIT)
+/// lexical  = share of the question's content terms in title+highlights+snippet
+///            (title term = 1.0, highlight-only term = HIGHLIGHT_ONLY_CREDIT,
+///             snippet-only term = SNIPPET_ONLY_CREDIT)
 /// base     = provider.is_some() ? w*provider + (1-w)*lexical : lexical
-/// score    = clamp(base + implied_domain_bonus - host_penalty, 0.0, 1.0)
+/// merit    = base - host_penalty
+/// score    = clamp(merit + (merit >= keep_threshold() ? implied_domain_bonus
+///                                                     : 0.0), 0.0, 1.0)
 /// ```
+///
+/// `highlights` are Quarry's `highlights` for the hit — the passages its
+/// reranker matched against this same query. They are empty for every provider
+/// that does not rerank, and an empty list scores exactly as [`assess`] does.
+///
+/// See [`assess_with_signals`] for the engine-agreement signal; this is that
+/// function with an empty engine list.
 #[must_use]
-pub fn assess(question: &Question, candidate: &Candidate<'_>) -> Verdict {
+pub fn assess_with_highlights(
+    question: &Question,
+    candidate: &Candidate<'_>,
+    highlights: &[String],
+) -> Verdict {
+    assess_with_signals(question, candidate, highlights, &[])
+}
+
+/// Score one candidate with every signal the edge can supply, including which
+/// independent engines returned it.
+///
+/// The formula, in full:
+///
+/// ```text
+/// lexical   = as in `assess_with_highlights`
+/// base      = provider.is_some() ? w*provider + (1-w)*lexical : lexical
+/// merit     = base - host_penalty            // the hit's own case, no standing
+/// bonus     = max(implied_domain_bonus, norwegian_authority_bonus)   [see below]
+/// agreement = min(MAX_ENGINE_AGREEMENT_BONUS,
+///                 credit * (distinct engines - 1))
+/// standing  = merit >= keep_threshold() ? bonus + agreement : 0.0   [see below]
+/// score     = clamp(merit + standing, 0.0, 1.0)
+/// ```
+///
+/// **Why `standing` is gated on `merit` and not merely kept small.** A bonus is
+/// a soft preference: it reorders comparable results, and must never by itself
+/// carry an irrelevant result past the bar. Gating it on the hit having already
+/// cleared [`keep_threshold`] on its own case makes that structurally true —
+/// `score >= threshold` iff `merit >= threshold`, for every value these
+/// constants can take, because `standing` is non-negative and is zero in exactly
+/// the case where it could have changed the answer. See the block comment in the
+/// body for the two alternatives and why they were rejected.
+///
+/// **Why the two host bonuses take a max rather than a sum.** They are two
+/// statements about the same fact — that this publisher is an authority — at
+/// different strengths. "`ssb.no` owns statistics, and this is a statistics
+/// question" already contains "`ssb.no` is a Norwegian primary source"; adding
+/// both would count one piece of evidence twice, and would push a host that is
+/// on both lists past [`DEFAULT_KEEP_THRESHOLD`] on provenance alone. Taking the
+/// larger keeps the ceiling on host standing exactly where the implied-domain
+/// bonus already set it, which is what preserves the property that no domain
+/// bonus can admit a page that cannot answer the question.
+///
+/// `engines` is Quarry's `SearchResult::engines` — the engines the edge's
+/// federation actually received this URL from for this query. It is empty on
+/// every deployment until the Ingestion Plane populates the field, and an empty
+/// list makes this function byte-identical to [`assess_with_highlights`].
+#[must_use]
+pub fn assess_with_signals(
+    question: &Question,
+    candidate: &Candidate<'_>,
+    highlights: &[String],
+    engines: &[String],
+) -> Verdict {
     let host = host_of(candidate.url);
     let provider = candidate
         .provider_score
         .filter(|score| score.is_finite())
         .map(|score| score.clamp(0.0, 1.0));
 
-    let lexical = lexical_overlap(question, candidate.title, candidate.snippet);
+    let lexical = lexical_overlap(question, candidate.title, candidate.snippet, highlights);
     let unjudged = lexical.is_none();
     let lexical_value = lexical.unwrap_or(UNJUDGEABLE_SCORE);
 
@@ -767,7 +1056,7 @@ pub fn assess(question: &Question, candidate: &Candidate<'_>) -> Verdict {
         }
     }
 
-    let bonus = if question
+    let implied = if question
         .implied_hosts
         .iter()
         .any(|implied| host_matches(&host, implied))
@@ -776,13 +1065,60 @@ pub fn assess(question: &Question, candidate: &Candidate<'_>) -> Verdict {
     } else {
         0.0
     };
+    let authority = if is_norwegian_authority(candidate.url) {
+        norwegian_authority_bonus()
+    } else {
+        0.0
+    };
+    let bonus = implied.max(authority);
+    let agreement = engine_agreement(engines);
+
+    // The hit's own case for being read: what the question's words and Quarry's
+    // reranker say about it, less what its host class costs it. Provenance and
+    // popularity are deliberately absent.
+    let merit = base - demotion;
+
+    // A hit that cannot answer the question gets NO bonus at all, so no
+    // combination of them can carry it past the bar. The authority bonus was
+    // specified as a soft preference that reorders comparable results, and the
+    // previous `base + bonus + agreement` broke that: on a Norwegian authority
+    // host that four engines agreed on, 0.15 + 0.15 reached the 0.30 bar exactly
+    // with a base of zero, admitting a page on provenance and popularity alone.
+    //
+    // Three fixes were considered:
+    //
+    // (a) a minimum base before any bonus applies — this, with the minimum being
+    //     the keep threshold itself. Any lower floor would not hold: a hit at the
+    //     floor plus the bonuses still clears the bar.
+    // (b) capping the total bonus below the margin between the lowest passing
+    //     base and the threshold. Unimplementable: the lowest passing base IS the
+    //     threshold, so that margin is zero and no positive cap satisfies it.
+    //     Every version of (b) that looks workable is really "smaller than the
+    //     bar", which is what just failed.
+    // (c) bonuses for ordering only, never for the keep decision. The cleanest
+    //     statement, but this module has one number and callers use it for both:
+    //     `deep_research` stores `score` as the source's displayed relevance and
+    //     sorts read order by it, and `filtered_reason` prints it against the
+    //     bar. A second ordering score would leave those callers printing "0.40"
+    //     beside "relevance 0.00, below the 0.30 required".
+    //
+    // So: (a) in mechanism, (c) in meaning. Above the bar, where the keep
+    // decision is already settled, the bonuses do exactly the reordering they
+    // were specified for; below it they are reported (see `Verdict::bonus`) and
+    // not counted.
+    let standing = if merit >= keep_threshold() {
+        bonus + agreement
+    } else {
+        0.0
+    };
 
     Verdict {
-        score: (base + bonus - demotion).clamp(0.0, 1.0),
+        score: (merit + standing).clamp(0.0, 1.0),
         lexical: lexical_value,
         provider,
         demotion,
         bonus,
+        agreement,
         soft_host,
         unjudged,
     }
@@ -1278,6 +1614,515 @@ mod tests {
         assert!(over.score <= 1.0);
     }
 
+    // --- the reranker's highlights ----------------------------------------
+
+    /// The point of forwarding highlights: two hits whose title and snippet are
+    /// equally uninformative are NOT equally good if one of them has a reranker
+    /// passage that actually contains the question's terms.
+    #[test]
+    fn a_highlight_carrying_the_question_terms_outscores_one_that_does_not() {
+        let question = Question::parse("havvind utbyggingstakt i Norge");
+        let page = candidate(
+            "https://www.example.com/rapport",
+            "Rapport",
+            "Les mer om saken.",
+        );
+        let without = assess(&question, &page);
+        let on_topic = assess_with_highlights(
+            &question,
+            &page,
+            &["Utbyggingstakten for havvind i Norge øker".to_owned()],
+        );
+        let off_topic = assess_with_highlights(
+            &question,
+            &page,
+            &["Abonner på nyhetsbrevet vårt".to_owned()],
+        );
+        assert!(
+            on_topic.score > without.score,
+            "on-topic {:.2} vs none {:.2}",
+            on_topic.score,
+            without.score
+        );
+        assert!(
+            (off_topic.score - without.score).abs() < f32::EPSILON,
+            "an off-topic highlight is not evidence and must change nothing"
+        );
+    }
+
+    /// Absent highlights are the normal case (no reranking, or a provider that
+    /// does not supply them), so the no-highlight path must score exactly as it
+    /// did before highlights existed — otherwise forwarding them silently
+    /// re-tunes every deployment that has none.
+    #[test]
+    fn an_empty_highlight_list_scores_identically_to_assess() {
+        let question = Question::parse("været i Bergen");
+        let hit = candidate(
+            "https://www.yr.no/nb/v%C3%A6rvarsel/Bergen",
+            "Været i Bergen - Yr",
+            "Værvarsel for Bergen.",
+        );
+        assert_eq!(
+            assess(&question, &hit),
+            assess_with_highlights(&question, &hit, &[])
+        );
+    }
+
+    /// A highlight is worth less than the title and more than the snippet, and
+    /// the ordering is what the constants are FOR — a highlight that outscored a
+    /// title match would let a matched passage stand in for what the page is
+    /// about.
+    #[test]
+    fn highlight_credit_sits_between_title_and_snippet() {
+        let question = Question::parse("havvind");
+        let url = "https://www.example.com/a";
+        let in_title = assess(&question, &candidate(url, "Havvind", "Les mer."));
+        let in_highlight = assess_with_highlights(
+            &question,
+            &candidate(url, "Rapport", "Les mer."),
+            &["Havvind bygges ut".to_owned()],
+        );
+        let in_snippet = assess(&question, &candidate(url, "Rapport", "Havvind bygges ut."));
+        assert!(in_title.score > in_highlight.score);
+        assert!(in_highlight.score > in_snippet.score);
+    }
+
+    // --- engine agreement -------------------------------------------------
+
+    /// The field does not exist in any shipped Quarry response yet, so the
+    /// signal must be a strict no-op until it does. If this ever drifts, every
+    /// live deployment is silently re-tuned by a signal none of them can supply.
+    #[test]
+    fn an_empty_engine_list_scores_identically_to_the_highlight_path() {
+        let question = Question::parse("været i Bergen");
+        let hit = candidate(
+            "https://www.yr.no/nb/v%C3%A6rvarsel/Bergen",
+            "Været i Bergen - Yr",
+            "Værvarsel for Bergen.",
+        );
+        assert_eq!(
+            assess(&question, &hit),
+            assess_with_signals(&question, &hit, &[], &[])
+        );
+        let highlights = ["Været i Bergen time for time".to_owned()];
+        assert_eq!(
+            assess_with_highlights(&question, &hit, &highlights),
+            assess_with_signals(&question, &hit, &highlights, &[])
+        );
+    }
+
+    /// One engine returning a page is what every hit has; several independent
+    /// engines returning the SAME url for the SAME query is the observed fact
+    /// this signal is made of. It has to move the score, and it has to stop
+    /// moving it at the cap.
+    ///
+    /// The page has to be one that already clears the bar on its own wording,
+    /// because that is the only place agreement is allowed to move anything —
+    /// see `a_hit_that_fails_on_its_own_stays_filtered_with_every_bonus_maxed`.
+    /// Its terms are in the snippet rather than the title so the score has room
+    /// to move without clamping at 1.0.
+    #[test]
+    fn engines_agreeing_raise_the_score_up_to_the_documented_cap() {
+        let question = Question::parse("havvind utbyggingstakt i Norge");
+        let page = candidate(
+            "https://www.example.com/rapport",
+            "Rapport",
+            "Utbyggingstakten for havvind i Norge er økende.",
+        );
+        let engines = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|name| (*name).to_owned()).collect()
+        };
+
+        let alone = assess_with_signals(&question, &page, &[], &engines(&["brave"]));
+        assert_eq!(alone.agreement, 0.0, "one engine corroborates nothing");
+
+        let three = assess_with_signals(&question, &page, &[], &engines(&["brave", "ddg", "sx"]));
+        assert!((three.agreement - 2.0 * engine_agreement_credit()).abs() < f32::EPSILON);
+        assert!(three.score > alone.score);
+
+        let many = assess_with_signals(
+            &question,
+            &page,
+            &[],
+            &engines(&["brave", "ddg", "sx", "mojeek", "marginalia", "startpage"]),
+        );
+        assert_eq!(
+            many.agreement, MAX_ENGINE_AGREEMENT_BONUS,
+            "agreement saturates rather than scaling with the federation size"
+        );
+    }
+
+    /// The same engine listed twice has not corroborated anything — it is one
+    /// federation entry reported twice, which is a fan-out artefact and not
+    /// evidence.
+    #[test]
+    fn engine_agreement_counts_each_engine_once() {
+        assert_eq!(engine_agreement(&[]), 0.0);
+        assert_eq!(
+            engine_agreement(&[
+                "brave".to_owned(),
+                "Brave".to_owned(),
+                "  brave  ".to_owned(),
+                String::new(),
+            ]),
+            0.0
+        );
+    }
+
+    /// Agreement is a tie-breaker between plausible hits, never an admission
+    /// ticket: every engine on earth returning an off-topic page still leaves it
+    /// below the bar, because agreement says the page is popular for the query's
+    /// words, not that it answers the question.
+    #[test]
+    fn engine_agreement_alone_cannot_admit_an_off_topic_hit() {
+        let verdict = assess_with_signals(
+            &Question::parse("hva er været i Oslo i dag"),
+            &candidate(
+                "https://example.com/parfyme",
+                "Min nye parfyme",
+                "Denne dufter godt.",
+            ),
+            &[],
+            &[
+                "brave".to_owned(),
+                "ddg".to_owned(),
+                "sx".to_owned(),
+                "mojeek".to_owned(),
+            ],
+        );
+        assert_eq!(verdict.agreement, MAX_ENGINE_AGREEMENT_BONUS);
+        assert!(!verdict.kept(), "scored {:.2}", verdict.score);
+    }
+
+    // --- the Norwegian authority bonus ------------------------------------
+
+    /// The editorial judgement, doing what it is for: at equal wording a
+    /// national primary source outranks an arbitrary publisher.
+    #[test]
+    fn a_norwegian_authority_outranks_an_equally_worded_ordinary_page() {
+        let question = "regler for pauser i arbeidstiden";
+        let authority = score(
+            question,
+            "https://lovdata.no/dokument/NL/lov/2005-06-17-62",
+            "Pauser",
+            "Regler for pauser i arbeidstiden.",
+        );
+        let ordinary = score(
+            question,
+            "https://enblogg.example/pauser",
+            "Pauser",
+            "Regler for pauser i arbeidstiden.",
+        );
+        assert!(
+            authority > ordinary,
+            "lovdata {authority:.2} must beat a blog {ordinary:.2} at equal wording"
+        );
+        assert!(
+            authority < 1.0,
+            "the assertion must not be a clamp artefact"
+        );
+    }
+
+    /// The match is on the REGISTRABLE domain, which is the difference between a
+    /// bonus and an exploit. `data.ssb.no` is SSB; `ssb.no.evil.com` is a
+    /// different registration that merely spells SSB into its own name, and a
+    /// substring or prefix test would hand it the bonus of a national statistics
+    /// office.
+    #[test]
+    fn the_authority_bonus_follows_the_registrable_domain_not_the_spelling() {
+        // A question with no implied domain, so `bonus` here is the authority
+        // bonus and nothing else.
+        let question = Question::parse("når åpner butikken i Bodø");
+        assert!(
+            question.implied_hosts.is_empty(),
+            "this question must imply no host, or the assertion below is testing the wrong bonus"
+        );
+        let bonus_for = |url: &str| {
+            assess(
+                &question,
+                &candidate(url, "Åpningstider", "Butikken i Bodø."),
+            )
+            .bonus
+        };
+        assert_eq!(
+            bonus_for("https://data.ssb.no/api/v0"),
+            norwegian_authority_bonus()
+        );
+        assert_eq!(
+            bonus_for("https://www.ssb.no/statbank"),
+            norwegian_authority_bonus()
+        );
+        assert_eq!(
+            bonus_for("https://ssb.no.evil.com/phish"),
+            0.0,
+            "a lookalike registration is not SSB"
+        );
+        assert_eq!(bonus_for("https://notssb.no/x"), 0.0);
+        assert_eq!(bonus_for("https://enblogg.example/x"), 0.0);
+    }
+
+    /// A bonus, never a filter. The list cannot admit a page that does not
+    /// answer the question — 0.15 on top of no overlap at all is still under the
+    /// 0.30 bar — which is the property that keeps it an ordering preference
+    /// rather than a whitelist.
+    #[test]
+    fn the_authority_bonus_cannot_admit_an_irrelevant_page() {
+        let verdict = assess(
+            &Question::parse("hva er været i Oslo i dag"),
+            &candidate(
+                "https://www.nrk.no/kultur/anmeldelse-av-ny-roman-1.16",
+                "Anmeldelse av ny roman",
+                "Terningkast fem til høstens debutant.",
+            ),
+        );
+        assert!(verdict.bonus > 0.0, "nrk.no is on the list");
+        assert!(
+            !verdict.kept(),
+            "but it cannot answer a weather question, scored {:.2}",
+            verdict.score
+        );
+        assert!(
+            norwegian_authority_bonus() < keep_threshold(),
+            "the bonus must be smaller than the bar it is not allowed to clear on its own"
+        );
+    }
+
+    /// Nothing is ever excluded: an ordinary domain that actually answers the
+    /// question beats an authority that does not. Relevance stays ahead of
+    /// provenance, which is the only way a soft preference is honest.
+    #[test]
+    fn an_ordinary_domain_that_answers_the_question_beats_an_authority_that_does_not() {
+        let question = "konsumprisindeksen i Norge 2026";
+        let ordinary = score(
+            question,
+            "https://enblogg.example/kpi-2026",
+            "Konsumprisindeksen i Norge 2026",
+            "Tallene for konsumprisindeksen i Norge i 2026.",
+        );
+        let authority = score(
+            question,
+            "https://www.nrk.no/sport/handball-1.17",
+            "Håndball",
+            "Oppgjøret endte uavgjort.",
+        );
+        assert!(ordinary > authority, "{ordinary:.2} vs {authority:.2}");
+    }
+
+    /// The two host bonuses are two strengths of the same claim, so they take a
+    /// MAX and not a sum. Summing them would put `ssb.no` at 0.40 on provenance
+    /// alone — past the 0.30 bar — and an off-topic SSB page would be admitted
+    /// by the very arithmetic that was written to keep it out.
+    #[test]
+    fn the_implied_domain_and_authority_bonuses_do_not_stack() {
+        let verdict = assess(
+            &Question::parse("konsumprisindeksen i Norge 2026"),
+            &candidate(
+                "https://www.ssb.no/kultur-og-fritid/idrett-og-friluftsliv",
+                "Idrett og friluftsliv",
+                "Deltakelse i organisert idrett.",
+            ),
+        );
+        assert!(
+            norwegian_authority_bonus() > 0.0 && implied_domain_bonus() > 0.0,
+            "both signals must be live, or this test proves nothing"
+        );
+        assert_eq!(
+            verdict.bonus,
+            implied_domain_bonus(),
+            "the larger claim stands alone; the two are not added"
+        );
+        assert!(
+            verdict.bonus < implied_domain_bonus() + norwegian_authority_bonus(),
+            "a sum is exactly what must not happen here"
+        );
+        assert!(!verdict.kept(), "and the off-topic SSB page stays filtered");
+    }
+
+    // --- bonuses reorder, they never admit --------------------------------
+
+    /// The property the bonuses were specified with: a soft preference reorders
+    /// comparable results and must NEVER by itself carry an irrelevant result
+    /// past the bar. This is the case that broke it — the Norwegian-authority
+    /// bonus and the engine-agreement bonus summed to the keep threshold exactly,
+    /// so a page whose own wording failed was kept on provenance and popularity.
+    ///
+    /// Both bonuses are at their maximum here: the host is on the authority list
+    /// AND is what the question's topic implies (so it earns the larger of the
+    /// two, which is the most any host can earn), and six independent engines
+    /// saturate agreement. The hit is scored exactly as the same wording on an
+    /// ordinary host with no engines at all — that equality, not the size of any
+    /// constant, is what this test pins.
+    #[test]
+    fn a_hit_that_fails_on_its_own_stays_filtered_with_every_bonus_at_its_maximum() {
+        let question = Question::parse("konsumprisindeksen i Norge 2026");
+        // One term of three, in the snippet only: below the bar, but not zero —
+        // a hit scoring zero would pass this test even if the bonuses were added.
+        let title = "Idrett og friluftsliv";
+        let snippet = "Deltakelse i organisert idrett i Norge.";
+        let engines: Vec<String> = ["brave", "ddg", "sx", "mojeek", "marginalia", "startpage"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+
+        let bare = assess(
+            &question,
+            &candidate("https://enblogg.example/idrett", title, snippet),
+        );
+        let maxed = assess_with_signals(
+            &question,
+            &candidate("https://www.ssb.no/kultur-og-fritid/idrett", title, snippet),
+            &[],
+            &engines,
+        );
+
+        assert!(
+            bare.score > 0.0 && !bare.kept(),
+            "the premise: the wording alone fails the bar, scored {:.2}",
+            bare.score
+        );
+        assert_eq!(
+            maxed.bonus,
+            implied_domain_bonus(),
+            "ssb.no is both implied and an authority, so it earns the larger claim"
+        );
+        assert_eq!(
+            maxed.agreement, MAX_ENGINE_AGREEMENT_BONUS,
+            "six engines saturate agreement"
+        );
+        assert!(
+            !maxed.kept(),
+            "admitted at {:.2} on standing alone",
+            maxed.score
+        );
+        assert_eq!(
+            maxed.score, bare.score,
+            "a bonus may reorder comparable results; it may not change what a hit is worth when it is not comparable"
+        );
+
+        // This is the tripwire, and it is what makes the assertions above mean
+        // something: the bonuses this hit EARNED are together enough to have
+        // carried it past the bar, so the test is exercising the failure and not
+        // a case that today's constants happen to make safe. If it ever fires,
+        // someone shrank a bonus and this scenario stopped being the dangerous
+        // one — replace it with a stronger case. It is never a licence to let
+        // standing back into the keep decision.
+        assert!(
+            bare.score + maxed.bonus + maxed.agreement >= keep_threshold(),
+            "this hit must be one the old additive score would have admitted"
+        );
+    }
+
+    /// The same property swept over every host class and engine count the code
+    /// can produce, so it is pinned as a property rather than as one example.
+    /// Nothing here depends on what the bonus constants are set to: raising any
+    /// of them cannot break this test, which is the point — the containment is
+    /// structural, in `assess_with_signals`, not arithmetic.
+    ///
+    /// The lookalike host is in the sweep because the anti-spoofing rule is part
+    /// of the same guarantee: the authority match is on the registrable domain,
+    /// so `data.ssb.no` is SSB and `ssb.no.evil.com` is not, at any engine count.
+    #[test]
+    fn no_host_or_engine_combination_can_lift_a_failing_hit_past_the_bar() {
+        let question = Question::parse("konsumprisindeksen i Norge 2026");
+        let title = "Idrett og friluftsliv";
+        let snippet = "Deltakelse i organisert idrett i Norge.";
+        let engines = |count: usize| -> Vec<String> {
+            ["brave", "ddg", "sx", "mojeek", "marginalia", "startpage"]
+                .iter()
+                .take(count)
+                .map(|name| (*name).to_owned())
+                .collect()
+        };
+        // (url, the host bonus it earns)
+        let hosts = [
+            ("https://enblogg.example/idrett", 0.0),
+            (
+                "https://www.nrk.no/kultur/idrett",
+                norwegian_authority_bonus(),
+            ),
+            (
+                "https://www.ssb.no/kultur-og-fritid/idrett",
+                implied_domain_bonus(),
+            ),
+            ("https://data.ssb.no/api/v0/idrett", implied_domain_bonus()),
+            ("https://ssb.no.evil.com/idrett", 0.0),
+        ];
+
+        let bare = assess(&question, &candidate(hosts[0].0, title, snippet));
+        assert!(!bare.kept(), "the premise: this wording fails on its own");
+
+        for (url, earned) in hosts {
+            for count in 0..=6 {
+                let verdict = assess_with_signals(
+                    &question,
+                    &candidate(url, title, snippet),
+                    &[],
+                    &engines(count),
+                );
+                assert_eq!(verdict.bonus, earned, "{url} earned the wrong host bonus");
+                assert!(
+                    !verdict.kept(),
+                    "{url} with {count} engines was admitted at {:.2}",
+                    verdict.score
+                );
+                assert_eq!(
+                    verdict.score, bare.score,
+                    "{url} with {count} engines scored above its own case"
+                );
+            }
+        }
+    }
+
+    /// And the bonuses must still do the job they exist for. Withholding them
+    /// below the bar must not have turned them into no-ops: above it, where the
+    /// keep decision is already settled, they still order an authority ahead of
+    /// an equally-worded ordinary page and a corroborated hit ahead of a lone
+    /// one. Wording is snippet-only so nothing clamps at 1.0.
+    #[test]
+    fn above_the_bar_the_bonuses_still_reorder_comparable_results() {
+        let question = Question::parse("konsumprisindeksen i Norge 2026");
+        let scored = |url: &str, engines: &[String]| {
+            assess_with_signals(
+                &question,
+                &candidate(
+                    url,
+                    "Prisvekst",
+                    "Konsumprisindeksen for Norge steg i 2026.",
+                ),
+                &[],
+                engines,
+            )
+        };
+        let three: Vec<String> = ["brave", "ddg", "sx"]
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+
+        let ordinary = scored("https://enblogg.example/kpi", &[]);
+        let authority = scored("https://www.nrk.no/kpi", &[]);
+        let corroborated = scored("https://www.nrk.no/kpi", &three);
+
+        assert!(
+            ordinary.kept(),
+            "the premise: this wording clears the bar, scored {:.2}",
+            ordinary.score
+        );
+        assert!(
+            authority.score > ordinary.score,
+            "authority {:.2} vs ordinary {:.2}",
+            authority.score,
+            ordinary.score
+        );
+        assert!(
+            corroborated.score > authority.score,
+            "agreement must still break the tie above the bar"
+        );
+        assert!(
+            corroborated.score < 1.0,
+            "the assertions must not be clamp artefacts"
+        );
+    }
+
     // --- unjudgeable questions -------------------------------------------
 
     /// With no content terms there is nothing to judge against, so the gate must
@@ -1308,6 +2153,7 @@ mod tests {
             provider: None,
             demotion: 0.0,
             bonus: 0.0,
+            agreement: 0.0,
             soft_host: false,
             unjudged: false,
         };
@@ -1331,6 +2177,7 @@ mod tests {
             provider: None,
             demotion: 0.0,
             bonus: 0.0,
+            agreement: 0.0,
             soft_host: false,
             unjudged: false,
         };

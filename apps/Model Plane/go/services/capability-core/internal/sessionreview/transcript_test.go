@@ -9,6 +9,7 @@ import (
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/capability-core/internal/learning"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type fakeReader struct {
@@ -90,11 +91,25 @@ func TestFetch_WrapsRpcErrors(t *testing.T) {
 		t.Fatalf("expected wrapped conversation error, got %v", err)
 	}
 	src2 := NewSessionCoreTranscriptSource(&fakeReader{
-		convo:     &mpv1.ListConversationResponse{},
+		convo:     &mpv1.ListConversationResponse{Messages: []*mpv1.SessionMessage{{Role: "user", Content: "Review this."}}},
 		skillsErr: errors.New("pg down"),
 	})
 	if _, _, err := src2.Fetch(context.Background(), SessionRef{}); err == nil ||
 		!strings.Contains(err.Error(), "list agent skills") {
 		t.Fatalf("expected wrapped skills error, got %v", err)
+	}
+}
+
+func TestFetch_ConversationOnlyDoesNotReadSkillsOrReviewContent(t *testing.T) {
+	metadata, _ := structpb.NewStruct(map[string]interface{}{"source_scope": "conversation"})
+	src := NewSessionCoreTranscriptSource(&fakeReader{
+		convo: &mpv1.ListConversationResponse{Messages: []*mpv1.SessionMessage{
+			{Role: "user", Content: "Fictional customer and prices", Metadata: metadata},
+		}},
+		skillsErr: errors.New("must not request skills for isolated tasks"),
+	})
+	transcript, skills, err := src.Fetch(context.Background(), SessionRef{})
+	if err != nil || transcript != "" || len(skills) != 0 {
+		t.Fatalf("isolated task was not skipped: transcript=%q skills=%d error=%v", transcript, len(skills), err)
 	}
 }

@@ -168,14 +168,129 @@ Letting a user regenerate an effectful turn after gating it behind a confirm
 dialog is exactly the "HITL approval is decorative" failure this codebase's own
 audit history has already found once.
 
-### 3.5 No model picker
+### 3.5 The model picker — reversed 2026-09-16
 
-The composer exposes an **effort dial** (Quick / Standard / Deep) and nothing
-else. Which model backs each tier is org policy set by the tenant admin, visible
-on hover for transparency. No Norwegian quality manager has an opinion about a
-model ID, and offering one invites a support ticket. This also makes the
-existing pinned Budget/Balance/Genius grouping the *right* shape already — it
-just needs to stop exposing the raw provider catalog underneath.
+> **Superseded.** This section used to read *"No model picker."* It said: the
+> composer exposes an effort dial and nothing else, the pinned
+> Budget/Balance/Genius grouping "just needs to stop exposing the raw provider
+> catalog underneath". The product went the other way, deliberately, and the
+> catalog is in active use. The original text is kept below the decision,
+> because the reasoning it carried is still half-right and the half that is
+> wrong is worth being able to see.
+
+**Decision: the composer keeps a model picker. The picker is right and the old
+line was wrong.** It is recorded here as a reversal, not edited away, because
+the reasons the original gave were real and had to be answered rather than
+ignored.
+
+**What the old line got right, and still governs.** The *default* is an intent
+dial, not a model ID. The composer opens on the pinned Verevon modes
+(Budget/Balance/Genius) and the response-mode selector (Raskt svar / Auto / Dyp
+research → the wire's `effort`). A quality manager who never forms an opinion
+about a model never has to. The raw catalog is behind a collapsed
+`<details>` labelled *"Velg modell selv"* — one deliberate click away, never in
+the default path. That much of §3.5 is enforced today, not aspirational.
+
+**What the old line got wrong.** It treated model choice as pure preference —
+"no Norwegian quality manager has an opinion about a model ID". Two things it
+did not anticipate make that false here:
+
+1. **Privacy tier is a governance property of the model, not of the tier
+   label.** Picking a tiered catalog model is *how* a `minPrivacyTier` reaches
+   the payload (`DashboardComposer.tsx`, `selectedPrivacyTier` →
+   `createComposerSubmitPayload`). Hiding the catalog would delete the only
+   control a sovereignty-constrained customer has. That is §3.3's own argument —
+   a governance control, not a preference — applied to the thing §3.5 wanted to
+   remove.
+2. **A user-owned subscription is an entitlement, not a preference.** A customer
+   who connects their own ChatGPT subscription is routing their own contract.
+   Withholding that route because the design doc says "no picker" is not
+   simplification.
+
+**Why the 2026-09-15 audit objected, and why that objection no longer holds.**
+`CHAT_PARITY_AUDIT_2026-09-15.md` F-08 was right at the time: the picker let a
+user land on a provider that failed ~50 % of streams (F-01) and silently
+stripped five capabilities (F-10). A picker that hands a user a worse product
+without telling them is a trap, and "the design forbids it anyway" made the
+trap look like an accident. Each of those has since been closed, and the
+picker is safe *because of those specific protections* — not because the
+objection was waved off:
+
+| Protection | Where it lives | What it stops |
+|---|---|---|
+| **Capability gating** (F-10) | `DashboardComposer.tsx` `subscriptionBacked` mirrors `chat-client.ts`'s own `buildChatWireBody` condition; Søk / Bilde / Utfør / Dyp research render `disabled` with `title="Ikke tilgjengelig med denne modellen"` | A control that looks live while the wire sends `false`. Pinned by `DashboardComposer.subscription.test.tsx` |
+| **Capability gating, `/` commands** | the `/` catalog withholds search / image / deep-research / skill commands on a subscription route and prints why | The same no-op re-entering through a slash command instead of a toggle |
+| **Provider-failure surface** (F-01) | model-gateway `sse.rs::stream_ended_with_no_content`; `use-chat-controller.ts` retries once on an empty model (resolving to Balance) and otherwise renders `ErrorNotice` → *"Prøv igjen"* | A failed stream arriving as an empty bubble labelled "fant ingen dekning" — a fabricated *answer* where there was a *failure* |
+| **Tool parity** (F-18) | `buildChatWireBody` now adds the `tools` feature for subscription turns; model-gateway routes the tool-decision round through Balance (`tool_round_model`) and hands the answer off only when a tool actually ran | A subscription turn being permanently unable to reach `get_weather` / `code_interpreter` while every other model could |
+| **Tier-aware entitlement** | the Subscription group is filtered out of the catalog unless an *active* connection exists; privacy-tier and `$$` cost badges on each model; sovereign notice under the list | Offering a route the org is not entitled to, or a tier it must not use |
+| **Stale-entitlement fallback** | `DashboardComposer.tsx`: a persisted subscription selection whose connection is no longer active falls back to Verevon Balance and says so | The one remaining stranding (below) |
+
+**The stranding that was still there, and is now fixed.** The model selection is
+persisted per org (`verevon.ai-model-selection.v1:<org>`); the connection that
+makes a subscription model routable is not. When that connection lapsed, the
+composer kept the dead selection: the Subscription group disappeared from the
+catalog (so the picker showed neither the selection nor a way back), the F-10
+mirror kept four controls disabled with "not available with this model", and the
+payload kept naming a model the gateway could no longer route. The composer now
+detects the lapse once the connection list has actually resolved — `undefined`
+is "still loading", not "none" — falls back to Verevon Balance, and shows
+*"ChatGPT-abonnementet er ikke lenger tilkoblet. Byttet til Verevon Balance."*
+
+**The rule this reversal leaves behind, which is the part worth keeping:** a
+model is offerable only when the composer can tell the truth about it. If a
+route cannot do something, the control for that something is disabled *and says
+why*; if a route stops existing, the selection does not silently survive it. A
+picker that meets that bar is a governance control. One that does not is the
+trap F-08 named — and the correct response to that trap is to fix the picker,
+not to delete a working control on the strength of a doc line.
+
+<details>
+<summary>The superseded 2026-08-17 text</summary>
+
+> The composer exposes an **effort dial** (Quick / Standard / Deep) and nothing
+> else. Which model backs each tier is org policy set by the tenant admin,
+> visible on hover for transparency. No Norwegian quality manager has an opinion
+> about a model ID, and offering one invites a support ticket. This also makes
+> the existing pinned Budget/Balance/Genius grouping the *right* shape already —
+> it just needs to stop exposing the raw provider catalog underneath.
+
+</details>
+
+### 3.5.1 Slash commands are commands (2026-09-16)
+
+`CHAT_PARITY_AUDIT_2026-09-15.md` F-09 called the composer's slash commands
+"two upload/image shortcuts, not commands". It was worse than that: the
+`slashCommands` array it pointed at (`/Last opp fil`, `/Generer bilde`) was
+**dead** — `applyAutocompleteSelection` looked it up by an id
+(`cmd-file`/`cmd-image`) the menu builder never produced, so the live menu had
+quietly been the specialized-action list for some time and those two labels
+appeared nowhere. Unparameterised *and* unreachable.
+
+The composer now has a real command system. Its contract:
+
+- **Discoverable.** `/` opens a filterable menu; each row shows the command's
+  name, what it does, and the argument it takes. Backend skills, capabilities
+  and connectors join the same catalog as commands.
+- **Parameterised.** A command may consume the rest of the line.
+  `/image en rød katt` sends *"en rød katt"* with the image tool set;
+  `/dyp <spørsmål>` sends the question with deep research on. Norwegian and
+  English aliases both resolve (`/bilde` = `/image`, `/søk` = `/search`).
+- **Keyboard-first.** Arrows move, Enter or Tab confirms, Escape closes; the
+  list is a `listbox` with a selected `option`.
+- **Degrades to text.** The menu opens only when `/` *starts* the draft, so
+  "kr 200/mnd" and "og/eller" are prose. An unrecognised `/name` is sent
+  verbatim rather than swallowed as a failed command.
+- **Subject to §3.5's rule.** On a route that cannot honour them, the
+  capability-bearing commands are withheld and the menu says why.
+
+**Constraint this had to respect (F-03).** Enter must submit a plain message.
+The composer distinguishes a *deliberately opened* menu, which consumes Enter,
+from the *ambient* date suggestion, which must not — an ordinary sentence ending
+in "man", "fri" or "tor" prefix-matches a day name and used to swallow the send.
+The command menu participates in that same single rule rather than inventing a
+second one, and the argument hint strip is deliberately **not** menu state, so a
+command that already has its argument sends on Enter like any other message.
+`DashboardComposer.enter-to-send.test.tsx` (4 cases) still passes unchanged.
 
 ### 3.6 Thread ownership — overriding the research
 
@@ -553,6 +668,13 @@ split-pane case, where UX 10 only requires 480px for the conversation.
     transcript chip that read "Claude Sonnet · 5 tokens" now reads "Detaljer";
     the panel it opens already carried Modell, Input, Output, tid, Sikkerhet and
     Kostnad, which is where UX finding 7 puts them.
+
+    **Superseded 2026-09-16.** The tension this item was working around — "make
+    the catalog as invisible as §3.5 demands without deleting the privacy-tier
+    control" — is resolved at the source: §3.5 was reversed, and the picker is
+    now design-sanctioned rather than tolerated. The shape reached here (pinned
+    modes by default, catalog behind "Velg modell selv") is what §3.5 now
+    prescribes, so this item's outcome stands; only its framing changed.
 
 21. **Mixed-language chrome.** Acceptance criterion 9 rejects it outright. 42
     Norwegian strings in `src/features/chat` bypass `i18n.tr` (visible text plus

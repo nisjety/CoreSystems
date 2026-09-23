@@ -32,7 +32,18 @@ def _parse_pdf(content: bytes) -> str:
 
 def _parse_docx(content: bytes) -> str:
     document = Document(io.BytesIO(content))
-    return "\n".join(paragraph.text for paragraph in document.paragraphs).strip()
+    # Preserve paragraph/table order: order quantities and policy revisions
+    # frequently live in tables, not in document.paragraphs.
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    parts = []
+    for element in document.element.body:
+        if element.tag.endswith('}p'):
+            parts.append(Paragraph(element, document).text)
+        elif element.tag.endswith('}tbl'):
+            table = Table(element, document)
+            parts.extend('\t'.join(cell.text for cell in row.cells) for row in table.rows)
+    return "\n".join(parts).strip()
 
 
 def _parse_plain(content: bytes) -> str:

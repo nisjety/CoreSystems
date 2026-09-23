@@ -6,7 +6,7 @@ pub(crate) mod products;
 mod quarry;
 mod retrieval;
 pub(crate) mod shared;
-mod sync;
+pub(crate) mod sync;
 mod wiki;
 mod workspace;
 
@@ -24,9 +24,17 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/knowledge/documents",
             get(documents::list_documents).post(documents::create_document),
         )
+        // DELETE was missing entirely, which made the knowledge base
+        // append-only from the product's side: a chat attachment is ingested
+        // here as a durable, org-wide document (see chat::documents), and
+        // nothing in the SPA or this gateway could remove it again — a demo
+        // source pack uploaded once kept surfacing in unrelated conversations'
+        // knowledge search, with no way out but a direct Data Plane call.
+        // documents-api has supported `DELETE /v1/documents/{id}` under
+        // `documents:write` all along.
         .route(
             "/api/v1/knowledge/documents/{id}",
-            get(documents::get_document),
+            get(documents::get_document).delete(documents::delete_document),
         )
         // Knowledge workspace: the rich aggregated payload the SPA renders (sources,
         // collections, graph, finspo storage analytics, integrations, files, diagnostics).

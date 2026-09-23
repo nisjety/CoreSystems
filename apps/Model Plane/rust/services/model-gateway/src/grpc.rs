@@ -403,15 +403,18 @@ async fn fetch_memory_context(
 
 fn build_messages(memory_context: &[String], user_content: &str) -> Vec<ChatMessage> {
     let mut messages = Vec::with_capacity(2);
-    if !memory_context.is_empty() {
-        let joined = memory_context.join("\n---\n");
+    // Same block as the SSE path builds — one helper so the two cannot drift
+    // into framing the same recalled entries differently.
+    if let Some(block) = crate::memory_provenance::memory_context_block(memory_context) {
         messages.push(ChatMessage {
+            compaction_summary: String::new(),
             role: "system".to_owned(),
-            content: format!("Relevant memory:\n{joined}"),
+            content: block,
             name: String::new(),
         });
     }
     messages.push(ChatMessage {
+        compaction_summary: String::new(),
         role: "user".to_owned(),
         content: user_content.to_owned(),
         name: String::new(),
@@ -543,6 +546,12 @@ async fn publish_usage_envelope(
             "provider_used": infer.provider_used.clone(),
             "residency": infer.residency.clone(),
             "min_privacy_tier": min_privacy_tier,
+            // Cache-token telemetry (native-compaction migration
+            // prerequisite): already folded into `input_tokens` above, but
+            // broken out so cache-hit rate and savings are queryable off the
+            // ledger.
+            "cache_read_input_tokens": infer.cache_read_input_tokens,
+            "cache_creation_input_tokens": infer.cache_creation_input_tokens,
         }),
         zdr,
     };
@@ -2559,11 +2568,13 @@ impl ModelGateway for GatewayService {
             provider_hint: req.provider.clone(),
             messages: vec![
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: system_prompt,
                     name: String::new(),
                 },
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: user_prompt,
                     name: String::new(),
@@ -2892,6 +2903,7 @@ mod tests {
 
         async fn infer(&self, _: Request<InferRequest>) -> Result<Response<InferResponse>, Status> {
             Ok(Response::new(InferResponse {
+                compaction_summary: String::new(),
                 request_id: "req-ok".to_owned(),
                 content: "hello".to_owned(),
                 model_used: "mock".to_owned(),
@@ -2902,6 +2914,8 @@ mod tests {
                 residency: String::new(),
                 token_confidence: None,
                 tool_calls: Vec::new(),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }))
         }
 
@@ -2911,6 +2925,7 @@ mod tests {
         ) -> Result<Response<Self::InferStreamStream>, Status> {
             Ok(Response::new(Box::pin(futures::stream::iter(vec![
                 Ok(InferChunk {
+                    compaction_summary: String::new(),
                     request_id: "req-stream".to_owned(),
                     delta: "hel".to_owned(),
                     done: false,
@@ -2922,8 +2937,11 @@ mod tests {
                     provider_used: String::new(),
                     residency: String::new(),
                     token_confidence: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 }),
                 Ok(InferChunk {
+                    compaction_summary: String::new(),
                     request_id: "req-stream".to_owned(),
                     delta: "lo".to_owned(),
                     done: true,
@@ -2935,6 +2953,8 @@ mod tests {
                     provider_used: String::new(),
                     residency: String::new(),
                     token_confidence: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
                 }),
             ]))))
         }

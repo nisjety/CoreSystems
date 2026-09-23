@@ -38,7 +38,7 @@ func NewSubscriber(client *Client, handler EventHandler) *Subscriber {
 }
 
 // Start starts listening to auth events
-func (s *Subscriber) Start(ctx context.Context) error {
+func (s *Subscriber) Start(_ context.Context) error {
 	log.Println("🎧 Starting NATS event subscriber...")
 
 	// Subscribe to auth events using core NATS (simpler than JetStream for this use case)
@@ -50,81 +50,41 @@ func (s *Subscriber) Start(ctx context.Context) error {
 	return nil
 }
 
+// subscribe registers handler for subject and tracks the subscription for Stop.
+func (s *Subscriber) subscribe(subject string, handler nats.MsgHandler) error {
+	sub, err := s.client.Subscribe(subject, handler)
+	if err != nil {
+		return err
+	}
+	s.subs = append(s.subs, sub)
+	return nil
+}
+
 // subscribeToAuthEvents subscribes to all auth event patterns
 func (s *Subscriber) subscribeToAuthEvents() error {
-	// Subscribe to user registered events
-	sub1, err := s.client.Subscribe(SubjectAuthUserRegistered, s.handleUserRegistered)
-	if err != nil {
-		return err
+	subscriptions := []struct {
+		subject string
+		handler nats.MsgHandler
+	}{
+		{SubjectAuthUserRegistered, s.handleUserRegistered},
+		{SubjectAuthUserLogin, s.handleUserLogin},
+		{SubjectAuthUserLogout, s.handleUserLogout},
+		{SubjectAuthUserProfileUpdated, s.handleUserProfileUpdated},
+		{SubjectAuthSessionCreated, s.handleSessionCreated},
+		{SubjectAuthSessionEnded, s.handleSessionEnded},
+		// Account linking
+		{SubjectAuthUserProviderLinked, s.handleUserProviderLinked},
+		// Organization membership events from both auth-core and org-core.
+		{SubjectAuthOrganizationMemberAdded, s.handleOrganizationMemberAdded},
+		{SubjectAuthOrganizationMemberRemoved, s.handleOrganizationMemberRemoved},
+		{SubjectOrganizationMemberAdded, s.handleOrganizationMemberAdded},
+		{SubjectOrganizationMemberRemoved, s.handleOrganizationMemberRemoved},
 	}
-	s.subs = append(s.subs, sub1)
-
-	// Subscribe to user login events
-	sub2, err := s.client.Subscribe(SubjectAuthUserLogin, s.handleUserLogin)
-	if err != nil {
-		return err
+	for _, subscription := range subscriptions {
+		if err := s.subscribe(subscription.subject, subscription.handler); err != nil {
+			return err
+		}
 	}
-	s.subs = append(s.subs, sub2)
-
-	// Subscribe to user logout events
-	sub3, err := s.client.Subscribe(SubjectAuthUserLogout, s.handleUserLogout)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub3)
-
-	// Subscribe to user profile updated events
-	sub4, err := s.client.Subscribe(SubjectAuthUserProfileUpdated, s.handleUserProfileUpdated)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub4)
-
-	// Subscribe to session created events
-	sub5, err := s.client.Subscribe(SubjectAuthSessionCreated, s.handleSessionCreated)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub5)
-
-	// Subscribe to session ended events
-	sub6, err := s.client.Subscribe(SubjectAuthSessionEnded, s.handleSessionEnded)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub6)
-
-	// Subscribe to provider linked events (account linking)
-	sub7, err := s.client.Subscribe(SubjectAuthUserProviderLinked, s.handleUserProviderLinked)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub7)
-
-	// Subscribe to organization membership events from both auth-core and org-core.
-	sub8, err := s.client.Subscribe(SubjectAuthOrganizationMemberAdded, s.handleOrganizationMemberAdded)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub8)
-
-	sub9, err := s.client.Subscribe(SubjectAuthOrganizationMemberRemoved, s.handleOrganizationMemberRemoved)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub9)
-
-	sub10, err := s.client.Subscribe(SubjectOrganizationMemberAdded, s.handleOrganizationMemberAdded)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub10)
-
-	sub11, err := s.client.Subscribe(SubjectOrganizationMemberRemoved, s.handleOrganizationMemberRemoved)
-	if err != nil {
-		return err
-	}
-	s.subs = append(s.subs, sub11)
 
 	return nil
 }
@@ -294,13 +254,13 @@ func (s *Subscriber) handleOrganizationMemberRemoved(msg *nats.Msg) {
 }
 
 func decodeOrganizationMembershipEvent(payload []byte) (*OrganizationMembershipEvent, error) {
-	var raw map[string]interface{}
+	var raw map[string]any
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, err
 	}
 
 	data := raw
-	if nested, ok := raw["data"].(map[string]interface{}); ok {
+	if nested, ok := raw["data"].(map[string]any); ok {
 		data = nested
 	}
 
@@ -313,7 +273,7 @@ func decodeOrganizationMembershipEvent(payload []byte) (*OrganizationMembershipE
 	}, nil
 }
 
-func coalesceString(values ...interface{}) string {
+func coalesceString(values ...any) string {
 	for _, value := range values {
 		if str, ok := value.(string); ok && str != "" {
 			return str

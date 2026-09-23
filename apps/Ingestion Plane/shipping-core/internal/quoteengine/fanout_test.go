@@ -19,6 +19,23 @@ func testRequest() carrier.QuoteRequest {
 	}
 }
 
+func TestQuoteProvenanceComesFromConfiguredAdapter(t *testing.T) {
+	for _, mode := range []carrier.Mode{carrier.ModeProduction, carrier.ModeSandbox, carrier.ModeMock, ""} {
+		result := New([]Quoter{&mockQuoter{code: "carrier", mode: mode}}, time.Second).GetQuotes(context.Background(), testRequest())[0]
+		if result.Err != nil || len(result.Quotes) == 0 {
+			t.Fatalf("missing quote: %+v", result)
+		}
+		q := result.Quotes[0]
+		want := string(mode)
+		if want == "" {
+			want = "unknown"
+		}
+		if q.Environment != want || q.IsMock != (mode == carrier.ModeMock) || q.QuotedAt.IsZero() || q.PackageCount != 1 {
+			t.Fatalf("incorrect provenance for %q: %+v", mode, q)
+		}
+	}
+}
+
 func TestEngine_GetQuotes_AllSucceed(t *testing.T) {
 	adapters := toQuoters(mock.DefaultCarriers())
 	engine := New(adapters, time.Second)

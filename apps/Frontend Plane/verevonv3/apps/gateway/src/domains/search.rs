@@ -6,7 +6,7 @@
 //!
 //! - `web`           → quarry-edge `/v1/search` (keyword) or `/v1/scrape` (URL input)
 //! - `images`        → quarry-edge `/v1/search/images`
-//! - `videos`        → SearXNG `/search?categories=videos` (embeddable iframe results)
+//! - `videos`        → quarry-edge `/v1/search/videos` (embeddable iframe results)
 //! - `answer/stream` → quarry-edge `/v1/answer/stream` (SSE: citations/delta/done)
 //! - `suggestions`   → autocomplete-core `/v1/suggestions` (degrades to empty)
 //!
@@ -447,9 +447,19 @@ async fn search_suggest(
     }
 }
 
-/// `POST /api/v1/search/videos` → SearXNG `videos` category (embeddable results).
+/// `POST /api/v1/search/videos` → quarry-edge `/v1/search/videos`, sanitized.
+///
+/// This handler used to call SearXNG directly, and was the only one in this file
+/// with no `AuthenticatedUser` extension — which is precisely why the bypass was
+/// invisible: with no user id there was no quarry token to mint, so video
+/// traffic reached the provider with no org scope, no cache, no host-diversity
+/// cap and no metered unit, while every sibling vertical went through the edge.
+/// The session guard made it look authenticated; it was never *attributed*.
+/// Keep the extension even if a future edit needs nothing else from the user.
 async fn search_videos(
     State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     let query = body
@@ -468,47 +478,45 @@ async fn search_videos(
         .get("limit")
         .and_then(Value::as_u64)
         .unwrap_or(24)
-        .clamp(1, 50) as usize;
-    let url = format!("{}/search", state.searxng_url);
+        .clamp(1, 50);
+    let token = quarry_token(&state, &user, &headers).await;
+    let url = format!("{}/v1/search/videos", state.quarry_edge_url);
+    let payload = json!({ "query": query, "limit": limit });
 
-    let request = state
-        .client
-        .get(&url)
-        .timeout(Duration::from_secs(15))
-        .header("accept", "application/json")
-        .query(&[
-            ("q", query.as_str()),
-            ("categories", "videos"),
-            ("format", "json"),
-            ("safesearch", "1"),
-        ]);
-
-    match request.send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let data = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
-            let mut videos = sanitize_videos(data.get("results"));
-            videos.truncate(limit);
-            (StatusCode::OK, Json(ok(json!({ "videos": videos }))))
-        }
-        Ok(resp) => (
-            StatusCode::BAD_GATEWAY,
-            Json(error(
-                "video_search_unavailable",
-                format!(
-                    "Video search is unavailable (SearXNG {} — ensure the JSON format is enabled).",
-                    resp.status().as_u16()
-                ),
-            )),
+    match post_quarry(
+        &state,
+        &url,
+        token.as_deref(),
+        &user.user_id,
+        &payload,
+        Duration::from_secs(15),
+    )
+    .await
+    {
+        Ok(data) => (
+            StatusCode::OK,
+            Json(ok(json!({ "videos": sanitize_videos(data.get("videos")) }))),
         ),
-        Err(e) if e.is_timeout() => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(error("video_search_timeout", "Video search timed out.")),
-        ),
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(crate::envelope::upstream_unavailable()),
-        ),
+        Err(envelope) => as_video_error(envelope),
     }
+}
+
+/// Re-label `post_quarry`'s generic failure codes as the video-specific ones the
+/// SPA's error catalog already translates. `web_search_unavailable` has no entry
+/// in `shared/i18n/errors.ts`, so forwarding it verbatim would have swapped a
+/// localized "Videosøk er utilgjengelig" for a raw code on screen — a silent UX
+/// regression from a change that is only meant to move where the request goes.
+fn as_video_error(envelope: (StatusCode, Json<Value>)) -> (StatusCode, Json<Value>) {
+    let (status, Json(mut body)) = envelope;
+    let relabelled = match body.pointer("/error/code").and_then(Value::as_str) {
+        Some("web_search_unavailable") => Some("video_search_unavailable"),
+        Some("web_search_timeout") => Some("video_search_timeout"),
+        _ => None,
+    };
+    if let Some(code) = relabelled {
+        body["error"]["code"] = json!(code);
+    }
+    (status, Json(body))
 }
 
 /// `GET /api/v1/search/suggestions` → autocomplete-core. Always degrades to an
@@ -788,7 +796,15 @@ fn sanitize_images(value: Option<&Value>) -> Vec<Value> {
         .collect()
 }
 
-/// SearXNG video result → the SPA's `{url, title, thumbnailUrl, embedUrl, author, length}`.
+/// quarry-edge video shape `{url, title, thumbnail_src, iframe_src, author,
+/// length, published_date, content}` → the SPA's `{url, title, thumbnailUrl,
+/// embedUrl, author, length}`. Mirrors `sanitize_images`: it drops non-http
+/// schemes and keeps only the fields the VIDEOS tab can actually render, so an
+/// upstream that grows fields does not widen what the browser receives.
+///
+/// The poster field is `thumbnail_src`, not SearXNG's own `thumbnail` — the edge
+/// normalizes both `thumbnail` and `img_src` into that one name, so reading the
+/// raw SearXNG spelling here would silently yield thumbnail-less results.
 fn sanitize_videos(value: Option<&Value>) -> Vec<Value> {
     let Some(arr) = value.and_then(Value::as_array) else {
         return Vec::new();
@@ -804,7 +820,7 @@ fn sanitize_videos(value: Option<&Value>) -> Vec<Value> {
                 .and_then(Value::as_str)
                 .filter(|s| !s.trim().is_empty());
             let thumbnail = v
-                .get("thumbnail")
+                .get("thumbnail_src")
                 .and_then(Value::as_str)
                 .filter(|s| is_safe_http(s));
             let embed = v
@@ -868,6 +884,181 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["url"], json!("https://page"));
         assert_eq!(out[0]["thumbnailUrl"], json!("https://img/t.jpg"));
+    }
+
+    fn test_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// The bypass verbatim: video search must reach quarry-edge and SearXNG must
+    /// see nothing. Asserting "exactly one request to quarry" is the half that
+    /// catches a regression where someone keeps the proxy but re-adds a direct
+    /// SearXNG call beside it as a "fallback" — the un-attributed path is the
+    /// defect, whether or not the attributed one also ran.
+    #[tokio::test]
+    async fn video_search_proxies_quarry_edge_and_never_calls_searxng() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/search/videos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query": "otters",
+                "provider": "searxng",
+                "videos": [
+                    {
+                        "url": "https://videos.invalid/watch/1",
+                        "title": "Otters",
+                        "thumbnail_src": "https://videos.invalid/t1.jpg",
+                        "iframe_src": "https://videos.invalid/embed/1",
+                        "author": "Channel",
+                        "length": "3:21",
+                        "published_date": "2026-01-01",
+                        "content": "A snippet the SPA never renders."
+                    },
+                    // Dropped: no watch URL survives `is_safe_http`.
+                    { "url": "javascript:alert(1)", "title": "Hostile" }
+                ]
+            })))
+            .mount(&quarry)
+            .await;
+
+        // Mounts nothing on purpose: any request at all shows up in
+        // `received_requests`, so the assertion fails loudly rather than
+        // depending on what a stubbed SearXNG would have answered.
+        let searxng = MockServer::start().await;
+
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state.searxng_url = searxng.uri();
+
+        let (status, Json(body)) = search_videos(
+            State(state),
+            Extension(test_user()),
+            HeaderMap::new(),
+            Json(json!({ "query": "otters", "limit": 5 })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            searxng.received_requests().await.unwrap().is_empty(),
+            "the BFF must never talk to SearXNG directly"
+        );
+
+        let requests = quarry.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "expected exactly one upstream request");
+        assert_eq!(requests[0].url.path(), "/v1/search/videos");
+        // The user id is the attribution the bypass could not supply.
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("x-user-id")
+                .map(|v| v.to_str().unwrap()),
+            Some("user-1")
+        );
+        let sent: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(sent["query"], json!("otters"));
+        assert_eq!(sent["limit"], json!(5));
+
+        let videos = body["data"]["videos"].as_array().unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0]["url"], json!("https://videos.invalid/watch/1"));
+        assert_eq!(
+            videos[0]["thumbnailUrl"],
+            json!("https://videos.invalid/t1.jpg")
+        );
+        assert_eq!(
+            videos[0]["embedUrl"],
+            json!("https://videos.invalid/embed/1")
+        );
+        // Sanitizing is still a BFF job: the edge's extra fields stay behind.
+        assert!(videos[0].get("content").is_none());
+        assert!(videos[0].get("published_date").is_none());
+    }
+
+    /// The tell that identified the bypass was a handler with no authenticated-
+    /// user extractor. Pin the signature: axum happily routes a handler that
+    /// takes fewer extractors, so dropping it again would compile, pass the
+    /// session guard, and silently un-attribute the vertical a second time.
+    #[test]
+    fn video_search_requires_an_authenticated_user() {
+        fn takes_authenticated_user<Fut: std::future::Future>(
+            _handler: fn(
+                State<AppState>,
+                Extension<AuthenticatedUser>,
+                HeaderMap,
+                Json<Value>,
+            ) -> Fut,
+        ) {
+        }
+        takes_authenticated_user(search_videos);
+    }
+
+    /// `post_quarry` is shared with the web vertical, so its failure codes are
+    /// web-flavoured. The SPA translates `video_search_unavailable` and has no
+    /// entry for `web_search_unavailable`.
+    #[test]
+    fn upstream_failures_keep_the_video_specific_error_code() {
+        let (status, Json(body)) = as_video_error((
+            StatusCode::BAD_GATEWAY,
+            Json(error("web_search_unavailable", "upstream 502")),
+        ));
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"]["code"], json!("video_search_unavailable"));
+        assert_eq!(body["error"]["message"], json!("upstream 502"));
+
+        let (_, Json(timeout)) = as_video_error((
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(error("web_search_timeout", "Search timed out.")),
+        ));
+        assert_eq!(timeout["error"]["code"], json!("video_search_timeout"));
+
+        // Codes that already say something specific are passed through.
+        let (_, Json(other)) = as_video_error((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(error("search_provider_unconfigured", "no provider")),
+        ));
+        assert_eq!(
+            other["error"]["code"],
+            json!("search_provider_unconfigured")
+        );
+    }
+
+    #[test]
+    fn sanitize_videos_reads_the_edge_field_names() {
+        let raw = json!([
+            {
+                "url": "https://videos.invalid/watch/1",
+                "title": "Hit",
+                "thumbnail_src": "https://videos.invalid/t.jpg",
+                "iframe_src": "https://videos.invalid/embed/1"
+            },
+            // Raw SearXNG spelling: no longer what this layer receives, so the
+            // poster is simply absent rather than wrongly populated.
+            { "url": "https://videos.invalid/watch/2", "thumbnail": "https://videos.invalid/t2.jpg" }
+        ]);
+        let out = sanitize_videos(Some(&raw));
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0]["thumbnailUrl"],
+            json!("https://videos.invalid/t.jpg")
+        );
+        assert_eq!(out[0]["embedUrl"], json!("https://videos.invalid/embed/1"));
+        assert_eq!(out[1]["thumbnailUrl"], Value::Null);
     }
 
     #[test]

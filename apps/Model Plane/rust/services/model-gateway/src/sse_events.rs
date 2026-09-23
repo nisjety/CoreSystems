@@ -20,6 +20,9 @@ use tokio::sync::mpsc::Sender;
 /// A rich chat-stream event beyond the plain text delta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
+    /// Version-bound local checks, distinct from factual/source confidence.
+    /// Emitted only after the matching result has been persisted and completed.
+    ResultReceipt { receipt: Value },
     /// Collapsible "thinking…" trace tokens.
     ReasoningDelta { delta: String },
     /// Agent-activity timeline / Steps tab.
@@ -154,7 +157,7 @@ impl ChatEvent {
             | ChatEvent::Grounding { .. }
             | ChatEvent::Verification { .. } => Some("citations"),
             ChatEvent::Artifact { .. } | ChatEvent::Attachment { .. } => Some("artifacts"),
-            ChatEvent::Usage { .. } => Some("usage"),
+            ChatEvent::Usage { .. } | ChatEvent::ResultReceipt { .. } => Some("usage"),
             ChatEvent::MemoryRecall { .. } => Some("memory"),
             // control events — always allowed (Title/FollowUps only exist when
             // the gateway actually generated them; gating on a feature family
@@ -186,6 +189,7 @@ impl ChatEvent {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
+            ChatEvent::ResultReceipt { .. } => "result_receipt",
             ChatEvent::ReasoningDelta { .. } => "reasoning_delta",
             ChatEvent::StepUpdate { .. } => "step_update",
             ChatEvent::ToolCall { .. } => "tool_call",
@@ -209,6 +213,7 @@ impl ChatEvent {
     #[must_use]
     pub fn payload(&self, request_id: &str) -> Value {
         match self {
+            ChatEvent::ResultReceipt { receipt } => json!({ "receipt": receipt, "request_id": request_id }),
             ChatEvent::ReasoningDelta { delta } => {
                 json!({ "delta": delta, "request_id": request_id })
             }
@@ -340,6 +345,7 @@ impl ChatEvent {
 /// Emits [`ChatEvent`]s onto an SSE channel, honoring the client's opt-in
 /// `features[]`. Cheap to clone the inputs; holds the sender + gating context.
 pub struct RichEventSink {
+    stage_text_artifacts: bool,
     tx: Sender<Result<Event, Infallible>>,
     features: Vec<String>,
     request_id: String,
@@ -353,6 +359,12 @@ pub struct RichEventSink {
     /// `Grounding` was persistable and every tool-sourced source vanished from
     /// history the moment the browser cache was gone.
     citations: std::sync::Arc<std::sync::Mutex<Vec<RecordedCitation>>>,
+    /// Every text artifact that passed through this sink, for the same reason
+    /// as `citations`: the durable thread read returned zero artifacts for a
+    /// turn that had produced three (RUN-LOG finding 3), because the only
+    /// copy lived in the browser that watched the stream. Generated binaries
+    /// (data: URIs) are NOT recorded — see [`RecordedArtifact::from_event`].
+    artifacts: std::sync::Arc<std::sync::Mutex<Vec<RecordedArtifact>>>,
 }
 
 /// A citation observed on the wire, in the shape the SPA already reads back.
@@ -364,6 +376,55 @@ pub struct RecordedCitation {
     pub snippet: String,
 }
 
+/// An authored artifact observed on the wire, in the shape the SPA's
+/// `isChatArtifact` accepts back from a thread read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RecordedArtifact {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    pub version: u32,
+}
+
+impl RecordedArtifact {
+    /// Largest artifact body persisted with a message. Matches the authoring
+    /// cap in `artifacts::MAX_TEXT_ARTIFACT_CHARS`, so nothing the model may
+    /// write is ever too big to keep.
+    pub const MAX_PERSISTED_CHARS: usize = 200_000;
+
+    /// `Some` for a model-authored text artifact (document/code/html);
+    /// `None` for generated files and images, whose `content` is a base64
+    /// `data:` URI far too large for a metadata column and already
+    /// downloadable from the message's attachment.
+    #[must_use]
+    pub fn from_event(event: &ChatEvent) -> Option<Self> {
+        let ChatEvent::Artifact {
+            id,
+            kind,
+            title,
+            content,
+            version,
+        } = event
+        else {
+            return None;
+        };
+        if !matches!(kind.as_str(), "document" | "code" | "html") {
+            return None;
+        }
+        if content.starts_with("data:") || content.chars().count() > Self::MAX_PERSISTED_CHARS {
+            return None;
+        }
+        Some(Self {
+            id: id.clone(),
+            kind: kind.clone(),
+            title: title.clone(),
+            content: content.clone(),
+            version: *version,
+        })
+    }
+}
+
 impl RichEventSink {
     #[must_use]
     pub fn new(
@@ -372,11 +433,22 @@ impl RichEventSink {
         request_id: String,
     ) -> Self {
         Self {
+            stage_text_artifacts: false,
             tx,
             features,
             request_id,
             citations: std::sync::Arc::default(),
+            artifacts: std::sync::Arc::default(),
         }
+    }
+
+    /// Text artifacts are private candidates until the caller persists the
+    /// completed assistant message and terminalizes the run. Progress/citations
+    /// continue to stream. Dropping this sink discards unpublished candidates.
+    pub fn staging_artifacts(
+        tx: Sender<Result<Event, Infallible>>, features: Vec<String>, request_id: String,
+    ) -> Self {
+        Self { stage_text_artifacts: true, ..Self::new(tx, features, request_id) }
     }
 
     /// Emit an event if the client opted into its family (control events always
@@ -402,10 +474,45 @@ impl RichEventSink {
                 });
             }
         }
+        if let Some(artifact) = RecordedArtifact::from_event(&event) {
+            if let Ok(mut recorded) = self.artifacts.lock() {
+                recorded.push(artifact);
+            }
+            if self.stage_text_artifacts { return; }
+        }
         if !event.should_emit(&self.features) {
             return;
         }
         let _ = self.tx.send(Ok(event.to_sse(&self.request_id))).await;
+    }
+
+    /// The artifacts seen so far, one entry per id carrying its LATEST version,
+    /// in first-seen order. A reopened thread needs the final document, not
+    /// every draft the loop went through.
+    #[must_use]
+    pub fn recorded_artifacts(&self) -> Vec<RecordedArtifact> {
+        let Ok(recorded) = self.artifacts.lock() else {
+            return Vec::new();
+        };
+        let mut order: Vec<String> = Vec::new();
+        let mut latest: std::collections::HashMap<String, RecordedArtifact> =
+            std::collections::HashMap::new();
+        for artifact in recorded.iter() {
+            match latest.get(&artifact.id) {
+                Some(existing) if existing.version >= artifact.version => {}
+                Some(_) => {
+                    latest.insert(artifact.id.clone(), artifact.clone());
+                }
+                None => {
+                    order.push(artifact.id.clone());
+                    latest.insert(artifact.id.clone(), artifact.clone());
+                }
+            }
+        }
+        order
+            .into_iter()
+            .filter_map(|id| latest.remove(&id))
+            .collect()
     }
 
     /// The citations seen so far, deduplicated by url (falling back to id) in
@@ -436,8 +543,54 @@ impl RichEventSink {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn staged_artifacts_never_reach_the_wire_on_a_failed_turn() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let sink = RichEventSink::staging_artifacts(tx, families(&["artifacts", "steps"]), "r".into());
+        for version in [3, 4] {
+            sink.emit(ChatEvent::Artifact { id: "doc".into(), kind: "document".into(),
+                title: "Draft".into(), content: format!("private {version}"), version }).await;
+        }
+        assert!(rx.try_recv().is_err());
+        assert_eq!(sink.recorded_artifacts()[0].version, 4);
+        sink.emit(ChatEvent::Error { code: "response_validation_failed".into(),
+            message: "Not completed".into(), retryable: true }).await;
+        assert!(rx.try_recv().is_ok(), "failure still reaches the browser");
+        drop(sink);
+        assert!(rx.try_recv().is_err(), "dropping a failed run never releases drafts");
+    }
+
     fn families(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The durable read returned zero artifacts for a turn that produced
+    /// three (RUN-LOG finding 3). The sink must keep what went out — latest
+    /// version per id, drafts collapsed, binaries excluded.
+    #[tokio::test]
+    async fn sink_records_the_latest_version_of_each_text_artifact() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let sink = RichEventSink::new(tx, families(&["artifacts"]), "req".into());
+        let artifact = |id: &str, kind: &str, content: &str, version: u32| ChatEvent::Artifact {
+            id: id.into(),
+            kind: kind.into(),
+            title: format!("T {id}"),
+            content: content.into(),
+            version,
+        };
+        sink.emit(artifact("rapport", "document", "v1 body", 1)).await;
+        sink.emit(artifact("notat", "document", "memo", 1)).await;
+        sink.emit(artifact("rapport", "document", "v2 body", 2)).await;
+        // A generated file is a data: URI and never belongs in metadata.
+        sink.emit(artifact("chart", "image", "data:image/png;base64,AAAA", 1)).await;
+        sink.emit(artifact("sheet", "spreadsheet", "data:application/x;base64,AA", 1)).await;
+
+        let recorded = sink.recorded_artifacts();
+        assert_eq!(recorded.len(), 2, "one entry per text artifact id");
+        assert_eq!(recorded[0].id, "rapport", "first-seen order is kept");
+        assert_eq!(recorded[0].version, 2);
+        assert_eq!(recorded[0].content, "v2 body", "the latest draft wins");
+        assert_eq!(recorded[1].id, "notat");
     }
 
     #[test]

@@ -49,7 +49,10 @@ describe('deriveConversationNodes', () => {
     const nodes = deriveConversationNodes(assistantTurn({ status: 'waiting', content: '' }))
     expect(nodes.find((node) => node.kind === 'answer')).toEqual({
       kind: 'answer',
-      answer: { state: 'pending' },
+      // The elapsed-wait counter is anchored to the turn, not to the indicator's
+      // mount: the transcript's `<For>` rebuilds every node on every derivation,
+      // so a clock owned by the component restarted on each streamed tool call.
+      answer: { state: 'pending', since: '2026-08-22T10:00:00.000Z' },
     })
   })
 
@@ -123,6 +126,64 @@ describe('deriveConversationNodes', () => {
     ])
     // No 'follow-ups' tail: see the suppression test above.
     expect(kinds(rich)).not.toContain('follow-ups')
+  })
+})
+
+/**
+ * RUN-LOG finding 12. The confidence notice hedges on every scored answer, but
+ * "ingen kilder ble brukt" is a second, separate claim — and it appeared under
+ * answers whose numbers a code-interpreter run had just produced, contradicting
+ * the Arbeid panel one click away. `hasEvidence` decides whether there is
+ * anything for a reader to go and check; the hedge itself stays ungated.
+ */
+describe('confidence hasEvidence', () => {
+  const toolCall = (overrides: Partial<{ id: string; name: string; status: string; error: string }> = {}) =>
+    ({ id: 'tc1', name: 'run_python', ...overrides }) as NonNullable<ChatTurn['toolCalls']>[number]
+  const evidence = (overrides: Partial<ChatTurn>) => {
+    const node = deriveConversationNodes(assistantTurn({ confidence: 0.3, ...overrides }))
+      .find((candidate) => candidate.kind === 'confidence')
+    expect(node, 'a scored, settled turn must emit a confidence node').toBeDefined()
+    return (node as Extract<typeof node, { kind: 'confidence' }>).hasEvidence
+  }
+
+  it('reports nothing to check when the turn produced no citations, grounding or tools', () => {
+    expect(evidence({})).toBe(false)
+  })
+
+  it('counts a citation', () => {
+    expect(evidence({
+      citations: [{ id: 'c1', title: 'Mattilsynet', url: 'https://mattilsynet.no', snippet: 'Regelverk.' }],
+    })).toBe(true)
+  })
+
+  it('counts internal knowledge grounding', () => {
+    expect(evidence({ grounding: { sources: [] } as unknown as ChatTurn['grounding'] })).toBe(true)
+  })
+
+  it('counts a tool call that succeeded', () => {
+    // The finding itself: the sandbox printed the figures the answer quotes.
+    expect(evidence({ toolCalls: [toolCall({ status: 'completed' })] })).toBe(true)
+    // No status at all is not a failure — older frames carry none.
+    expect(evidence({ toolCalls: [toolCall()] })).toBe(true)
+  })
+
+  it('does not count a tool call that failed', () => {
+    // A tool that errored verified nothing, so telling the reader to go and
+    // check would point them at the failure rather than at evidence.
+    expect(evidence({ toolCalls: [toolCall({ error: 'permission denied' })] })).toBe(false)
+    expect(evidence({ toolCalls: [toolCall({ status: 'error' })] })).toBe(false)
+    expect(evidence({ toolCalls: [toolCall({ status: 'failed' })] })).toBe(false)
+  })
+
+  it('counts a run where one tool failed and another did not', () => {
+    expect(evidence({
+      toolCalls: [toolCall({ status: 'failed' }), toolCall({ id: 'tc2', status: 'completed' })],
+    })).toBe(true)
+  })
+
+  it('treats an empty citation list as no evidence rather than as a list', () => {
+    expect(evidence({ citations: [] })).toBe(false)
+    expect(evidence({ toolCalls: [] })).toBe(false)
   })
 })
 

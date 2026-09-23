@@ -19,30 +19,44 @@ import (
 // [extractJSONObject] tolerates both. Every returned candidate is forced to
 // Origin=background_review (the producer can never mint a "user" skill).
 func ParseReviewResponse(raw string) ([]SkillCandidate, error) {
+	if len(raw) > 64*1024 {
+		return nil, fmt.Errorf("review response exceeded size limit")
+	}
 	js := extractJSONObject(raw)
 	if js == "" {
 		return nil, fmt.Errorf("review response contained no JSON object")
 	}
 	var doc struct {
-		Skills []struct {
+		Skills *[]struct {
 			Name            string   `json:"name"`
 			Description     string   `json:"description"`
 			Content         string   `json:"content"`
 			TriggerKeywords []string `json:"trigger_keywords"`
-			Confidence      float64  `json:"confidence"`
+			Confidence      *float64 `json:"confidence"`
 		} `json:"skills"`
 	}
 	if err := json.Unmarshal([]byte(js), &doc); err != nil {
-		return nil, fmt.Errorf("parse review response: %w", err)
+		return nil, fmt.Errorf("review response schema invalid")
 	}
-	out := make([]SkillCandidate, 0, len(doc.Skills))
-	for _, s := range doc.Skills {
+	if doc.Skills == nil || len(*doc.Skills) > 8 {
+		return nil, fmt.Errorf("review response requires a bounded skills array")
+	}
+	out := make([]SkillCandidate, 0, len(*doc.Skills))
+	for _, s := range *doc.Skills {
+		if strings.TrimSpace(s.Name) == "" || len(s.Name) > 160 || strings.TrimSpace(s.Content) == "" || len(s.Content) > 8000 || len(s.Description) > 1000 || s.Confidence == nil || *s.Confidence < 0 || *s.Confidence > 1 || len(s.TriggerKeywords) > 12 {
+			return nil, fmt.Errorf("review candidate schema invalid")
+		}
+		for _, keyword := range s.TriggerKeywords {
+			if len(keyword) > 120 {
+				return nil, fmt.Errorf("review candidate keyword exceeds limit")
+			}
+		}
 		out = append(out, SkillCandidate{
 			Name:            strings.TrimSpace(s.Name),
 			Description:     s.Description,
 			Content:         s.Content,
 			TriggerKeywords: s.TriggerKeywords,
-			Confidence:      s.Confidence,
+			Confidence:      *s.Confidence,
 			Origin:          OriginBackgroundReview,
 		})
 	}

@@ -31,7 +31,7 @@ type Server struct {
 	grpcAuthError    error
 }
 
-// NewServer creates a new gRPC server instance. sharedPublisher (may be nil)
+// NewServer creates a new gRPC server instance. sharedPublisher, when non-nil,
 // emits cross-plane grant-change events so the Data Plane retrieval cache evicts
 // on revoke — closing the previously nil-wired DocumentAclHandler publisher.
 func NewServer(cfg *config.Config, db *database.DB, publisher *nats.Publisher, sharedPublisher *nats.SharedPublisher, betterAuthClient *clients.BetterAuthClient) *Server {
@@ -124,10 +124,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 func (s *Server) requireInternalKeyUnaryInterceptor(
 	ctx context.Context,
-	req interface{},
+	req any,
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler,
-) (interface{}, error) {
+) (any, error) {
 	if err := authorizeGRPCServiceCredential(ctx, info.FullMethod, s.grpcCredentials); err != nil {
 		log.Printf("gRPC auth denied: %s - %v", info.FullMethod, err)
 		return nil, err
@@ -136,7 +136,7 @@ func (s *Server) requireInternalKeyUnaryInterceptor(
 }
 
 func (s *Server) requireInternalKeyStreamInterceptor(
-	srv interface{},
+	srv any,
 	stream grpc.ServerStream,
 	info *grpc.StreamServerInfo,
 	handler grpc.StreamHandler,
@@ -158,10 +158,10 @@ func (s *Server) Stop() {
 // loggingInterceptor logs gRPC requests
 func (s *Server) loggingInterceptor(
 	ctx context.Context,
-	req interface{},
+	req any,
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler,
-) (interface{}, error) {
+) (any, error) {
 	log.Printf("gRPC Request: %s", info.FullMethod)
 
 	resp, err := handler(ctx, req)

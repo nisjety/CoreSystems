@@ -3,7 +3,6 @@
 import { useEffect, useRef } from "react";
 import { HeroParallax } from "./HeroParallax";
 import { SignalPathLayer } from "./SignalPathLayer";
-import { VerevonMarkOutline } from "./VerevonMark";
 import { ArrowButton } from "@/components/ui/ArrowButton";
 import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion";
 
@@ -63,10 +62,6 @@ export function HeroSection() {
 					/>
 				</video>
 				<div className="pointer-events-none absolute inset-0 bg-black/15" />
-			</div>
-
-			<div className="pointer-events-none absolute left-[70%] top-[50%] z-[1] w-[min(62vw,760px)] -translate-x-1/2 -translate-y-1/2 text-[color-mix(in_srgb,var(--verevon-c-white)_13%,transparent)] mix-blend-screen max-[760px]:left-[66%] max-[760px]:top-[43%] max-[760px]:w-[128vw]">
-				<VerevonMarkOutline className="h-auto w-full" strokeWidth={2} />
 			</div>
 
 			<SignalPathLayer variant="hero" />

@@ -23,7 +23,7 @@ type updateInboxWorkspacePreferenceRequest struct {
 
 const inboxWorkspacePreferenceLimit = 200
 
-func decodeInboxWorkspaceState(settings map[string]interface{}) inboxWorkspaceState {
+func decodeInboxWorkspaceState(settings map[string]any) inboxWorkspaceState {
 	state := inboxWorkspaceState{PinnedConversationIDs: []string{}, ReadConversationIDs: []string{}}
 	data, err := json.Marshal(settings)
 	if err != nil {
@@ -79,9 +79,9 @@ func (s *Server) inboxWorkspaceState(c *gin.Context) {
 		return
 	}
 
-	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "inbox_workspace", map[string]interface{}{
-		"pinnedConversationIds": []interface{}{},
-		"readConversationIds":   []interface{}{},
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "inbox_workspace", map[string]any{
+		"pinnedConversationIds": []any{},
+		"readConversationIds":   []any{},
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to get inbox workspace settings")
@@ -110,9 +110,9 @@ func (s *Server) updateInboxWorkspacePreference(field string) gin.HandlerFunc {
 			return
 		}
 
-		settings, err := s.userService.GetSettings(c.Request.Context(), userID, "inbox_workspace", map[string]interface{}{
-			"pinnedConversationIds": []interface{}{},
-			"readConversationIds":   []interface{}{},
+		settings, err := s.userService.GetSettings(c.Request.Context(), userID, "inbox_workspace", map[string]any{
+			"pinnedConversationIds": []any{},
+			"readConversationIds":   []any{},
 		})
 		if err != nil {
 			log.Error().Err(err).Str("user_id", userID).Msg("failed to read inbox workspace before update")
@@ -131,7 +131,7 @@ func (s *Server) updateInboxWorkspacePreference(field string) gin.HandlerFunc {
 			return
 		}
 
-		if _, err := s.userService.UpsertSettings(c.Request.Context(), userID, "inbox_workspace", map[string]interface{}{
+		if _, err := s.userService.UpsertSettings(c.Request.Context(), userID, "inbox_workspace", map[string]any{
 			"pinnedConversationIds": state.PinnedConversationIDs,
 			"readConversationIds":   state.ReadConversationIDs,
 		}); err != nil {

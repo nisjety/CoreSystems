@@ -73,6 +73,29 @@ describe('item 16 — streaming is announced to a screen reader', () => {
     expect(page).toContain('10_000')
   })
 
+  it('gives the Kilder tally a spoken equivalent', async () => {
+    const page = await read(PAGE)
+    // The region said only that Verevon was working, so a reader who cannot see
+    // the badge had no equivalent of the visible "3 av 24" — the one number
+    // saying the other twenty-one hits were never read (F-16). `spokenTally`
+    // is built from the same memos the badge renders, so the two cannot drift;
+    // its phrasing is covered by unit tests on `spokenSourceTally`.
+    expect(page).toContain('spokenTally()')
+    expect(page).toContain('spokenSourceTally(sourceBadgeRead(), sourceBadgeTotal())')
+  })
+
+  it('speaks the same progress detail the thinking indicator shows', async () => {
+    const page = await read(PAGE)
+    // F-07: the heartbeat said only that work continued, so a reader who cannot
+    // see the status line beside "Tenker" lost the one thing that distinguishes
+    // a long run from a hung one. Both are built from `deriveStreamActivity`
+    // and formatted by `streamActivityLabel`, so they cannot describe the same
+    // wait differently; the phrasing itself is unit-tested in stream-activity.
+    expect(page).toContain('spokenActivity()')
+    expect(page).toContain('deriveStreamActivity(pending?.toolCalls)')
+    expect(page).toContain('streamActivityLabel(activity)')
+  })
+
   it('clears the heartbeat by returning a cleanup from the effect', async () => {
     const page = await read(PAGE)
     // Solid 2 runs a cleanup RETURNED from the effect fn; `onCleanup` inside

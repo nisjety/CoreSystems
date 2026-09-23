@@ -228,6 +228,11 @@ impl ResearchExecutor {
             // considered "ZDR doesn't apply here" — see the 2026-09-03
             // ledger entry.
             zdr: false,
+            // As with `zdr` above, no per-request paid permission is threaded
+            // into the research executor yet. Absent permission means none.
+            allow_paid_providers: false,
+            // No intent hint — the router classifies the query itself.
+            intent: None,
         };
         let results = provider.search(query, &opts).await?;
         Ok(ResearchArtifacts {

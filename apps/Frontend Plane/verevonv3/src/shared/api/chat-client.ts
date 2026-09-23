@@ -1,4 +1,5 @@
 import { ApiError, requestJson } from './http'
+
 import { readSseStream, type SseEvent } from './sse'
 import {
   isSelectablePrivacyTier,
@@ -16,6 +17,12 @@ import {
 } from '@/features/chat/lib/chat-retention'
 
 // ── Wire contract ───────────────────────────────────────────────────────────
+export async function extractChatDocument(filename: string, content_base64: string, content_type: string): Promise<{ content: string }> {
+  return requestJson('/api/v1/chat/documents/extract', {
+    method: 'POST', body: JSON.stringify({ filename, content_base64, content_type }),
+  })
+}
+
 // The gateway forwards the chat body verbatim to model-gateway `/v1/invoke/*`,
 // whose `InvokeRequest` is snake_case with `tools: ToolSpec[]`. This client owns
 // the logical→wire translation so callers stay ergonomic (camelCase + intent).
@@ -42,6 +49,7 @@ export type ChatAttachment = {
 }
 
 export type ChatInvokeRequest = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   content: string
   model?: string
   /** Explicit provider route for a user-owned model subscription. */
@@ -375,6 +383,7 @@ export type ChatStreamHandlers = {
 }
 
 export type ChatMessage = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   id: string
   role: 'user' | 'assistant'
   content: string
@@ -646,31 +655,39 @@ export function shouldRequestSupportContext(content: string): boolean {
 }
 
 export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
+  const conversationOnly = request.sourceScope === 'conversation'
   const threadId = request.threadId?.trim() || undefined
   const supportReadOnly = isSupportChatThread(threadId)
   const subscriptionBacked = request.provider === 'openai-codex-subscription'
   const tools = supportReadOnly || subscriptionBacked ? [] : buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
+  if (conversationOnly) features.add('conversation_only')
+  else features.delete('conversation_only')
   // Request the tools family by default, even with zero client-declared specs.
   // Support-derived threads are the exception because their durable history
   // contains customer-authored transcript text and must remain read-only.
   // model-gateway merges its own builtins (tool_loop::builtin_tool_defs —
-  // fetch_url, knowledge_search) into the tool list whenever this feature is
-  // present, regardless of what the client sent (sse.rs). Without it, a plain
-  // chat turn never gets knowledge_search attached, so the model can't ground
-  // answers in the org's own ingested knowledge base unless the user happens
-  // to also toggle Browse or an action first. web_search stays gated behind
-  // its own explicit-Search-toggle check server-side, so this does not grant
-  // unrestricted web access — only the safe, always-useful builtins turn on.
-  if (supportReadOnly || subscriptionBacked) features.delete('tools')
+  // fetch_url, knowledge_search, get_weather, code_interpreter) into the tool
+  // list whenever this feature is present, regardless of what the client
+  // sent (sse.rs). Without it, a plain chat turn never gets knowledge_search
+  // attached, so the model can't ground answers in the org's own ingested
+  // knowledge base unless the user happens to also toggle Browse or an
+  // action first. web_search stays gated behind its own explicit-Search-
+  // toggle check server-side, so this does not grant unrestricted web access
+  // — only the safe, always-useful builtins turn on.
+  //
+  // Subscription models propose tool calls through the scoped broker. Model
+  // Gateway keeps execution, authorization and audit ownership; decision and
+  // answer inference retain the selected subscription model and connection.
+  if (supportReadOnly) features.delete('tools')
   else features.add('tools')
   // Plan mode → agentic run path (orchestration-backed, supports approval gates
   // + run pause/resume). Without it the gateway uses the direct tool loop, which
   // never pauses for human approval.
-  if (request.planMode && !supportReadOnly && !subscriptionBacked) features.add('agentic')
+  if (request.planMode && !conversationOnly && !supportReadOnly && !subscriptionBacked) features.add('agentic')
   else features.delete('agentic')
 
-  const supportContextQuery = !supportReadOnly && shouldRequestSupportContext(request.content)
+  const supportContextQuery = !conversationOnly && !supportReadOnly && shouldRequestSupportContext(request.content)
     ? request.content.trim().slice(0, 240)
     : undefined
 
@@ -688,8 +705,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // `[]` — so a turn that names no skill is byte-for-byte what it was before
     // this field existed.
     ...(supportReadOnly || subscriptionBacked ? {} : skillIdsField(request.actions)),
-    browse_web: supportReadOnly || subscriptionBacked ? false : request.browseWeb ?? false,
-    generate_image: supportReadOnly || subscriptionBacked ? false : request.generateImage ?? false,
+    browse_web: conversationOnly || supportReadOnly || subscriptionBacked ? false : request.browseWeb ?? false,
+    generate_image: conversationOnly || supportReadOnly || subscriptionBacked ? false : request.generateImage ?? false,
     // Sent as a real field, not just as the `agentic` feature above: the
     // gateway needs it to mark the run itself (in-memory plan-mode store +
     // session-core's durable `run.mode`). Without this the toggle only widened
@@ -700,7 +717,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
     // multi-round research pipeline off this flag.
-    deep_research: supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
+    deep_research: conversationOnly || supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
     // Omitted entirely when unset or `standard`: the gateway treats an absent
     // effort as "no thinking", and sending `standard` explicitly would be a
     // no-op field on every ordinary turn.
@@ -1683,6 +1700,7 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       content: str(item.content) ?? '',
       model: str(item.model) ?? str(item.model_used),
       createdAt: str(item.created_at) ?? str(item.createdAt) ?? '',
+      sourceScope: (item.source_scope ?? objectValue(item.metadata)?.source_scope) === 'conversation' ? 'conversation' : 'workspace',
       // Turn metadata the backend flattens onto the message. Present only for
       // assistant turns recorded since the score became durable, so a missing
       // field means "not recorded" — never a score of zero.

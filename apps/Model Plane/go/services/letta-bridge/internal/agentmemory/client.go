@@ -66,6 +66,10 @@ type memoryRecord struct {
 	Topics     []string `json:"topics,omitempty"`
 	MemoryType string   `json:"memory_type,omitempty"`
 	UserID     string   `json:"user_id,omitempty"`
+	// Session Core already extracted and authorized this exact fact. Letting
+	// the vector backend extract it again creates untracked IDs that survive
+	// editing/deleting the original and can change its scope or meaning.
+	DiscreteMemoryExtracted string `json:"discrete_memory_extracted"`
 }
 
 type createRequest struct {
@@ -121,13 +125,14 @@ func (c *Client) Put(ctx context.Context, orgID, threadID, topic, memoryID, user
 		topics = []string{topic}
 	}
 	body := createRequest{Memories: []memoryRecord{{
-		ID:         memoryID,
-		Text:       content,
-		Namespace:  orgID,
-		SessionID:  threadID,
-		Topics:     topics,
-		MemoryType: memoryType,
-		UserID:     userID,
+		ID:                      memoryID,
+		Text:                    content,
+		Namespace:               orgID,
+		SessionID:               threadID,
+		Topics:                  topics,
+		MemoryType:              memoryType,
+		UserID:                  userID,
+		DiscreteMemoryExtracted: "t",
 	}}}
 	if _, err := c.post(ctx, "/v1/long-term-memory/", body); err != nil {
 		return nil, err

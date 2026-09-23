@@ -62,7 +62,10 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	}
 	must(ledger.Entry{OrgID: org, UserID: "u1", RunID: "run1", Model: "gpt", InputTokens: 100, OutputTokens: 40, CostUSD: 0.25, IdempotencyKey: "itest-k1"})
 	must(ledger.Entry{OrgID: org, UserID: "u1", RunID: "run1", Model: "gpt", InputTokens: 100, OutputTokens: 40, CostUSD: 0.25, IdempotencyKey: "itest-k1"}) // dup
-	must(ledger.Entry{OrgID: org, UserID: "u2", RunID: "run1", Model: "claude", InputTokens: 10, CostUSD: 0.5})
+	// Cache-token telemetry rides alongside the ordinary token counts (native-
+	// compaction migration prerequisite): this entry's legs must survive the
+	// round trip through every read path exercised below.
+	must(ledger.Entry{OrgID: org, UserID: "u2", RunID: "run1", Model: "claude", InputTokens: 10, CostUSD: 0.5, CacheReadInputTokens: 6, CacheCreationInputTokens: 3})
 	must(ledger.Entry{OrgID: otherOrg, UserID: "u3", ProducerID: "service:model-gateway", InputTokens: 9, IdempotencyKey: "itest-k1"})
 
 	// Idempotent: the duplicate key must collapse to one row.
@@ -86,6 +89,9 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	if run.EntryCount != 2 || run.TotalInputTokens != 110 {
 		t.Fatalf("run rollup wrong: %+v", run)
 	}
+	if run.TotalCacheReadInputTokens != 6 || run.TotalCacheCreationInputTokens != 3 {
+		t.Fatalf("run cache-token rollup wrong: %+v", run)
+	}
 
 	// Org aggregate.
 	agg, err := store.Aggregate(ctx, ledger.AggregateFilter{OrgID: org})
@@ -94,6 +100,9 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	}
 	if agg.EntryCount != 2 || agg.TotalCostUSD < 0.74 || agg.TotalCostUSD > 0.76 {
 		t.Fatalf("aggregate wrong: %+v", agg)
+	}
+	if agg.TotalCacheReadInputTokens != 6 || agg.TotalCacheCreationInputTokens != 3 {
+		t.Fatalf("aggregate cache-token totals wrong: %+v", agg)
 	}
 
 	// Budget cap.
@@ -111,6 +120,18 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	}
 	if len(entries) != 2 {
 		t.Fatalf("list count = %d, want 2", len(entries))
+	}
+	var sawCacheEntry bool
+	for _, e := range entries {
+		if e.UserID == "u2" {
+			sawCacheEntry = true
+			if e.CacheReadInputTokens != 6 || e.CacheCreationInputTokens != 3 {
+				t.Fatalf("listed entry cache tokens wrong: %+v", e)
+			}
+		}
+	}
+	if !sawCacheEntry {
+		t.Fatalf("expected the u2 cache-bearing entry in the listing: %+v", entries)
 	}
 }
 

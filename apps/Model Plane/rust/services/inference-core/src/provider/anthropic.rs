@@ -18,6 +18,10 @@ use tracing::{debug, info, warn};
 use super::zdr::ZdrAttestation;
 use super::{InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter};
 
+#[cfg(test)]
+#[path = "anthropic_compaction_tests.rs"]
+mod checkpoint_tests;
+
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -465,7 +469,209 @@ fn resolve_thinking_budget(model: &str, requested: i32, max_tokens: i32) -> Opti
     Some(requested)
 }
 
+/// Beta header for Anthropic's server-side context-editing feature FAMILY —
+/// the `clear_tool_uses_20250919` strategy lives inside this family and is
+/// selected in the request body, not by a header of its own. Verified live
+/// against platform.claude.com's context-editing reference (Sept 2026).
+const CONTEXT_MANAGEMENT_BETA: &str = "context-management-2025-06-27";
+
+/// Beta header for Anthropic's server-side compaction feature
+/// (`compact_20260112`). Verified live against platform.claude.com's
+/// compaction reference (Sept 2026).
+const COMPACTION_BETA: &str = "compact-2026-01-12";
+
+/// Anthropic's floor for the `compact_20260112` trigger's `value` — a smaller
+/// number is a `400`, not a more eager trigger. Asserted below, not enforced
+/// at runtime: the value this provider sends is a compile-time constant, so a
+/// violation is a bug in this file, not a caller input to validate.
+const MIN_COMPACTION_TRIGGER_TOKENS: u64 = 50_000;
+
+/// Whether to ask Anthropic's own context-editing (`clear_tool_uses_20250919`)
+/// and compaction (`compact_20260112`) to manage this provider's conversation
+/// context.
+///
+/// # Why this exists — the native-compaction migration
+///
+/// On by default. This REPLACES model-gateway's hand-rolled
+/// `clear_stale_tool_results` (tier 1) and `plan_head_summary`/
+/// `apply_head_summary` (tier 2) for a turn resolved to THIS provider —
+/// model-gateway's own half of this migration skips both for a model this
+/// heuristic identifies as Anthropic-family (see
+/// `model_gateway::compaction::should_run_local_compaction` and
+/// `::clear_stale_tool_results_unless_native`). Leaving both off here would
+/// silently reintroduce the unbounded-history growth those two mechanisms
+/// exist to prevent, for every Anthropic-routed turn.
+///
+/// # The escape hatch
+///
+/// Context editing's Azure/Microsoft Foundry support is confirmed (Microsoft's
+/// own Foundry docs list the exact beta header). Compaction's is NOT
+/// independently confirmed at the dated-identifier level for an
+/// Azure-*hosted* Claude deployment as of the research this migration is
+/// built on (Sept 2026) — only inferred, for deployments proxied straight
+/// through to Anthropic's own infrastructure. A `4xx` from either beta
+/// parameter is handled the same way any other provider rejection already is
+/// (the fallback chain logs it, retries, and walks to the next candidate
+/// model/provider — see `provider::fallback`) — this flag exists for an
+/// operator who has confirmed the rejection is persistent on their resource
+/// and wants it stopped at the source rather than repeatedly eating a failed
+/// attempt.
+fn native_context_management_enabled() -> bool {
+    context_management_flag_enabled(
+        std::env::var("ANTHROPIC_NATIVE_CONTEXT_MANAGEMENT")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parser behind [`native_context_management_enabled`], so the on/off
+/// decision is unit-testable without mutating process-global environment
+/// state — which is racy under Rust's default parallel test runner, and every
+/// other env-gated toggle in this codebase that gets tested at all follows
+/// the same split (a thin env-reading wrapper over a pure parser).
+fn context_management_flag_enabled(raw: Option<&str>) -> bool {
+    !matches!(raw.map(str::trim), Some("0" | "false" | "off" | "no"))
+}
+
+/// Whether `model` supports Anthropic's `compact_20260112` strategy.
+///
+/// # Verified live, not assumed
+///
+/// The research this migration is built on flagged Azure support for
+/// compaction specifically (as opposed to context editing) as unconfirmed at
+/// the dated-identifier level. Tested live against this deployment's real
+/// Azure Foundry resource (Sept 2026): `claude-haiku-4-5` 400s naming the
+/// model and strategy explicitly —
+/// `"'claude-haiku-4-5-20251001' does not support the 'compact_20260112'
+/// context management strategy"` — while `claude-sonnet-4-6` and
+/// `claude-opus-4-8` both accept the identical payload and beta header and
+/// return `200` with `context_management.applied_edits` and
+/// `usage.iterations` present, exactly per the documented response shape.
+/// `clear_tool_uses_20250919` showed no such restriction on any tier tested.
+///
+/// This is a real, not hypothetical, blast radius: `claude-haiku-4-5` is
+/// [`DEFAULT_AZURE_ANTHROPIC_MODEL`] — every unspecified-model request on
+/// this provider resolves to it — so sending `compact_20260112`
+/// unconditionally would 400 the DEFAULT route on every turn, deterministically,
+/// once real traffic exceeded the trigger, well past what the existing
+/// retry/fallback machinery should have to absorb for a turn that was never
+/// going to succeed on this provider.
+///
+/// Only explicitly verified deployment families are enabled. An unknown alias
+/// keeps local gateway recovery rather than inheriting support by its name.
+fn model_supports_compaction(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    // Only deployments with verified support; unknown future aliases fail closed.
+    ["claude-sonnet-4-6", "claude-opus-4-8"].iter().any(|known| model == *known || model.starts_with(&format!("{known}-")))
+}
+
+/// Build the `context_management.edits[]` block that hands this turn's
+/// tool-result clearing — and, where the model supports it (see
+/// [`model_supports_compaction`]), head compaction too — to Anthropic itself.
+///
+/// `keep: 3` and the 30k/5k-token thresholds mirror
+/// `compaction::DEFAULT_TOOL_PAYLOAD_BUDGET`'s shape (keep the newest 3 tool
+/// rounds; only clear once it is worth clearing) so the native behaviour is
+/// the same policy in spirit, not a new one model-gateway never asked for.
+/// `compact`'s `trigger` uses Anthropic's own documented default (150k input
+/// tokens) rather than anything derived from model-gateway's
+/// `MAX_THREAD_CONTEXT_MESSAGES`: that constant counts MESSAGES, not tokens,
+/// and the two are not commensurable.
+///
+/// `instructions` for `compact` echoes `compaction::summary_prompt`'s own
+/// preservation guidance (constraints, decisions, identifiers) so a native
+/// summary keeps the same things model-gateway's hand-rolled one was built to
+/// keep — even though this path has no access to the memory `on_pre_compress`
+/// hook (`compaction::summary_prompt_with_memory`'s directive), which is
+/// fetched from session-core by org/thread id, and this provider-agnostic
+/// codec layer never sees either.
+fn apply_context_management(body: &mut serde_json::Value, model: &str) {
+    // Compile-time, not `debug_assert!`: both operands are constants, so a
+    // violation is a bug in the literal below, not something that could ever
+    // pass in one build and fail in another.
+    const _: () = assert!(
+        150_000 >= MIN_COMPACTION_TRIGGER_TOKENS,
+        "compact trigger below Anthropic's documented floor"
+    );
+    let mut edits = vec![serde_json::json!({
+        "type": "clear_tool_uses_20250919",
+        "trigger": { "type": "input_tokens", "value": 30_000 },
+        "keep": { "type": "tool_uses", "value": 3 },
+        "clear_at_least": { "type": "input_tokens", "value": 5_000 }
+    })];
+    if model_supports_compaction(model) {
+        edits.push(serde_json::json!({
+            "type": "compact_20260112",
+            "trigger": { "type": "input_tokens", "value": 150_000 },
+            "instructions": "Summarize the earlier part of this conversation so a later turn \
+                can continue without it. Preserve, verbatim where possible: constraints and \
+                preferences the user stated, decisions already made, identifiers (names, \
+                order/invoice/customer numbers, dates, amounts), and anything still \
+                unresolved. Omit pleasantries and restating of tool mechanics."
+        }));
+    }
+    body["context_management"] = serde_json::json!({ "edits": edits });
+}
+
+/// The `anthropic-beta` header value for a request carrying
+/// [`apply_context_management`]'s block for `model`: both features' betas,
+/// comma-joined (Anthropic's documented convention for combining beta headers
+/// in one request) — or just the context-editing beta alone for a model
+/// [`model_supports_compaction`] excludes, so the header never advertises a
+/// strategy the body does not actually carry.
+fn context_management_beta_header(model: &str) -> String {
+    if model_supports_compaction(model) {
+        format!("{CONTEXT_MANAGEMENT_BETA},{COMPACTION_BETA}")
+    } else {
+        CONTEXT_MANAGEMENT_BETA.to_owned()
+    }
+}
+
+/// Anthropic's own record of what its native context management actually did
+/// this turn: `(strategy type, cleared_tool_uses, cleared_input_tokens)` per
+/// entry, parsed from `context_management.applied_edits[]`. Present on the
+/// unary response object, and — per the compaction reference — on the
+/// streaming `message_delta` event; empty whenever neither strategy
+/// triggered, which is the common case for an ordinary turn that never grew
+/// large enough to need either.
+fn applied_context_edits(json: &serde_json::Value) -> Vec<(String, i64, i64)> {
+    json["context_management"]["applied_edits"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|edit| {
+            (
+                edit["type"].as_str().unwrap_or("unknown").to_owned(),
+                edit["cleared_tool_uses"].as_i64().unwrap_or(0),
+                edit["cleared_input_tokens"].as_i64().unwrap_or(0),
+            )
+        })
+        .collect()
+}
+
+/// Surface [`applied_context_edits`] at INFO — the downstream signal the
+/// native-compaction migration exists to make observable: whether Anthropic's
+/// own context management actually acted this turn, and by how much. Same
+/// observability level as the cache-leg log line this sits beside; a `.rs`
+/// grep for either finds both halves of the same story.
+fn log_applied_context_edits(model: &str, provider: &str, json: &serde_json::Value) {
+    for (edit_type, cleared_tool_uses, cleared_input_tokens) in applied_context_edits(json) {
+        info!(
+            model,
+            provider,
+            edit_type = %edit_type,
+            cleared_tool_uses,
+            cleared_input_tokens,
+            "anthropic native context management acted on this turn"
+        );
+    }
+}
+
 fn build_request_body(req: &InferRequest) -> serde_json::Value {
+    build_request_body_with_context_management(req, native_context_management_enabled())
+}
+
+fn build_request_body_with_context_management(req: &InferRequest, native_enabled: bool) -> serde_json::Value {
     // The Anthropic Messages API takes the system prompt as a TOP-LEVEL `system`
     // parameter, not as a message with role "system" — sending it inline 400s:
     // "messages.0: use the top-level 'system' parameter for the initial system
@@ -485,6 +691,13 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
         .iter()
         .filter(|m| !m.role.eq_ignore_ascii_case("system"))
         .map(|m| {
+            if m.role == "assistant" && !m.compaction_summary.trim().is_empty()
+                && model_supports_compaction(&req.model) && native_enabled {
+                return serde_json::json!({"role": "assistant", "content": [
+                    {"type": "compaction", "content": m.compaction_summary},
+                    {"type": "text", "text": m.content}
+                ]});
+            }
             serde_json::json!({
                 "role": m.role,
                 "content": m.content,
@@ -552,6 +765,21 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
         };
     }
 
+    // Native token-based compaction complements gateway message-count/tool
+    // budgets. Not gated on `req.zdr`: unlike prompt caching, this
+    // adds no NEW cross-request retention — it only shapes what THIS single
+    // call's context looks like to the model.
+    if native_enabled {
+        apply_context_management(&mut body, &req.model);
+        // Tool decision rounds are not persisted as assistant turns. Until they
+        // have durable checkpoints, compact only the final answer request.
+        if !req.tools.is_empty() {
+            if let Some(edits) = body["context_management"]["edits"].as_array_mut() {
+                edits.retain(|edit| edit["type"] != "compact_20260112");
+            }
+        }
+    }
+
     // Mark the stable prefix for Anthropic's prompt cache. Must run last: it
     // rewrites `tools` / `system` / `messages` in place, so every field it marks
     // has to already be present. Bypassed entirely for ZDR requests.
@@ -593,13 +821,21 @@ fn to_i32_or_max(value: i64) -> i32 {
 /// `response.usage` for non-streaming replies, `message_start.message.usage`
 /// for streaming).
 fn cache_read_input_tokens(usage: &serde_json::Value) -> i32 {
-    to_i32_or_max(usage["cache_read_input_tokens"].as_i64().unwrap_or(0))
+    usage_tokens(usage, "cache_read_input_tokens")
 }
 
 /// Tokens newly written to Anthropic's prompt cache by this request (0 when
 /// absent). See [`cache_read_input_tokens`] for the `usage` shape.
 fn cache_creation_input_tokens(usage: &serde_json::Value) -> i32 {
-    to_i32_or_max(usage["cache_creation_input_tokens"].as_i64().unwrap_or(0))
+    usage_tokens(usage, "cache_creation_input_tokens")
+}
+
+// Compaction usage is excluded from top-level usage. Sum iterations once;
+// otherwise native compaction would hide billed work from cost accounting.
+fn usage_tokens(usage: &serde_json::Value, field: &str) -> i32 {
+    if let Some(iterations) = usage["iterations"].as_array().filter(|items| !items.is_empty()) {
+        iterations.iter().fold(0i32, |total, item| total.saturating_add(to_i32_or_max(item[field].as_i64().unwrap_or(0))))
+    } else { to_i32_or_max(usage[field].as_i64().unwrap_or(0)) }
 }
 
 /// With prompt caching on, Anthropic's `input_tokens` counts ONLY the tokens
@@ -611,7 +847,7 @@ fn cache_creation_input_tokens(usage: &serde_json::Value) -> i32 {
 /// round's input from usage and under-report cost. Both cache fields are
 /// absent (→ 0) when nothing was cached, so uncached requests are unchanged.
 fn total_input_tokens(usage: &serde_json::Value) -> i32 {
-    to_i32_or_max(usage["input_tokens"].as_i64().unwrap_or(0))
+    usage_tokens(usage, "input_tokens")
         .saturating_add(cache_read_input_tokens(usage))
         .saturating_add(cache_creation_input_tokens(usage))
 }
@@ -645,10 +881,14 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         .unwrap_or("end_turn")
         .to_owned();
     let input_tokens = total_input_tokens(&json["usage"]);
-    let output_tokens = to_i32_or_max(json["usage"]["output_tokens"].as_i64().unwrap_or(0));
+    let output_tokens = usage_tokens(&json["usage"], "output_tokens");
     let tool_calls = parse_tool_calls(json);
 
     InferResponse {
+        compaction_summary: json["content"].as_array().into_iter().flatten()
+            .filter(|block| block["type"] == "compaction")
+            .filter_map(|block| block["content"].as_str())
+            .last().unwrap_or_default().to_owned(),
         request_id: request_id.to_owned(),
         content,
         model_used,
@@ -664,6 +904,8 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         // there is no model-certainty signal to carry here; `None` reads as
         // "unknown" downstream, never as low confidence.
         token_confidence: None,
+        cache_read_input_tokens: cache_read_input_tokens(&json["usage"]),
+        cache_creation_input_tokens: cache_creation_input_tokens(&json["usage"]),
     }
 }
 
@@ -747,12 +989,16 @@ impl ProviderRouter for AnthropicProvider {
     async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
         let body = build_request_body(req);
 
-        let response = self
+        let mut request = self
             .client
             .post(self.messages_url())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if native_context_management_enabled() {
+            request = request.header("anthropic-beta", context_management_beta_header(&req.model));
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -800,6 +1046,7 @@ impl ProviderRouter for AnthropicProvider {
             cache_creation_input_tokens = cache_creation_input_tokens(&json["usage"]),
             "infer completed"
         );
+        log_applied_context_edits(&req.model, self.provider_name(), &json);
         Ok(parse_response(&req.request_id, &json))
     }
 
@@ -810,12 +1057,16 @@ impl ProviderRouter for AnthropicProvider {
         let mut body = build_request_body(req);
         body["stream"] = serde_json::Value::Bool(true);
 
-        let response = self
+        let mut request = self
             .client
             .post(self.messages_url())
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if native_context_management_enabled() {
+            request = request.header("anthropic-beta", context_management_beta_header(&req.model));
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -848,6 +1099,7 @@ impl ProviderRouter for AnthropicProvider {
 
         let request_id = req.request_id.clone();
         let model = req.model.clone();
+        let provider_name = self.provider_name().to_owned();
         let (tx, rx) = mpsc::channel(64);
 
         tokio::spawn(async move {
@@ -865,11 +1117,21 @@ impl ProviderRouter for AnthropicProvider {
             // bug) always resolved to 0.
             let mut input_tokens: i32 = 0;
             let mut output_tokens: i32 = 0;
+            // Prompt-cache legs, captured off `message_start.message.usage`
+            // alongside `input_tokens` (same event, same fold-in relationship
+            // documented on `total_input_tokens`) and carried to every final
+            // chunk below. This is the streaming path's half of cache-token
+            // telemetry: `parse_response` (the unary path) has logged these
+            // for a while, but until now nothing on `infer_stream` reported
+            // them at all -- a cache hit was unobservable on this path.
+            let mut cache_read_tokens: i32 = 0;
+            let mut cache_creation_tokens: i32 = 0;
             // Set from `message_delta.delta.stop_reason` once it arrives.
             // Stays empty if the loop exits without ever seeing one -- the
             // tail-chunk fallback below treats that as an incomplete stream,
             // not a natural completion.
             let mut stop_reason = String::new();
+            let mut compaction_summary = String::new();
 
             while let Some(chunk_result) = bytes_stream.next().await {
                 let bytes = match chunk_result {
@@ -890,6 +1152,7 @@ impl ProviderRouter for AnthropicProvider {
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" {
                             let final_chunk = InferChunk {
+                                compaction_summary: compaction_summary.clone(),
                                 reasoning_delta: String::new(),
                                 request_id: request_id.clone(),
                                 delta: String::new(),
@@ -905,6 +1168,8 @@ impl ProviderRouter for AnthropicProvider {
                                 } else {
                                     stop_reason.clone()
                                 },
+                                cache_read_input_tokens: cache_read_tokens,
+                                cache_creation_input_tokens: cache_creation_tokens,
                             };
                             let _ = tx.send(final_chunk).await;
                             return;
@@ -915,14 +1180,34 @@ impl ProviderRouter for AnthropicProvider {
 
                             if event_type == "message_start" {
                                 input_tokens = total_input_tokens(&json["message"]["usage"]);
+                                cache_read_tokens =
+                                    cache_read_input_tokens(&json["message"]["usage"]);
+                                cache_creation_tokens =
+                                    cache_creation_input_tokens(&json["message"]["usage"]);
                             } else if event_type == "message_delta" {
-                                if let Some(v) = json["usage"]["output_tokens"].as_i64() {
-                                    output_tokens = to_i32_or_max(v);
+                                if json["usage"]["output_tokens"].is_number() || json["usage"]["iterations"].is_array() {
+                                    output_tokens = usage_tokens(&json["usage"], "output_tokens");
+                                }
+                                if json["usage"]["input_tokens"].is_number() || json["usage"]["iterations"].is_array() {
+                                    input_tokens = total_input_tokens(&json["usage"]);
+                                    cache_read_tokens = cache_read_input_tokens(&json["usage"]);
+                                    cache_creation_tokens = cache_creation_input_tokens(&json["usage"]);
                                 }
                                 if let Some(reason) = anthropic_message_delta_stop_reason(&json) {
                                     stop_reason = reason.to_owned();
                                 }
+                                // Per the compaction reference, `applied_edits`
+                                // arrives on this event when streaming (the
+                                // unary path reads it off the whole response
+                                // instead -- see `infer`'s own call to this).
+                                log_applied_context_edits(&model, &provider_name, &json);
+                            } else if event_type == "content_block_start" && json["content_block"]["type"] == "compaction" {
+                                compaction_summary = json["content_block"]["content"].as_str().unwrap_or_default().to_owned();
                             } else if event_type == "content_block_delta" {
+                                if json["delta"]["type"] == "compaction_delta" {
+                                    compaction_summary.push_str(json["delta"]["content"].as_str().unwrap_or_default());
+                                    continue;
+                                }
                                 // A delta belongs to exactly ONE channel. With
                                 // extended thinking enabled the stream
                                 // interleaves `thinking_delta` blocks with
@@ -937,6 +1222,7 @@ impl ProviderRouter for AnthropicProvider {
                                     continue;
                                 }
                                 let chunk = InferChunk {
+                                    compaction_summary: String::new(),
                                     request_id: request_id.clone(),
                                     delta,
                                     done: false,
@@ -948,12 +1234,15 @@ impl ProviderRouter for AnthropicProvider {
                                     token_confidence: None,
                                     stop_reason: String::new(),
                                     reasoning_delta,
+                                    cache_read_input_tokens: 0,
+                                    cache_creation_input_tokens: 0,
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
                                 }
                             } else if event_type == "message_stop" {
                                 let final_chunk = InferChunk {
+                                    compaction_summary: compaction_summary.clone(),
                                     reasoning_delta: String::new(),
                                     request_id: request_id.clone(),
                                     delta: String::new(),
@@ -969,6 +1258,8 @@ impl ProviderRouter for AnthropicProvider {
                                     } else {
                                         stop_reason.clone()
                                     },
+                                    cache_read_input_tokens: cache_read_tokens,
+                                    cache_creation_input_tokens: cache_creation_tokens,
                                 };
                                 let _ = tx.send(final_chunk).await;
                                 return;
@@ -984,6 +1275,7 @@ impl ProviderRouter for AnthropicProvider {
             // real message_delta event still wins, but absent that,
             // "end_turn" would misreport an incomplete answer as a clean one.
             let final_chunk = InferChunk {
+                compaction_summary: String::new(),
                 reasoning_delta: String::new(),
                 request_id,
                 delta: String::new(),
@@ -999,6 +1291,8 @@ impl ProviderRouter for AnthropicProvider {
                 } else {
                     stop_reason
                 },
+                cache_read_input_tokens: cache_read_tokens,
+                cache_creation_input_tokens: cache_creation_tokens,
             };
             let _ = tx.send(final_chunk).await;
         });
@@ -1060,11 +1354,13 @@ mod tool_tests {
             temperature: 0.7,
             messages: vec![
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: "You are Verevon.".to_owned(),
                     name: String::new(),
                 },
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: "Hi".to_owned(),
                     name: String::new(),
@@ -1128,11 +1424,13 @@ mod prompt_cache_tests {
             tool_choice: "auto".to_owned(),
             messages: vec![
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: format!("You are Verevon. {}", "s".repeat(5_000)),
                     name: String::new(),
                 },
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: format!("Hva er på lager? {}", "u".repeat(5_000)),
                     name: String::new(),
@@ -1224,6 +1522,7 @@ mod prompt_cache_tests {
         req.tools = (0..12).map(|_| padded_tool(4_000)).collect();
         for i in 0..24 {
             req.messages.push(ChatMessage {
+                compaction_summary: String::new(),
                 role: if i % 2 == 0 { "assistant" } else { "user" }.to_owned(),
                 content: format!("round {i} {}", "h".repeat(2_000)),
                 name: String::new(),
@@ -1251,11 +1550,13 @@ mod prompt_cache_tests {
             tool_choice: "auto".to_owned(),
             messages: vec![
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: "You are Verevon.".to_owned(),
                     name: String::new(),
                 },
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: "Hei".to_owned(),
                     name: String::new(),
@@ -1291,11 +1592,13 @@ mod prompt_cache_tests {
             max_tokens: 512,
             messages: vec![
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: "y".repeat(6_000),
                     name: String::new(),
                 },
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: "Hei".to_owned(),
                     name: String::new(),
@@ -1677,5 +1980,374 @@ mod extended_thinking_tests {
                 "{delta} is not readable content"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod streaming_cache_telemetry_tests {
+    //! Cache-token telemetry on the STREAMING path (`infer_stream`), the gap
+    //! a prior audit found: `parse_response` (unary) has logged the cache
+    //! legs for a while, but until now nothing here reported them on the
+    //! wire, and `InferChunk` had no field to carry them even if it had.
+    //! These exercise the real HTTP/SSE code path end to end (not just the
+    //! `total_input_tokens` helper already covered above), against a fixture
+    //! stream shaped exactly like `prompt_cache_tests`'s
+    //! `streaming_usage_comes_from_message_start_and_message_delta_not_message_stop`.
+    use super::{AnthropicProvider, ProviderRouter};
+    use crate::provider::{ChatMessage, InferRequest};
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    /// A scripted Anthropic SSE stream carrying `cache_read_input_tokens` and
+    /// `cache_creation_input_tokens` on `message_start.message.usage`, ending
+    /// normally via `message_stop`.
+    fn cached_sse_body() -> String {
+        concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4-6\",",
+            "\"usage\":{\"input_tokens\":25,\"cache_read_input_tokens\":8000,",
+            "\"cache_creation_input_tokens\":400,\"output_tokens\":1}}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,",
+            "\"delta\":{\"type\":\"text_delta\",\"text\":\"Hei\"}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},",
+            "\"usage\":{\"output_tokens\":12}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        )
+        .to_owned()
+    }
+
+    fn sample_request() -> InferRequest {
+        InferRequest {
+            request_id: "req-cache-1".to_owned(),
+            model: "claude-sonnet-4-6".to_owned(),
+            max_tokens: 512,
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: "Hei".to_owned(),
+                name: String::new(),
+            }],
+            ..InferRequest::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_stream_carries_cache_legs_on_the_final_chunk() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(cached_sse_body(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new_azure("key", server.uri(), vec![])
+            .expect("azure-flavored provider for the mock endpoint");
+
+        let mut stream = provider
+            .infer_stream(&sample_request())
+            .await
+            .expect("stream starts");
+
+        // Intermediate chunk: cache legs are exactly 0, not carried early.
+        let delta_chunk = stream.recv().await.expect("delta chunk");
+        assert!(!delta_chunk.done);
+        assert_eq!(delta_chunk.cache_read_input_tokens, 0);
+        assert_eq!(delta_chunk.cache_creation_input_tokens, 0);
+
+        // Final chunk: the cache legs captured off `message_start` arrive
+        // here, same rule as `input_tokens`/`output_tokens`.
+        let final_chunk = stream.recv().await.expect("final chunk");
+        assert!(final_chunk.done);
+        assert_eq!(final_chunk.input_tokens, 8_425); // 25 + 8_000 + 400
+        assert_eq!(final_chunk.output_tokens, 12);
+        assert_eq!(final_chunk.cache_read_input_tokens, 8_000);
+        assert_eq!(final_chunk.cache_creation_input_tokens, 400);
+        assert_eq!(final_chunk.stop_reason, "end_turn");
+    }
+
+    /// An uncached stream (no cache fields in `usage` at all) must report
+    /// exact zeros, not carry over stale state from a previous call.
+    #[tokio::test]
+    async fn infer_stream_reports_zero_cache_legs_when_uncached() {
+        let server = MockServer::start().await;
+        let body = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"model\":\"claude-sonnet-4-6\",",
+            "\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\n",
+            "event: message_delta\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},",
+            "\"usage\":{\"output_tokens\":9}}\n\n",
+            "event: message_stop\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new_azure("key", server.uri(), vec![])
+            .expect("azure-flavored provider for the mock endpoint");
+
+        let mut stream = provider
+            .infer_stream(&sample_request())
+            .await
+            .expect("stream starts");
+        let final_chunk = stream.recv().await.expect("final chunk");
+        assert!(final_chunk.done);
+        assert_eq!(final_chunk.input_tokens, 25);
+        assert_eq!(final_chunk.cache_read_input_tokens, 0);
+        assert_eq!(final_chunk.cache_creation_input_tokens, 0);
+    }
+}
+
+#[cfg(test)]
+mod native_context_management_tests {
+    //! The native-compaction migration's inference-core half: every
+    //! Anthropic-provider request carries the `context_management` block plus
+    //! the `anthropic-beta` header (the model-gateway half — skipping the
+    //! hand-rolled `clear_stale_tool_results` / head-summary compaction for an
+    //! Anthropic-family model — lives in
+    //! `model-gateway::compaction::{should_run_local_compaction,
+    //! clear_stale_tool_results_unless_native}` and is tested there).
+    use super::{
+        applied_context_edits, build_request_body, context_management_beta_header,
+        context_management_flag_enabled, parse_response, AnthropicProvider, ProviderRouter,
+        COMPACTION_BETA, CONTEXT_MANAGEMENT_BETA,
+    };
+    use crate::provider::{ChatMessage, InferRequest};
+    use wiremock::{
+        matchers::{headers, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    fn sample_request() -> InferRequest {
+        InferRequest {
+            request_id: "req-ctx-mgmt-1".to_owned(),
+            model: "claude-sonnet-4-6".to_owned(),
+            max_tokens: 512,
+            messages: vec![ChatMessage {
+                compaction_summary: String::new(),
+                role: "user".to_owned(),
+                content: "Hei".to_owned(),
+                name: String::new(),
+            }],
+            ..InferRequest::default()
+        }
+    }
+
+    /// The parser is pure precisely so this never has to touch `std::env`
+    /// (racy under Rust's default parallel test runner) to exercise both
+    /// branches.
+    #[test]
+    fn the_flag_defaults_on_and_only_a_recognized_falsy_value_turns_it_off() {
+        assert!(context_management_flag_enabled(None));
+        assert!(context_management_flag_enabled(Some("1")));
+        assert!(context_management_flag_enabled(Some("anything-else")));
+        for falsy in ["0", "false", "off", "no", "  off  "] {
+            assert!(
+                !context_management_flag_enabled(Some(falsy)),
+                "{falsy:?} must disable the native path"
+            );
+        }
+    }
+
+    /// **Test 1 (part A):** a request this provider builds carries the native
+    /// `context_management.edits[]` block with both strategies, on by
+    /// default — no per-call opt-in from model-gateway required.
+    #[test]
+    fn build_request_body_carries_both_native_context_management_edits() {
+        let body = build_request_body(&sample_request());
+        let edits = body["context_management"]["edits"]
+            .as_array()
+            .expect("edits array present by default");
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0]["type"], "clear_tool_uses_20250919");
+        assert_eq!(edits[0]["trigger"]["type"], "input_tokens");
+        assert_eq!(edits[0]["keep"]["value"], 3);
+        assert_eq!(edits[1]["type"], "compact_20260112");
+        // Anthropic 400s a `compact` trigger below 50k tokens; guard the
+        // literal this provider actually sends against ever regressing under
+        // that floor.
+        assert!(edits[1]["trigger"]["value"].as_u64().unwrap() >= 50_000);
+        assert!(edits[1]["instructions"].as_str().is_some());
+    }
+
+    #[test]
+    fn the_combined_beta_header_names_both_features_for_a_compaction_capable_model() {
+        let header = context_management_beta_header("claude-sonnet-4-6");
+        assert!(header.contains(CONTEXT_MANAGEMENT_BETA));
+        assert!(header.contains(COMPACTION_BETA));
+        assert_eq!(header, "context-management-2025-06-27,compact-2026-01-12");
+    }
+
+    /// **Live-verified regression guard.** Tested directly against a real
+    /// Azure Foundry Claude deployment (Sept 2026): `claude-haiku-4-5` — the
+    /// default model this provider substitutes for every unspecified-model
+    /// request (`DEFAULT_AZURE_ANTHROPIC_MODEL`) — 400s outright when a
+    /// request carries the `compact_20260112` edit, naming the model and the
+    /// strategy in its error. `clear_tool_uses_20250919` showed no such
+    /// restriction on any tier tested (haiku included). Both this and the
+    /// body-shape test below exist so a body/header carrying `compact` for
+    /// Haiku can never ship again unnoticed — that combination would 400 the
+    /// DEFAULT route of this provider on every over-budget turn.
+    #[test]
+    fn haiku_omits_the_compaction_strategy_it_does_not_support() {
+        let header = context_management_beta_header("claude-haiku-4-5");
+        assert_eq!(header, CONTEXT_MANAGEMENT_BETA);
+        assert!(!header.contains(COMPACTION_BETA));
+
+        let mut req = sample_request();
+        req.model = "claude-haiku-4-5".to_owned();
+        let body = build_request_body(&req);
+        let edits = body["context_management"]["edits"]
+            .as_array()
+            .expect("clear_tool_uses is still offered to haiku");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0]["type"], "clear_tool_uses_20250919");
+        assert!(
+            edits.iter().all(|edit| edit["type"] != "compact_20260112"),
+            "haiku must never be sent the strategy it 400s on"
+        );
+    }
+
+    /// **Test 1 (part B):** the header is not just built but actually placed
+    /// on the wire, for BOTH the direct and Azure-Foundry flavors of a call
+    /// this provider makes — a wiremock header matcher, not just a body
+    /// assertion, so a future refactor that builds the right body but forgets
+    /// to attach the header still fails this test.
+    #[tokio::test]
+    async fn infer_sends_the_native_context_management_beta_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            // wiremock's header matcher compares against a comma-joined
+            // header by splitting it back into individual values, mirroring
+            // HTTP's own "repeated header == comma-joined header" semantics
+            // -- so the two betas are asserted as two separate values here,
+            // exactly as `context_management_beta_header`'s own unit test
+            // pins the single wire string they come from.
+            .and(headers(
+                "anthropic-beta",
+                vec![CONTEXT_MANAGEMENT_BETA, COMPACTION_BETA],
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{ "type": "text", "text": "hei" }],
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 10, "output_tokens": 2 }
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new_azure("key", server.uri(), vec![])
+            .expect("azure-flavored provider for the mock endpoint");
+
+        // The mock only matches a request carrying the exact header; a
+        // missing/garbled one falls through to wiremock's default 404 and
+        // this call returns an error instead of the scripted 200.
+        provider
+            .infer(&sample_request())
+            .await
+            .expect("the beta header must have reached the wire for the mock to match");
+    }
+
+    #[tokio::test]
+    async fn infer_stream_sends_the_native_context_management_beta_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/anthropic/v1/messages"))
+            .and(headers(
+                "anthropic-beta",
+                vec![CONTEXT_MANAGEMENT_BETA, COMPACTION_BETA],
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                concat!(
+                    "event: message_start\n",
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",",
+                    "\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1}}}\n\n",
+                    "event: message_stop\n",
+                    "data: {\"type\":\"message_stop\"}\n\n"
+                ),
+                "text/event-stream",
+            ))
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new_azure("key", server.uri(), vec![])
+            .expect("azure-flavored provider for the mock endpoint");
+
+        let mut stream = provider
+            .infer_stream(&sample_request())
+            .await
+            .expect("the beta header must have reached the wire for the mock to match");
+        let final_chunk = stream.recv().await.expect("final chunk");
+        assert!(final_chunk.done);
+    }
+
+    /// **Test 3:** the pre-existing cache-token telemetry (previous stage)
+    /// stays populated on a response that ALSO carries native
+    /// `context_management.applied_edits` — proving the new parsing this
+    /// migration adds does not regress the cache-leg parsing it sits beside,
+    /// on the exact response shape a real compacted/cleared turn produces.
+    #[test]
+    fn cache_token_telemetry_is_populated_alongside_applied_native_edits() {
+        let json = serde_json::json!({
+            "content": [{ "type": "text", "text": "ok" }],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 120,
+                "cache_read_input_tokens": 8_000,
+                "cache_creation_input_tokens": 400,
+                "output_tokens": 42
+            },
+            "context_management": {
+                "applied_edits": [
+                    {
+                        "type": "clear_tool_uses_20250919",
+                        "cleared_tool_uses": 8,
+                        "cleared_input_tokens": 50_000
+                    },
+                    {
+                        "type": "compact_20260112",
+                        "cleared_tool_uses": 0,
+                        "cleared_input_tokens": 120_000
+                    }
+                ]
+            }
+        });
+
+        let parsed = parse_response("req-1", &json);
+        // Cache-token telemetry (previous stage): still correct, unaffected
+        // by the sibling `context_management` key.
+        assert_eq!(parsed.input_tokens, 8_520);
+        assert_eq!(parsed.output_tokens, 42);
+
+        // This migration's own telemetry: both applied edits are readable.
+        let edits = applied_context_edits(&json);
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0], ("clear_tool_uses_20250919".to_owned(), 8, 50_000));
+        assert_eq!(edits[1], ("compact_20260112".to_owned(), 0, 120_000));
+    }
+
+    /// An ordinary turn that never triggered either strategy must report no
+    /// applied edits — not a default/placeholder entry that would read as a
+    /// phantom compaction in a log line.
+    #[test]
+    fn no_applied_edits_when_context_management_is_absent() {
+        let json = serde_json::json!({
+            "content": [{ "type": "text", "text": "ok" }],
+            "usage": { "input_tokens": 10, "output_tokens": 2 }
+        });
+        assert!(applied_context_edits(&json).is_empty());
     }
 }

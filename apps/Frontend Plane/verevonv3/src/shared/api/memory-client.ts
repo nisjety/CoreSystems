@@ -109,3 +109,54 @@ export async function deleteMemory(memoryId: string): Promise<DeleteMemoryResult
     degradationReason: response.degradation_reason ?? response.degradationReason ?? '',
   }
 }
+
+export interface CorrectMemoryResult {
+  /**
+   * The corrected entry's id. NOT the same id passed in — session-core's
+   * MemoryService has no update-in-place RPC, so the gateway indexes a fresh
+   * entry with the corrected content and deletes the original; callers must
+   * swap this in for the old id in whatever list they are rendering.
+   */
+  memoryId: string
+  /** Whether the original entry was actually removed (see `degraded`). */
+  deleted: boolean
+  degraded: boolean
+  degradationReason: string
+}
+
+interface CorrectMemoryResponse {
+  memory_id?: string
+  memoryId?: string
+  deleted?: boolean
+  degraded?: boolean
+  degradation_reason?: string
+  degradationReason?: string
+}
+
+/**
+ * Corrects a single memory's content, keeping it a "USER"-topic entry.
+ *
+ * `threadId` is only used to satisfy the write path's thread-ownership check
+ * (the same one the Dreaming extractor's own writes go through) — pass
+ * whichever thread the correction was made from; the corrected entry is not
+ * scoped to it and is still recalled the same as any other personal memory.
+ */
+export async function correctMemory(
+  memoryId: string,
+  threadId: string,
+  content: string,
+): Promise<CorrectMemoryResult> {
+  const response = await requestJson<CorrectMemoryResponse>(
+    `/api/v1/memory/${encodeURIComponent(memoryId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ threadId, content }),
+    },
+  )
+  return {
+    memoryId: response.memory_id ?? response.memoryId ?? '',
+    deleted: response.deleted ?? false,
+    degraded: response.degraded ?? false,
+    degradationReason: response.degradation_reason ?? response.degradationReason ?? '',
+  }
+}

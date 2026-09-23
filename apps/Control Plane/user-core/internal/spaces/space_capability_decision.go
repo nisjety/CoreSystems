@@ -106,22 +106,13 @@ func spaceCapabilityPayloadDigest(evidence PersonalThreadDecisionEvidence, inten
 		hash.Write(length[:])
 		hash.Write([]byte(field.value))
 	}
-	for _, revision := range []struct {
-		name  string
-		value int64
-	}{
-		{"authority_revision", evidence.Membership.Revisions.Authority},
-		{"membership_revision", evidence.Membership.Revisions.Membership},
-		{"privacy_revision", evidence.Membership.Revisions.Privacy},
-		{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
-		{"entitlement_revision", evidence.Membership.Revisions.Entitlement},
-	} {
-		hash.Write([]byte(revision.name))
-		hash.Write([]byte{0})
-		var encoded [8]byte
-		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
-		hash.Write(encoded[:])
-	}
+	writeDigestRevisions(hash,
+		digestRevision{"authority_revision", evidence.Membership.Revisions.Authority},
+		digestRevision{"membership_revision", evidence.Membership.Revisions.Membership},
+		digestRevision{"privacy_revision", evidence.Membership.Revisions.Privacy},
+		digestRevision{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
+		digestRevision{"entitlement_revision", evidence.Membership.Revisions.Entitlement},
+	)
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
@@ -148,7 +139,7 @@ func IssueSpaceCapabilityDecision(
 		return Decision{}, err
 	}
 	if !matchesOneOf(evidence.Membership.Role, "editor", "manager", "owner") {
-		return Decision{}, fmt.Errorf("Space role %q cannot acquire a sandbox capability", evidence.Membership.Role)
+		return Decision{}, fmt.Errorf("space role %q cannot acquire a sandbox capability", evidence.Membership.Role)
 	}
 	if !evidence.SandboxCapabilityEntitled {
 		return Decision{}, fmt.Errorf("sandbox capability entitlement is not active")
@@ -177,20 +168,9 @@ func IssueSpaceCapabilityDecision(
 	if intent.Processes == ProcessesBackgroundRegistry && evidence.ProcessRegistryEntitled {
 		permissions = append(permissions, "space:processes")
 	}
-	return Decision{
-		DecisionRef: strings.TrimSpace(decisionRef), OrgID: evidence.Membership.OrgID, SpaceRef: evidence.Membership.SpaceRef,
-		SubjectID: evidence.Membership.SubjectID, ServiceAudience: spaceCapabilityAudience,
-		ActionID: spaceCapabilityAction, ActionSchemaHash: spaceCapabilitySchema,
-		PayloadDigest: spaceCapabilityPayloadDigest(evidence, intent), IdempotencyKey: strings.TrimSpace(intent.IdempotencyKey),
-		RecipientAudienceRef: strings.TrimSpace(evidence.RecipientAudienceRef), RecipientAudienceHash: strings.TrimSpace(evidence.RecipientAudienceHash),
-		PrivacyPolicyRef: strings.TrimSpace(evidence.Privacy.PolicyRef), ResourceAuthorizationRef: strings.TrimSpace(evidence.ResourceAuthorizationRef),
-		AuthorityRevision: evidence.Membership.Revisions.Authority, MembershipRevision: evidence.Membership.Revisions.Membership,
-		PrivacyRevision: evidence.Membership.Revisions.Privacy, RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
-		EntitlementRevision: evidence.Membership.Revisions.Entitlement, Permissions: permissions,
-		Purpose: strings.TrimSpace(evidence.Privacy.Purpose), LawfulBasis: strings.TrimSpace(evidence.Privacy.LawfulBasis),
-		PrivacyClass: strings.TrimSpace(evidence.Privacy.PrivacyClass), ThirdPartyAllowed: evidence.Privacy.ThirdPartyAllowed,
-		RetentionClass: strings.TrimSpace(evidence.Privacy.RetentionClass), Residency: strings.TrimSpace(evidence.Privacy.Residency),
-		DeletionScope: strings.TrimSpace(evidence.Privacy.DeletionScope), ZeroDataRetention: evidence.Privacy.ZeroDataRetention,
-		IssuedAt: now.UTC(), ExpiresAt: now.UTC().Add(personalDecisionLifetime), Nonce: strings.TrimSpace(nonce),
-	}, nil
+	return newEvidenceDecision(
+		evidence, decisionRef, spaceCapabilityAudience, spaceCapabilityAction, spaceCapabilitySchema,
+		spaceCapabilityPayloadDigest(evidence, intent), intent.IdempotencyKey, nonce,
+		permissions, evidence.Privacy.ZeroDataRetention, now,
+	), nil
 }

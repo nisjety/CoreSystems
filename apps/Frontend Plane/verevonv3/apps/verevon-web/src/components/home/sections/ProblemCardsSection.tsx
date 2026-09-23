@@ -141,11 +141,8 @@ export function ProblemCardsSection() {
 		>
 			<Reveal delay={90}>
 				<header className="mx-auto max-w-[770px] text-center max-[760px]:text-left">
-					<p className="font-protokoll text-[0.7rem] font-medium uppercase tracking-[0.16em] text-verevon-text-muted">
-						02 / VEREVON
-					</p>
 					<h2
-						className="mt-4 font-arbeit text-[clamp(2rem,3.2vw,3.5rem)] font-light leading-[0.98] tracking-[-0.055em] text-pretty"
+						className="font-arbeit text-[clamp(2rem,3.2vw,3.5rem)] font-light leading-[0.98] tracking-[-0.055em] text-pretty"
 						id="end-to-end-knowledge-title"
 					>
 						<span className="block">Samle bedriftens kunnskap,</span>{" "}

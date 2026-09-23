@@ -79,6 +79,18 @@ func consumerBindings() []consumerBinding {
 			},
 		},
 		{
+			// DeliverSubject is required on every consumer in this file that a Go
+			// consumer binds to via QueueSubscribe/Subscribe + nats.Bind (both
+			// consumers on MODEL_PLANE_RUN_EVENTS, below): a JetStream consumer with
+			// no DeliverSubject is a PULL consumer server-side, and nats.go's
+			// push-style Subscribe/QueueSubscribe refuses to bind to one ("must use
+			// pull subscribe to bind to pull based consumer") -- verified directly
+			// against nats.go v1.37.0 (the pinned version) on 2026-09-17, reproducing
+			// a LATENT BUG in capability-core-run-watch-notify's config that predates
+			// this comment: it had shipped with no DeliverSubject and would have
+			// failed to bind the moment capability-core's NATS connection ever
+			// succeeded, which it had not (a separate connect-retry bug, fixed the
+			// same day, meant this had never actually been exercised live).
 			// AUTO-2 ("notify me when a run finishes"): capability-core's
 			// internal/runwatch.Notifier binds this durable with manual ack (see
 			// its package doc) and calls notification-core for every user who
@@ -91,13 +103,70 @@ func consumerBindings() []consumerBinding {
 			// not have existed yet.
 			stream: "MODEL_PLANE_RUN_EVENTS",
 			config: nats.ConsumerConfig{
-				Durable:       "capability-core-run-watch-notify",
+				Durable:        "capability-core-run-watch-notify",
+				DeliverSubject: "_VEREVON.MODEL.DELIVER.capability.run_watch_notify",
+				// A queue-bound push consumer (Notifier.Run subscribes via
+				// QueueSubscribe) also needs DeliverGroup set server-side, or
+				// the client's queue subscribe is refused with "cannot create
+				// a queue subscription for a consumer without a deliver
+				// group" -- verified directly in the same 2026-09-17 repro
+				// that found the DeliverSubject gap above. Matches the queue
+				// name Notifier.Run passes to QueueSubscribe (its own
+				// Durable), by convention.
+				DeliverGroup:  "capability-core-run-watch-notify",
 				AckPolicy:     nats.AckExplicitPolicy,
 				AckWait:       30 * time.Second,
 				MaxDeliver:    5,
 				FilterSubject: "mp.v1.run.*.event",
 				ReplayPolicy:  nats.ReplayInstantPolicy,
 				DeliverPolicy: nats.DeliverNewPolicy,
+			},
+		},
+		{
+			// G7 skill-learning review: capability-core's
+			// internal/sessionreview.RunConsumer binds this durable with manual
+			// ack and turns each RUN_COMPLETED into an LLM review (fetch
+			// transcript -> review -> UpsertAgentSkill).
+			//
+			// This durable did not exist before 2026-09-17: RunConsumer instead
+			// used a plain core-NATS nc.Subscribe, which receives a message only
+			// while actively connected, with no persistence and no redelivery.
+			// session-core's publisher (a real JetStream publish, acked) had
+			// been durably delivering onto this stream regardless -- 88 of 88
+			// publishes acked with none stuck -- but every one was lost the
+			// moment capability-core was not live and subscribed at that exact
+			// instant (a restart, a redeploy, a brief reconnect), which is the
+			// ordinary case for a service's lifecycle, not a rare fault. The
+			// result: agent_skills stayed empty despite 147 completed runs.
+			//
+			// DeliverAllPolicy, unlike the run-watch notify durable above: that
+			// one deliberately skips history because a watcher could not have
+			// registered before this deploy existed. Here the opposite is true --
+			// the whole point of adding this durable is to recover the reviews
+			// that were silently missed, so it replays everything the stream
+			// still retains (MaxAge 48h) on first bind.
+			//
+			// AckWait is longer than the other two run-event consumers': this
+			// handler's side effect is a real LLM review call (transcript fetch
+			// + inference-core Infer + UpsertAgentSkill), not a cheap local
+			// read/write or a single outbound HTTP call, so 30s risks a live
+			// review being Nak'd by its own timeout mid-flight and redelivered
+			// as a duplicate attempt.
+			stream: "MODEL_PLANE_RUN_EVENTS",
+			config: nats.ConsumerConfig{
+				Durable:        "capability-core-skill-review",
+				DeliverSubject: "_VEREVON.MODEL.DELIVER.capability.skill_review",
+				// See the identical DeliverGroup note on
+				// capability-core-run-watch-notify above: RunConsumer also
+				// binds via QueueSubscribe, so this needs a matching
+				// DeliverGroup too.
+				DeliverGroup:  "capability-core-skill-review",
+				AckPolicy:     nats.AckExplicitPolicy,
+				AckWait:       120 * time.Second,
+				MaxDeliver:    5,
+				FilterSubject: "mp.v1.run.*.event",
+				ReplayPolicy:  nats.ReplayInstantPolicy,
+				DeliverPolicy: nats.DeliverAllPolicy,
 			},
 		},
 	}
@@ -182,11 +251,41 @@ func ensureConsumer(js nats.JetStreamContext, binding consumerBinding) error {
 		return err
 	}
 	actual := info.Config
+
+	// A consumer whose DeliverSubject/DeliverGroup has drifted from the
+	// current contract (empty because it predates push delivery entirely, or
+	// non-empty but under an earlier naming convention) is safe to delete and
+	// recreate PROVIDED it has zero prior deliveries: a consumer object only
+	// tracks delivery position/ack state for ITS OWN prior deliveries, so
+	// info.Delivered.Consumer == 0 means no client has ever actually received
+	// a message through this exact durable — there is no progress to lose.
+	// The underlying messages stay on the stream regardless; only this one
+	// durable's (empty) delivery record is discarded. Semantic identity
+	// fields (Durable/FilterSubject/AckPolicy/MaxDeliver) must still match,
+	// so this never masks a deliberate operator change to what the consumer
+	// actually does — only to how its messages get delivered.
+	deliverySubjectDrift := actual.DeliverSubject != binding.config.DeliverSubject ||
+		actual.DeliverGroup != binding.config.DeliverGroup
+	if deliverySubjectDrift && info.Delivered.Consumer == 0 &&
+		actual.Durable == binding.config.Durable && actual.FilterSubject == binding.config.FilterSubject &&
+		actual.AckPolicy == binding.config.AckPolicy && actual.MaxDeliver == binding.config.MaxDeliver {
+		slog.Warn("consumer's delivery subject/group predates current contract and has zero prior deliveries; recreating (safe: nothing to lose)",
+			"stream", binding.stream, "durable", binding.config.Durable,
+			"old_deliver_subject", actual.DeliverSubject, "new_deliver_subject", binding.config.DeliverSubject,
+			"old_deliver_group", actual.DeliverGroup, "new_deliver_group", binding.config.DeliverGroup)
+		if err := js.DeleteConsumer(binding.stream, binding.config.Durable); err != nil {
+			return fmt.Errorf("recreate %s/%s: delete stale consumer: %w", binding.stream, binding.config.Durable, err)
+		}
+		_, err := js.AddConsumer(binding.stream, &binding.config)
+		return err
+	}
+
 	if actual.Durable != binding.config.Durable || actual.FilterSubject != binding.config.FilterSubject ||
 		actual.AckPolicy != binding.config.AckPolicy || actual.AckWait != binding.config.AckWait ||
-		actual.MaxDeliver != binding.config.MaxDeliver {
-		return fmt.Errorf("existing config differs: got filter=%q ack=%v ack_wait=%s max_deliver=%d",
-			actual.FilterSubject, actual.AckPolicy, actual.AckWait, actual.MaxDeliver)
+		actual.MaxDeliver != binding.config.MaxDeliver || actual.DeliverSubject != binding.config.DeliverSubject ||
+		actual.DeliverGroup != binding.config.DeliverGroup {
+		return fmt.Errorf("existing config differs: got filter=%q ack=%v ack_wait=%s max_deliver=%d deliver_subject=%q deliver_group=%q",
+			actual.FilterSubject, actual.AckPolicy, actual.AckWait, actual.MaxDeliver, actual.DeliverSubject, actual.DeliverGroup)
 	}
 	return nil
 }

@@ -180,6 +180,7 @@ export type ChatKnowledgeGrounding = {
 export const LOW_CONFIDENCE_ANSWER_THRESHOLD = 0.75
 
 export type ChatTurn = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   id: string
   role: 'user' | 'assistant'
   content: string
@@ -350,6 +351,7 @@ export type StreamAttachment = {
 }
 
 export type SendOptions = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   actions?: ChatAction[]
   /** Explicit provider route for a connected user-owned model subscription. */
   provider?: string
@@ -364,6 +366,15 @@ export type SendOptions = {
   tone?: 'concise' | 'detailed'
 
   attachments?: StreamAttachment[]
+  /**
+   * What the MODEL receives as the user turn, when it differs from what the
+   * user typed: the typed text followed by the full text of small attached
+   * documents. The transcript keeps showing the typed text (with the
+   * attachment chips); the model gets the content in the same turn instead of
+   * waiting for asynchronous indexing that finishes after the answer
+   * (RUN-LOG finding 1). Absent means "send the typed text as-is".
+   */
+  modelContent?: string
   browseWeb?: boolean
   deepResearch?: boolean
   createdAt?: string
@@ -398,6 +409,15 @@ export type SendOptions = {
    * otherwise, so unspecified stays byte-identical on the wire.
    */
   minPrivacyTier?: PrivacyTier
+  /**
+   * "Fortsett" (continue-after-stop): pre-fills the new assistant turn's
+   * DISPLAYED content with this text instead of starting from `''`, so the
+   * partial answer a stopped turn already produced is never lost — streamed
+   * deltas simply append after it, exactly as they would after an empty turn.
+   * Absent for every other send. See `continueGeneration` in
+   * use-chat-controller.ts, the only caller.
+   */
+  seedContent?: string
 }
 
 export type EvidenceSource = (Citation & { kind: 'web' }) | ChatGroundingSource
@@ -408,21 +428,64 @@ export type MarkdownListItem = {
   /** Marker family of this item; nested items may differ from the block's. */
   ordered: boolean
   text: string
+  /**
+   * GFM task-list state ("- [ ]" / "- [x]"), undefined for an ordinary item.
+   * `text` has already had the "[ ]"/"[x]" marker stripped off the front.
+   */
+  checked?: boolean
 }
 
 export type MarkdownTableAlign = 'center' | 'left' | 'right' | null
 
+/**
+ * One line of a (possibly nested) blockquote, mirroring `MarkdownListItem`'s
+ * depth field so nested quotes (">" then ">>", or "> >") can recurse the same
+ * way nested lists do instead of collapsing to a single level.
+ */
+export type MarkdownQuoteLine = {
+  /** Nesting level derived from the count of leading '>' markers (1 = top level). */
+  depth: number
+  text: string
+}
+
 export type MarkdownBlock =
-  | { kind: 'code'; lang: string; text: string }
+  | {
+      kind: 'code'
+      lang: string
+      text: string
+      /**
+       * False when the fence never closed before the source ran out (an
+       * in-progress fence mid-stream). A ```mermaid``` block only ever goes
+       * through the actual diagram renderer once `closed`; while streaming
+       * it renders as a plain code block, same as any other language, so an
+       * incomplete/invalid partial diagram never reaches `mermaid.render`.
+       */
+      closed: boolean
+    }
   // Raw `<details>`/`<summary>` HTML written by the model (e.g. "Se alle
   // tilbud" behind a shipping-quote table). Rendered as a real collapsible
   // instead of escaped tag soup; `blocks` is the parsed inner markdown.
   | { kind: 'details'; summary: string; blocks: MarkdownBlock[] }
   | { kind: 'heading'; level: 1 | 2 | 3; text: string }
   | { kind: 'hr' }
-  | { kind: 'list'; ordered: boolean; items: MarkdownListItem[] }
+  | {
+      kind: 'list'
+      ordered: boolean
+      items: MarkdownListItem[]
+      /**
+       * The integer parsed off the FIRST item's marker when `ordered`
+       * (e.g. "391." -> 391) so a leading number is preserved as `<ol
+       * start>` instead of every list silently renumbering from 1.
+       */
+      startNumber?: number
+    }
+  // Block ("display") math, `$$...$$`. `closed` mirrors the code fence's
+  // field: false while the closing `$$` hasn't arrived yet (mid-stream), so
+  // the renderer shows the raw source instead of feeding a half-written
+  // LaTeX expression to KaTeX.
+  | { kind: 'math'; text: string; closed: boolean }
   | { kind: 'paragraph'; text: string }
-  | { kind: 'quote'; text: string }
+  | { kind: 'quote'; lines: MarkdownQuoteLine[] }
   | { kind: 'table'; align: MarkdownTableAlign[]; header: string[]; rows: string[][] }
 
 // ── Prompt chips ──────────────────────────────────────────────────────────────

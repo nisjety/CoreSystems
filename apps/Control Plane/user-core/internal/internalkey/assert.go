@@ -24,10 +24,10 @@ import (
 	"strings"
 )
 
-// PlaceholderPrefixes lists the values the helper recognises as
+// PlaceholderPrefixes lists the values the helper recognizes as
 // placeholders. Matches verevon's `scripts/check-internal-api-keys.mjs` and
 // `src/lib/server/internal-api-key-assertion.ts` so the cross-language
-// behaviour is consistent.
+// behavior is consistent.
 var placeholderPrefixes = []string{
 	"test",
 	"placeholder",
@@ -105,8 +105,8 @@ func Validate(envVarName, value string) *Problem {
 	return nil
 }
 
-// IsProduction returns true when the process is running in a production-
-// like mode and a failed format check should be fatal. We treat both
+// IsProduction returns true when the process is running in a production-like
+// mode and a failed format check should be fatal. We treat both
 // `GIN_MODE=release` (gin-based services run this way in Docker) and
 // `ENV=production` / `NODE_ENV=production` as production-like.
 func IsProduction() bool {

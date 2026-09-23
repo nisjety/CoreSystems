@@ -158,6 +158,12 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/audio", post(crate::audio_routes::audio))
         .route("/v1/search", post(crate::search_routes::search))
         .route("/v1/search/images", post(crate::search_routes::images))
+        // The BFF has been calling `/api/v1/search/videos` since the VIDEOS tab
+        // shipped; with no route here it fell straight through to SearXNG and
+        // skipped org scoping, metering and the shared error envelope. Keep it
+        // next to `images` — the two verticals share a handler shape and a
+        // SearXNG dependency, and a future one belongs in the same block.
+        .route("/v1/search/videos", post(crate::search_routes::videos))
         .route("/v1/search/similar", post(crate::search_routes::similar))
         .route("/v1/search/suggest", post(crate::search_routes::suggest))
         .route("/v1/map", post(crate::map_routes::map))

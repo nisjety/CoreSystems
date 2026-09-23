@@ -432,39 +432,49 @@ describe('plane service-principal registry loading', () => {
     ).toThrow(/both configured/);
   });
 
-  it.each([
-    ['relative path', () => 'registry.json', /normalized absolute path/],
-    [
-      'symbolic link',
-      () => {
-        const link = join(directory, 'registry-link.json');
-        symlinkSync(registryFile, link);
-        return link;
-      },
-      /private regular file/,
-    ],
-    [
-      'oversized file',
-      () => {
-        const oversized = join(directory, 'oversized.json');
-        writeFileSync(oversized, Buffer.alloc(1024 * 1024 + 1), {
-          mode: 0o600,
-        });
-        return oversized;
-      },
-      /too large/,
-    ],
-    [
-      'unreadable file',
-      () => {
-        const unreadable = join(directory, 'unreadable.json');
-        writeFileSync(unreadable, configured, { mode: 0o600 });
-        chmodSync(unreadable, 0o000);
-        return unreadable;
-      },
-      /private regular file/,
-    ],
-  ])('rejects an unsafe %s', (_name, fileFactory, expectedError) => {
+  // Windows cannot express POSIX permission/symlink hardening: chmod only
+  // toggles the read-only attribute and file symlinks need a special
+  // privilege, so those cases only run where the checks are enforceable.
+  const posixOnly = process.platform !== 'win32';
+  it.each(
+    (
+      [
+        ['relative path', () => 'registry.json', /normalized absolute path/],
+        [
+          'symbolic link',
+          () => {
+            const link = join(directory, 'registry-link.json');
+            symlinkSync(registryFile, link);
+            return link;
+          },
+          /private regular file/,
+          true,
+        ],
+        [
+          'oversized file',
+          () => {
+            const oversized = join(directory, 'oversized.json');
+            writeFileSync(oversized, Buffer.alloc(1024 * 1024 + 1), {
+              mode: 0o600,
+            });
+            return oversized;
+          },
+          /too large/,
+        ],
+        [
+          'unreadable file',
+          () => {
+            const unreadable = join(directory, 'unreadable.json');
+            writeFileSync(unreadable, configured, { mode: 0o600 });
+            chmodSync(unreadable, 0o000);
+            return unreadable;
+          },
+          /private regular file/,
+          true,
+        ],
+      ] as const
+    ).filter(([, , , posixRequired]) => posixOnly || !posixRequired),
+  )('rejects an unsafe %s', (_name, fileFactory, expectedError) => {
     expect(() =>
       loadPlaneServicePrincipalRegistry({
         PLANE_SERVICE_PRINCIPALS_FILE: fileFactory(),
@@ -472,13 +482,16 @@ describe('plane service-principal registry loading', () => {
     ).toThrow(expectedError);
   });
 
-  it('rejects a registry file readable by group or other users', () => {
-    chmodSync(registryFile, 0o644);
+  (posixOnly ? it : it.skip)(
+    'rejects a registry file readable by group or other users',
+    () => {
+      chmodSync(registryFile, 0o644);
 
-    expect(() =>
-      loadPlaneServicePrincipalRegistry({
-        PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
-      }),
-    ).toThrow(/private/);
-  });
+      expect(() =>
+        loadPlaneServicePrincipalRegistry({
+          PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
+        }),
+      ).toThrow(/private/);
+    },
+  );
 });

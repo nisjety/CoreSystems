@@ -265,7 +265,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
                 )}
               </Show>
               <Show when={props.item.turn.createdAt}>
-                <span>{formatRelative(props.item.turn.createdAt)}</span>
+                <span>{formatRelative(props.item.turn.createdAt, i18n.locale())}</span>
               </Show>
             </p>
           </div>

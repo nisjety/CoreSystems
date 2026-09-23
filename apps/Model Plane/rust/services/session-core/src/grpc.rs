@@ -2238,8 +2238,8 @@ async fn append_message_inner(
         .map_err(|e| Status::internal(e.to_string()))?;
 
     let has_append_context = validate_append_space_context_shape(&req)?;
-    let thread: (String, String, Option<String>) =
-        sqlx::query_as("SELECT org_id, user_id, space_id FROM threads WHERE id = $1 FOR UPDATE")
+    let thread: (String, String, Option<String>, String) =
+        sqlx::query_as("SELECT org_id, user_id, space_id, source_scope FROM threads WHERE id = $1 FOR UPDATE")
             .bind(&req.thread_id)
             .fetch_optional(&mut *tx)
             .await
@@ -2321,10 +2321,34 @@ async fn append_message_inner(
     // with the stream that produced it. Persist it here and `list_conversation`
     // can hand it back on any device. An absent metadata stays `{}` rather than
     // NULL to match the column default.
-    let metadata_json = req
+    let mut metadata_json = req
         .metadata
         .as_ref()
         .map_or_else(|| serde_json::json!({}), struct_to_json);
+
+    // This scope is immutable after the first user message. Enforce it here,
+    // under the thread lock, so alternate ingress paths cannot silently widen
+    // a restricted task or relabel history that already used other sources.
+    let requested_isolation = metadata_json["source_scope"] == "conversation";
+    let stored_isolation = thread.3 == "conversation";
+    if req.role == "user" {
+        if stored_isolation && !requested_isolation {
+            return Err(Status::failed_precondition("This conversation requires conversation-only source scope."));
+        }
+        if requested_isolation && !stored_isolation {
+            let (has_history,): (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1)")
+                .bind(&req.thread_id).fetch_one(&mut *tx).await.map_err(|e| Status::internal(e.to_string()))?;
+            if has_history {
+                return Err(Status::failed_precondition("Start a new conversation to restrict its source scope."));
+            }
+            sqlx::query("UPDATE threads SET source_scope = 'conversation' WHERE id = $1")
+                .bind(&req.thread_id).execute(&mut *tx).await.map_err(|e| Status::internal(e.to_string()))?;
+        }
+    }
+    let conversation_only = stored_isolation || (req.role == "user" && requested_isolation);
+    if conversation_only {
+        metadata_json["source_scope"] = serde_json::json!("conversation");
+    }
 
     let row: (i64, Option<String>, Option<String>, Option<i64>, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
         "INSERT INTO messages
@@ -2388,8 +2412,9 @@ async fn append_message_inner(
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
 
-    let candidates =
-        crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id);
+    let candidates = if conversation_only { Vec::new() } else {
+        crate::dreaming::extract_memory_candidates(&req.role, &req.content, &req.thread_id)
+    };
     if !candidates.is_empty() {
         let (org_id, user_id): (String, String) =
             sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
@@ -2434,6 +2459,7 @@ async fn append_message_inner(
     if let Some((org_id, user_id, candidates, persisted)) = letta_sync {
         if retention.permits_durable_memory() {
             crate::dreaming::sync_persisted_candidates_to_letta(
+                pool,
                 letta,
                 &org_id,
                 &user_id,
@@ -2446,6 +2472,89 @@ async fn append_message_inner(
     }
 
     Ok(Response::new(pb::AppendMessageResponse { sequence }))
+}
+
+#[cfg(test)]
+mod source_scope_db_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn source_scope_survives_storage_and_blocks_widening_and_learning() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let suffix = new_ulid();
+        let org = format!("scope-test-{suffix}");
+        let make_thread = |key: String| pb::CreateThreadRequest { session_key: key, org_id: org.clone(), user_id: "test-user".into(), ..Default::default() };
+        let isolated = create_thread_inner(&pool, make_thread(format!("isolated-{suffix}"))).await.unwrap().into_inner().thread_id;
+        let ordinary = create_thread_inner(&pool, make_thread(format!("ordinary-{suffix}"))).await.unwrap().into_inner().thread_id;
+        let request = |thread: &str, restricted: bool| pb::AppendMessageRequest {
+            thread_id: thread.to_owned(), role: "user".into(), content: "Husk at demokoden er scope-test-amber.".into(),
+            metadata: restricted.then(|| prost_types::Struct { fields: [("source_scope".into(), prost_types::Value { kind: Some(prost_types::value::Kind::StringValue("conversation".into())) })].into() }),
+            ..Default::default()
+        };
+        append_message_inner(&pool, None, MemoryRetention::Durable, request(&isolated, true), "test-user").await.unwrap();
+        let widened = append_message_inner(&pool, None, MemoryRetention::Durable, request(&isolated, false), "test-user").await.unwrap_err();
+        assert_eq!(widened.code(), tonic::Code::FailedPrecondition);
+        let (scope,): (String,) = sqlx::query_as("SELECT source_scope FROM threads WHERE id = $1").bind(&isolated).fetch_one(&pool).await.unwrap();
+        assert_eq!(scope, "conversation");
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages WHERE thread_id = $1").bind(&isolated).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 1, "rejected widening must not append content");
+        crate::dreaming::dream_once(&pool, None, None, None, 1000).await.unwrap();
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agent_memory WHERE org_id = $1").bind(&org).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0, "isolated text must not produce foreground or background memory");
+        append_message_inner(&pool, None, MemoryRetention::Durable, request(&ordinary, false), "test-user").await.unwrap();
+        let relabelled = append_message_inner(&pool, None, MemoryRetention::Durable, request(&ordinary, true), "test-user").await.unwrap_err();
+        assert_eq!(relabelled.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn forgotten_memory_cannot_return_from_pending_or_inflight_extraction() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let org = format!("forget-test-{}", new_ulid());
+        let user = "forget-user";
+        let thread = create_thread_inner(&pool, pb::CreateThreadRequest {
+            session_key: org.clone(), org_id: org.clone(), user_id: user.into(), ..Default::default()
+        }).await.unwrap().into_inner().thread_id;
+        let content = "Husk at minnetest-regresjon er ravgul.";
+        append_message_inner(&pool, None, MemoryRetention::Durable, pb::AppendMessageRequest {
+            thread_id: thread.clone(), role: "user".into(), content: content.into(), ..Default::default()
+        }, user).await.unwrap();
+        let id: String = sqlx::query_scalar("SELECT id FROM agent_memory WHERE org_id = $1 AND scope = 'user'")
+            .bind(&org).fetch_one(&pool).await.unwrap();
+        let message_id: String = sqlx::query_scalar("SELECT id FROM messages WHERE thread_id = $1")
+            .bind(&thread).fetch_one(&pool).await.unwrap();
+        let mut candidates = crate::dreaming::extract_memory_candidates("user", content, &thread);
+        assert!(!candidates.is_empty());
+        assert!(crate::dreaming::delete_user_memory(&pool, &org, user, &id).await.unwrap());
+        // Simulate an LLM result that was already in flight when deletion won.
+        // A different generated slot must not bypass the message cutoff.
+        candidates[0].key = "user:llm:another_slot".into();
+        let mut tx = pool.begin().await.unwrap();
+        let (saved, _) = crate::dreaming::persist_candidates(&mut tx, &org, user, &thread, &message_id, &candidates).await.unwrap();
+        assert_eq!(saved, 0);
+        tx.commit().await.unwrap();
+        crate::dreaming::dream_once(&pool, None, None, None, 1000).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_memory WHERE org_id = $1")
+            .bind(&org).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0, "the pending original message cannot recreate deleted memory");
+        let entry = pb::MemoryEntry { memory_id: id.clone(), content: content.into(), ..Default::default() };
+        let mut mirror = vec![entry.clone()];
+        crate::memory_control::filter_forgotten(&pool, &org, user, &mut mirror).await.unwrap();
+        assert!(mirror.is_empty(), "a late semantic mirror cannot surface a forgotten ID");
+        let mut foreign = vec![entry];
+        crate::memory_control::filter_forgotten(&pool, "another-org", user, &mut foreign).await.unwrap();
+        assert_eq!(foreign.len(), 1, "forgetting is tenant-scoped");
+        append_message_inner(&pool, None, MemoryRetention::Durable, pb::AppendMessageRequest {
+            thread_id: thread, role: "user".into(), content: "Husk at minnetest-regresjon er sjøgrønn.".into(), ..Default::default()
+        }, user).await.unwrap();
+        let contents: Vec<String> = sqlx::query_scalar("SELECT content FROM agent_memory WHERE org_id = $1")
+            .bind(&org).fetch_all(&pool).await.unwrap();
+        assert!(contents.iter().any(|value| value.contains("sjøgrønn")), "new explicit learning remains available");
+        assert!(contents.iter().all(|value| !value.contains("ravgul")));
+    }
 }
 
 /// Core of `SessionCore::start_run`, factored out to keep the trait method
@@ -3567,6 +3676,7 @@ fn append_letta_search_outcome(
 /// all — memory is not configured, or the thread has no org — which is not a
 /// degradation and is deliberately left uncounted, matching prior behaviour.
 async fn append_letta_memory_rows(
+    pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
     retention: MemoryRetention,
     org_id: Option<&str>,
@@ -3593,7 +3703,7 @@ async fn append_letta_memory_rows(
     }
 
     let query = semantic_memory_query(thread_messages);
-    let outcome = letta
+    let mut outcome = letta
         .search_detailed(
             org_id,
             thread_id,
@@ -3603,6 +3713,11 @@ async fn append_letta_memory_rows(
             8,
         )
         .await;
+    if crate::memory_control::filter_forgotten(pool, org_id, owner_user_id.unwrap_or_default(), &mut outcome.entries).await.is_err() {
+        let status = SemanticContextSearchStatus::Degraded("DEGRADED_MEMORY_DELETION_STATE");
+        record_semantic_context_search(status);
+        return Some(status);
+    }
     Some(append_letta_search_outcome(memory_rows, outcome, 8))
 }
 
@@ -3643,6 +3758,7 @@ async fn load_context_memory_rows(
     .map_err(|e| Status::internal(e.to_string()))?;
     rows.append(&mut agent_rows);
     append_letta_memory_rows(
+        &svc.pool,
         svc.letta_memory.as_ref(),
         retention,
         thread_org_id.as_deref(),
@@ -7295,6 +7411,7 @@ mod tests {
 
         assert_eq!(
             append_letta_memory_rows(
+                &sqlx::postgres::PgPoolOptions::new().connect_lazy("postgresql://localhost/unused").unwrap(),
                 Some(&adapter),
                 MemoryRetention::of(&VerifiedIdentity::user_for_test_with_zdr(
                     "org-1", "user-1", true,
@@ -7322,6 +7439,7 @@ mod tests {
         );
 
         let status = append_letta_memory_rows(
+            &sqlx::postgres::PgPoolOptions::new().connect_lazy("postgresql://localhost/unused").unwrap(),
             Some(&adapter),
             MemoryRetention::of(&VerifiedIdentity::user_for_test("org-1", "user-1")),
             Some("org-1"),

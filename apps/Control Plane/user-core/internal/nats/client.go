@@ -87,7 +87,7 @@ func (c *Client) IsConnected() bool {
 }
 
 // Publish publishes a message to a subject
-func (c *Client) Publish(subject string, data interface{}) error {
+func (c *Client) Publish(subject string, data any) error {
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("failed to marshal data: %w", err)
@@ -102,7 +102,7 @@ func (c *Client) Publish(subject string, data interface{}) error {
 }
 
 // PublishJetStream publishes a message to JetStream
-func (c *Client) PublishJetStream(ctx context.Context, subject string, data interface{}) error {
+func (c *Client) PublishJetStream(ctx context.Context, subject string, data any) error {
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("failed to marshal data: %w", err)
@@ -153,7 +153,7 @@ func (c *Client) QueueSubscribe(subject, queue string, handler func(msg *nats.Ms
 }
 
 // Request sends a request and waits for a response
-func (c *Client) Request(subject string, data interface{}, timeout time.Duration) (*nats.Msg, error) {
+func (c *Client) Request(subject string, data any, timeout time.Duration) (*nats.Msg, error) {
 	payload, err := json.Marshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal data: %w", err)

@@ -5,19 +5,32 @@
 //
 // # Design
 //
-// Event-driven via a JetStream DURABLE consumer with manual ack — unlike
-// taskexec.RunCompletionConsumer and sessionreview.RunConsumer, which both
-// use a plain core-NATS nc.Subscribe/QueueSubscribe (fire-and-forget,
-// at-most-once from JetStream's perspective). Those two consumers can afford
-// that because their side effects are cheap local reads/writes; this
-// consumer's side effect is an OUTBOUND CROSS-PLANE HTTP CALL to
-// notification-core, which can fail transiently (network blip,
-// notification-core briefly down, etc.), and a lost RUN_COMPLETED here means
-// a user silently never finds out their run finished. Manual ack lets a
-// notify failure Nak the message so JetStream redelivers it — safe because
-// [Notifier.process] only ever flips a row from 'pending' to 'notified' once
-// the notify call succeeds, so redelivery re-derives the same still-pending
-// watcher set and simply retries the ones that failed.
+// Event-driven via a JetStream DURABLE consumer with manual ack — like
+// sessionreview.RunConsumer (converted to this same pattern 2026-09-17, after
+// its plain nc.Subscribe was found to have silently lost 88 of 88 published
+// RUN_COMPLETED learning-review events in production; see that package's own
+// doc). taskexec.RunCompletionConsumer still uses a plain core-NATS
+// nc.Subscribe/QueueSubscribe (fire-and-forget, at-most-once from
+// JetStream's perspective) and can afford that because its side effect is a
+// cheap local Postgres write; this consumer's side effect is an OUTBOUND
+// CROSS-PLANE HTTP CALL to notification-core, which can fail transiently
+// (network blip, notification-core briefly down, etc.), and a lost
+// RUN_COMPLETED here means a user silently never finds out their run
+// finished. Manual ack lets a notify failure Nak the message so JetStream
+// redelivers it — safe because [Notifier.process] only ever flips a row from
+// 'pending' to 'notified' once the notify call succeeds, so redelivery
+// re-derives the same still-pending watcher set and simply retries the ones
+// that failed.
+//
+// This consumer's own JetStream config (nats-provisioner's consumerBindings)
+// shipped with no DeliverSubject/DeliverGroup — server-side that makes it a
+// PULL consumer, which the push-style QueueSubscribe+Bind below cannot bind
+// to at all ("must use pull subscribe to bind to pull based consumer",
+// verified directly against the pinned nats.go version). That gap predates
+// this comment and was fixed the same day sessionreview's was found, in the
+// same pass — it had simply never been exercised live, because
+// capability-core's NATS connection itself had no retry and had been failing
+// outright (a separate bug, also fixed the same day).
 //
 // Every dependency below process is a small interface ([SubscriptionStore],
 // [notifyclient.Client] via the narrower [NotifyClient]), so the decode ->

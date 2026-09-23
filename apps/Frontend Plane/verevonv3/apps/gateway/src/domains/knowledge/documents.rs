@@ -138,6 +138,41 @@ pub(super) async fn get_document(
     .await
 }
 
+/// Remove one document from the knowledge base
+/// (`documents-api` `DELETE /v1/documents/{id}`).
+///
+/// Same scoped Data Plane leg as `create_document`, so a caller can only
+/// delete inside the org their verified credential resolves to. Without this
+/// the knowledge base was append-only from the product: everything a chat
+/// attachment ingested stayed indexed forever.
+pub(super) async fn delete_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let org_id = {
+        let o = crate::upstream::authorized_org_id(&state, &user).await;
+        (!o.is_empty()).then_some(o)
+    };
+    let url = format!(
+        "{}/v1/documents/{}",
+        state.documents_api_url,
+        urlencoding::encode(&id)
+    );
+    shared::proxy_data_plane_json(
+        &state,
+        &user,
+        &headers,
+        Method::DELETE,
+        &url,
+        None,
+        org_id.as_deref(),
+        None,
+    )
+    .await
+}
+
 pub(super) async fn list_sources(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,

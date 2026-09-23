@@ -92,7 +92,7 @@ func (s *Service) BuildDSARExport(ctx context.Context, userID string) (*DSARExpo
 	}
 
 	// Extended profile (bio/phone/location/...), best-effort.
-	if profile, perr := s.repo.GetProfile(ctx, userID); perr == nil && profile != nil {
+	if profile, profileErr := s.repo.GetProfile(ctx, userID); profileErr == nil && profile != nil {
 		export.Profile["bio"] = profile.Bio
 		export.Profile["phone"] = profile.Phone
 		export.Profile["location"] = profile.Location
@@ -101,9 +101,9 @@ func (s *Service) BuildDSARExport(ctx context.Context, userID string) (*DSARExpo
 		export.Profile["metadata"] = profile.Metadata
 	}
 
-	memberships, merr := s.repo.ListUserOrgMembershipsForSubject(ctx, userID)
-	if merr != nil {
-		return nil, merr
+	memberships, membershipsErr := s.repo.ListUserOrgMembershipsForSubject(ctx, userID)
+	if membershipsErr != nil {
+		return nil, membershipsErr
 	}
 	for _, m := range memberships {
 		export.Memberships = append(export.Memberships, map[string]any{
@@ -157,8 +157,7 @@ func (s *Service) PublishDSARAudit(ctx context.Context, orgID, subjectID, actorI
 		return fmt.Errorf("encode DSAR audit event: %w", err)
 	}
 	err = s.auditOutbox.EnqueueAndDispatch(ctx, AuditOutboxRow{EventID: eventID, Subject: DSARExportAuditSubject, Payload: encoded})
-	var deferred *auditDispatchDeferredError
-	if errors.As(err, &deferred) {
+	if deferred, ok := errors.AsType[*auditDispatchDeferredError](err); ok {
 		log.Printf("user-core audit event %s retained for retry: %v", eventID, deferred)
 		return nil
 	}

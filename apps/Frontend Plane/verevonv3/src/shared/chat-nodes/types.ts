@@ -41,6 +41,7 @@ import type {
 } from '@/features/chat/components/chat-types'
 import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
 import type { RecalledMemory } from '@/shared/api/chat-client'
+import type { StreamActivity } from '@/features/chat/lib/stream-activity'
 
 
 /**
@@ -52,8 +53,23 @@ import type { RecalledMemory } from '@/shared/api/chat-client'
  * impossible.
  */
 export type AnswerState =
-  /** Waiting with nothing to show yet — the thinking indicator. */
-  | { state: 'pending' }
+  /**
+   * Waiting with nothing to show yet — the thinking indicator.
+   *
+   * `since` is the turn's own start, carried on the node rather than captured
+   * when the indicator mounts. `<For>` in the transcript keys on item identity
+   * and every derivation builds fresh node objects, so the indicator is torn
+   * down and rebuilt on each one; a clock anchored to mount therefore restarted
+   * on every streamed tool call. On the deep-research routes the counter exists
+   * for — one call every few hundred milliseconds — it never survived long
+   * enough to cross the ten-second threshold at all.
+   *
+   * `activity` is what the run is doing, when the stream has said. Absent means
+   * nothing has been reported yet — the state the plain subscription route sits
+   * in for its whole 90-second wait — and the indicator then shows elapsed time
+   * alone rather than an invented phase.
+   */
+  | { state: 'pending'; since: string; activity?: StreamActivity }
   /** The stream failed; the content field holds the error text. */
   | { state: 'failed'; message: string }
   /** Real content (possibly still streaming, possibly stopped early). */
@@ -114,6 +130,14 @@ export type ConversationNodeContext = {
   /** Explicit `[n]` answer markers can resolve only against this turn's
    * validated citation list; absent entries stay as plain text. */
   citations?: readonly Citation[]
+  /**
+   * The thread this turn belongs to. `memory-recall`'s per-entry "Rediger"
+   * needs it to satisfy the write path's thread-ownership check when saving a
+   * correction (see `correctMemory` in `memory-client.ts`); null on a surface
+   * with no thread yet (e.g. a not-yet-persisted first turn), which disables
+   * the edit action there rather than sending an empty id.
+   */
+  threadId: string | null
 }
 
 /** One node kind's renderer. */

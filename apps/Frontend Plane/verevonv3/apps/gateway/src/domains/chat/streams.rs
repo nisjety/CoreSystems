@@ -24,6 +24,10 @@ pub(super) async fn stream_chat(
     let token = shared::model_token(&state, &user, &headers).await;
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
     let ingestion_token = shared::ingestion_token(&state, &user, &headers).await;
+    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): best-effort, not
+    // `required_*` — a mint failure must degrade the PII/injection-defense
+    // policy lookup (model-gateway fails closed and redacts), not the turn.
+    let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
         Ok(token) => token,
         Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
@@ -106,6 +110,7 @@ pub(super) async fn stream_chat(
         Some(outbound_body),
         token.as_deref(),
         data_plane_token.as_deref(),
+        capability_token.as_deref(),
         Some(&inference_token),
         Some(&execution_token),
         Some(&cost_token),
@@ -127,6 +132,8 @@ pub(super) async fn resume_stream(
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
     let session_token = shared::session_token(&state, &user, &headers).await;
+    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
+    let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let last_event_id = headers
         .get("last-event-id")
@@ -144,6 +151,7 @@ pub(super) async fn resume_stream(
         None,
         token.as_deref(),
         session_token.as_deref(),
+        capability_token.as_deref(),
         last_event_id.as_deref(),
         Some((&user.user_id, org_id.as_str())),
         false,
@@ -159,6 +167,8 @@ pub(super) async fn run_events_stream(
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
     let session_token = shared::session_token(&state, &user, &headers).await;
+    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
+    let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     // Phase 2: forward `last-event-id` like `resume_stream` already does — a
     // reconnecting client (e.g. a durable browser-agent run) must resume via
@@ -188,6 +198,7 @@ pub(super) async fn run_events_stream(
         None,
         token.as_deref(),
         session_token.as_deref(),
+        capability_token.as_deref(),
         last_event_id.as_deref(),
         Some((&user.user_id, org_id.as_str())),
         false,
@@ -217,6 +228,8 @@ pub(super) async fn run_events_replay(
         Ok(token) => token,
         Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
     };
+    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
+    let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let mut url = format!(
         "{}/v1/runs/{}/events/replay",
         state.model_gateway_url,
@@ -238,13 +251,14 @@ pub(super) async fn run_events_replay(
         url.push('?');
         url.push_str(&params.join("&"));
     }
-    let (status, body) = shared::proxy_model_json_with_session(
+    let (status, body) = shared::proxy_model_json_with_session_and_capability(
         &state,
         Method::GET,
         &url,
         None,
         token.as_deref(),
         Some(&session_token),
+        capability_token.as_deref(),
         &user,
     )
     .await;

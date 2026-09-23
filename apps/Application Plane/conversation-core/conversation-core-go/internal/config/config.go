@@ -42,6 +42,12 @@ type Config struct {
 	// credential would silently broaden a compromise into an effect fence.
 	ControlOwnerEffectReservationURL   string
 	ControlOwnerEffectReservationToken string
+	// ModelGatewayServiceToken admits the Model Plane's chat runtime as a
+	// delegated principal for the read-only Verevon lane only (see
+	// newRouter). Optional: a deployment that leaves it unset simply has no
+	// model-gateway principal, and the chat tools report the read as
+	// unconfigured rather than failing a turn.
+	ModelGatewayServiceToken string
 	// AllowInsecureControlRunActionAuthorityLoopback is a local-development
 	// escape hatch only. It permits HTTP solely to an IP loopback endpoint;
 	// non-local Control authority reads always require HTTPS.
@@ -168,6 +174,7 @@ func Load() (*Config, error) {
 			"conversation-ingest": strings.TrimSpace(getEnv("CONVERSATION_CORE_INGEST_SERVICE_TOKEN", "")),
 		},
 		ExecutionCoreServiceToken:                      strings.TrimSpace(getEnv("CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN", "")),
+		ModelGatewayServiceToken:                       strings.TrimSpace(getEnv("CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN", "")),
 		ControlRunActionDecisionKeyID:                  strings.TrimSpace(getEnv("CONTROL_RUN_ACTION_DECISION_KEY_ID", "")),
 		ControlRunActionDecisionPublicKey:              strings.TrimSpace(getEnv("CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64", "")),
 		ControlRunActionAuthorityURL:                   strings.TrimSpace(getEnv("CONTROL_RUN_ACTION_AUTHORITY_URL", "")),
@@ -230,6 +237,12 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
 		}
 		cfg.DelegationKeys["execution-core"] = cfg.ExecutionCoreServiceToken
+	}
+	if cfg.ModelGatewayServiceToken != "" {
+		if !validDelegationSecret(cfg.ModelGatewayServiceToken) {
+			return nil, fmt.Errorf("CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
+		}
+		cfg.DelegationKeys["model-gateway"] = cfg.ModelGatewayServiceToken
 	}
 	controlAuthorityConfigured := 0
 	for _, value := range []string{cfg.ControlRunActionAuthorityURL, cfg.ControlRunActionAuthorityToken} {
@@ -469,16 +482,29 @@ func validateDelegationKeys(keys map[string]string) error {
 			return fmt.Errorf("delegation token for %s must be a non-placeholder secret of at least 32 bytes", serviceID)
 		}
 	}
-	if keys["verevon-gateway"] == keys["conversation-ingest"] {
-		return fmt.Errorf("conversation delegation tokens must be distinct per service")
+	for _, serviceID := range []string{"execution-core", "model-gateway"} {
+		token, configured := keys[serviceID]
+		if !configured {
+			continue
+		}
+		if !validDelegationSecret(token) {
+			return fmt.Errorf("delegation token for %s must be a non-placeholder secret of at least 32 bytes", serviceID)
+		}
 	}
-	if executionCoreToken, configured := keys["execution-core"]; configured {
-		if !validDelegationSecret(executionCoreToken) {
-			return fmt.Errorf("delegation token for execution-core must be a non-placeholder secret of at least 32 bytes")
+	// Every pair, not just each optional principal against the two required
+	// ones: two optional principals sharing a secret would let either one sign
+	// for the other's lane, and a hand-written comparison chain stops covering
+	// that the moment a third principal is added.
+	seen := make(map[string]string, len(keys))
+	for _, serviceID := range []string{"verevon-gateway", "conversation-ingest", "execution-core", "model-gateway"} {
+		token, configured := keys[serviceID]
+		if !configured || token == "" {
+			continue
 		}
-		if executionCoreToken == keys["verevon-gateway"] || executionCoreToken == keys["conversation-ingest"] {
-			return fmt.Errorf("conversation delegation tokens must be distinct per service")
+		if owner, clash := seen[token]; clash {
+			return fmt.Errorf("conversation delegation tokens must be distinct per service: %s and %s share one", owner, serviceID)
 		}
+		seen[token] = serviceID
 	}
 	return nil
 }

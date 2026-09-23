@@ -343,7 +343,7 @@ pub(super) async fn list_sharepoint_folders(
     }
 }
 
-pub(super) async fn register_sharepoint(
+pub(crate) async fn register_sharepoint(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Json(input): Json<Value>,

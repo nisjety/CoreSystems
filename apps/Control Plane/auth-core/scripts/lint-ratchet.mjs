@@ -73,7 +73,10 @@ export function compareLintDebt({
   const failures = [];
 
   for (const result of results) {
-    const file = path.relative(projectRoot, result.filePath).split(path.sep).join('/');
+    const file = path
+      .relative(projectRoot, result.filePath)
+      .split(path.sep)
+      .join('/');
     for (const message of result.messages) {
       if (!message.ruleId) {
         failures.push(`${file}: ${message.message}`);
@@ -131,11 +134,22 @@ function gitOutput(args) {
   return result.stdout;
 }
 
+// Generated ts-proto stubs — excluded from eslint via eslint.config.mjs, so
+// they must not be enumerated here either (passing ignored files explicitly
+// makes ESLint fail with "File ignored because of a matching ignore pattern").
+export const GENERATED_GRPC_STUB_PREFIXES = [
+  'src/grpc/auth/v1/',
+  'src/grpc/google/',
+  'src/grpc/proto/',
+];
+
 function listTypescriptFiles() {
   const files = [];
   const visit = (relativeDirectory) => {
     const absoluteDirectory = path.join(projectRoot, relativeDirectory);
-    for (const entry of readdirSync(absoluteDirectory, { withFileTypes: true })) {
+    for (const entry of readdirSync(absoluteDirectory, {
+      withFileTypes: true,
+    })) {
       const relativePath = path.join(relativeDirectory, entry.name);
       if (entry.isDirectory()) {
         visit(relativePath);
@@ -146,7 +160,20 @@ function listTypescriptFiles() {
   };
   visit('src');
   visit('test');
-  return files.sort();
+  visit('scripts');
+  // Root-level TypeScript (drizzle.config.ts, auth-schema.ts, …) is linted by
+  // editors too, so it must stay clean as well.
+  for (const entry of readdirSync(projectRoot, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith('.ts')) {
+      files.push(entry.name);
+    }
+  }
+  return files
+    .filter(
+      (file) =>
+        !GENERATED_GRPC_STUB_PREFIXES.some((prefix) => file.startsWith(prefix)),
+    )
+    .sort();
 }
 
 function runEslintBatch(paths) {
@@ -180,7 +207,9 @@ function runEslintBatch(paths) {
   try {
     return JSON.parse(result.stdout);
   } catch {
-    throw new Error(`ESLint returned invalid JSON: ${result.stdout.slice(0, 500)}`);
+    throw new Error(
+      `ESLint returned invalid JSON: ${result.stdout.slice(0, 500)}`,
+    );
   }
 }
 
@@ -229,7 +258,9 @@ function main() {
 
   const files = listTypescriptFiles();
   const intendedFiles = new Set(files);
-  const intendedChangedFiles = changedFiles.filter((file) => intendedFiles.has(file));
+  const intendedChangedFiles = changedFiles.filter((file) =>
+    intendedFiles.has(file),
+  );
   console.log(`TypeScript files enumerated: ${files.length}`);
   const results = runEslintBatches(files);
   const comparison = compareLintDebt({
@@ -247,7 +278,10 @@ function main() {
   return comparison.ok ? 0 : 1;
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+if (
+  process.argv[1] &&
+  pathToFileURL(process.argv[1]).href === import.meta.url
+) {
   try {
     process.exitCode = main();
   } catch (error) {

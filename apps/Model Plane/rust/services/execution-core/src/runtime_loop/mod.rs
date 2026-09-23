@@ -500,8 +500,30 @@ async fn execute_step_inner(
             return StepOutcome::permission_denied();
         }
         Err(error) => {
-            tracing::warn!(code = ?error.code(), "tool dispatch blocked because capability policy is unavailable");
-            return StepOutcome::failed("capability policy unavailable");
+            tracing::warn!(
+                code = ?error.code(),
+                message = %error.message(),
+                "tool dispatch blocked because capability policy is unavailable"
+            );
+            // Name the cause. A bare "capability policy unavailable" reached
+            // the user three times on 2026-09-14 while the real fault was a
+            // deployment error (capability-core signing no evidence), and the
+            // only place that said so was a container log. The model, and the
+            // Arbeid panel, get the same sentence so neither has to guess
+            // whether the tool is forbidden, broken, or misconfigured.
+            let cause = error.message();
+            let detail = if cause.contains("decision evidence") {
+                format!(
+                    "capability policy misconfigured: {cause}. This is a deployment fault (capability-core is not signing decisions), not a permission decision — tell the user the tool is unavailable and do not substitute manual work for it."
+                )
+            } else if error.code() == tonic::Code::Unavailable {
+                format!(
+                    "capability policy unreachable: {cause}. Retrying will not help this turn — tell the user the tool is unavailable right now."
+                )
+            } else {
+                format!("capability policy unavailable: {cause}")
+            };
+            return StepOutcome::failed(&detail);
         }
     }
 
@@ -594,9 +616,9 @@ async fn execute_step_inner(
         )
         .await
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
-        execute_web_search(tool_input, org_id).await
+        execute_web_search(tool_input, org_id, zdr).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
-        execute_web_fetch(tool_input, org_id).await
+        execute_web_fetch(tool_input, org_id, zdr).await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
         execute_knowledge_search(
             tool_input,
@@ -959,7 +981,24 @@ async fn execute_process_tool(
 
 /// `web_search` tool — input JSON `{"query": String, "limit"?: u32}`. Returns a
 /// ranked result list from the Quarry edge. Read-only (no approval gate).
-async fn execute_web_search(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+///
+/// `zdr` comes from the run's request, never from model-authored `tool_input`:
+/// the model must not be able to talk a ZDR tenant out of its retention
+/// posture. It reaches the edge as `SearchRequest.zdr`, which is what
+/// suppresses cache writes and durable content-bearing events there.
+/// Upper bound on the `limit` a model may ask `web_search` to send upstream.
+/// Matches `web_tools::MAX_SEARCH_RESULTS`, which is what the formatter keeps.
+const MAX_WEB_SEARCH_RESULTS: u32 = 8;
+
+/// Same treatment for the news tool, whose upstream is a third-party feed.
+const DEFAULT_NEWS_RESULTS: u32 = 10;
+const MAX_NEWS_RESULTS: u32 = 25;
+
+async fn execute_web_search(
+    tool_input: &str,
+    org_id: &str,
+    zdr: bool,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct SearchInput {
         query: String,
@@ -978,7 +1017,17 @@ async fn execute_web_search(tool_input: &str, org_id: &str) -> tool_bridge::Tool
         Err(error) => return tool_error(format!("web_search unavailable: {error}")),
     };
     match client
-        .search(&input.query, input.limit.unwrap_or(8), org_id)
+        // Clamped, not passed through: `limit` is model-authored, and the
+        // formatter keeps only MAX_SEARCH_RESULTS of whatever comes back, so a
+        // larger number buys nothing and bills a stranger's search engine for
+        // work this process then discards. `search_memory` below already
+        // clamps for the same reason.
+        .search(
+            &input.query,
+            input.limit.unwrap_or(MAX_WEB_SEARCH_RESULTS).clamp(1, MAX_WEB_SEARCH_RESULTS),
+            org_id,
+            zdr,
+        )
         .await
     {
         Ok(output) => tool_bridge::ToolExecution {
@@ -1022,7 +1071,16 @@ async fn execute_mcp(
 
 /// `web_fetch` tool — input JSON `{"url": String}`. Returns the page's cleaned
 /// markdown from the Quarry edge. Read-only (no approval gate).
-async fn execute_web_fetch(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+///
+/// `zdr` is run context, not model input — see `execute_web_search`. This is
+/// the higher-stakes of the two: `/v1/extract` returns whole fetched pages, so
+/// a dropped flag means full third-party page content lands in the edge's
+/// caches and durable events for a tenant that contracted for none.
+async fn execute_web_fetch(
+    tool_input: &str,
+    org_id: &str,
+    zdr: bool,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct FetchInput {
         url: String,
@@ -1038,7 +1096,7 @@ async fn execute_web_fetch(tool_input: &str, org_id: &str) -> tool_bridge::ToolE
         }
         Err(error) => return tool_error(format!("web_fetch unavailable: {error}")),
     };
-    match client.fetch(&input.url, org_id).await {
+    match client.fetch(&input.url, org_id, zdr).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -1267,7 +1325,8 @@ async fn execute_news(tool_input: &str) -> tool_bridge::ToolExecution {
     match client
         .news(
             input.category.as_deref().unwrap_or(""),
-            input.limit.unwrap_or(10),
+            // Same reason as web_search above: model-authored, so bounded here.
+            input.limit.unwrap_or(DEFAULT_NEWS_RESULTS).clamp(1, MAX_NEWS_RESULTS),
         )
         .await
     {

@@ -2360,6 +2360,7 @@ dependencies = [
  "prost-types",
  "rand 0.8.6",
  "redis",
+ "regex",
  "reqwest",
  "rsa",
  "serde",

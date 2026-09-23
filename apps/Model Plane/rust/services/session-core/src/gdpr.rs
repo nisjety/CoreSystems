@@ -156,6 +156,8 @@ pub struct PurgeSummary {
     pub hook_configs: u64,
     pub agent_skills: u64,
     pub agent_memory: u64,
+    pub user_memory_controls: u64,
+    pub forgotten_memory_ids: u64,
     pub finetune_jobs: u64,
     pub dream_runs: u64,
     pub session_audit_outbox: u64,
@@ -195,6 +197,8 @@ impl PurgeSummary {
             + self.hook_configs
             + self.agent_skills
             + self.agent_memory
+            + self.user_memory_controls
+            + self.forgotten_memory_ids
             + self.finetune_jobs
             + self.dream_runs
             + self.session_audit_outbox
@@ -385,7 +389,7 @@ pub async fn purge_organization_data(
     // letta-bridge keyed by the same id, and once this statement commits there
     // is nothing left in Postgres to find that twin by. `owner` is the user_id
     // the semantic copy was tagged with (memory_grpc::index_memory).
-    let erased_memories: Vec<crate::memory_erasure::ErasedMemory> =
+    let mut erased_memories: Vec<crate::memory_erasure::ErasedMemory> =
         sqlx::query_as::<_, (String, String)>(
             "DELETE FROM agent_memory WHERE org_id = $1 RETURNING id, owner",
         )
@@ -396,6 +400,19 @@ pub async fn purge_organization_data(
         .map(|(memory_id, owner)| crate::memory_erasure::ErasedMemory { memory_id, owner })
         .collect();
     summary.agent_memory = erased_memories.len() as u64;
+
+    let forgotten: Vec<(String, String)> = sqlx::query_as("SELECT memory_id, user_id FROM forgotten_memory_ids WHERE org_id = $1")
+        .bind(org_id).fetch_all(&mut *tx).await?;
+    for (memory_id, owner) in forgotten {
+        if !erased_memories.iter().any(|entry| entry.memory_id == memory_id && entry.owner == owner) {
+            erased_memories.push(crate::memory_erasure::ErasedMemory { memory_id, owner });
+        }
+    }
+
+    summary.forgotten_memory_ids = sqlx::query("DELETE FROM forgotten_memory_ids WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
+    summary.user_memory_controls = sqlx::query("DELETE FROM user_memory_controls WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
 
     summary.finetune_jobs = sqlx::query("DELETE FROM finetune_jobs WHERE org_id = $1")
         .bind(org_id)
@@ -604,6 +621,8 @@ mod tests {
             hook_configs: 1,
             agent_skills: 1,
             agent_memory: 1,
+            user_memory_controls: 1,
+            forgotten_memory_ids: 1,
             finetune_jobs: 1,
             dream_runs: 1,
             session_audit_outbox: 1,
@@ -619,7 +638,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            23,
+            25,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );

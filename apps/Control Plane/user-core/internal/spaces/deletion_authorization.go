@@ -32,7 +32,7 @@ type LegalHold struct {
 
 func (p DeletionPolicy) Validate() error {
 	if strings.TrimSpace(p.OrgID) == "" {
-		return fmt.Errorf("Space deletion org_id is required")
+		return fmt.Errorf("space deletion org_id is required")
 	}
 	return nil
 }
@@ -40,7 +40,7 @@ func (p DeletionPolicy) Validate() error {
 func (h LegalHold) Validate() error {
 	for name, value := range map[string]string{"space_ref": h.SpaceRef, "hold_ref": h.HoldRef} {
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("Space legal hold %s is required", name)
+			return fmt.Errorf("space legal hold %s is required", name)
 		}
 	}
 	return nil
@@ -52,7 +52,7 @@ func (r DeletionAuthorizationRequest) Validate() error {
 		"request_id": r.RequestID, "idempotency_key": r.IdempotencyKey,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("Space deletion %s is required", name)
+			return fmt.Errorf("space deletion %s is required", name)
 		}
 	}
 	return nil
@@ -73,7 +73,7 @@ type DeletionAuthorizationReceipt struct {
 
 func (r DeletionAuthorizationReceipt) ValidateFor(requestID string) error {
 	if strings.TrimSpace(requestID) == "" || r.RequestID != requestID {
-		return fmt.Errorf("Space deletion receipt does not match request")
+		return fmt.Errorf("space deletion receipt does not match request")
 	}
 	switch r.Status {
 	case DeletionAuthorized, DeletionBlockedLegalHold, DeletionRejected:

@@ -10,7 +10,7 @@
     "consumerEnv": "CAPABILITY_CORE_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
-      "inference-core": "zdr",
+      "inference-core": "persistent",
       "orchestrator-core": "persistent",
       "sandbox-manager": "persistent",
       "session-core": "persistent"
@@ -21,6 +21,7 @@
       "orchestration:workflow:start:global",
       "sandbox:read",
       "session:read",
+      "session:schedule-prepare",
       "session:skills:write"
     ],
     "scopesByAudience": {
@@ -36,6 +37,7 @@
       ],
       "session-core": [
         "session:read",
+        "session:schedule-prepare",
         "session:skills:write"
       ]
     }

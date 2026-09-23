@@ -239,6 +239,17 @@ services:
             # Base Compose is the loopback development stack. Production override
             # switches this to production and requires a file-backed principal registry.
             NODE_ENV: development
+            # Built from ${DRAGONFLY_PASSWORD} — the same variable
+            # controlplane-dragonfly's own --requirepass uses — so the two
+            # cannot disagree. auth-core/.env.docker carries a DRAGONFLY_URL
+            # with the password written INLINE, and that literal silently
+            # stopped matching when the password was rotated: Dragonfly came
+            # back on the current 64-char value while auth-core kept presenting
+            # a 48-char one, every cache call failed WRONGPASS, and
+            # /api/v1/auth/session answered 500 — nobody could sign in.
+            # `environment:` wins over `env_file:`, so this entry is what the
+            # container actually gets.
+            DRAGONFLY_URL: redis://:${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set (no change-me default)}@controlplane-dragonfly:6379/3
             VEREVON_NATS_URL: nats://control-shared-nats:4222
             NATS_SHARED_USER: auth-core-shared
             NATS_SHARED_PASSWORD: ${AUTH_SHARED_NATS_PASSWORD:?AUTH_SHARED_NATS_PASSWORD is required}

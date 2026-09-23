@@ -27,6 +27,14 @@ import (
 // unrecognised model is priced (at a mid tier) rather than counted as free.
 const DefaultModelKey = "default"
 
+// CacheReadDiscount is the fraction of the base input-token rate a
+// prompt-cache read is billed at -- the documented 10x discount Anthropic
+// (and other providers with prompt caching) apply to a cache hit. Mirrored
+// exactly in the gateway's Rust pricing cache
+// (services/model-gateway/src/pricing.rs) so the streamed display cost and
+// this ledgered cost agree.
+const CacheReadDiscount = 0.1
+
 // Rate is the price for one model key, in USD per 1,000,000 tokens.
 type Rate struct {
 	Model            string  `json:"model"`
@@ -127,10 +135,32 @@ func fromRates(rates []Rate) *Resolver {
 // Cost returns the USD cost of an inference given its model and token counts.
 // Negative token counts are clamped to zero.
 func (r *Resolver) Cost(model string, inputTokens, outputTokens int64) float64 {
+	return r.CostWithCache(model, inputTokens, outputTokens, 0, 0)
+}
+
+// CostWithCache is [Resolver.Cost] plus prompt-cache telemetry: a cache-token
+// telemetry prerequisite for the native-compaction migration, so cache-hit
+// rate and its cost savings are visible on the durable ledger.
+//
+// cacheReadInputTokens and cacheCreationInputTokens are cache legs already
+// folded into inputTokens by the serving adapter (Anthropic's
+// `total_input_tokens` fold-in, mirrored on the Rust side) -- passing 0 for
+// both reproduces Cost's result exactly, so every existing caller (and every
+// non-Anthropic provider today) is unaffected byte-for-byte. A cache-read leg
+// is billed at CacheReadDiscount (0.1x) of the base input rate instead of the
+// full rate: inputTokens is charged in full first, then the cache-read leg's
+// over-charge is credited back. A cache-creation leg stays at the full input
+// rate (Anthropic writes it fresh, no discount) -- it is already counted
+// correctly inside inputTokens and needs no adjustment; the parameter exists
+// so a future differential rate has one call site to change.
+func (r *Resolver) CostWithCache(model string, inputTokens, outputTokens, cacheReadInputTokens, _cacheCreationInputTokens int64) float64 {
 	rate := r.lookup(model)
 	in := float64(max64(inputTokens, 0))
 	out := float64(max64(outputTokens, 0))
-	return in/1_000_000.0*rate.InputPerMillion + out/1_000_000.0*rate.OutputPerMillion
+	cacheRead := float64(max64(cacheReadInputTokens, 0))
+	return in/1_000_000.0*rate.InputPerMillion +
+		out/1_000_000.0*rate.OutputPerMillion -
+		cacheRead/1_000_000.0*rate.InputPerMillion*(1.0-CacheReadDiscount)
 }
 
 // lookup resolves a model name to a Rate: exact key, else longest prefix key,

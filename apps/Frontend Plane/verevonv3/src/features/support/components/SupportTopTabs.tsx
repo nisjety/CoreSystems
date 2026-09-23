@@ -7,6 +7,10 @@ export function SupportTopTabs(props: { active: SupportSurface }) {
   const i18n = useI18n()
   const tabs = () => [
     { id: 'conversations' as const, label: i18n.tr('Samtaler', 'Conversations') },
+    // Drafts Verevon proposed, awaiting a person. They live in the support
+    // workspace only — the chat page lists `origin == "chat"` threads and
+    // never reads this queue.
+    { id: 'drafts' as const, label: i18n.tr('Utkast', 'Drafts') },
     { id: 'tickets' as const, label: i18n.tr('Saksbehandling', 'Ticketing') },
     { id: 'outbound' as const, label: i18n.tr('Utgående', 'Outbound') },
     { id: 'remote' as const, label: i18n.tr('Fjernhjelp', 'Remote support') },

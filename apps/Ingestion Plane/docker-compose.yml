@@ -19,9 +19,27 @@ services:
     environment:
       QUARRY_EDGE__PORT: "8082"
       QUARRY_EDGE__USER_AGENT: "Quarry/2.0 (+https://triodelab.com/quarry)"
-      QUARRY_EDGE__BROWSER_PROVIDER: ${QUARRY_EDGE_BROWSER_PROVIDER:-static}
-      QUARRY_EDGE__BROWSERLESS_BASE_URL: ${BROWSERLESS_URL:-}
-      QUARRY_EDGE__BROWSERLESS_TOKEN: ${BROWSERLESS_TOKEN:-}
+      # The browser driver is chosen at BUILD time, never by an env var, so
+      # QUARRY_EDGE__BROWSER_PROVIDER / __BROWSERLESS_BASE_URL / __BROWSERLESS_TOKEN
+      # are gone from here: EdgeConfig (crates/quarry-edge/src/config.rs) has no
+      # field of any of those names and the config crate drops unknown keys in
+      # silence, so `BROWSER_PROVIDER=static` never reached the binary while
+      # telling every operator the edge had no browser. It has one — Dockerfile.edge
+      # builds with `--features …,browser-agent` and installs a pinned Chromium, and
+      # main.rs registers the in-process chromiumoxide driver under that feature
+      # whenever Browserbase keys are absent ("browser driver registered (local
+      # chromiumoxide)" at boot). DriverPlan::static_fetch chains Static → Tls →
+      # Browser, so the JS-shell escalation in quarry-runtime/src/fallback_driver.rs
+      # has a real driver behind it. Browserbase (QUARRY_EDGE__BROWSERBASE_API_KEY +
+      # _PROJECT_ID) is the one env-selected alternative and stays unset on purpose:
+      # it is third-party processing, ineligible for governed runs.
+      # Hydration settle budget for that browser. `goto` resolves on the load event,
+      # which on a page whose text lives in hydration payloads fires before any text
+      # exists; the adapter re-snapshots until visible text stops growing or this
+      # budget is spent. 3500 is DEFAULT_SETTLE_MS in
+      # crates/quarry-runtime/src/browser_driver.rs — surfaced here so a
+      # slow-hydrating source can be granted more time without a rebuild.
+      QUARRY_BROWSER_SETTLE_MS: "${QUARRY_BROWSER_SETTLE_MS:-3500}"
       QUARRY_EDGE__CONTROL_BASE_URL: http://quarry-control:8081
       QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       # Phase 1 Track C / cluster #9 — durable change-monitoring store.
@@ -56,6 +74,21 @@ services:
       # self-contained and does not depend on a root mega-stack service.
       QUARRY_EDGE__SEARXNG_URL: http://searxng:8080
       QUARRY_EDGE__BRAVE_SEARCH_KEY: ${BRAVE_API_KEY:-${BRAVE_SEARCH_KEY:-}}
+      # SmartRouter's first tier is a Tantivy index over Quarry's own scraped
+      # corpus. Unset, main.rs builds the in-memory variant, so the corpus
+      # restarted empty every time and tier 1 answered nothing.
+      # The path must sit under a directory the edge image already creates and
+      # chowns to its non-root `quarry` user (uid 65532, see
+      # deploy/compose/Dockerfile.edge): Docker hands a named volume the
+      # ownership of the image directory it is mounted over, but creates a
+      # mount point absent from the image root-owned — and on a root-owned
+      # path TantivyLocalIndex::open fails outright and main.rs drops the
+      # index entirely (that branch has no in-memory fallback), leaving search
+      # worse off than the ephemeral index this replaces. The XDG cache dir is
+      # the pre-chowned directory the image ships empty, so the volume below
+      # shadows no image content and leaves the browser profile root
+      # (QUARRY_BROWSER_PROFILE_ROOT) as ephemeral as it is today.
+      QUARRY_EDGE__LOCAL_INDEX_DIR: /var/lib/quarry/home/.cache/local-index
       # Real auth path (bypass OFF by default): public /v1/* routes verify the
       # gateway's short-lived `quarry` audience JWT against auth-core's JWKS and
       # derive org scope from the verified `claims.org_id`. The orchestrator's
@@ -85,13 +118,21 @@ services:
       # the config crate maps QUARRY_EDGE__MODEL_PLANE_URL → model_plane_url. Serves
       # /v1/invoke for answer synthesis; the gateway chooses the model (no model id needed).
       QUARRY_EDGE__MODEL_PLANE_URL: ${MODEL_PLANE_URL:-http://model-gateway:8080}
-      # Exa-style search-quality layers (all default OFF; need MODEL_PLANE_URL).
+      # Exa-style search-quality layers (need MODEL_PLANE_URL, set above).
+      # Both default ON now: they shipped defaulted to 0, so the deployed stack
+      # served the raw SERP merge while the quality code sat unused. Each layer
+      # is degrade-safe on its own — main.rs logs a warn and keeps the original
+      # query / result order when the Model Plane client cannot be built, and
+      # the rewriter and reranker fall back to their inputs on any per-request
+      # failure — so a Model Plane outage costs latency, never results. Set the
+      # override to 0 to get the plain merge back without a rebuild.
       # Autoprompt: rewrite verbose Research/Comparative queries before fan-out.
-      QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-0}"
+      QUARRY_EDGE__AUTOPROMPT: "${QUARRY_EDGE_AUTOPROMPT:-1}"
       QUARRY_EDGE__AUTOPROMPT_MODEL: ${QUARRY_AUTOPROMPT_MODEL:-}
       # Semantic rerank: reorder top-N merged results by relevance + attach a
-      # query-relevant highlight per result.
-      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
+      # query-relevant highlight per result. TOP_N stays at 10 because it is
+      # what bounds the per-query LLM cost (one call over N titles/snippets).
+      QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-1}"
       QUARRY_EDGE__SEMANTIC_RERANK_MODEL: ${QUARRY_SEMANTIC_RERANK_MODEL:-}
       QUARRY_EDGE__SEMANTIC_RERANK_TOP_N: ${QUARRY_SEMANTIC_RERANK_TOP_N:-10}
       # Data residency: set to 1 to refuse external SERP SaaS (Brave/Serper) so
@@ -166,6 +207,11 @@ services:
       - "${INGESTION_BIND_ADDRESS:-127.0.0.1}:8082:8082"
     volumes:
       - ./config/security-feeds:/app/data/security-feeds:ro
+      # Backs QUARRY_EDGE__LOCAL_INDEX_DIR above. Mounted on the image's XDG
+      # cache dir (not a fresh /app/data path) so the volume inherits the
+      # `quarry` uid the image already chowned there — see the env var's
+      # comment for why a root-owned mount point would disable the index.
+      - quarry-edge-index-data:/var/lib/quarry/home/.cache
     networks:
       - ingestion-net
       - inter-plane-bus
@@ -458,10 +504,13 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-          cpus: "0.25"
+          # The API also hosts scoped Codex subprocesses for subscription
+          # inference. The former CRUD-only 256M/0.25 CPU cap throttled even
+          # short review calls into their deadlines. Keep limits configurable.
+          memory: ${INTEGRATION_API_MEMORY_LIMIT:-2G}
+          cpus: "${INTEGRATION_API_CPU_LIMIT:-2.0}"
         reservations:
-          memory: 64M
+          memory: 256M
     depends_on:
       postgres:
         condition: service_healthy
@@ -1428,6 +1477,11 @@ volumes:
   connector-runtime-db-data:
     driver: local
   stirling-pdf-data:
+    driver: local
+  # quarry-edge's Tantivy corpus (SmartRouter tier 1). Rebuildable — it refills
+  # from subsequent scrapes — so deleting it loses no source of truth, only the
+  # zero-latency own-corpus tier until the corpus grows back.
+  quarry-edge-index-data:
     driver: local
 
 networks:

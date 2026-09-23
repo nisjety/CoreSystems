@@ -10,6 +10,30 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
 )
 
+// seedMembershipTestSpace registers a test Space plus its authority-revision
+// row, and schedules cleanup of every row the test created.
+func seedMembershipTestSpace(t *testing.T, pool *pgxpool.Pool, spaceRef, orgID, owner string) {
+	t.Helper()
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM space_memberships WHERE space_ref=$1`, spaceRef)
+		_, _ = pool.Exec(ctx, `DELETE FROM space_authority_revisions WHERE space_ref=$1`, spaceRef)
+		_, _ = pool.Exec(ctx, `DELETE FROM registered_spaces WHERE space_ref=$1`, spaceRef)
+	})
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO registered_spaces (space_ref, org_id, space_kind, owner_principal_id,
+		    application_lifecycle_revision, registration_state)
+		VALUES ($1,$2,'room',$3,1,'active')
+		ON CONFLICT (space_ref) DO NOTHING`, spaceRef, orgID, owner); err != nil {
+		t.Fatalf("seed Space: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO space_authority_revisions (space_ref) VALUES ($1) ON CONFLICT DO NOTHING`, spaceRef); err != nil {
+		t.Fatalf("seed revisions: %v", err)
+	}
+}
+
 // A roster sync must never demote the Space owner.
 //
 // This is a regression test for a defect the live system produced: the
@@ -38,23 +62,8 @@ func TestReplaceMembershipsNeverDemotesTheOwner(t *testing.T) {
 		owner    = "test-owner-principal"
 		other    = "test-member-principal"
 	)
-	t.Cleanup(func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM space_memberships WHERE space_ref=$1`, spaceRef)
-		_, _ = pool.Exec(ctx, `DELETE FROM space_authority_revisions WHERE space_ref=$1`, spaceRef)
-		_, _ = pool.Exec(ctx, `DELETE FROM registered_spaces WHERE space_ref=$1`, spaceRef)
-	})
+	seedMembershipTestSpace(t, pool, spaceRef, orgID, owner)
 
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO registered_spaces (space_ref, org_id, space_kind, owner_principal_id,
-		    application_lifecycle_revision, registration_state)
-		VALUES ($1,$2,'room',$3,1,'active')
-		ON CONFLICT (space_ref) DO NOTHING`, spaceRef, orgID, owner); err != nil {
-		t.Fatalf("seed Space: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO space_authority_revisions (space_ref) VALUES ($1) ON CONFLICT DO NOTHING`, spaceRef); err != nil {
-		t.Fatalf("seed revisions: %v", err)
-	}
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, granted_by)
 		VALUES ($1,'user',$2,'owner','test')
@@ -101,10 +110,10 @@ func TestReplaceMembershipsNeverDemotesTheOwner(t *testing.T) {
 		t.Fatalf("declared member was not applied: role=%q active=%v", role, active)
 	}
 
-	// Absence revokes an ordinary member but still leaves the owner alone,
-	// and the revocation is reported so the caller can fan it out
-	// cross-plane — the owner must never appear here even though they were
-	// also absent from this empty roster.
+	// Absence revokes an ordinary member but still leaves the owner alone.
+	// The revocation is reported so the caller can fan it out cross-plane.
+	// The owner must never appear here even though they were also absent
+	// from this empty roster.
 	if _, revoked, reactivated, _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{SpaceRef: spaceRef}); err != nil {
 		t.Fatalf("empty replace: %v", err)
 	} else if len(revoked) != 1 || revoked[0] != other {
@@ -178,23 +187,8 @@ func TestUserScopedReplacementLeavesAgentsBound(t *testing.T) {
 		owner    = "test-owner-agent-scope"
 		agent    = "test-agent-subject"
 	)
-	t.Cleanup(func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM space_memberships WHERE space_ref=$1`, spaceRef)
-		_, _ = pool.Exec(ctx, `DELETE FROM space_authority_revisions WHERE space_ref=$1`, spaceRef)
-		_, _ = pool.Exec(ctx, `DELETE FROM registered_spaces WHERE space_ref=$1`, spaceRef)
-	})
+	seedMembershipTestSpace(t, pool, spaceRef, orgID, owner)
 
-	if _, err := pool.Exec(ctx, `
-		INSERT INTO registered_spaces (space_ref, org_id, space_kind, owner_principal_id,
-		    application_lifecycle_revision, registration_state)
-		VALUES ($1,$2,'room',$3,1,'active')
-		ON CONFLICT (space_ref) DO NOTHING`, spaceRef, orgID, owner); err != nil {
-		t.Fatalf("seed Space: %v", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO space_authority_revisions (space_ref) VALUES ($1) ON CONFLICT DO NOTHING`, spaceRef); err != nil {
-		t.Fatalf("seed revisions: %v", err)
-	}
 	// An agent bound to the room by a different, agent-aware decision.
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, granted_by)

@@ -7,14 +7,29 @@ import (
 	"testing"
 )
 
-func TestTenantScopeAndRiskMigrationFailsClosedForLegacyRows(t *testing.T) {
-	t.Parallel()
-
-	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0007_tenant_scopes_and_risk_constraints.up.sql"))
+// readMigration reads a migration and normalises its line endings.
+//
+// These assertions are the durable record of several security postures: a
+// capability that starts unavailable until health is attested, an upsert that
+// cannot clobber a live attestation, cap.command.shell staying high-risk. One
+// of them spans two lines, so on a CRLF checkout the file held a carriage
+// return where the literal did not and the check failed for a reason that had
+// nothing to do with the posture it guards. A security test that is red for a
+// spurious reason gets ignored, which is the worst outcome available here, so
+// the line endings are normalised once, at the read.
+func readMigration(t *testing.T, name string) string {
+	t.Helper()
+	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}
-	sql := string(contents)
+	return strings.ReplaceAll(string(contents), "\r\n", "\n")
+}
+
+func TestTenantScopeAndRiskMigrationFailsClosedForLegacyRows(t *testing.T) {
+	t.Parallel()
+
+	sql := readMigration(t, "0007_tenant_scopes_and_risk_constraints.up.sql")
 	for _, required := range []string{
 		"ADD COLUMN IF NOT EXISTS org_id",
 		"capabilities_risk_level_check",
@@ -33,11 +48,7 @@ func TestTenantScopeAndRiskMigrationFailsClosedForLegacyRows(t *testing.T) {
 func TestExecutionDispatchCapabilitiesStartUnavailableUntilHealthAttested(t *testing.T) {
 	t.Parallel()
 
-	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0008_execution_dispatch_capabilities.up.sql"))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	sql := string(contents)
+	sql := readMigration(t, "0008_execution_dispatch_capabilities.up.sql")
 	for _, required := range []string{
 		"'cap.command.shell'",
 		"'cap.agent.spawn'",
@@ -76,11 +87,7 @@ func TestSandboxCommandCapabilityMigrationSeedsLowRiskHermeticExecution(t *testi
 	t.Parallel()
 
 	const name = "0010_sandbox_code_execution_capability.up.sql"
-	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	sql := string(contents)
+	sql := readMigration(t, name)
 	for _, required := range []string{
 		"'cap.command.sandbox'",
 		"'code_interpreter'",
@@ -143,11 +150,7 @@ func TestSandboxCommandCapabilityMigrationSeedsLowRiskHermeticExecution(t *testi
 func TestConversationTicketActionStartsUnavailableAndKeepsOwnerBoundFields(t *testing.T) {
 	t.Parallel()
 
-	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0011_conversation_ticket_action_capability.up.sql"))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	sql := string(contents)
+	sql := readMigration(t, "0011_conversation_ticket_action_capability.up.sql")
 	for _, required := range []string{
 		"'cap.tool.ticket.create'",
 		"'tickets.create'",
@@ -198,11 +201,7 @@ func TestBackgroundProcessCapabilityStaysLowRiskBehindASecondGate(t *testing.T) 
 	t.Parallel()
 
 	const name = "0015_background_process_capability.up.sql"
-	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	sql := string(contents)
+	sql := readMigration(t, name)
 	for _, required := range []string{
 		"'cap.process.background'",
 		"'process_start'",

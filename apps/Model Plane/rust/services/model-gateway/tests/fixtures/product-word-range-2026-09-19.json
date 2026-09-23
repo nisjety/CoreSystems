@@ -1,0 +1,105 @@
+{
+  "description": "Fictional Team Fjord QA outputs, read from authoritative saved messages as UTF-8. No authentication, identifiers or source metadata. Corrects the mojibake in the DevTools response-text captures.",
+  "samples": [
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Ingen invitasjon er foreløpig sendt.\n\n**Risiko**\nTeknisk avklaring må være ferdig før pilotdatoen kan bekreftes. Det finnes ingen godkjent budsjettramme. Disse to forholdene utgjør åpne avhengigheter som kan forsinke eller blokkere piloten.\n\n**Neste beslutning**\nNeste beslutning er om Amirs tekniske avklaring er tilstrekkelig til at pilotdatoen kan bekreftes. Inntil dette er avklart, forblir 24. september 2026 et mål – ikke en godkjent dato.",
+      "words": 85,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere og arbeider mot et pilotmål satt til 24. september 2026. Datoen er ikke bekreftet. Nora eier planen, og Amir eier den tekniske avklaringen. Ingen invitasjon er sendt, og det finnes ingen godkjent budsjettramme.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før den tekniske avklaringen er fullført. Manglende budsjettramme og usendte invitasjoner er åpne forhold som kan forsinke fremdriften ytterligere dersom avklaringen trekker ut i tid.\n\n**Neste beslutning**\nNeste beslutning er om den tekniske avklaringen er tilstrekkelig til å gå videre. Utfallet av denne vurderingen avgjør om pilotdatoen kan bekreftes eller må revideres.",
+      "words": 93,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Ingen invitasjon er sendt, og det finnes ingen godkjent budsjettramme.\n\n**Risiko**\nTeknisk avklaring må være ferdig før pilotdatoen kan bekreftes. Så lenge Amirs avklaring ikke er fullført, kan ikke datoen låses. Fraværet av godkjent budsjettramme utgjør en ytterligere usikkerhet for fremdriften.\n\n**Neste beslutning**\nNeste beslutning er om teknisk avklaring er tilstrekkelig til å bekrefte pilotdatoen. Inntil den vurderingen er gjort, forblir 24. september 2026 et mål, ikke en bekreftet dato.",
+      "words": 93,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere og arbeider mot et pilotmål satt til 24. september 2026. Datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Ingen invitasjon er sendt.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før teknisk avklaring er fullført. Det finnes ingen godkjent budsjettramme, noe som utgjør en selvstendig risiko for fremdriften. Disse to forholdene henger tett sammen og kan forsinke oppstart.\n\n**Neste beslutning**\nTeamet må ta stilling til om Amirs tekniske avklaring er tilstrekkelig. Først etter den vurderingen kan pilotdatoen eventuelt bekreftes og videre planlegging iverksettes.",
+      "words": 87,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Ingen invitasjon er sendt.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før Amirs tekniske avklaring er fullført. Det finnes ingen godkjent budsjettramme, noe som utgjør en ytterligere usikkerhet for fremdriften.\n\n**Neste beslutning**\nNeste beslutning er om den tekniske avklaringen er tilstrekkelig til at pilotdatoen kan bekreftes. Inntil dette er avgjort, forblir både dato og budsjett ubekreftet, og ingen invitasjoner kan sendes.",
+      "words": 82,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere og arbeider mot et pilotmål satt til 24. september 2026. Nora eier planen, og Amir eier den tekniske avklaringen. Pilotdatoen er ikke bekreftet, og ingen invitasjon er sendt.\n\n**Risiko**\nDen tekniske avklaringen må være ferdig før pilotdatoen kan bekreftes. Per nå finnes det ingen godkjent budsjettramme, noe som utgjør en selvstendig usikkerhet for fremdriften.\n\n**Neste beslutning**\nTeamet må ta stilling til om den tekniske avklaringen er tilstrekkelig. Først når denne vurderingen er gjort, kan pilotdatoen eventuelt bekreftes. Budsjettspørsmålet er uavklart og vil sannsynligvis også kreve en beslutning.",
+      "words": 90,
+      "accepted": false
+    },
+    {
+      "content": "**Statusoppdatering – Team Fjord**\n\n**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring.\n\n**Risiko**\nTeknisk avklaring må være ferdig før pilotdatoen kan bekreftes, og denne avklaringen er foreløpig ikke fullført. Det finnes ingen godkjent budsjettramme. Ingen invitasjon er sendt.\n\n**Neste beslutning**\nNeste beslutning er om teknisk avklaring er tilstrekkelig til at pilotdatoen kan bekreftes. Inntil dette er avgjort, forblir 24. september et mål – ikke en godkjent dato.",
+      "words": 80,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men denne datoen er ikke bekreftet. Nora eier planen, og Amir eier den tekniske avklaringen. Ingen invitasjon er foreløpig sendt.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før den tekniske avklaringen er fullført. I tillegg foreligger det ingen godkjent budsjettramme. Disse to forholdene utgjør usikkerhet som må håndteres før fremdriften kan sikres.\n\n**Neste beslutning**\nNeste beslutning er om Amirs tekniske avklaring er tilstrekkelig. Utfallet av denne vurderingen avgjør om pilotdatoen 24. september 2026 kan bekreftes og videre planlegging kan settes i gang.",
+      "words": 90,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Det finnes ingen godkjent budsjettramme, og ingen invitasjon er sendt.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før Amirs tekniske avklaring er fullført. Manglende budsjettramme og usendte invitasjoner utgjør ytterligere åpne punkter som kan forsinke fremdriften.\n\n**Neste beslutning**\nNeste beslutning er om den tekniske avklaringen er tilstrekkelig til å gå videre. Før det er avgjort, forblir pilotdatoen et mål – ikke en bekreftet plan.",
+      "words": 84,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere og arbeider mot et pilotmål satt til 24. september 2026. Nora eier planen, mens Amir eier den tekniske avklaringen. Pilotdatoen er ikke bekreftet, og ingen invitasjon er sendt.\n\n**Risiko**\nDen tekniske avklaringen må være fullført før pilotdatoen kan bekreftes. Per nå finnes det ingen godkjent budsjettramme, noe som utgjør en ytterligere usikkerhet for fremdriften.\n\n**Neste beslutning**\nTeamet må ta stilling til om den tekniske avklaringen er tilstrekkelig. Først når dette er avklart, kan pilotdatoen bekreftes, invitasjoner sendes og videre planlegging igangsettes.",
+      "words": 84,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Ingen invitasjon er sendt, og det finnes ingen godkjent budsjettramme.\n\n**Risiko**\nTeknisk avklaring må være ferdig før pilotdatoen kan bekreftes. Så lenge denne avklaringen ikke er fullført, er pilotdatoen fortsatt et mål – ikke en beslutning. Manglende budsjettramme og usendte invitasjoner er ytterligere åpne punkter som kan forsinke fremdriften.\n\n**Neste beslutning**\nNeste beslutning er om teknisk avklaring er tilstrekkelig til å bekrefte pilotdatoen. Denne vurderingen ligger hos Amir, og utfallet vil være avgjørende for den videre planen.",
+      "words": 99,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier den tekniske avklaringen. Det finnes ingen godkjent budsjettramme, og ingen invitasjon er sendt.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før den tekniske avklaringen er fullført. Manglende budsjettramme og usendte invitasjoner utgjør ytterligere åpne punkter som kan forsinke fremdriften.\n\n**Neste beslutning**\nNeste beslutning er om Amirs tekniske avklaring er tilstrekkelig til at pilotdatoen kan bekreftes. Først når dette er avgjort, kan videre planlegging under Noras ansvar gå fremover.",
+      "words": 87,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Piloten har et foreløpig mål om oppstart 24. september 2026, men denne datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Det finnes ingen godkjent budsjettramme, og ingen invitasjon er sendt.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før Amirs tekniske avklaring er fullført. Manglende budsjettramme og usendte invitasjoner utgjør ytterligere åpne punkter som kan forsinke fremdriften.\n\n**Neste beslutning**\nTeamet må ta stilling til om den tekniske avklaringen er tilstrekkelig som grunnlag for å bekrefte pilotdatoen. Først når denne beslutningen er fattet, kan videre planlegging konkretiseres.",
+      "words": 90,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier den tekniske avklaringen. Ingen invitasjon er sendt, og det finnes ingen godkjent budsjettramme.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før den tekniske avklaringen er fullført. Dette er en direkte avhengighet som blokkerer videre fremdrift. Manglende budsjettramme og usendte invitasjoner øker usikkerheten ytterligere.\n\n**Neste beslutning**\nNeste beslutning er om Amirs tekniske avklaring er tilstrekkelig til at pilotdatoen kan bekreftes. Inntil dette er avgjort, forblir 24. september et mål, ikke en godkjent dato.",
+      "words": 91,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier den tekniske avklaringen.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før den tekniske avklaringen er fullført. Det finnes ingen godkjent budsjettramme, og ingen invitasjon er sendt. Disse åpne punktene utgjør usikkerhet for fremdriften.\n\n**Neste beslutning**\nNeste beslutning er om den tekniske avklaringen er tilstrekkelig til å gå videre. Først når denne vurderingen er gjort, kan pilotdatoen eventuelt bekreftes og øvrige steg igangsettes.",
+      "words": 81,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere og arbeider mot et pilotmål satt til 24. september 2026. Datoen er ikke bekreftet. Nora eier planen, og Amir eier den tekniske avklaringen. Ingen invitasjon er sendt, og det finnes ingen godkjent budsjettramme.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før den tekniske avklaringen er fullført. Dette skaper usikkerhet om fremdriften. Manglende budsjettramme og usendte invitasjoner er ytterligere forhold som kan forsinke gjennomføringen dersom de ikke håndteres i tide.\n\n**Neste beslutning**\nNeste beslutning er om Amirs tekniske avklaring er tilstrekkelig til å gå videre. Først når dette er avklart, kan pilotdatoen eventuelt bekreftes.",
+      "words": 94,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Ingen invitasjon er foreløpig sendt, og det finnes ingen godkjent budsjettramme.\n\n**Risiko**\nPilotdatoen kan ikke bekreftes før Amirs tekniske avklaring er fullført. Manglende budsjettramme og usendte invitasjoner gjør fremdriften sårbar dersom avklaringen trekker ut eller viser seg utilstrekkelig.\n\n**Neste beslutning**\nTeamet må ta stilling til om den tekniske avklaringen er tilstrekkelig som grunnlag for å gå videre. Først etter den vurderingen kan pilotdatoen eventuelt bekreftes og videre tiltak planlegges.",
+      "words": 92,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier teknisk avklaring. Ingen invitasjon er foreløpig sendt, og det finnes ingen godkjent budsjettramme.\n\n**Risiko**\nTeknisk avklaring må være ferdig før pilotdatoen kan bekreftes. Så lenge denne avklaringen ikke er fullført, kan ikke datoen låses. Fraværet av godkjent budsjettramme utgjør en ytterligere usikkerhet for fremdriften.\n\n**Neste beslutning**\nNeste beslutning er om Amirs tekniske avklaring er tilstrekkelig til at pilotdatoen kan bekreftes. Inntil denne vurderingen er gjort, forblir 24. september 2026 et mål, ikke en bekreftet dato.",
+      "words": 96,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\nTeam Fjord har 8 medarbeidere og arbeider mot et pilotmål satt til 24. september 2026. Nora eier planen, og Amir eier teknisk avklaring. Pilotdatoen er ikke bekreftet, og ingen invitasjon er sendt.\n\n**Risiko**\nTeknisk avklaring må være ferdig før pilotdatoen kan bekreftes. Det finnes ingen godkjent budsjettramme. Disse to åpne punktene gjør det uklart om piloten kan gjennomføres som planlagt.\n\n**Neste beslutning**\nTeamet må ta stilling til om Amirs tekniske avklaring er tilstrekkelig. Først når den vurderingen er gjort, kan pilotdatoen eventuelt bekreftes og videre steg iverksettes.",
+      "words": 84,
+      "accepted": false
+    },
+    {
+      "content": "**Situasjon**\n\nTeam Fjord består av 8 medarbeidere. Pilotmålet er satt til 24. september 2026, men datoen er ikke bekreftet. Nora eier planen, og Amir eier den tekniske avklaringen. Ingen invitasjon er foreløpig sendt, og det finnes ingen godkjent budsjettramme.\n\n**Risiko**\n\nPilotdatoen kan ikke bekreftes før Amirs tekniske avklaring er fullført. Manglende budsjettramme og usendte invitasjoner innebærer at viktige forutsetninger for pilot fortsatt er åpne. Forsinkelser i den tekniske avklaringen vil direkte påvirke muligheten til å fastsette datoen.\n\n**Neste beslutning**\n\nDet som nå må avgjøres, er om den tekniske avklaringen er tilstrekkelig til at pilotdatoen kan bekreftes og prosjektet kan gå videre.",
+      "words": 97,
+      "accepted": false
+    }
+  ]
+}

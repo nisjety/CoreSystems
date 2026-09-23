@@ -929,11 +929,13 @@ async fn run_rounds(
     // never reaches the parent's context, only its conclusion does.
     let mut messages = vec![
         pb::ChatMessage {
+            compaction_summary: String::new(),
             role: "system".to_owned(),
             content: compose_system_prompt(&ctx.allowlist),
             name: String::new(),
         },
         pb::ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: goal.to_owned(),
             name: String::new(),
@@ -953,6 +955,7 @@ async fn run_rounds(
         messages.insert(
             1,
             pb::ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: format!(
                     "You have access to the following skills relevant to this request. Apply their guidance when it fits:\n\n{}",
@@ -1625,12 +1628,14 @@ async fn run_rounds(
         // tool outcomes so the next round can answer from them.
         if !response.content.trim().is_empty() {
             messages.push(pb::ChatMessage {
+                compaction_summary: String::new(),
                 role: "assistant".to_owned(),
                 content: response.content,
                 name: String::new(),
             });
         }
         messages.push(pb::ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: format_tool_context(&outcomes),
             name: String::new(),
@@ -4404,6 +4409,7 @@ mod tests {
                 .unwrap_or_else(|| Scripted::Answer("done".to_owned()));
             match step {
                 Scripted::Answer(content) => Ok(Response::new(pb::InferResponse {
+                    compaction_summary: String::new(),
                     request_id: "req".to_owned(),
                     content,
                     model_used: "mock".to_owned(),
@@ -4415,6 +4421,7 @@ mod tests {
                 })),
                 Scripted::TruncatedToolCalls { content, calls } => {
                     Ok(Response::new(pb::InferResponse {
+                        compaction_summary: String::new(),
                         request_id: "req".to_owned(),
                         content,
                         model_used: "mock".to_owned(),
@@ -4431,6 +4438,7 @@ mod tests {
                     }))
                 }
                 Scripted::ToolCalls { content, calls } => Ok(Response::new(pb::InferResponse {
+                    compaction_summary: String::new(),
                     request_id: "req".to_owned(),
                     content,
                     model_used: "mock".to_owned(),

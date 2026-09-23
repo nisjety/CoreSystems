@@ -56,16 +56,34 @@ Thumbs.db
 *.swp
 *.swo
 *~
-.idea/
+**/.idea/
+# Only the two intentionally shared root-level JetBrains settings belong in
+# source control; plane-local inspection settings are machine-generated.
+!/.idea/
+/.idea/*
+!/.idea/dictionaries/
+/.idea/dictionaries/*
+!/.idea/dictionaries/verevon.xml
+!/.idea/inspectionProfiles/
+/.idea/inspectionProfiles/*
+!/.idea/inspectionProfiles/CoreSystem.xml
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.example.json
 # JetBrains inspection exports — not source, and large (the Control Plane
-# copies were 2.8MB/41K lines). Committed by mistake more than once; glob
-# repo-wide so the same export run under a different plane directory is
-# caught too.
+# copies were 2.8MB/41K lines; an auth-core HTML export reached 5.9GB).
+# Committed by mistake more than once; glob repo-wide so the same export run
+# under a different plane directory is caught too. The HTML export always
+# emits this trio into a docs/ folder.
 **/.descriptions.xml
 **/Annotator.xml
+**/docs/index.html
+**/docs/script.js
+**/docs/styles.css
+# Some inspection exports were written directly at a Control Plane service root.
+apps/Control Plane/*/index.html
+apps/Control Plane/*/script.js
+apps/Control Plane/*/styles.css
 
 # ──────────────────────────────────────────────────────────────────────
 # Secrets and local env
@@ -101,6 +119,8 @@ Thumbs.db
 # Generated runtime key material. Public keys are derived locally alongside
 # private keys so the complete trust bundle remains deployment-owned.
 **/.secrets/
+# Local Visma API response dumps contain business records, not fixtures.
+/.visma-*.json
 
 # ──────────────────────────────────────────────────────────────────────
 # Compiled Go service binaries (build artifacts — large, non-reproducible,
@@ -116,6 +136,7 @@ apps/Control Plane/user-core/server
 # with no -o drops the binary next to main.go, named after its directory, so it
 # lands outside the `**/bin/` rules above and looks like an ordinary new file.
 apps/Model Plane/go/services/nats-provisioner/nats-provisioner
+apps/Model Plane/go/services/nats-provisioner/nats-provisioner.exe
 
 # ──────────────────────────────────────────────────────────────────────
 # Claude Code agent worktrees — isolated git worktrees (full nested
@@ -218,3 +239,5 @@ DEPLOYED_SERVICES_CREDENTIALS.txt
 **/DEPLOYED_SERVICES_CREDENTIALS.txt
 .env.generated-secrets
 **/.env.generated-secrets
+.vercel
+.env*

@@ -27,6 +27,18 @@ func validBody() []byte {
 	return body
 }
 
+func TestHandlerCannotSilentlyTreatMultiplePackagesAsOne(t *testing.T) {
+	var body map[string]any
+	_ = json.Unmarshal(validBody(), &body)
+	body["packages"] = []any{body["package"], body["package"]}
+	raw, _ := json.Marshal(body)
+	rec := httptest.NewRecorder()
+	Handler(New(nil, time.Second), nil)(rec, httptest.NewRequest(http.MethodPost, "/api/quotes", bytes.NewReader(raw)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("multiple packages silently accepted: %d", rec.Code)
+	}
+}
+
 func TestHandler_ValidRequest_ReturnsSortedQuotes(t *testing.T) {
 	engine := New([]Quoter{
 		&mockQuoter{code: "expensive"},

@@ -514,6 +514,8 @@ struct CanonicalMessagesResponse {
 
 #[derive(Debug, Deserialize)]
 struct CanonicalMessage {
+    #[serde(default)]
+    source_scope: Option<String>,
     /// Durable message id from session-core, relayed by Model Gateway.
     ///
     /// Empty for rows written before the conversation read returned ids; the
@@ -543,6 +545,12 @@ struct CanonicalMessage {
     grounding: Option<Value>,
     #[serde(default)]
     citations: Option<Value>,
+    /// The turn's authored work product (documents, code, HTML), latest
+    /// version per id, as Model Gateway persists it. Relayed for the same
+    /// reason as the two above: the Resultat panel was empty on a reopened
+    /// thread because the only copy lived in the browser that streamed it.
+    #[serde(default)]
+    artifacts: Option<Value>,
 }
 
 async fn read_canonical_transcript(
@@ -618,6 +626,7 @@ fn canonical_messages_to_transcript(
                 "role": message.role,
                 "content": message.content,
             });
+            if message.source_scope.as_deref() == Some("conversation") { turn["sourceScope"] = json!("conversation"); }
             if !message.agent_name.trim().is_empty() {
                 turn["agentName"] = json!(message.agent_name);
             }
@@ -633,6 +642,12 @@ fn canonical_messages_to_transcript(
                 .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()))
             {
                 turn["citations"] = citations;
+            }
+            if let Some(artifacts) = message
+                .artifacts
+                .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()))
+            {
+                turn["artifacts"] = artifacts;
             }
             turn
         })
@@ -945,12 +960,14 @@ mod tests {
             "thread-1",
             vec![
                 CanonicalMessage {
+                    source_scope: None,
                     message_id: "01JABCDEF".into(),
                     role: "user".into(),
                     content: "Question".into(),
                     agent_name: String::new(),
                     grounding: None,
                     citations: None,
+                    artifacts: None,
                 },
                 CanonicalMessage {
                     // A row written before the conversation read returned ids.
@@ -960,6 +977,7 @@ mod tests {
                     agent_name: String::new(),
                     grounding: None,
                     citations: None,
+                    artifacts: None,
                 },
             ],
         )
@@ -975,20 +993,24 @@ mod tests {
             "thread-1",
             vec![
                 CanonicalMessage {
+                    source_scope: None,
                     message_id: String::new(),
                     role: "user".into(),
                     content: "Question".into(),
                     agent_name: String::new(),
                     grounding: None,
                     citations: None,
+                    artifacts: None,
                 },
                 CanonicalMessage {
+                    source_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "Answer".into(),
                     agent_name: "Statusagent".into(),
                     grounding: None,
                     citations: None,
+                    artifacts: None,
                 },
             ],
         )
@@ -1015,14 +1037,17 @@ mod tests {
             "thread-1",
             vec![
                 CanonicalMessage {
+                    source_scope: None,
                     message_id: String::new(),
                     role: "user".into(),
                     content: "Which pram is best?".into(),
                     agent_name: String::new(),
                     grounding: None,
                     citations: None,
+                    artifacts: None,
                 },
                 CanonicalMessage {
+                    source_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "The Nuna TRIV LX.".into(),
@@ -1033,14 +1058,17 @@ mod tests {
                         "citations": [{ "id": "c1", "title": "Nuna TRIV LX", "url": "https://example.test" }],
                     })),
                     citations: None,
+                    artifacts: None,
                 },
                 CanonicalMessage {
+                    source_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "Ungrounded reply".into(),
                     agent_name: String::new(),
                     grounding: Some(Value::Null),
                     citations: None,
+                    artifacts: None,
                 },
             ],
         )
@@ -1054,6 +1082,45 @@ mod tests {
         assert!(transcript.turns[2].get("grounding").is_none());
     }
 
+    /// The Resultat panel was empty on every reopened thread because the
+    /// canonical read carried no artifacts (RUN-LOG finding 3). A persisted
+    /// list is relayed as-is; an empty one must not create the key.
+    #[test]
+    fn canonical_messages_carry_persisted_artifacts() {
+        let transcript = canonical_messages_to_transcript(
+            "thread-1",
+            vec![
+                CanonicalMessage {
+                    source_scope: None,
+                    message_id: String::new(),
+                    role: "assistant".into(),
+                    content: "Rapporten ligger i sidepanelet.".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                    artifacts: Some(json!([
+                        { "id": "rapport", "kind": "document", "title": "Salgsrapport", "content": "# Uke 37", "version": 2 },
+                    ])),
+                },
+                CanonicalMessage {
+                    source_scope: None,
+                    message_id: String::new(),
+                    role: "assistant".into(),
+                    content: "Ingen artefakter.".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                    artifacts: Some(json!([])),
+                },
+            ],
+        )
+        .expect("canonical conversation should render");
+
+        assert_eq!(transcript.turns[0]["artifacts"][0]["id"], "rapport");
+        assert_eq!(transcript.turns[0]["artifacts"][0]["version"], 2);
+        assert!(transcript.turns[1].get("artifacts").is_none());
+    }
+
     /// Tool-loop evidence (web search, deep research) never appears in
     /// `grounding` — it arrives as a separate `citations` list. This is the
     /// common case in practice, so it gets its own coverage.
@@ -1063,6 +1130,7 @@ mod tests {
             "thread-1",
             vec![
                 CanonicalMessage {
+                    source_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "Oslo.".into(),
@@ -1071,8 +1139,10 @@ mod tests {
                     citations: Some(json!([
                         { "id": "w1", "title": "Oslo", "url": "https://example.test/oslo", "snippet": "capital" },
                     ])),
+                    artifacts: None,
                 },
                 CanonicalMessage {
+                    source_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "No sources used.".into(),
@@ -1080,6 +1150,7 @@ mod tests {
                     grounding: None,
                     // An empty list is not evidence; it must not create the key.
                     citations: Some(json!([])),
+                    artifacts: None,
                 },
             ],
         )

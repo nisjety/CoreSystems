@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -185,7 +186,57 @@ func buildCarriers(logger *slog.Logger) []carrier.Adapter {
 		logger.Info("fedex credentials found, using real adapter", "base_url", cfg.BaseURL)
 	}
 
-	return adapters
+	return dropMocksWhenRealCarriersExist(adapters, logger)
+}
+
+// dropMocksWhenRealCarriersExist removes the leftover mock adapters once at
+// least one real carrier is configured.
+//
+// Why this is not optional. The fleet starts as mocks and each real
+// integration replaces its own counterpart, so any carrier without an
+// integration (DSV, PostNord) stayed in the fleet as an invented price —
+// quoted in the same list, in the same shape, with no marker the caller could
+// act on. Quotes are returned cheapest-first, and the mock prices are the
+// cheap ones: measured 2026-09-14 on a real 66 kg Fredrikstad→Sarpsborg
+// request, "DSV" 669 NOK and "PostNord" 808 NOK beat the real UPS quote of
+// 1 364,60 NOK, so the two carriers a customer would have been offered were
+// both fabricated. Mixing invented prices with real ones in a price
+// comparison is the one thing this service must never do.
+//
+// With no real carrier configured the mocks are kept: a local stack with no
+// credentials should still return something rather than an empty list. Set
+// SHIPPING_ALLOW_MOCK_CARRIERS=true to keep them alongside real carriers
+// anyway — deliberately opt-in, and never the default.
+func dropMocksWhenRealCarriersExist(adapters []carrier.Adapter, logger *slog.Logger) []carrier.Adapter {
+	isMock := func(a carrier.Adapter) bool {
+		info := a.Info()
+		return info.Mode == carrier.ModeMock || strings.HasPrefix(info.Code, "mock-")
+	}
+	real := make([]carrier.Adapter, 0, len(adapters))
+	mocks := make([]string, 0, len(adapters))
+	for _, a := range adapters {
+		if isMock(a) {
+			mocks = append(mocks, a.Info().Code)
+			continue
+		}
+		real = append(real, a)
+	}
+	if len(real) == 0 {
+		logger.Warn("no real carrier credentials configured; serving mock quotes only",
+			"mock_carriers", strings.Join(mocks, ","))
+		return adapters
+	}
+	if len(mocks) == 0 {
+		return adapters
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SHIPPING_ALLOW_MOCK_CARRIERS")), "true") {
+		logger.Warn("keeping mock carriers alongside real ones because SHIPPING_ALLOW_MOCK_CARRIERS=true; quotes may mix invented and real prices",
+			"mock_carriers", strings.Join(mocks, ","))
+		return adapters
+	}
+	logger.Info("dropping mock carriers because real carriers are configured",
+		"dropped", strings.Join(mocks, ","), "real_carriers", len(real))
+	return real
 }
 
 // replaceCarrier swaps out the adapter with the given code for a real

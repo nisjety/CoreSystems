@@ -2,6 +2,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  flush,
   onCleanup,
   untrack,
 } from 'solid-js'
@@ -41,7 +42,6 @@ import {
 import {
   consumePendingChatLaunch,
 } from '@/features/chat/lib/pending-chat-launch'
-import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import {
   bindSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
@@ -77,7 +77,6 @@ import {
   saveChatThreadSnapshot,
   streamChat,
   submitFeedback,
-  uploadChatDocument,
   VEREVON_BALANCE_MODE_ID,
   type AutonomyRung,
   type ChatFeedbackRating,
@@ -117,6 +116,7 @@ import {
   humanizeToolName,
   mergeServerTurnsWithCachedMetadata,
   messageToTurn,
+  cancelledRunTurn,
   missingSearchResultStep,
   normalizeArtifact,
   normalizeCitation,
@@ -129,9 +129,10 @@ import {
   summarizeGrounding,
   summarizeToolResult,
   taskStepsToTranscript,
-  textIngestibleAttachments,
+  appendInlinedAttachments,
+  inlineTextAttachments,
+  contentWithPreparedSources,
   toStreamAttachments,
-  unsentAttachmentNames,
   toolNameForResult,
   transcriptStepToTaskStep,
   transcriptTurnToChatTurn,
@@ -168,6 +169,20 @@ function safeBranchBoundary(turns: readonly ChatTurn[], requestedIndex: number):
     if (turns[candidate]?.role === 'user') return candidate
   }
   return requestedIndex
+}
+
+/**
+ * The MODEL-facing content for a "Fortsett" (continue-after-stop) send — see
+ * `continueGeneration`, the only caller. Never shown in the transcript
+ * (`sendContent` shows the ORIGINAL question there, unchanged); this is only
+ * what goes out on the wire via `SendOptions.modelContent`.
+ *
+ * Pure and exported-shape-tested rather than inlined so the exact wording is
+ * one reviewable, testable string rather than a template literal buried in a
+ * long function.
+ */
+export function buildContinuationModelContent(userContent: string, partialAnswer: string): string {
+  return `${userContent}\n\n[System: Svaret ditt ble avbrutt før det var ferdig. Du hadde allerede skrevet nøyaktig følgende, og det er allerede vist til brukeren — ikke gjenta noe av det:\n"""\n${partialAnswer}\n"""\nFortsett svaret nøyaktig der det slapp. Ikke skriv en innledning, ikke oppsummer det som står over, og ikke start på nytt — skriv bare den direkte fortsettelsen, som om teksten aldri stoppet.]`
 }
 
 export function useChatController() {
@@ -222,6 +237,8 @@ export function useChatController() {
   const [imageMode, setImageMode] = createSignal(false)
   const [planMode, setPlanMode] = createSignal(false)
   const [browseWeb, setBrowseWeb] = createSignal(readBrowseWebPreference())
+  const [selectedSourceScope, setSourceScope] = createSignal<import('@/shared/actions/chat-source-scope').ChatSourceScope>('workspace')
+  const sourceScope = () => state.turns.find(turn => turn.role === 'user')?.sourceScope ?? (state.turns.length ? 'workspace' : selectedSourceScope())
   // Temporary chat (ChatGPT's "Temporary Chat" = Verevon's already-enforced
   // Zero Data Retention mode): `temporaryChat` is the composer TOGGLE state
   // for the NEXT send. `temporaryThreadIds` is the set of thread ids THIS
@@ -960,6 +977,20 @@ export function useChatController() {
         cachedTurns,
       )
       let turns = fillMissingTurnTimestamps(mergedTurns, threadId, cachedUpdatedAt)
+      // Cancelling private validation may leave no canonical assistant text.
+      // Recover its status from the server-owned run, never from browser draft
+      // content (the BFF intentionally does not persist presentation snapshots).
+      const latest = listed.find((thread) => thread.threadId === threadId)
+      const lastMessage = history.at(-1)
+      if (turns.at(-1)?.role === 'user' && lastMessage?.role === 'user'
+        && latest?.latestRunStatus === 'cancelled' && latest.latestRunId
+        && !isTemporaryThread(threadId) && !isForeignOriginThread(threadId)) {
+        const runs = await listRuns({ threadId, limit: 1 }).catch(() => null)
+        if (seq !== threadLoadSequence || state.threadId !== threadId) return
+        const run = runs?.runs[0]
+        const stopped = run && cancelledRunTurn(threadId, latest.latestRunId, lastMessage, run)
+        if (stopped) turns = [...turns, stopped]
+      }
       // Clear the guard BEFORE the turns land: setState runs the snapshot
       // effect synchronously, and that very run is the one that must persist
       // this thread's real content (it also self-heals entries the old bug
@@ -1066,10 +1097,11 @@ export function useChatController() {
    * never a stuck spinner. Guards against a thread switch landing mid-resume:
    * every mutation checks `state.threadId === threadId` first.
    */
-  const attemptResumeStream = async (threadId: string, turn: ChatTurn) => {
-    if (!turn.requestId || state.status === 'streaming' || isTemporaryThread(threadId)) return
+  const attemptResumeStream = async (threadId: string, turn: ChatTurn, reconnectActive = false) => {
+    if (!turn.requestId || (state.status === 'streaming' && !reconnectActive) || isTemporaryThread(threadId)) return
     const assistantId = turn.id
-    const isActiveThread = () => state.threadId === threadId
+    const resumeGeneration = streamGeneration
+    const isActiveThread = () => state.threadId === threadId && streamGeneration === resumeGeneration
     const turnIndex = state.turns.findIndex((candidate) => candidate.id === assistantId)
     const precedingUser = turnIndex > 0 ? state.turns[turnIndex - 1] : undefined
     const turnTitle = createPreview(
@@ -1152,7 +1184,16 @@ export function useChatController() {
             if (t) t.content = t.content + delta
           })
         },
-      onDone: ({ modelUsed, outputTokens }) => {
+        onStopped: ({ reason }) => {
+          settled = true
+          if (!isActiveThread()) return
+          stopStreaming('stopped')
+          markOpenSteps('stopped', reason || 'The run stopped before completion.', assistantId)
+          updateLocalRunHint(threadId, 'cancelled', turn.runId)
+          setState((s) => { s.status = 'idle' })
+          writeThreadSnapshot(threadId, state.turns)
+        },
+        onDone: ({ modelUsed, outputTokens }) => {
           settled = true
           if (!isActiveThread()) return
           if (modelUsed) {
@@ -1357,10 +1398,13 @@ export function useChatController() {
           }
           setBrowseWeb(Boolean(pending.tools?.includes('search') || pending.tools?.includes('research')))
           const attachments = await toStreamAttachments(pending.attachments ?? [])
+          const inlined = await inlineTextAttachments(pending.attachments ?? [])
           triggerLaunchMotion()
           await sendContent(pending.text, pending.model, {
             attachments: attachments.length > 0 ? attachments : undefined,
+            modelContent: inlined.length > 0 ? appendInlinedAttachments(pending.text, inlined) : undefined,
             browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
+            sourceScope: pending.sourceScope,
             deepResearch: pending.tools?.includes('research'),
             displayAttachments: pending.attachments ?? [],
             effort: pending.effort,
@@ -1702,6 +1746,7 @@ export function useChatController() {
       ? {
           id: createId('user'),
           role: 'user',
+          sourceScope: options.sourceScope ?? sourceScope(),
           content,
           createdAt: submittedAt,
           streaming: false,
@@ -1715,7 +1760,10 @@ export function useChatController() {
     const assistantTurn: ChatTurn = {
       id: assistantId,
       role: 'assistant',
-      content: '',
+      // Normally empty; `continueGeneration` seeds this with the partial text
+      // a stopped turn already produced, so streamed deltas append after it
+      // instead of the visible answer starting over from nothing.
+      content: options.seedContent ?? '',
       createdAt: new Date().toISOString(),
       streaming: true,
       // Captured at SEND time so a toggle flipped later cannot retroactively
@@ -1783,6 +1831,7 @@ export function useChatController() {
     })
 
     let settled = false
+    let reconnectRequested = false
     const captureRequestId = (requestId?: string) => {
       if (!requestId) return
       setState((s) => { s.requestId = requestId })
@@ -1805,7 +1854,9 @@ export function useChatController() {
     try {
       await streamChat(
         {
-          content,
+          // Inlined attachment text rides along for the model only; `content`
+          // above stays what the user typed, and is what the transcript shows.
+          content: contentWithPreparedSources(options.modelContent?.trim() || content, options.displayAttachments),
           model,
           provider: options.provider,
           subscriptionConnectionId: options.subscriptionConnectionId,
@@ -1817,6 +1868,7 @@ export function useChatController() {
           sessionKey: activeThreadId,
           spaceRef: requestedSpaceRef,
           browseWeb: options.browseWeb,
+          sourceScope: options.sourceScope ?? sourceScope(),
           deepResearch: options.deepResearch,
           generateImage: options.generateImage,
           attachments: options.attachments,
@@ -2049,7 +2101,7 @@ export function useChatController() {
               writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
             }
           },
-          onError: ({ message }) => {
+          onError: ({ code, message }) => {
             // Thread switched away mid-stream: loadThread already aborted us and
             // reset the shared machine for the new thread, so finalise nothing
             // here (a global error/status write or a fallback retry would land
@@ -2058,29 +2110,12 @@ export function useChatController() {
               settled = true
               return
             }
-            // Graceful model fallback: a pinned model (or Verevon intent mode)
-            // whose provider is unavailable fails the whole turn. Retry once with
-            // an empty model → inference-core resolves Verevon Balance / a working
-            // provider. Only when a model was set (`model` non-empty) — the retry
-            // runs with model "" so it can never re-trigger this branch — and
-            // never on a user-aborted stream.
-            if (
-              model &&
-              options.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER &&
-              !controller.signal.aborted
-            ) {
+            // A lost HTTP connection does not mean the server's run failed.
+            // Reattach to that invocation once; never repeat its tools or silently
+            // change the user's provider. Provider fallback belongs to Inference.
+            if (code === 'connection_error' && !controller.signal.aborted) {
               settled = true
-              // An SSE error frame can share a buffered response with trailing
-              // frames. End this failed connection before opening the fallback
-              // stream so none of its leftover events can contend with the new
-              // turn's projection channel.
-              controller.abort()
-              markOpenSteps('stopped', 'Provider unavailable. Retrying with fallback model.', assistantId)
-              setState((s) => {
-                s.turns = s.turns.filter((turn) => turn.id !== assistantId)
-              })
-              setState((s) => { s.status = 'idle' })
-              void sendContent(content, '', { ...options, appendUser: false })
+              reconnectRequested = true
               return
             }
             settled = true
@@ -2109,15 +2144,53 @@ export function useChatController() {
       )
 
       if (!settled) {
-        stopStreaming(undefined)
-        markOpenSteps('done', 'Completed.', assistantId)
-        addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
+        // F-12 root cause (confirmed by a live repro — see
+        // use-chat-controller.f12.test.ts's second describe block): a manual
+        // stop aborts `controller`, and `handleStop` immediately (synchronously)
+        // sets this turn's status to 'stopped'. But `readSseStream` swallows
+        // `AbortError` rather than rejecting, so the `await streamChat(...)`
+        // above still resolves normally once the aborted read loop unwinds —
+        // which can happen well after `handleStop` returns. `settled` was never
+        // set (no `done` frame arrived before the abort), so execution always
+        // reached here and called `stopStreaming(undefined)` UNCONDITIONALLY,
+        // silently reverting the turn's status from 'stopped' back to
+        // `undefined` moments after the user stopped it. Live effect: the
+        // "Stoppet" chip (derive.ts/ChatMessages.tsx — correct and untouched)
+        // never rendered, because the state feeding it had already been
+        // clobbered by the time it read `turn.status`, and the Work feed's
+        // steps flipped from 'stopped' back to 'done'/'Completed.' the same
+        // way. The resume path (`attemptResumeStream` above) already gets this
+        // right — its own `!settled` branch always settles as 'stopped' — this
+        // branch is the one place that disagreed. Branching on
+        // `controller.signal.aborted` (exactly like the `catch` block just
+        // below) keeps a genuine user stop as 'stopped'. Q08 additionally
+        // treats a non-aborted EOF as incomplete and replays the same run once.
+        const aborted = controller.signal.aborted
+        stopStreaming('stopped')
+        if (aborted) {
+          markOpenSteps('stopped', 'Stopped by the user.', assistantId)
+        } else {
+          reconnectRequested = true
+          markOpenSteps('stopped', 'Connection closed before completion.', assistantId)
+        }
         // Same ownership guard as onDone: an aborted stream (e.g. a thread
         // switch) lands here with `!settled`, and must not flip the visible
         // thread's status or snapshot the wrong turns.
-          if (projection.accepts()) {
-            setState((s) => { s.status = 'idle' })
+        if (projection.accepts() && !reconnectRequested) {
+          setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
+        }
+      }
+      if (reconnectRequested && projection.accepts() && !controller.signal.aborted) {
+        flush()
+        const interrupted = state.turns.find((turn) => turn.id === assistantId)
+        if (interrupted?.requestId && !isTemporaryThread(activeThreadId)) {
+          await attemptResumeStream(activeThreadId, interrupted, true)
+        } else {
+          stopStreaming('stopped')
+          markOpenSteps('stopped', 'Connection closed before completion. Retry to start a new answer.', assistantId)
+          setState((s) => { s.status = 'idle' })
+          writeThreadSnapshot(activeThreadId, state.turns)
         }
       }
     } catch {
@@ -2148,7 +2221,18 @@ export function useChatController() {
     if (isForeignOriginThread(state.threadId)) return
     if (!hasMessages()) triggerLaunchMotion()
     const attachments = await toStreamAttachments(payload.attachments)
-    void ingestTextAttachments(payload.attachments)
+    // Small text documents go to the model IN this turn, appended to the
+    // message. The retrieval route below is asynchronous — Data Plane chunks
+    // and embeds after the turn has answered — so the turn that carried the
+    // file used to see none of it, or only the first chunk (RUN-LOG finding 1,
+    // measured live: a 2 KB markdown attachment reached the model as one
+    // line). Files too large to inline still take the retrieval route.
+    const inlined = await inlineTextAttachments(payload.attachments)
+    // Every document was read before submission. Attaching a file never promotes
+    // it into organization-wide knowledge or races asynchronous indexing.
+    const modelContent = inlined.length > 0
+      ? appendInlinedAttachments(payload.text, inlined)
+      : undefined
     const displayAttachments = await materializeAttachmentPreviews(payload.attachments)
     const model = payload.model ?? state.activeModel
     const actions = withBrregLookupAction(
@@ -2158,7 +2242,9 @@ export function useChatController() {
     setState((s) => { s.activeModel = model })
     void sendContent(payload.text, model, {
       attachments: attachments.length > 0 ? attachments : undefined,
+      modelContent,
       browseWeb: payload.tools.includes('search') || payload.tools.includes('research'),
+      sourceScope: payload.sourceScope,
       deepResearch: payload.tools.includes('research'),
       displayAttachments,
       generateImage: payload.tools.includes('image'),
@@ -2173,73 +2259,6 @@ export function useChatController() {
       // body omits it otherwise (see buildChatWireBody).
       minPrivacyTier: payload.minPrivacyTier,
     })
-  }
-
-  /**
-   * Send attached TEXT documents through `POST /api/v1/chat/documents` so an
-   * attached file is actually usable, and say plainly what happened to the rest.
-   *
-   * Only images reach the model inline. Everything else used to be discarded in
-   * silence while the chip, the "attachment added" transcript line and the
-   * absence of any error all reported success. Text documents now become
-   * retrievable Data Plane documents; PDF/DOCX still cannot go this way (the
-   * route takes a `content` string, not bytes) and are named instead, pointing
-   * at the per-file action that does handle them.
-   *
-   * Skipped entirely for a temporary chat: the server refuses durable ingest
-   * under ZDR (412), and a temporary conversation must leave nothing behind.
-   */
-  const ingestTextAttachments = async (
-    attachments: DashboardComposerSubmitPayload['attachments'],
-  ) => {
-    const unsent = unsentAttachmentNames(attachments)
-    if (unsent.length === 0) return
-    if (isTemporaryThread(state.threadId)) {
-      showFeedbackNotice(
-        `Midlertidig chat lagrer ingenting: ${unsent.join(', ')} ble ikke lagt ved.`,
-      )
-      return
-    }
-
-    const ingestible = textIngestibleAttachments(attachments)
-    const ingested: string[] = []
-    const failed: string[] = []
-    for (const attachment of ingestible) {
-      try {
-        const response = await fetch(attachment.url)
-        if (!response.ok) throw new Error('unreadable')
-        // Capped so one large log or CSV cannot become an unbounded request;
-        // the document is for retrieval, not archival.
-        const content = (await response.text()).slice(0, 200_000)
-        if (!content.trim()) throw new Error('empty')
-        await uploadChatDocument(attachment.name || 'Vedlegg', content)
-        ingested.push(attachment.name || 'uten navn')
-      } catch {
-        failed.push(attachment.name || 'uten navn')
-      }
-    }
-
-    const ingestedSet = new Set(ingested)
-    const notSent = unsent.filter((name) => !ingestedSet.has(name))
-    const parts: string[] = []
-    if (ingested.length > 0) {
-      // Deliberately does NOT promise the current answer. Data Plane v2 accepts
-      // the document as `pending` and chunks/embeds it asynchronously, so the
-      // turn that carried the file finishes before the content is retrievable:
-      // measured live, turn one answered "I find no notes" and the next turn
-      // quoted the file correctly. Promising this answer made the assistant look
-      // broken; naming the follow-up makes the wait usable.
-      parts.push(
-        `${ingested.join(', ')} er lagret i kunnskapsbasen og indekseres nå. Spør du om innholdet på nytt, kan svaret bruke det.`,
-      )
-    }
-    if (notSent.length > 0) {
-      parts.push(
-        `${notSent.join(', ')} ble ikke lagt ved — bruk «Legg i kunnskapsbasen» på filen.`,
-      )
-    }
-    if (failed.length > 0) parts.push(`Kunne ikke lese ${failed.join(', ')}.`)
-    if (parts.length > 0) showFeedbackNotice(parts.join(' '))
   }
 
   /** Materialize composer blob URLs before DashboardComposer revokes them. */
@@ -2426,7 +2445,11 @@ export function useChatController() {
         const step = normalizeStep(event, assistantId, turnTitle)
         if (step) upsertTaskStep(step)
         const isDurableWork = isWorkSurfaceTurn(state.turns.find((turn) => turn.id === assistantId))
-        if (isDurableWork) summonSurface('steps')
+        // Artifact candidates stay private until review passes. Show the real
+        // review activity before any artifact/tool event can open a surface,
+        // so the user can inspect progress and stop during the first review.
+        const checkingDocument = event.id?.endsWith(':source-check') && step?.status === 'active'
+        if (isDurableWork || checkingDocument) summonSurface('steps')
         // Agentic HITL: the raw step carries the orchestration status before
         // it is coerced to a task-status. A `paused` run is awaiting human
         // approval; approval/resume steps mean the gate resolved.
@@ -2639,8 +2662,22 @@ export function useChatController() {
     // without this truncation the old answer stayed visible forever and a
     // second, separate answer piled up underneath it.
     setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
-    setState((s) => { s.turns = s.turns.slice(0, anchorIndex + 1) })
-    setState((s) => { s.branchCount = s.branchCount + 1 })
+    // F-12 (CHAT_PARITY_AUDIT_2026-09-15.md §3.5): `sendContent` (below) reads
+    // `state.turns` again, synchronously, to build its own next-turns array —
+    // and that read is a plain untracked read, not inside an effect/JSX. A
+    // store write is not guaranteed visible to such a read until flushed, so
+    // without the flush here the truncation had not landed yet by the time
+    // `sendContent` ran: the outgoing (stopped) turn survived and the new
+    // turn was appended AFTER it instead of replacing it, leaving two
+    // assistant turns for one user turn. Reproduced directly in
+    // use-chat-controller.f12.test.ts (stop -> regenerate -> assert exactly
+    // one assistant turn); that test failed with three turns before this
+    // flush was added. `editAndResubmit`'s final-exchange path has the exact
+    // same shape and needed the same fix, below.
+    flush(() => {
+      setState((s) => { s.turns = s.turns.slice(0, anchorIndex + 1) })
+      setState((s) => { s.branchCount = s.branchCount + 1 })
+    })
     void sendContent(lastUser.content, lastUser.model, {
       appendUser: false,
       browseWeb: lastUser.tools.includes('search') || lastUser.tools.includes('research'),
@@ -2658,6 +2695,76 @@ export function useChatController() {
       // only way model-gateway can know: the text is identical. This is what
       // activates SignalKind::Regenerate in the implicit-feedback loop.
       regenerated: true,
+    })
+  }
+
+  /**
+   * "Fortsett" (continue-after-stop; chat-parity §0.1 — the cheapest of the
+   * three parity gaps the audit left open after F-12). Mechanically this is
+   * `regenerateLatest` with two differences, not a parallel mechanism: the
+   * outgoing turn's partial text is carried forward as the new turn's
+   * STARTING content (`seedContent`) instead of being discarded, and the
+   * model is told — via `modelContent`, which never appears in the
+   * transcript — that this is a continuation of that exact partial text, not
+   * a fresh answer to the same question.
+   *
+   * There is no backend "continue with this partial text as context"
+   * parameter to call instead (grepped: no such field exists on the
+   * regenerate-equivalent request, unlike `regenerated`/`editResubmit`), so
+   * this is the documented fallback: resend the ordinary request with the
+   * continuation instruction folded into the model-facing content, and splice
+   * whatever comes back onto the preserved prefix client-side via
+   * `seedContent` + the normal `onMessage` delta-append.
+   *
+   * Deliberately NOT `regenerated: true` — that flag is what activates
+   * `SignalKind::Regenerate`, the implicit-DISSATISFACTION signal
+   * (chat-types.ts `SendOptions`). Continuing is the opposite signal: the
+   * reader liked what they saw so far and wants more of it, not a
+   * replacement, so this must not feed the same classifier as a discard.
+   */
+  const continueGeneration = (turnId: string) => {
+    if (isForeignOriginThread(state.threadId)) return
+    if (isStreaming()) return
+    const anchorIndex = lastUserIndex(state.turns)
+    if (anchorIndex < 0) return
+    const lastUser = state.turns[anchorIndex]
+    if (!lastUser) return
+    const outgoingAssistant = state.turns[anchorIndex + 1]
+    // Only the trailing STOPPED turn is continuable. `ChatMessages.tsx` gates
+    // the "Fortsett" control the same way (stopped + non-empty content), but
+    // the controller re-checks rather than trusting the caller — `turnId` is
+    // whatever the click closed over, which can be stale if the transcript
+    // changed underneath it.
+    if (!outgoingAssistant || outgoingAssistant.id !== turnId) return
+    if (outgoingAssistant.status !== 'stopped') return
+    const partial = outgoingAssistant.content
+    // Nothing to continue FROM. "Generer på nytt" already covers this turn
+    // correctly; inventing a continuation for empty text would just be a
+    // regenerate wearing the wrong label.
+    if (!partial.trim()) return
+    if (isEffectfulChatTurn(outgoingAssistant.effectClass)) {
+      showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke fortsettes på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
+      return
+    }
+    // Same versioning + truncate-then-flush shape as `regenerateLatest` — see
+    // its comments for why the flush is load-bearing (F-12).
+    setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
+    flush(() => {
+      setState((s) => { s.turns = s.turns.slice(0, anchorIndex + 1) })
+      setState((s) => { s.branchCount = s.branchCount + 1 })
+    })
+    void sendContent(lastUser.content, lastUser.model, {
+      appendUser: false,
+      browseWeb: lastUser.tools.includes('search') || lastUser.tools.includes('research'),
+      deepResearch: lastUser.tools.includes('research'),
+      displayAttachments: lastUser.attachments,
+      generateImage: lastUser.tools.includes('image'),
+      tools: lastUser.tools,
+      provider: lastUser.provider,
+      subscriptionConnectionId: lastUser.subscriptionConnectionId,
+      zdr: isTemporaryThread(state.threadId),
+      seedContent: partial,
+      modelContent: buildContinuationModelContent(lastUser.content, partial),
     })
   }
 
@@ -2725,8 +2832,13 @@ export function useChatController() {
     } else {
       setVersionState(null)
     }
-    setState((s) => { s.turns = s.turns.slice(0, index) })
-    setState((s) => { s.status = 'idle' })
+    // Same race as regenerateLatest above (F-12): `sendContent` below reads
+    // `state.turns` again, synchronously, in this same tick — flush the
+    // truncation first so it has actually landed by then.
+    flush(() => {
+      setState((s) => { s.turns = s.turns.slice(0, index) })
+      setState((s) => { s.status = 'idle' })
+    })
     await sendContent(next, original.model, {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: original.tools.includes('search') || original.tools.includes('research'),
@@ -2852,6 +2964,7 @@ export function useChatController() {
     feedbackNotice,
     dismissFeedbackNotice,
     regenerateLatest,
+    continueGeneration,
     rerunAsNewTurn,
     editAndResubmit,
     branchAt,
@@ -2874,6 +2987,8 @@ export function useChatController() {
     planApprovalError,
     setPlanMode,
     browseWeb,
+    sourceScope,
+    setSourceScope,
     setBrowseWeb,
     temporaryChat,
     setTemporaryChat,

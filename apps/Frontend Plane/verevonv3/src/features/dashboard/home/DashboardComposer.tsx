@@ -68,7 +68,8 @@ import {
 	type ComposerSettingsItem,
 } from "@/shared/api/composer-settings-client";
 import { selectChatThread } from "@/features/chat/lib/chat-thread-history";
-import { writePendingChatLaunch } from "@/features/chat/lib/pending-chat-launch";
+import { PendingChatLaunchError, writePendingChatLaunch } from "@/features/chat/lib/pending-chat-launch";
+import { prepareChatAttachments } from "@/features/chat/lib/prepare-chat-attachments";
 import {
 	groupChatModels,
 	hasZeroRetentionModel,
@@ -167,13 +168,39 @@ type EntityToken = {
 	text: string;
 };
 
+type ComposerCommandArgument = {
+	hint: { en: string; no: string };
+	required: boolean;
+};
+
+/**
+ * A `/` command: a name the user types, aliases in both languages, a one-line
+ * description the menu shows, and — where it makes sense — an argument taken
+ * from the rest of the line.
+ */
+export type ComposerCommand = {
+	aliases: string[];
+	argument?: ComposerCommandArgument;
+	/** Local composer behaviour; absent for a backend skill/capability/connector. */
+	builtin?: "deep_research" | "file" | "image" | "web_search";
+	description: { en: string; no: string };
+	icon: Component<LucideProps>;
+	id: string;
+	label: string;
+	/** Canonical token after "/", lowercase and space-free. */
+	name: string;
+	specialized?: SpecializedAction;
+};
+
 type AutocompleteItem = {
-	action?: "file" | "image";
+	/** Localized name of what this command takes after its name, when it takes one. */
+	argumentHint?: string;
+	command?: ComposerCommand;
+	description?: string;
 	icon: Component<LucideProps>;
 	id: string;
 	label: string;
 	meta?: EntityKind | "slash";
-	specialized?: SpecializedAction;
 };
 
 type AutocompleteState = {
@@ -188,6 +215,7 @@ type TriggerContext =
 	| { type: "slash"; query: string; rawLen: number; start: number };
 
 export type DashboardComposerAttachment = {
+	extractedText?: string;
 	id: string;
 	name: string;
 	size: number;
@@ -203,6 +231,7 @@ export type ComposerActiveAction = {
 };
 
 export type DashboardComposerSubmitPayload = {
+    sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope;
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
@@ -321,24 +350,191 @@ const dayEntries = [
 	{ name: "Saturday", nameNo: "lørdag", dayIndex: 6 },
 	{ name: "Sunday", nameNo: "søndag", dayIndex: 0 },
 ] as const;
-const slashCommands: AutocompleteItem[] = [
+// F-09 (CHAT_PARITY_AUDIT_2026-09-15.md §3.1). What stood here was a two-entry
+// `slashCommands` array — "/Last opp fil", "/Generer bilde" — that no code path
+// could reach: `applyAutocompleteSelection` looked it up by an id
+// (`cmd-file`/`cmd-image`) that the menu builder never produced, since the menu
+// has been built from `specializedActions()` for some time. So the audit's two
+// "commands" were both unparameterised AND dead. These are commands: a typed
+// name, aliases so Norwegian and English both work, a description the menu
+// renders, and an argument read off the rest of the line where one makes sense.
+// The two originals survive as `file` and `image`.
+const BUILTIN_COMMANDS: ComposerCommand[] = [
 	{
-		id: "cmd-file",
+		aliases: ["fil", "upload", "vedlegg", "attach"],
+		description: {
+			no: "Legg ved en fil eller et bilde i meldingen.",
+			en: "Attach a file or photo to your message.",
+		},
+		builtin: "file",
 		icon: Upload,
-		label: "Last opp fil",
-		meta: "slash",
-		action: "file",
+		id: "builtin:__file",
+		label: "Upload file",
+		name: "file",
 	},
 	{
-		id: "cmd-image",
+		aliases: ["bilde", "img", "tegn"],
+		argument: {
+			hint: { no: "beskrivelse", en: "description" },
+			required: true,
+		},
+		builtin: "image",
+		description: {
+			no: "Lag et bilde fra beskrivelsen som følger.",
+			en: "Create an image from the description that follows.",
+		},
 		icon: ImagePlus,
-		label: "Generer bilde",
-		meta: "slash",
-		action: "image",
+		id: "builtin:__image",
+		label: "Generate image",
+		name: "image",
+	},
+	{
+		aliases: ["web", "søk", "sok", "nett"],
+		builtin: "web_search",
+		description: {
+			no: "La Verevon søke på nett mens den svarer.",
+			en: "Let Verevon search the web while it answers.",
+		},
+		icon: Globe2,
+		id: "builtin:web_search",
+		label: "Web search",
+		name: "search",
+	},
+	{
+		aliases: ["dyp", "deep", "dypdykk"],
+		argument: {
+			hint: { no: "spørsmål", en: "question" },
+			required: false,
+		},
+		builtin: "deep_research",
+		description: {
+			no: "Kjør flere research-runder før svaret.",
+			en: "Run several research rounds before answering.",
+		},
+		icon: Telescope,
+		id: "builtin:deep_research",
+		label: "Deep research",
+		name: "research",
 	},
 ];
 
+// The `/` menu opens only when the slash starts the draft. A slash typed inside
+// a sentence — "2026/09", "og/eller", "kr 200/mnd" — is ordinary text and stays
+// ordinary text, which the old `\/(\w*)$` match (a slash ANYWHERE before the
+// caret) did not honour.
+const SLASH_TRIGGER_PATTERN = /^\s*\/([\p{L}\p{N}_-]*)$/u;
+const DRAFT_COMMAND_PATTERN = /^\s*\/([\p{L}\p{N}_-]+)(?:\s+([\s\S]*))?$/u;
+
+function normalizeCommandToken(value: string): string {
+	return value.trim().toLowerCase();
+}
+
+function commandMatchesQuery(command: ComposerCommand, query: string): boolean {
+	if (!query) return true;
+	return (
+		command.name.startsWith(query) ||
+		command.aliases.some((alias) => alias.startsWith(query)) ||
+		command.label.toLowerCase().includes(query)
+	);
+}
+
+/**
+ * True when running this command needs a wire capability the route may refuse.
+ * `file` is the only one that does not: an attachment rides the request body,
+ * so it survives every provider.
+ */
+function commandNeedsFullRoute(command: ComposerCommand): boolean {
+	return command.builtin !== "file";
+}
+
+/** Backend skill/capability/connector names become typable command tokens. */
+function slugifyCommandName(name: string): string {
+	return (
+		name
+			.toLowerCase()
+			.replace(/[^\p{L}\p{N}]+/gu, "-")
+			.replace(/^-+|-+$/gu, "") || "action"
+	);
+}
+
+/**
+ * Resolve the draft's leading `/name` against the catalog, splitting off its
+ * argument. Returns null for anything that is not a command — including an
+ * UNKNOWN name — so a draft that merely happens to start with a slash is sent
+ * as the plain text the user typed rather than swallowed as a failed command.
+ */
+export function matchDraftCommand(
+	message: string,
+	catalog: ComposerCommand[],
+): { argument: string; command: ComposerCommand } | null {
+	const match = DRAFT_COMMAND_PATTERN.exec(message);
+	if (!match) return null;
+	const token = normalizeCommandToken(match[1] ?? "");
+	const command = catalog.find(
+		(candidate) =>
+			candidate.name === token || candidate.aliases.includes(token),
+	);
+	if (!command) return null;
+	return { argument: (match[2] ?? "").trim(), command };
+}
+
 const TEXTAREA_AUTO_MAX_PX = 240;
+
+/**
+ * ChatGPT and Claude both convert a sufficiently long paste into a "pasted
+ * text" attachment instead of dumping it inline into the composer
+ * (CHAT_PARITY_AUDIT_2026-09-15.md §3.6 / F-... "long paste"). This is the
+ * length, in `string.length` code units, above which Verevon does the same.
+ * It sits in the "a few thousand characters" range those products use: short
+ * enough that a genuine document-scale paste (a log dump, an article, a long
+ * spec) becomes a tidy attachment chip, long enough that an ordinary
+ * paragraph-or-two paste still lands inline exactly as before.
+ */
+export const PASTE_TEXT_ATTACHMENT_THRESHOLD = 4000;
+
+// Inline rather than in global.css: `.dashboard-composer-autocomplete-menu
+// button span` there sets every span in a row to 14px/600, which is right for a
+// command's name and wrong for its description. These are the only new visual
+// pieces the command menu needs, and keeping them here keeps the change inside
+// this component.
+const COMMAND_MENU_STYLE: JSX.CSSProperties = { "max-width": "380px" };
+const COMMAND_BODY_STYLE: JSX.CSSProperties = {
+	display: "flex",
+	"flex-direction": "column",
+	gap: "2px",
+	"min-width": "0",
+};
+const COMMAND_LABEL_STYLE: JSX.CSSProperties = {
+	display: "flex",
+	"align-items": "baseline",
+	gap: "6px",
+};
+const COMMAND_ARGUMENT_STYLE: JSX.CSSProperties = {
+	"font-size": "12px",
+	"font-weight": "500",
+	opacity: "0.6",
+};
+const COMMAND_DESCRIPTION_STYLE: JSX.CSSProperties = {
+	"font-size": "12px",
+	"font-weight": "400",
+	opacity: "0.7",
+	"white-space": "normal",
+};
+const COMMAND_NOTE_STYLE: JSX.CSSProperties = {
+	padding: "6px 16px 0",
+	"font-size": "11.5px",
+	"line-height": "1.4",
+	opacity: "0.7",
+};
+const COMPOSER_NOTICE_STYLE: JSX.CSSProperties = {
+	display: "flex",
+	"align-items": "center",
+	gap: "7px",
+	margin: "0 14px 8px",
+	"font-size": "11.5px",
+	"line-height": "1.4",
+	opacity: "0.8",
+};
 
 type ComposerSubmitState = {
 	hasContent: boolean;
@@ -485,7 +681,32 @@ function pastedImageFiles(event: ClipboardEvent) {
 	);
 }
 
+function pastedPlainText(event: ClipboardEvent) {
+	return event.clipboardData?.getData("text/plain") ?? "";
+}
+
+/** A short, readable name for a paste-generated text attachment, e.g. "Limt inn tekst: some preview text….txt". */
+function pastedTextAttachmentName(text: string, label: string): string {
+	const trimmed = text.trim();
+	const preview = trimmed.replace(/\s+/g, " ").slice(0, 60);
+	if (preview.length === 0) {
+		return `${label} ${new Date().toLocaleTimeString()}.txt`;
+	}
+	const truncated = trimmed.length > preview.length ? "…" : "";
+	return `${label}: ${preview}${truncated}.txt`;
+}
+
+/** Wraps pasted text as a `.txt`-equivalent File so it flows through the existing attachment pipeline (`addFiles`). */
+function pastedTextAttachmentFile(text: string, label: string): File {
+	return new File([text], pastedTextAttachmentName(text, label), {
+		type: "text/plain",
+	});
+}
+
 export function DashboardComposer(props: {
+    sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope;
+    onSourceScopeChange?: (value: import('@/shared/actions/chat-source-scope').ChatSourceScope) => void;
+    sourceScopeLocked?: boolean;
 	/** Calm, conversation-first presentation used by the dedicated chat page. */
 	appearance?: "chat" | "default";
 	browseWeb?: boolean;
@@ -540,7 +761,10 @@ export function DashboardComposer(props: {
 	let audioChunks: Blob[] = [];
 	let pendingFilePosition: number | null = null;
 	const [internalBrowseWeb, setInternalBrowseWeb] = createSignal(false);
-	const browseWeb = () => props.browseWeb ?? internalBrowseWeb();
+	const [internalSourceScope, setInternalSourceScope] = createSignal<import('@/shared/actions/chat-source-scope').ChatSourceScope>('workspace');
+	const sourceScope = () => props.sourceScope ?? internalSourceScope();
+	const conversationOnly = () => sourceScope() === 'conversation';
+	const browseWeb = () => !subscriptionBacked() && (props.browseWeb ?? internalBrowseWeb());
 	const setBrowseWeb = (next: boolean | ((current: boolean) => boolean)) => {
 		const value = typeof next === "function" ? next(browseWeb()) : next;
 		if (props.browseWeb === undefined) setInternalBrowseWeb(value);
@@ -555,6 +779,8 @@ export function DashboardComposer(props: {
 	const [files, setFiles] = createSignal<ComposerFile[]>([]);
 	const [knowledgeImporting, setKnowledgeImporting] = createSignal(false);
 	const [knowledgeImportNotice, setKnowledgeImportNotice] = createSignal<string | null>(null);
+	const [handoffPending, setHandoffPending] = createSignal(false);
+	const [submitError, setSubmitError] = createSignal<string | null>(null);
 	const [historyPanelPosition, setHistoryPanelPosition] =
 		createSignal<PanelPosition>({ bottom: 0, right: 0, maxHeight: 400 });
 	const [historyThreads, setHistoryThreads] = createSignal<
@@ -580,6 +806,25 @@ export function DashboardComposer(props: {
 		initialModelSelection.model || VEREVON_BALANCE_MODE_ID,
 	);
 	const [selectedModelProvider, setSelectedModelProvider] = createSignal<string | undefined>(initialModelSelection.provider);
+	// Mirrors chat-client.ts's own `subscriptionBacked` check
+	// (buildChatWireBody, ~L651): for this provider the wire silently sends
+	// browse_web/generate_image/plan_mode/deep_research as `false` and drops
+	// every explicit skill pick, regardless of what these controls show here.
+	// Before this memo the composer had no way to know that, so Søk/Bilde/
+	// Utfør/Dyp research stayed fully enabled and unlabeled while doing
+	// nothing server-side — CHAT_PARITY_AUDIT_2026-09-15.md F-10.
+	const subscriptionBacked = createMemo(
+		() => selectedModelProvider() === "openai-codex-subscription",
+	);
+	const subscriptionDisabledTitle = () =>
+		i18n.tr(
+			"Ikke tilgjengelig med denne modellen",
+			"Not available with this model",
+		);
+	const subscriptionDisabledStyle = (): JSX.CSSProperties | undefined =>
+		subscriptionBacked()
+			? { opacity: 0.5, cursor: "not-allowed" }
+			: undefined;
 	const [models] = createResource(async () => {
 		try {
 			return await listModels();
@@ -604,6 +849,11 @@ export function DashboardComposer(props: {
 		(subscriptionConnections() ?? []).find(
 			(connection) => connection.status.toLocaleLowerCase() === "active",
 		),
+	);
+	// A connection lookup in progress is not evidence of disconnection. Keep
+	// the draft editable and wait before enabling Send on a persisted selection.
+	const subscriptionConnectionPending = createMemo(() =>
+		subscriptionBacked() && (!activeOrgId() || subscriptionConnections.loading || subscriptionConnections() === undefined),
 	);
 	// Chat-capable models grouped by family/provider. Non-chat modalities
 	// (image/video/embeddings/transcribe) are filtered out by `groupChatModels`.
@@ -630,8 +880,7 @@ export function DashboardComposer(props: {
 		chatModelGroups().flatMap((group) => group.models),
 	);
 	const selectedCatalogModel = createMemo(() => {
-		const provider = selectedModelProvider();
-		// No truthiness guard on `provider`: plenty of real catalog models have
+		// No truthiness guard on the provider: plenty of real catalog models have
 		// no provider tag (ModelInfo.provider is optional), and `selectModel`
 		// below already threads the clicked model's own provider straight into
 		// both signals, so an undefined-vs-undefined match is a legitimate
@@ -639,7 +888,9 @@ export function DashboardComposer(props: {
 		// selectedPrivacyTier() (and the submit payload's minPrivacyTier) go
 		// undefined for any selected model without a provider.
 		return flatChatModels().find(
-			(model) => model.id === selectedModel() && model.provider === provider,
+			(model) =>
+				model.id === selectedModel() &&
+				model.provider === selectedModelProvider(),
 		);
 	});
 	const selectedModelLabel = () => {
@@ -657,13 +908,18 @@ export function DashboardComposer(props: {
 	// so they never claim a tier here.
 	const selectedPrivacyTier = createMemo(() => selectedCatalogModel()?.privacyTier);
 	const selectedSubscriptionRoute = createMemo(() => {
-		const model = selectedCatalogModel();
 		const connection = activeSubscriptionConnection();
-		return model?.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && connection
+		// Catalog loading is independent of connection ownership. A delayed
+		// catalog must not make a connected, persisted selection look revoked.
+		return selectedModelProvider() === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && connection
 			? { provider: OPENAI_CODEX_SUBSCRIPTION_PROVIDER, connectionId: connection.id }
 			: undefined;
 	});
+	const [staleSubscriptionNotice, setStaleSubscriptionNotice] =
+		createSignal(false);
 	const selectModel = (id: string, provider?: string) => {
+		setStaleSubscriptionNotice(false);
+		setSubmitError(null);
 		setSelectedModel(id);
 		setSelectedModelProvider(provider);
 		const catalogModel = flatChatModels().find(
@@ -679,6 +935,16 @@ export function DashboardComposer(props: {
 		});
 		setModelOpen(false);
 	};
+	// A disconnected subscription remains the user's selection. Explain what
+	// needs reconnecting; never silently change the model or billing route.
+	createEffect(
+		() => ({ connections: subscriptionConnections(), active: activeSubscriptionConnection(), provider: selectedModelProvider() }),
+		(state) => {
+			if (state.connections === undefined) return;
+			setStaleSubscriptionNotice(state.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && !state.active);
+		},
+	);
+	createEffect(() => subscriptionBacked(), (selected) => { if (selected) setDeepSearch(false); });
 	const [settings, setSettings] = createSignal<ComposerSettings>({
 		tone: "balanced",
 		voiceLang: "nb-NO",
@@ -690,17 +956,59 @@ export function DashboardComposer(props: {
 	const [turns, setTurns] = createSignal<ComposerTurn[]>([]);
 	const [voiceMode, setVoiceMode] = createSignal(false);
 	const [voiceRecording, setVoiceRecording] = createSignal(false);
+	const [activeActions, setActiveActions] = createSignal<
+		ComposerActiveAction[]
+	>([]);
+	const [specializedActions, setSpecializedActions] =
+		createSignal<SpecializedAction[]>(BUILTIN_ACTIONS);
+	let actionsLoadStarted = false;
+	// The commands offered right now. A subscription-backed route silently drops
+	// browse_web / generate_image / deep_research and every explicit skill pick
+	// (`buildChatWireBody`, chat-client.ts), so offering a command that sets one
+	// would re-create F-10's unlabeled no-op behind a slash. Withhold them and
+	// say why, the same rule the Søk/Bilde/Utfør/Dyp research toggles follow.
+	const commandCatalog = createMemo<ComposerCommand[]>(() => {
+		if (subscriptionBacked()) {
+			return BUILTIN_COMMANDS.filter(
+				(command) => !commandNeedsFullRoute(command),
+			);
+		}
+		return [
+			...BUILTIN_COMMANDS,
+			...specializedActions()
+				.filter((action) => action.kind !== "builtin")
+				.map((action) => ({
+					aliases: [],
+					description: {
+						no: action.description ?? "",
+						en: action.description ?? "",
+					},
+					icon: iconForAction(action),
+					id: actionKey(action),
+					label: action.name,
+					name: slugifyCommandName(action.name),
+					specialized: action,
+				})),
+		];
+	});
+	// The draft's leading `/name`, when it resolves to a real command. Null for
+	// an unknown name, so "/foobar hei" is just a message that starts with a
+	// slash.
+	const draftCommand = createMemo(() =>
+		matchDraftCommand(props.message, commandCatalog()),
+	);
+	/** The draft minus its command prefix — what actually gets sent. */
+	const commandBody = createMemo(() => {
+		const parsed = draftCommand();
+		return parsed ? parsed.argument : props.message;
+	});
+	// Measured on the body, not the raw draft: a bare "/image" is an unfinished
+	// command, not a message, and must not arm the send button.
 	const hasContent = createMemo(
-		() => props.message.trim().length > 0 || files().length > 0,
+		() => commandBody().trim().length > 0 || files().length > 0,
 	);
-	const modelAttachmentCount = createMemo(
-		() => files().filter((file) => file.type.startsWith("image/")).length,
-	);
-	const previewOnlyAttachmentCount = createMemo(
-		() => files().filter((file) => !file.type.startsWith("image/")).length,
-	);
-	const imageMode = createMemo(() => props.imageMode ?? false);
-	const planMode = createMemo(() => props.planMode ?? false);
+	const imageMode = createMemo(() => !subscriptionBacked() && (props.imageMode ?? false));
+	const planMode = createMemo(() => !subscriptionBacked() && (props.planMode ?? false));
 	// Locked-true once the parent says the active thread is temporary — a
 	// disabled control could theoretically still be flipped by, e.g., a
 	// synthetic click, so the memo itself also refuses to report anything but
@@ -728,7 +1036,7 @@ export function DashboardComposer(props: {
 	const submitEnabled = createMemo(() =>
 		isComposerSubmitEnabled({
 			hasContent: hasContent(),
-			submitting: props.submitting && !props.allowMidRunSubmit,
+			submitting: handoffPending() || subscriptionConnectionPending() || (props.submitting && !props.allowMidRunSubmit),
 			voiceMode: voiceMode(),
 			voiceRecording: voiceRecording(),
 		}),
@@ -739,13 +1047,6 @@ export function DashboardComposer(props: {
 	const activeTurnReceipt = createMemo(() =>
 		visibleTurnReceipt(props.showTurnReceipt, turns()[0]),
 	);
-	const [activeActions, setActiveActions] = createSignal<
-		ComposerActiveAction[]
-	>([]);
-	const [specializedActions, setSpecializedActions] =
-		createSignal<SpecializedAction[]>(BUILTIN_ACTIONS);
-	let actionsLoadStarted = false;
-
 	const openFileDialog = () => fileInputRef?.click();
 	const focusTextareaAt = (caret?: number) => {
 		const element = textareaRef;
@@ -788,29 +1089,37 @@ export function DashboardComposer(props: {
 	};
 
 	const buildSlashItems = (query: string): AutocompleteItem[] => {
-		const normalized = query.trim().toLowerCase();
-		const active = activeActions();
-		return specializedActions()
-			.filter(
-				(action) =>
-					action.kind === "builtin" ||
-					!active.some(
+		const normalized = normalizeCommandToken(query);
+		return commandCatalog()
+			.filter((command) => {
+				const action = command.specialized;
+				return (
+					!action ||
+					!activeActions().some(
 						(a) => a.id === action.id && a.kind === action.kind,
-					),
-			)
-			.filter(
-				(action) =>
-					normalized.length === 0 ||
-					action.name.toLowerCase().includes(normalized) ||
-					action.id.toLowerCase().includes(normalized),
-			)
+					)
+				);
+			})
+			.filter((command) => commandMatchesQuery(command, normalized))
 			.slice(0, 8)
-			.map((action) => ({
-				id: actionKey(action),
-				icon: iconForAction(action),
-				label: action.name,
+			.map((command) => ({
+				...(command.argument
+					? {
+							argumentHint: i18n.tr(
+								command.argument.hint.no,
+								command.argument.hint.en,
+							),
+						}
+					: {}),
+				command,
+				description: i18n.tr(
+					command.description.no,
+					command.description.en,
+				),
+				icon: command.icon,
+				id: command.id,
+				label: command.label,
 				meta: "slash" as const,
-				specialized: action,
 			}));
 	};
 
@@ -841,14 +1150,25 @@ export function DashboardComposer(props: {
 		);
 	};
 
-	const activateSpecialized = (action: SpecializedAction) => {
-		if (action.kind === "builtin") {
-			if (action.builtin === "file") openFileDialog();
-			else if (action.builtin === "image")
-				props.onImageModeChange?.(true);
-			else if (action.builtin === "web_search") setBrowseWeb(true);
+	const runCommand = (command: ComposerCommand) => {
+		if (command.builtin === "file") {
+			openFileDialog();
 			return;
 		}
+		if (command.builtin === "image") {
+			props.onImageModeChange?.(true);
+			return;
+		}
+		if (command.builtin === "web_search") {
+			setBrowseWeb(true);
+			return;
+		}
+		if (command.builtin === "deep_research") {
+			setDeepSearch(true);
+			return;
+		}
+		const action = command.specialized;
+		if (!action || action.kind === "builtin") return;
 		const kind = action.kind;
 		setActiveActions((current) =>
 			current.some((a) => a.id === action.id && a.kind === kind)
@@ -1114,7 +1434,6 @@ export function DashboardComposer(props: {
 		}
 
 		try {
-			const voiceLang = settings().voiceLang;
 			const onTranscript = props.onMessageChange;
 			const stream = await navigator.mediaDevices.getUserMedia({
 				audio: true,
@@ -1140,7 +1459,7 @@ export function DashboardComposer(props: {
 				// on through the cleanup so the textarea stays locked and the loading
 				// bar covers the processing phase; APPEND to the draft (the voice-modal
 				// pattern) instead of overwriting whatever was already typed.
-				void dictateAudioBlob(audio, voiceLang, "chat message")
+				void dictateAudioBlob(audio, settings().voiceLang, "chat message")
 					.then((dictation) => {
 						const text = dictation.text || dictation.rawText;
 						if (!text) return;
@@ -1381,6 +1700,11 @@ export function DashboardComposer(props: {
 			}
 		}
 
+		// The `/file` command parks the caret position so the chosen file's name
+		// lands back where the command was. A cancelled file dialog fires no
+		// event, so the next keystroke is what retires that position — otherwise
+		// a much later drop would insert a name at a caret that moved long ago.
+		pendingFilePosition = null;
 		props.onMessageChange(value);
 		updateAutocomplete(value, cursorPosition);
 		setEntities((current) =>
@@ -1406,28 +1730,31 @@ export function DashboardComposer(props: {
 		return parts.before.length;
 	};
 
-	const selectSpecializedAutocomplete = (
+	const selectCommand = (
 		state: AutocompleteState,
-		action: SpecializedAction,
+		command: ComposerCommand,
 	) => {
+		if (command.builtin === "file") {
+			// Remember where the trigger was so the chosen file's name lands
+			// back in the draft at that spot.
+			pendingFilePosition = state.triggerStart;
+		}
+		if (command.argument) {
+			// A parameterised command is not finished the moment it is picked:
+			// leave `/name ` in the draft with the caret after it, so the next
+			// keystroke is the argument. The hint strip says what to type, and
+			// the prefix is stripped again at submit.
+			const parts = autocompleteTriggerParts(state);
+			const prefix = `/${command.name} `;
+			props.onMessageChange(`${parts.before}${prefix}${parts.after}`);
+			setAutocomplete(null);
+			runCommand(command);
+			focusTextareaAtNextFrame(parts.before.length + prefix.length);
+			return;
+		}
 		const caret = clearAutocompleteTrigger(state);
-		activateSpecialized(action);
+		runCommand(command);
 		focusTextareaAtNextFrame(caret);
-	};
-
-	const selectFileAutocompleteCommand = (state: AutocompleteState) => {
-		pendingFilePosition = state.triggerStart;
-		clearAutocompleteTrigger(state);
-		openFileDialog();
-	};
-
-	const selectImageAutocompleteCommand = (state: AutocompleteState) => {
-		const parts = autocompleteTriggerParts(state);
-		const prefix = "/image ";
-		props.onMessageChange(`${parts.before}${prefix}${parts.after}`);
-		props.onImageModeChange?.(true);
-		setAutocomplete(null);
-		focusTextareaAtNextFrame(parts.before.length + prefix.length);
 	};
 
 	const insertAutocompleteItem = (
@@ -1454,25 +1781,27 @@ export function DashboardComposer(props: {
 		const state = autocomplete();
 		if (!state) return;
 
-		if (item.specialized) {
-			selectSpecializedAutocomplete(state, item.specialized);
-			return;
-		}
-
-		const command = slashCommands.find(
-			(candidate) => candidate.id === item.id,
-		);
-		if (command?.action === "file") {
-			selectFileAutocompleteCommand(state);
-			return;
-		}
-		if (command?.action === "image") {
-			selectImageAutocompleteCommand(state);
+		if (item.command) {
+			selectCommand(state, item.command);
 			return;
 		}
 
 		insertAutocompleteItem(state, item);
 	};
+
+	// The "date" autocomplete (`detectTrigger`'s `date` branch, below) opens
+	// ambiently on ANY typed word of 3+ letters that happens to prefix a day
+	// name — "man", "fri", "tor"… all real, common Norwegian words on their
+	// own — unlike the slash-command menu, which only opens after an explicit
+	// "/" the user deliberately typed. Letting Enter confirm this ambient
+	// suggestion (the same as Tab/Enter already do for a deliberately-opened
+	// "/" menu) meant an ordinary sentence ending in one of those words
+	// silently inserted a date instead of sending the message: F-03
+	// (CHAT_PARITY_AUDIT_2026-09-15.md §3.1, §3.6) — reproduced with
+	// "Send meg en oppsummering man" + Enter, which left the message unsent
+	// and rewrote it to "…man. <next Monday>." instead.
+	const isScheduleAutocomplete = (state: AutocompleteState) =>
+		state.category === i18n.tr("Plan", "Schedule");
 
 	const handleAutocompleteKeyDown = (
 		event: KeyboardEvent & { currentTarget: HTMLTextAreaElement },
@@ -1489,7 +1818,17 @@ export function DashboardComposer(props: {
 				event.preventDefault();
 				setAutocompleteIndex((current) => Math.max(current - 1, 0));
 				return true;
-			case "Enter":
+			case "Enter": {
+				// Only an explicitly-opened menu (slash commands / actions) may
+				// consume Enter. The ambient date suggestion stays reachable via
+				// Tab, an arrow key + Tab, or a click — never via the same key
+				// that sends the message.
+				if (isScheduleAutocomplete(state)) return false;
+				event.preventDefault();
+				const item = state.items[autocompleteIndex()];
+				if (item) applyAutocompleteSelection(item);
+				return true;
+			}
 			case "Tab": {
 				event.preventDefault();
 				const item = state.items[autocompleteIndex()];
@@ -1555,7 +1894,10 @@ export function DashboardComposer(props: {
 
 	const createSubmissionSnapshot = () => {
 		const now = new Date();
-		const body = props.message.trim();
+		// The command prefix is syntax, not prose: "/image en rød katt" sends
+		// "en rød katt" with the image tool set, the way a command behaves
+		// everywhere else. An unrecognised "/..." is left alone by `commandBody`.
+		const body = commandBody().trim();
 		const submittedText =
 			body ||
 			i18n.tr(
@@ -1572,9 +1914,17 @@ export function DashboardComposer(props: {
 	};
 
 	const submitComposer = async () => {
-		if (props.disabled) return;
+		if (props.disabled || handoffPending() || subscriptionConnectionPending()) return;
+		// A deliberately-opened menu (slash commands / actions) still blocks a
+		// send — the user is mid-command. The ambient "date" suggestion must
+		// NOT: it is the other half of the F-03 fix above. Without this, Enter
+		// already stopped being swallowed by the keydown handler, but this
+		// guard alone still silently dropped the submit whenever that
+		// suggestion happened to be open (any message ending in "man", "fri",
+		// "tor"…), which is the exact symptom F-03 reported.
+		const pendingAutocomplete = autocomplete();
 		if (
-			autocomplete() ||
+			(pendingAutocomplete && !isScheduleAutocomplete(pendingAutocomplete)) ||
 			!hasContent() ||
 			voiceMode() ||
 			voiceRecording() ||
@@ -1582,39 +1932,97 @@ export function DashboardComposer(props: {
 		)
 			return;
 
-		const snapshot = createSubmissionSnapshot();
+		// A command whose required argument is still empty is unfinished, not a
+		// message — sending it would ship the bare "/image" as prose. The hint
+		// strip stays up and says what is missing.
+		const pendingCommand = draftCommand();
+		if (pendingCommand?.command.argument?.required && !pendingCommand.argument)
+			return;
+		// Typed commands apply even when the menu was never opened: "/image en
+		// rød katt" straight off the keyboard must carry the image tool, and
+		// "/kvalitet rapport uke 12" must carry the skill.
+		const commandBuiltin = pendingCommand?.command.builtin;
+		const commandAction = pendingCommand?.command.specialized;
+
+		const initialSnapshot = createSubmissionSnapshot();
+		const submittedActions =
+			commandAction && commandAction.kind !== "builtin" &&
+			!initialSnapshot.actions.some(
+				(a) => a.id === commandAction.id && a.kind === commandAction.kind,
+			)
+				? [
+						...initialSnapshot.actions,
+						{
+							id: commandAction.id,
+							name: commandAction.name,
+							kind: commandAction.kind,
+						},
+					]
+				: initialSnapshot.actions;
+		const initialEffectiveBrowseWeb =
+			browseWeb() || commandBuiltin === "web_search";
 		const productResearch = shouldResearchLinkedProducts({
-			browseWeb: browseWeb(),
-			message: snapshot.body,
+			browseWeb: initialEffectiveBrowseWeb,
+			message: initialSnapshot.body,
 		});
-		const effectiveDeepSearch = deepSearch() || productResearch;
+		const initialEffectiveDeepSearch =
+			deepSearch() || productResearch || commandBuiltin === "deep_research";
 		const subscriptionRoute = selectedSubscriptionRoute();
+		if (subscriptionBacked() && !subscriptionRoute) {
+			setStaleSubscriptionNotice(true);
+			setSubmitError(i18n.tr("Koble til ChatGPT-abonnementet i Integrasjoner før du sender. Utkastet er beholdt.", "Connect your ChatGPT subscription in Integrations before sending. Your draft has been kept."));
+			return;
+		}
 		const payload = createComposerSubmitPayload({
-			actions: snapshot.actions,
-			browseWeb: browseWeb(),
-			deepSearch: effectiveDeepSearch,
-			files: snapshot.files,
-			imageMode: imageMode(),
+			actions: submittedActions,
+			browseWeb: initialEffectiveBrowseWeb,
+			deepSearch: initialEffectiveDeepSearch,
+			files: initialSnapshot.files,
+			imageMode: imageMode() || commandBuiltin === "image",
 			minPrivacyTier: selectedPrivacyTier(),
 			model: selectedModel(),
 			provider: subscriptionRoute?.provider,
 			responseMode: responseMode(),
 			subscriptionConnectionId: subscriptionRoute?.connectionId,
-			text: snapshot.submittedText,
+			text: initialSnapshot.submittedText,
 			tone: settings().tone,
-			trimmedMessage: snapshot.body,
 			zdr: temporaryChat(),
 		});
+		payload.sourceScope = sourceScope();
+		if (conversationOnly()) {
+			payload.tools = [];
+			payload.actions = [];
+		}
+
+		setHandoffPending(true);
+		setSubmitError(null);
+		try {
+			if (payload.attachments.length > 0) payload.attachments = await prepareChatAttachments(payload.attachments);
+			if (props.onSubmit) await props.onSubmit(payload);
+			else await writePendingChatLaunch(payload);
+		} catch (error) {
+			const message = error instanceof PendingChatLaunchError
+				? error.reason === 'unreadable'
+					? i18n.tr(`Kunne ikke lese «${error.filename}». Prøv igjen eller fjern filen.`, `Could not read “${error.filename}”. Retry or remove the file.`)
+					: error.reason === 'too_large'
+						? i18n.tr('Vedleggene er for store for chat. Velg mindre filer og prøv igjen.', 'The attachments are too large for chat. Choose smaller files and retry.')
+						: i18n.tr('Kunne ikke overføre utkastet. Frigjør nettleserlagring og prøv igjen. Teksten og filene er beholdt.', 'Could not transfer the draft. Free browser storage and retry. Your text and files have been kept.')
+				: error instanceof Error ? error.message : i18n.tr('Kunne ikke sende. Prøv igjen.', 'Could not send. Please retry.');
+			setSubmitError(message);
+			return;
+		} finally {
+			setHandoffPending(false);
+		}
 
 		setTurns((current) =>
 			[
 				createComposerTurn({
-					body: snapshot.submittedText,
-					browseWeb: browseWeb(),
-					deepSearch: effectiveDeepSearch,
-					files: snapshot.files,
+					body: initialSnapshot.submittedText,
+					browseWeb: initialEffectiveBrowseWeb,
+					deepSearch: initialEffectiveDeepSearch,
+					files: initialSnapshot.files,
 					model: selectedModelLabel(),
-					now: snapshot.now,
+					now: initialSnapshot.now,
 					responseMode: responseMode(),
 				}),
 				...current,
@@ -1622,12 +2030,10 @@ export function DashboardComposer(props: {
 		);
 
 		if (props.onSubmit) {
-			await props.onSubmit(payload);
 			resetComposerDraft();
 			return;
 		}
 
-		await writePendingChatLaunch(payload);
 		resetComposerDraft();
 		props.onLaunchStart?.();
 		// Navigate immediately inside a View Transition: the composer carries
@@ -1650,7 +2056,8 @@ export function DashboardComposer(props: {
 			}}
 			class={dashboardComposerRootClass({ appearance: props.appearance, dragActive: dragActive() })}
 			aria-disabled={props.disabled ? "true" : "false"}
-			inert={props.disabled}
+			inert={props.disabled || handoffPending()}
+			aria-busy={handoffPending() ? "true" : "false"}
 			onDragOver={(event) => {
 				if (dragEventHasFiles(event)) {
 					event.preventDefault();
@@ -1679,12 +2086,45 @@ export function DashboardComposer(props: {
 				if (images.length > 0) {
 					event.preventDefault();
 					addFiles(images);
+					return;
+				}
+
+				const text = pastedPlainText(event);
+				if (text.length > PASTE_TEXT_ATTACHMENT_THRESHOLD) {
+					event.preventDefault();
+					addFiles([
+						pastedTextAttachmentFile(
+							text,
+							i18n.tr("Limt inn tekst", "Pasted text"),
+						),
+					]);
 				}
 			}}
 		>
 			<Show when={dragActive()}>
 				<div class="dashboard-composer-drop-overlay">
 					{i18n.tr("Slipp for å legge ved", "Drop to attach")}
+				</div>
+			</Show>
+
+			<Show when={subscriptionConnectionPending()}>
+				<div class="dashboard-composer-stale-model-notice" role="status" style={COMPOSER_NOTICE_STYLE}>
+					<span>{i18n.tr("Kontrollerer ChatGPT-abonnementet …", "Checking your ChatGPT subscription …")}</span>
+				</div>
+			</Show>
+			<Show when={staleSubscriptionNotice() && !subscriptionConnectionPending()}>
+				<div
+					class="dashboard-composer-stale-model-notice"
+					role="status"
+					style={COMPOSER_NOTICE_STYLE}
+				>
+					<Zap class="size-3.5" />
+					<span>
+						{i18n.tr(
+							"ChatGPT-abonnementet er ikke lenger tilkoblet. Koble til i Integrasjoner eller velg en annen modell.",
+							"The ChatGPT subscription is no longer connected. Reconnect in Integrations or choose another model.",
+						)}
+					</span>
 				</div>
 			</Show>
 
@@ -1925,8 +2365,8 @@ export function DashboardComposer(props: {
 							active={contextScopeOpen()}
 							expanded={contextScopeOpen()}
 													label={i18n.tr(
-														`Kontekst for dette svaret: ${browseWeb() ? "kunnskap og nett" : "kunnskap"}`,
-														`Context for this answer: ${browseWeb() ? "knowledge and web" : "knowledge"}`,
+														`Kontekst for dette svaret: ${conversationOnly() ? "kun samtalen" : browseWeb() ? "kunnskap og nett" : "kunnskap"}`,
+														`Context for this answer: ${conversationOnly() ? "conversation only" : browseWeb() ? "knowledge and web" : "knowledge"}`,
 													)}
 							onClick={() => {
 								setContextScopeOpen((current) => !current);
@@ -1939,8 +2379,8 @@ export function DashboardComposer(props: {
 													>
 														<BookOpen class="size-3.5" />
 													</ComposerIconButton>
-													<span class="dashboard-composer-context-label" aria-hidden="true">
-														{browseWeb() ? i18n.tr("Kunnskap + nett", "Knowledge + web") : i18n.tr("Kunnskap", "Knowledge")}
+													<span class={`dashboard-composer-context-label${conversationOnly() ? ' dashboard-composer-context-label--restricted' : ''}`} aria-hidden="true">
+														{conversationOnly() ? i18n.tr("Kun samtalen", "Conversation only") : browseWeb() ? i18n.tr("Kunnskap + nett", "Knowledge + web") : i18n.tr("Kunnskap", "Knowledge")}
 													</span>
 						<Show when={contextScopeOpen()}>
 							<div class="dashboard-composer-context-panel verevon-popover" role="dialog" aria-label={i18n.tr("Kontekst for svaret", "Answer context")}>
@@ -1949,6 +2389,22 @@ export function DashboardComposer(props: {
 									<strong>{i18n.tr("Kontekst", "Context")}</strong>
 								</div>
 								<p>{i18n.tr("Dette er hva Verevon kan bruke i denne meldingen.", "This is what Verevon can use for this message.")}</p>
+								<label class="grid gap-2 text-sm">
+									<span>{i18n.tr("Kilder for samtalen", "Conversation sources")}</span>
+									<select class="rounded-md border border-current/20 bg-transparent p-2" value={sourceScope()} disabled={props.sourceScopeLocked || props.submitting} onChange={(event) => {
+										const value = event.currentTarget.value === 'conversation' ? 'conversation' : 'workspace';
+										setInternalSourceScope(value); props.onSourceScopeChange?.(value);
+										if (value === 'conversation') { setBrowseWeb(false); setDeepSearch(false); props.onImageModeChange?.(false); props.onPlanModeChange?.(false); }
+									}}>
+										<option value="workspace">{i18n.tr("Tillatte arbeidsområdekilder", "Permitted workspace sources")}</option>
+										<option value="conversation">{i18n.tr("Kun samtalen og vedlegg", "Conversation and attachments only")}</option>
+									</select>
+								</label>
+								<Show when={conversationOnly()}>
+									<p>{i18n.tr("Bare tekst og vedlegg i denne samtalen brukes. Minner, organisasjonskunnskap, nettkilder og tilkoblede tjenester er av. Samtalen lagres, men brukes ikke til nye minner eller læring.", "Only this conversation and its attachments are used. Memory, workspace knowledge, web sources and connected services are off. The conversation is saved, but does not create memories or learned skills.")}</p>
+								</Show>
+								<Show when={props.sourceScopeLocked}><p>{i18n.tr("Start en ny samtale for å endre kildevalg.", "Start a new conversation to change sources.")}</p></Show>
+								<Show when={!conversationOnly()}>
 								<ul class="dashboard-composer-context-panel__list">
 									<li>
 										<span class="dashboard-composer-context-dot dashboard-composer-context-dot--on" />
@@ -1961,22 +2417,18 @@ export function DashboardComposer(props: {
 									<li>
 										<span class={cn("dashboard-composer-context-dot", files().length > 0 ? "dashboard-composer-context-dot--on" : "dashboard-composer-context-dot--off")} />
 										<span><strong>{i18n.tr("Vedlegg", "Attachments")}</strong><small>{files().length > 0
-											? modelAttachmentCount() > 0
-												? i18n.tr(
-													`${modelAttachmentCount()} bilde${modelAttachmentCount() === 1 ? "" : "r"} sendes til modellen${previewOnlyAttachmentCount() > 0 ? ` · ${previewOnlyAttachmentCount()} fil${previewOnlyAttachmentCount() === 1 ? "" : "er"} vises bare her` : ""}.`,
-													`${modelAttachmentCount()} image${modelAttachmentCount() === 1 ? "" : "s"} will be sent to the model${previewOnlyAttachmentCount() > 0 ? ` · ${previewOnlyAttachmentCount()} file${previewOnlyAttachmentCount() === 1 ? "" : "s"} are preview-only here` : ""}.`,
-												)
-												: i18n.tr(
-													`${previewOnlyAttachmentCount()} fil${previewOnlyAttachmentCount() === 1 ? "" : "er"} vises bare her; last opp til kunnskapsbasen hvis du vil lagre dem.`,
-													`${previewOnlyAttachmentCount()} file${previewOnlyAttachmentCount() === 1 ? " is" : "s are"} preview-only here; upload to knowledge if you want to save them.`,
-												)
-											: i18n.tr("Ingen filer lagt ved.", "No files attached.")}</small></span>
+											? i18n.tr(
+                                                `${files().length} vedlegg tas med i samtalen. Du får beskjed hvis en fil ikke kan leses.`,
+                                                `${files().length} attachments will be included in this conversation. You will be told if a file cannot be read.`,
+                                            )
+                                            : i18n.tr("Ingen filer lagt ved.", "No files attached.")}</small></span>
 									</li>
 									<li>
 										<span class={cn("dashboard-composer-context-dot", deepSearch() ? "dashboard-composer-context-dot--on" : "dashboard-composer-context-dot--off")} />
 										<span><strong>{i18n.tr("Dyp research", "Deep research")}</strong><small>{deepSearch() ? i18n.tr("Utvidet research er aktivert.", "Extended research is enabled.") : i18n.tr("Ikke aktivert.", "Not enabled.")}</small></span>
 									</li>
 								</ul>
+                                </Show>
 							</div>
 						</Show>
 					</span>
@@ -1987,14 +2439,19 @@ export function DashboardComposer(props: {
 								<span class={cn("dashboard-composer-intent-toggle", planMode() ? "dashboard-composer-intent-toggle--active" : "")}>
 									<ComposerIconButton
 										active={planMode()}
-										label={i18n.tr(
-											planMode()
-												? "Do-modus - agenten planlegger og ber om godkjenning før risikable verktøy"
-												: "Ask-modus - les, hent og foreslå uten å utføre risikable handlinger",
-											planMode()
-												? "Do mode - the agent plans and asks for approval before risky tools"
-												: "Ask mode - read, retrieve, and propose without executing risky actions",
-										)}
+										disabled={subscriptionBacked() || conversationOnly()}
+										label={
+											subscriptionBacked()
+												? `${i18n.tr("Utfør", "Do")} — ${subscriptionDisabledTitle()}`
+												: i18n.tr(
+													planMode()
+														? "Do-modus - agenten planlegger og ber om godkjenning før risikable verktøy"
+														: "Ask-modus - les, hent og foreslå uten å utføre risikable handlinger",
+													planMode()
+														? "Do mode - the agent plans and asks for approval before risky tools"
+														: "Ask mode - read, retrieve, and propose without executing risky actions",
+												)
+										}
 										onClick={() => props.onPlanModeChange?.(!planMode())}
 										variant="chip"
 									>
@@ -2019,7 +2476,10 @@ export function DashboardComposer(props: {
 									type="button"
 									aria-pressed={planMode() ? "true" : "false"}
 									class={{ "is-active": planMode() }}
+									disabled={subscriptionBacked() || conversationOnly()}
+									title={subscriptionBacked() ? subscriptionDisabledTitle() : undefined}
 									onClick={() => props.onPlanModeChange?.(true)}
+									style={subscriptionDisabledStyle()}
 								>
 									{i18n.tr("Utfør", "Do")}
 								</button>
@@ -2159,10 +2619,70 @@ export function DashboardComposer(props: {
 							<AutocompleteDropdown
 								category={state().category}
 								items={state().items}
+								note={
+									subscriptionBacked() &&
+									!isScheduleAutocomplete(state())
+										? i18n.tr(
+												"Søk, bilde, dyp research og ferdigheter er skjult — ikke tilgjengelig med denne modellen.",
+												"Search, image, deep research and skills are hidden — not available with this model.",
+											)
+										: undefined
+								}
 								selectedIndex={autocompleteIndex()}
 								onHover={setAutocompleteIndex}
 								onSelect={applyAutocompleteSelection}
 							/>
+						</div>
+					)}
+				</Show>
+
+				{/* Deliberately NOT an `autocomplete()` state: everything held in that
+				    signal blocks submit (the F-03 rule), and a command that already
+				    has its argument must send on Enter like any other message. This
+				    is a read-only strip that says which command the draft is
+				    carrying and what it still wants. */}
+				<Show when={draftCommand()}>
+					{(parsed) => (
+						<div
+							class="dashboard-composer-command-hint"
+							role="status"
+							data-command={parsed().command.name}
+							style={COMPOSER_NOTICE_STYLE}
+						>
+							<Dynamic
+								component={parsed().command.icon}
+								class="size-3.5"
+							/>
+							<span
+								class="dashboard-composer-command-hint__name"
+								style={{ "font-weight": "600" }}
+							>
+								{`/${parsed().command.name}`}
+							</span>
+							<span class="dashboard-composer-command-hint__description">
+								{i18n.tr(
+									parsed().command.description.no,
+									parsed().command.description.en,
+								)}
+							</span>
+							<Show when={parsed().command.argument}>
+								{(argument) => (
+									<span
+										class="dashboard-composer-command-hint__arg"
+										style={{ opacity: "0.75" }}
+									>
+										{parsed().argument
+											? i18n.tr(
+													"Trykk Enter for å sende",
+													"Press Enter to send",
+												)
+											: i18n.tr(
+													`Skriv ${argument().hint.no}`,
+													`Type a ${argument().hint.en}`,
+												)}
+									</span>
+								)}
+							</Show>
 						</div>
 					)}
 				</Show>
@@ -2174,6 +2694,9 @@ export function DashboardComposer(props: {
 						void submitComposer();
 					}}
 				>
+					<Show when={submitError()}>
+						<p class="dashboard-composer-attachments__notice" role="alert">{submitError()}</p>
+					</Show>
 					<AttachmentPreview
 						attachments={files()}
 						i18n={i18n}
@@ -2342,7 +2865,12 @@ export function DashboardComposer(props: {
 							</ComposerIconButton>
 							<ComposerIconButton
 								active={deepSearch()}
-								label={i18n.tr("Dyp research", "Deep search")}
+								disabled={subscriptionBacked() || conversationOnly()}
+								label={
+									subscriptionBacked()
+										? `${i18n.tr("Dyp research", "Deep search")} — ${subscriptionDisabledTitle()}`
+										: i18n.tr("Dyp research", "Deep search")
+								}
 								onClick={() =>
 									setDeepSearch((current) => !current)
 								}
@@ -2353,15 +2881,22 @@ export function DashboardComposer(props: {
 							<button
 								type="button"
 								aria-pressed={browseWeb() ? "true" : "false"}
-								aria-label={i18n.tr(
-									"Søk på nett",
-									"Browse web",
-								)}
-								title={i18n.tr("Søk på nett", "Browse web")}
+								aria-label={
+									subscriptionBacked()
+										? `${i18n.tr("Søk på nett", "Browse web")} — ${subscriptionDisabledTitle()}`
+										: i18n.tr("Søk på nett", "Browse web")
+								}
+								title={
+									subscriptionBacked()
+										? subscriptionDisabledTitle()
+										: i18n.tr("Søk på nett", "Browse web")
+								}
+								disabled={subscriptionBacked() || conversationOnly()}
 								onClick={() =>
 									setBrowseWeb((current) => !current)
 								}
 								class={composerWebButtonClass(browseWeb())}
+								style={subscriptionDisabledStyle()}
 							>
 								<Globe2 class="size-4" />
 								{i18n.tr("Søk", "Search")}
@@ -2370,20 +2905,30 @@ export function DashboardComposer(props: {
 								<button
 									type="button"
 									aria-pressed={imageMode() ? "true" : "false"}
-									aria-label={i18n.tr(
-										"Generer bilde",
-										"Generate image",
-									)}
-									title={i18n.tr(
-										"Generer bilde",
-										"Generate image",
-									)}
+									aria-label={
+										subscriptionBacked()
+											? `${i18n.tr("Generer bilde", "Generate image")} — ${subscriptionDisabledTitle()}`
+											: i18n.tr(
+												"Generer bilde",
+												"Generate image",
+											)
+									}
+									title={
+										subscriptionBacked()
+											? subscriptionDisabledTitle()
+											: i18n.tr(
+												"Generer bilde",
+												"Generate image",
+											)
+									}
+									disabled={subscriptionBacked() || conversationOnly()}
 									onClick={() =>
 										props.onImageModeChange?.(!imageMode())
 									}
 									class={composerImageButtonClass(
 										imageMode(),
 									)}
+									style={subscriptionDisabledStyle()}
 								>
 									<ImagePlus class="size-4" />
 									{i18n.tr("Bilde", "Image")}
@@ -2577,7 +3122,6 @@ function getComposerTools(input: {
 	browseWeb: boolean;
 	deepSearch: boolean;
 	imageMode: boolean;
-	message: string;
 	responseMode: ResponseMode;
 }): DashboardComposerSubmitPayload["tools"] {
 	const tools: DashboardComposerSubmitPayload["tools"] = [];
@@ -2591,11 +3135,11 @@ function getComposerTools(input: {
 	// Removed rather than wired: it was a second, dead encoding of a dial that
 	// already works.
 	if (input.deepSearch) tools.push("research");
-	if (
-		input.imageMode ||
-		input.message.trimStart().toLowerCase().startsWith("/image ")
-	)
-		tools.push("image");
+	// The "/image " sniff that used to sit here is gone: the command prefix is
+	// now parsed and stripped before submit, so `imageMode` already carries it
+	// (and carried only the English spelling before, silently failing for a
+	// Norwegian-labelled shortcut).
+	if (input.imageMode) tools.push("image");
 	return [...new Set(tools)];
 }
 
@@ -2636,7 +3180,6 @@ function createComposerSubmitPayload(input: {
 	subscriptionConnectionId?: string;
 	text: string;
 	tone: ComposerTone;
-	trimmedMessage: string;
 	zdr: boolean;
 }): DashboardComposerSubmitPayload {
 	return {
@@ -2661,7 +3204,6 @@ function createComposerSubmitPayload(input: {
 				browseWeb: input.browseWeb,
 				deepSearch: input.deepSearch,
 				imageMode: input.imageMode,
-				message: input.trimmedMessage,
 				responseMode: input.responseMode,
 			}),
 			zdr: input.zdr || undefined,
@@ -2711,14 +3253,17 @@ function detectTrigger(text: string, position: number): TriggerContext | null {
 	// knowledge endpoint and labelling those results as people would be a
 	// misleading invocation control.
 
-	const slashMatch = before.match(/\/(\w*)$/);
+	const slashMatch = SLASH_TRIGGER_PATTERN.exec(before);
 	if (slashMatch) {
 		const query = slashMatch[1] ?? "";
+		// Only the "/" and the token after it are the trigger — any leading
+		// whitespace the pattern allowed through stays in the draft.
+		const rawLen = query.length + 1;
 		return {
 			type: "slash",
 			query: query.toLowerCase(),
-			start: position - slashMatch[0].length,
-			rawLen: slashMatch[0].length,
+			start: position - rawLen,
+			rawLen,
 		};
 	}
 
@@ -2831,6 +3376,8 @@ function EntityOverlay(props: { entities: EntityToken[]; message: string }) {
 function AutocompleteDropdown(props: {
 	category: string;
 	items: AutocompleteItem[];
+	/** Why the list is shorter than usual, when something is being withheld. */
+	note?: string;
 	onHover: (index: number) => void;
 	onSelect: (item: AutocompleteItem) => void;
 	selectedIndex: number;
@@ -2839,6 +3386,9 @@ function AutocompleteDropdown(props: {
 		<div
 			class="dashboard-composer-autocomplete-menu verevon-popover verevon-popover-up"
 			data-composer-floating-panel="true"
+			role="listbox"
+			aria-label={props.category}
+			style={COMMAND_MENU_STYLE}
 		>
 			<div class="dashboard-composer-autocomplete-menu__category">
 				{props.category}
@@ -2847,6 +3397,10 @@ function AutocompleteDropdown(props: {
 				{(item, index) => (
 					<button
 						type="button"
+						role="option"
+						aria-selected={
+							index() === props.selectedIndex ? "true" : "false"
+						}
 						onMouseDown={(event) => {
 							event.preventDefault();
 							props.onSelect(item);
@@ -2858,10 +3412,53 @@ function AutocompleteDropdown(props: {
 						}}
 					>
 						<Dynamic component={item.icon} class="size-4" />
-						<span>{item.label}</span>
+						<span
+							class="dashboard-composer-autocomplete-menu__body"
+							style={COMMAND_BODY_STYLE}
+						>
+							<span
+								class="dashboard-composer-autocomplete-menu__label"
+								style={COMMAND_LABEL_STYLE}
+							>
+								{item.label}
+								{/* The argument is part of the command's signature, so
+								    it belongs next to the name rather than in a
+								    tooltip nobody opens. */}
+								<Show when={item.argumentHint}>
+									{(hint) => (
+										<span
+											class="dashboard-composer-autocomplete-menu__arg"
+											style={COMMAND_ARGUMENT_STYLE}
+										>
+											{`<${hint()}>`}
+										</span>
+									)}
+								</Show>
+							</span>
+							<Show when={item.description}>
+								{(description) => (
+									<span
+										class="dashboard-composer-autocomplete-menu__description"
+										style={COMMAND_DESCRIPTION_STYLE}
+									>
+										{description()}
+									</span>
+								)}
+							</Show>
+						</span>
 					</button>
 				)}
 			</For>
+			<Show when={props.note}>
+				{(note) => (
+					<p
+						class="dashboard-composer-autocomplete-menu__note"
+						style={COMMAND_NOTE_STYLE}
+					>
+						{note()}
+					</p>
+				)}
+			</Show>
 		</div>
 	);
 }
@@ -3353,12 +3950,11 @@ function HistoryPanel(props: {
 	// title/preview column at all — both are derived per query by LATERAL joins).
 	// Scoped honestly in the placeholder so it does not read as a promise of more.
 	const filteredItems = createMemo(() => {
-		const needle = historyQuery().trim().toLowerCase();
-		if (!needle) return allItems();
+		if (!historyQuery().trim()) return allItems();
 		return allItems().filter(
 			(item) =>
-				item.title.toLowerCase().includes(needle) ||
-				item.meta.toLowerCase().includes(needle),
+				item.title.toLowerCase().includes(historyQuery().trim().toLowerCase()) ||
+				item.meta.toLowerCase().includes(historyQuery().trim().toLowerCase()),
 		);
 	});
 	const groups = createMemo(() => historyGroups(filteredItems(), props.i18n));
@@ -3586,7 +4182,7 @@ function HistoryPanel(props: {
 				</Show>
 
 				<div class="dashboard-composer-menu-divider" />
-				<a href="/chat" link onClick={props.onClose} class="verevon-menu-row">
+				<a href="/chat" link onClick={() => props.onClose()} class="verevon-menu-row">
 					<LayoutGrid class="size-4 shrink-0" strokeWidth={1.7} />
 					<span class="verevon-menu-label">
 						{props.i18n.tr(

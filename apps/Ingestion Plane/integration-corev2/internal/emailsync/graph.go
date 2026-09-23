@@ -248,7 +248,21 @@ func (m graphMessage) normalize() (EmailMessage, bool) {
 	switch strings.ToLower(m.Body.ContentType) {
 	case "html":
 		msg.BodyHTML = m.Body.Content
-		msg.BodyText = m.BodyPreview
+		// Render the real body rather than storing Graph's bodyPreview:
+		// Microsoft caps that field at 255 characters, so using it made
+		// body_text a PREVIEW for every HTML mail while the full content
+		// sat in body_html. Everything that reads text instead of markup --
+		// search, classification, draft generation, the chat inbox tools --
+		// then saw only the opening sentence of each message, with no way
+		// to tell that it had. The Teams path in this package already
+		// rendered its HTML this way; only the mail path did not.
+		msg.BodyText = stripHTMLTags(m.Body.Content)
+		if msg.BodyText == "" {
+			// An image-only or empty-markup body renders to nothing. The
+			// preview is then the best text that exists, and is not a
+			// truncation of anything.
+			msg.BodyText = m.BodyPreview
+		}
 	default:
 		msg.BodyText = m.Body.Content
 	}

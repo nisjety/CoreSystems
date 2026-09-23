@@ -138,6 +138,7 @@ impl InferenceCore for MockOk {
         let request = request.into_inner();
         self.capture(&request);
         Ok(Response::new(InferResponse {
+            compaction_summary: String::new(),
             request_id: String::new(),
             content: "hello".into(),
             model_used: "mock".into(),
@@ -148,6 +149,8 @@ impl InferenceCore for MockOk {
             residency: String::new(),
             token_confidence: None,
             tool_calls: Vec::new(),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         }))
     }
     async fn infer_stream(
@@ -158,6 +161,7 @@ impl InferenceCore for MockOk {
         self.capture(&request);
         Ok(Response::new(Box::pin(futures::stream::iter(vec![
             Ok(InferChunk {
+                compaction_summary: String::new(),
                 reasoning_delta: String::new(),
                 request_id: "req-stream-ok".into(),
                 delta: "hel".into(),
@@ -169,8 +173,11 @@ impl InferenceCore for MockOk {
                 provider_used: String::new(),
                 residency: String::new(),
                 token_confidence: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }),
             Ok(InferChunk {
+                compaction_summary: String::new(),
                 reasoning_delta: String::new(),
                 request_id: "req-stream-ok".into(),
                 delta: "lo".into(),
@@ -182,6 +189,8 @@ impl InferenceCore for MockOk {
                 provider_used: String::new(),
                 residency: String::new(),
                 token_confidence: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             }),
         ]))))
     }
@@ -637,6 +646,7 @@ impl InferenceCore for MockStreamDown {
 
     async fn infer(&self, _: TReq<InferRequest>) -> Result<Response<InferResponse>, Status> {
         Ok(Response::new(InferResponse {
+            compaction_summary: String::new(),
             request_id: String::new(),
             content: "hello".into(),
             model_used: "mock".into(),
@@ -647,6 +657,8 @@ impl InferenceCore for MockStreamDown {
             residency: String::new(),
             token_confidence: None,
             tool_calls: Vec::new(),
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
         }))
     }
 
@@ -989,6 +1001,7 @@ impl SessionCore for MockSessionCore {
                 role: role.clone(),
                 content: content.clone(),
                 agent_name: String::new(),
+                ..Default::default()
             })
             .collect();
         Ok(Response::new(ListConversationResponse { messages }))
@@ -2547,9 +2560,26 @@ async fn invoke_stream_completes_and_persists_after_the_client_disconnects_mid_s
     drop(frames);
 
     // The producer runs in a spawned task independent of the response body's
-    // lifetime, so give it a beat to reach its terminal branch. MockOk's mock
-    // stream has no artificial delay, so this is generous, not a tight race.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // lifetime, so wait for it to reach its terminal branch. Poll for the
+    // assistant append rather than sleeping a fixed span: the turn's post-stream
+    // work (grounding, confidence scoring, persistence) has grown over time and
+    // a hardcoded sleep silently becomes a false failure the moment the turn
+    // outgrows it — which is exactly what a flat 300 ms did. The deadline is a
+    // failure bound, not an expected duration; the loop exits as soon as the
+    // append lands.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if session_handles.append_captures.lock().unwrap().len() >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the assistant answer must persist even though nobody was listening for it; \
+             saw only {:?} within the deadline",
+            session_handles.append_captures.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 
     let thread_id = prepared_thread_id(&session_handles);
     let appended = session_handles.append_captures.lock().unwrap();
@@ -3104,13 +3134,13 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
 
     let captured = captured_messages.lock().unwrap();
     let messages = captured.first().expect("infer_stream should be called");
-    // Three, not two: `temporal_awareness_message()` is inserted unconditionally
+    // `temporal_awareness_message()` is inserted unconditionally
     // at position 0 so the model always knows the real date, which shifts the
     // context-assembly block to index 1. Asserting the temporal message's
     // presence rather than tolerating it, so a future change that drops it fails
     // here instead of silently letting the model answer time-sensitive questions
     // from its training snapshot.
-    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.len(), 4);
     assert_eq!(messages[0].0, "system");
     assert!(messages[0].1.contains("Today's real date is"));
     assert_eq!(messages[1].0, "system");
@@ -3127,8 +3157,15 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
     assert!(messages[1].1.contains("GraphRAG"));
     assert!(!messages[1].1.contains("[prompt]"));
     assert!(!messages[1].1.contains("ima@example.com"));
+    // Four, not three: `RESPONSE_DISCIPLINE_NOTICE` is appended unconditionally
+    // to the tail of the leading system run, so it lands after the assembly
+    // block and before the user turn. Pinned rather than tolerated so a change
+    // that drops it — or that reorders it ahead of the assembly block it is
+    // meant to qualify — fails here.
+    assert_eq!(messages[2].0, "system");
+    assert!(messages[2].1.contains("Response discipline:"));
     assert_eq!(
-        messages[2],
+        messages[3],
         (
             "user".to_owned(),
             "contact [redacted-email] about context".to_owned()
@@ -3165,7 +3202,7 @@ async fn invoke_stream_search_turn_keeps_prior_user_name_context() {
                 "results": [{
                     "url": "https://names.test/ima",
                     "title": "Ima name meaning",
-                    "snippet": "Ima can be interpreted as a short personal name with meanings that vary by language and culture.",
+                    "snippet": "Ima can be interpreted as a short personal name with meanings that vary by language and culture. In Japanese it is written with characters meaning now or the present moment, while in several West African naming traditions it is given as a second daughter's name.",
                     "source": "mock",
                     "score": 0.98
                 }]
@@ -3277,7 +3314,7 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
                 "results": [{
                     "url": "https://www.anthropic.com/claude/opus",
                     "title": "Claude Opus",
-                    "snippet": "Claude Opus 4.8 is Anthropic's most capable model.",
+                    "snippet": "Claude Opus 4.8 is Anthropic's most capable model, positioned above Sonnet and Haiku for tasks that reward deeper reasoning. It leads the family on long-horizon agentic work, code generation and analysis benchmarks published alongside the release.",
                     "source": "mock",
                     "score": 0.99
                 }]
@@ -3654,7 +3691,7 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
                 "results": [{
                     "url": "https://verevon.test/model-plane",
                     "title": "Model Plane",
-                    "snippet": "Model Plane owns reasoning, sessions, inference, tools, and cost controls.",
+                    "snippet": "Model Plane owns reasoning, sessions, inference, tools, and cost controls. It is the plane that hosts the model gateway and execution core, brokers every provider call, and enforces the per-organisation budget and retention posture on each turn.",
                     "source": "mock",
                     "score": 0.99
                 }]

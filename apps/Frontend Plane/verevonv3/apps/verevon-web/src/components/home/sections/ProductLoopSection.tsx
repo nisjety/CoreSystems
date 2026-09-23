@@ -3,6 +3,8 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import type { ProductRecording } from "@/lib/product-recording-contract";
+import { ProductRecordingPlayer } from "./ProductRecordingPlayer";
 import type { VerevonComposerMode } from "@/components/ui/VerevonComposerPreview";
 import { FeatureComposerCycle } from "./FeatureComposerCycle";
 import { getProductLoopComposerCopy } from "./product-loop-composer-copy";
@@ -214,7 +216,6 @@ function ProductLoopMobileFallback() {
 			data-product-loop-mobile-fallback=""
 		>
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
-				<p className="verevon-eyebrow text-verevon-coral">03 / Produkt</p>
 				<h2 className="verevon-home-heading max-w-[11ch] text-verevon-j-text">
 					Fra kunnskap til handling
 				</h2>
@@ -273,13 +274,13 @@ function ProductLoopMobileFallback() {
 	);
 }
 
-export function ProductLoopSection() {
+export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRecording[] }) {
 	const sectionRef = useRef<HTMLElement>(null);
 
 	useLayoutEffect(() => {
 		const section = sectionRef.current;
 
-		if (!section) {
+		if (!section || recordings.length > 0) {
 			return;
 		}
 
@@ -853,7 +854,14 @@ export function ProductLoopSection() {
 			matchMedia.revert();
 			context.revert();
 		};
-	}, []);
+	}, [recordings.length]);
+
+	if (recordings.length > 0) {
+		return <section id="produkt" ref={sectionRef} aria-labelledby="product-recordings-title" className="bg-background px-[var(--verevon-page-pad)] py-24 text-verevon-j-text">
+			<div className="mx-auto mb-10 max-w-6xl"><h2 id="product-recordings-title" className="verevon-home-heading max-w-[14ch]">Fra kunnskap til handling.</h2></div>
+			<ProductRecordingPlayer recordings={recordings} />
+		</section>;
+	}
 
 	// The first 0.78 timeline units now play before the sticky boundary. Reducing
 	// the pinned height by the same proportion preserves the approved pacing of
@@ -884,8 +892,7 @@ export function ProductLoopSection() {
 						className="absolute left-[var(--verevon-edge)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(46.8vw,630px)] text-left max-[899px]:hidden"
 						data-product-loop-header=""
 					>
-						<p className="verevon-eyebrow text-verevon-coral">03 / Produkt</p>
-						<h2 className="verevon-home-heading mt-4 max-w-[10ch] text-verevon-j-text text-balance">
+						<h2 className="verevon-home-heading max-w-[10ch] text-verevon-j-text text-balance">
 							Fra kunnskap til handling
 						</h2>
 					</div>

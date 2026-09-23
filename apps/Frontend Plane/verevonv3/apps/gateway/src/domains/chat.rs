@@ -1,4 +1,4 @@
-mod documents;
+pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
 pub(crate) mod shared;
@@ -65,6 +65,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/documents",
             post(documents::upload_chat_document),
         )
+        .route("/api/v1/chat/documents/extract", post(documents::extract_chat_document))
         .route(
             "/api/v1/chat/feedback",
             post(json_handlers::submit_feedback),

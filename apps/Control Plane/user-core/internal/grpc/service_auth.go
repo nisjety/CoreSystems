@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	pb "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/proto/user/v1"
@@ -216,10 +217,8 @@ func authorizeGRPCServiceCredential(ctx context.Context, method string, credenti
 		matched.Principal != principal || !secureGRPCTokenEqual(expectedToken, token) {
 		return status.Error(codes.Unauthenticated, "User Core gRPC service credential is invalid")
 	}
-	for _, allowed := range matched.Methods {
-		if allowed == method {
-			return nil
-		}
+	if slices.Contains(matched.Methods, method) {
+		return nil
 	}
 	return status.Error(codes.PermissionDenied, "User Core gRPC service principal lacks method authority")
 }

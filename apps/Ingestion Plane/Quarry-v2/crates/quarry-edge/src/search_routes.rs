@@ -12,6 +12,13 @@
 //!     RAG context string).
 //!
 //! When no provider is configured, returns 501 Unsupported with a hint.
+//!
+//! Structured facts: with `include_answer`, each citation may carry the
+//! machine-readable harvest from its page (`Citation::structured`) — the
+//! channel that recovers figures readability strips with the `script` tags
+//! they live in. It is page content, so it travels exactly as the synthesized
+//! answer does: through the org-keyed cache below, which a ZDR request
+//! bypasses on both read and write, and no further.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
 use serde::{Deserialize, Serialize};
@@ -19,7 +26,10 @@ use serde::{Deserialize, Serialize};
 use quarry_core::zdr::ZdrMode;
 use quarry_runtime::answer::{AnswerRequest, Citation, MarkdownFetcher, SimpleHttpMarkdownFetcher};
 use quarry_runtime::mp_client::{ModelPlaneClient, ModelPlaneInvokeRequest};
-use quarry_runtime::serp::{ImageResult, SearXNGImages, SearchOptions, SearchResult};
+use quarry_runtime::serp::{
+    ImageResult, SearXNGImages, SearXNGVideos, SearchOptions, SearchResult, VideoResult,
+};
+use quarry_runtime::smart_router::{classify_intent, QueryIntent};
 
 use crate::state::AppState;
 
@@ -37,6 +47,22 @@ pub struct SearchRequest {
     /// Zero Data Retention: bypass caches and durable content-bearing events.
     #[serde(default)]
     pub zdr: bool,
+    /// Per-request permission to dispatch the paid external SERP providers
+    /// (Brave, Serper) — money and egress, so it is a permission the caller
+    /// has to assert, never an inference from anything else on the request.
+    ///
+    /// A plain `bool` with `#[serde(default)]` rather than `Option<bool>`:
+    /// absent means `false` means no paid fan-out, and a non-boolean value
+    /// fails deserialization so axum answers 422 instead of coercing it.
+    /// Missing input and malformed input therefore both land closed, which is
+    /// the only safe posture for a spend permission.
+    ///
+    /// Deliberately NOT given the warn-and-drop leniency `intent` gets below:
+    /// silently downgrading an unreadable permission to "granted" is a leak and
+    /// to "denied" is a silent behaviour change the caller never sees — a 422
+    /// says which of the two happened.
+    #[serde(default)]
+    pub allow_paid_providers: bool,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -80,6 +106,31 @@ pub struct SearchRequest {
     /// operators across the SERP providers.
     #[serde(default)]
     pub exclude_domains: Vec<String>,
+    /// Caller-supplied query-intent hint. Verevon's model-gateway stamps this
+    /// on every `/v1/search` call; until this field existed serde discarded it
+    /// with no error on either side, so the hint looked wired end-to-end while
+    /// changing nothing about routing.
+    ///
+    /// It is now forwarded: parsed against the router's own `QueryIntent`
+    /// vocabulary and carried to the runtime in `SearchOptions::intent`, where
+    /// `SmartSearchRouter::resolve_intent` adopts it as an *override* of its
+    /// own classification and skips the classifier call entirely. The rules
+    /// are therefore never consulted on a hinted request, so the edge runs
+    /// them itself and emits both verdicts: that comparison is the
+    /// caller-versus-rules disagreement rate, and once the hint wins it exists
+    /// nowhere else.
+    ///
+    /// The hint also joins the edge's cache signature. It has to: it changes
+    /// which engines run, so two requests differing only by intent produce
+    /// different result sets and would otherwise be served each other's.
+    ///
+    /// Unrecognized values are logged and dropped rather than rejected:
+    /// promoting a field that every deployed model-gateway build already sends
+    /// (and that was silently ignored until now) into a 400 would turn a no-op
+    /// into an outage. That leniency belongs to an advisory hint only — see
+    /// `allow_paid_providers` above, where the same treatment would be wrong.
+    #[serde(default)]
+    pub intent: Option<String>,
     /// Optional client-supplied request ID for tracing.
     #[serde(default)]
     #[allow(dead_code)] // scaffolding: wired in follow-up
@@ -103,6 +154,8 @@ pub struct SearchResponse {
     /// Present when `include_answer=true` and synthesis succeeded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
+    /// Sources behind `answer`. A citation additionally carries that page's
+    /// structured harvest when it had one — see the module header.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub citations: Option<Vec<Citation>>,
     /// Present when `format=context` — token-bounded RAG context string.
@@ -143,6 +196,169 @@ struct CachedSearch {
     answer: Option<String>,
     #[serde(default)]
     citations: Option<Vec<Citation>>,
+}
+
+// ── intent hint + source-quality observability (unit-tested) ────────────────
+//
+// Everything below emits through `tracing`, not the `metrics` facade. That is
+// deliberate: `metrics` and `metrics-exporter-prometheus` are declared in
+// Cargo.toml but nothing in this binary ever installs a recorder or serves
+// `/metrics`, so `metrics::counter!` would compile to a silent no-op and read
+// as instrumented while producing nothing. `tracing` events reach the JSON fmt
+// layer and, when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the OTLP exporter —
+// see `telemetry::init_telemetry`.
+//
+// Cardinality discipline for every field emitted from the search path: no
+// query text, no URLs, no org/user ids. Engine names are clamped to
+// `KNOWN_SEARCH_ENGINES` and intents to `intent_label`, both closed sets.
+
+/// Map a caller's `intent` string onto the router's own [`QueryIntent`]
+/// vocabulary. Built on the runtime enum rather than a local string list so
+/// the accepted vocabulary cannot drift from what the router actually routes
+/// on. Aliases cover the spellings model-gateway is known to send.
+pub(crate) fn parse_intent_hint(raw: &str) -> Option<QueryIntent> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "navigational" | "nav" => Some(QueryIntent::Navigational),
+        "fresh" | "news" | "recent" => Some(QueryIntent::Fresh),
+        "phrase" | "exact" => Some(QueryIntent::Phrase),
+        "research" | "deep_research" => Some(QueryIntent::Research),
+        "comparative" | "compare" => Some(QueryIntent::Comparative),
+        "local" => Some(QueryIntent::Local),
+        "code" => Some(QueryIntent::Code),
+        "default" | "general" => Some(QueryIntent::Default),
+        _ => None,
+    }
+}
+
+/// Stable telemetry label for a [`QueryIntent`]. An explicit match rather than
+/// `{:?}` so a rename or a new variant in the runtime enum breaks the build
+/// here instead of quietly renaming a dimension that dashboards group by.
+pub(crate) fn intent_label(intent: QueryIntent) -> &'static str {
+    match intent {
+        QueryIntent::Navigational => "navigational",
+        QueryIntent::Fresh => "fresh",
+        QueryIntent::Phrase => "phrase",
+        QueryIntent::Research => "research",
+        QueryIntent::Comparative => "comparative",
+        QueryIntent::Local => "local",
+        QueryIntent::Code => "code",
+        QueryIntent::Default => "default",
+    }
+}
+
+/// What the caller's `intent` hint actually did to this request.
+///
+/// Deliberately not a boolean. `SmartSearchRouter::resolve_intent` treats a
+/// supplied hint as an override of its own classification — it does not seed a
+/// classifier that may then disagree, it skips the classifier outright — so
+/// "was the hint honored" is yes by construction for every hint that parses,
+/// and a bool would do nothing but restate `intent_hint`. The question that
+/// still has an answer, and the one this field was added for, is whether the
+/// caller agreed with the rules or displaced them: a climbing `used_overrode`
+/// rate is the caller and the rule classifier drifting apart.
+///
+/// `supplied` is whether the request carried a non-blank `intent` at all and
+/// `hint` is the parse of it, kept as separate arguments so a hint that
+/// arrived but could not be read stays distinguishable from no hint — both
+/// leave the router classifying for itself, but only one is a client bug.
+///
+/// Four values, fixed here, so the dimension stays groupable.
+pub(crate) fn intent_hint_effect(
+    supplied: bool,
+    hint: Option<QueryIntent>,
+    rule: QueryIntent,
+) -> &'static str {
+    match hint {
+        // Dropped at the edge before `SearchOptions` was built, so the router
+        // classified this request itself. Same routing as an absent hint, but
+        // a contract breach rather than a choice — counting them together
+        // would hide a mis-wired client inside the no-hint baseline.
+        None if supplied => "invalid",
+        None => "none",
+        Some(h) if h == rule => "used_agreed",
+        Some(_) => "used_overrode",
+    }
+}
+
+/// Engines a result can be attributed to. `SearchResult.provider` is filled in
+/// by the provider adapters, so clamping to this closed list is what keeps the
+/// `engine` dimension bounded if an adapter ever starts writing a per-request
+/// string there. A genuinely new engine reads as `other` until it is added
+/// here — bounded and vague beats unbounded and precise for a label.
+const KNOWN_SEARCH_ENGINES: [&str; 7] = [
+    "brave",
+    "hybrid",
+    "lex",
+    "searxng",
+    "serper",
+    "stract",
+    "tantivy_local",
+];
+
+pub(crate) fn search_engine_label(raw: &str) -> &'static str {
+    KNOWN_SEARCH_ENGINES
+        .into_iter()
+        .find(|known| *known == raw)
+        .unwrap_or("other")
+}
+
+/// Snippet-length distribution across one result set, in chars.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SnippetStats {
+    pub min: usize,
+    pub median: usize,
+    pub max: usize,
+    /// Results that carried no snippet (or a blank one). A CAPTCHA'd or
+    /// rate-limited engine usually still returns links, so this is the field
+    /// that separates "upstream answered" from "upstream answered usefully".
+    pub missing: usize,
+}
+
+/// Summarise snippet lengths. Blank snippets count as missing rather than as
+/// length 0, otherwise a shut-out engine would drag `min` to 0 and look like a
+/// terse-but-working one.
+pub(crate) fn snippet_stats<'a, I>(snippets: I) -> SnippetStats
+where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    let mut lens: Vec<usize> = Vec::new();
+    let mut missing = 0usize;
+    for snippet in snippets {
+        match snippet.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) => lens.push(s.chars().count()),
+            None => missing += 1,
+        }
+    }
+    if lens.is_empty() {
+        return SnippetStats {
+            missing,
+            ..Default::default()
+        };
+    }
+    lens.sort_unstable();
+    SnippetStats {
+        min: lens[0],
+        // Lower median on even counts — this is a health signal, not a
+        // statistic anyone does arithmetic on downstream.
+        median: lens[lens.len() / 2],
+        max: lens[lens.len() - 1],
+        missing,
+    }
+}
+
+/// Render the per-engine contribution as one `engine=count` field, alongside
+/// (not instead of) the per-engine events. An engine that returns nothing
+/// emits no contribution event at all, so per-engine events alone cannot
+/// distinguish "three upstreams are quiet today" from "three upstreams have
+/// been CAPTCHA'd for a month" — which is exactly how this went unnoticed.
+/// Carrying the whole distribution on the shape event makes the width of the
+/// chain visible on every single request. `BTreeMap` ordering keeps the
+/// string stable across requests so it can be grouped on.
+pub(crate) fn render_engine_mix(mix: &std::collections::BTreeMap<&'static str, usize>) -> String {
+    mix.iter()
+        .map(|(engine, hits)| format!("{engine}={hits}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 // ── pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -218,7 +434,13 @@ pub(crate) fn build_context(
 /// Stable — intra-host order is preserved, and results with no parseable host
 /// are never capped. Applied outermost (after merge/rerank) so one domain can't
 /// monopolise the visible results. Pure → unit-tested.
-pub(crate) fn diversify_results(results: Vec<SearchResult>) -> Vec<SearchResult> {
+///
+/// Returns the reordered set plus how many results the cap demoted. The count
+/// is source-quality telemetry, not a return value the response shape uses: a
+/// query whose whole first page comes from one host means the rest of the
+/// engine chain contributed nothing, which is invisible from the result count
+/// alone (the demoted results are still in there, just at the tail).
+pub(crate) fn diversify_results(results: Vec<SearchResult>) -> (Vec<SearchResult>, usize) {
     use std::collections::HashMap;
     const MAX_PER_HOST: usize = 3;
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -241,8 +463,72 @@ pub(crate) fn diversify_results(results: Vec<SearchResult>) -> Vec<SearchResult>
             None => kept.push(result),
         }
     }
+    let demoted = deferred.len();
     kept.extend(deferred);
-    kept
+    (kept, demoted)
+}
+
+/// Assemble the runtime [`SearchOptions`] for one `/v1/search` request.
+///
+/// Extracted from the handler so the two fail-closed decisions it makes — the
+/// paid-provider permission ANDed with `!zdr`, and the org scope taken from the
+/// verified JWT rather than from the body — are reachable from a unit test
+/// instead of only from a live route.
+pub(crate) fn build_search_options(
+    req: &SearchRequest,
+    org_id: &str,
+    zdr: bool,
+    intent_hint: Option<QueryIntent>,
+) -> SearchOptions {
+    SearchOptions {
+        limit: req.limit.unwrap_or(10).min(50),
+        country: req.country.clone(),
+        language: req.language.clone(),
+        safe_search: req.safe_search,
+        topic: req.topic.clone(),
+        time_range: derive_time_range(req.time_range.as_deref(), req.days),
+        exact_match: req.exact_match,
+        // Tenant isolation: thread the verified JWT org_id so private-corpus
+        // providers (TantivyLocalIndex) restrict to this org.
+        org_id: Some(org_id.to_string()),
+        include_domains: req.include_domains.clone(),
+        exclude_domains: req.exclude_domains.clone(),
+        // ZDR: SmartSearchRouter must not send this query to an external
+        // paid SERP SaaS provider (Brave/Serper) when the caller flagged
+        // the request zero-retention. See `SearchOptions::zdr`.
+        zdr,
+        // Granted only when the caller asked for it AND the request is not
+        // zero-retention, written as one conjunction so the ZDR half cannot be
+        // mistaken for something that happens elsewhere. The router applies its
+        // own independent `!opts.zdr` test at every paid dispatch site; this is
+        // the outer of two belts, never a substitute for it.
+        allow_paid_providers: req.allow_paid_providers && !zdr,
+        intent: intent_hint,
+    }
+}
+
+/// Render the result-affecting parameters into the edge cache key's signature
+/// segment. `highlight` / `facets` / `format` are deliberately absent — they
+/// are re-applied per request on a hit, so those variants share one entry.
+///
+/// `intent` is present because it steers which engines the router dispatches:
+/// omitting it would let a `research` request be served the cached result set
+/// of a `navigational` one for the same query string.
+pub(crate) fn params_signature(opts: &SearchOptions, include_answer: bool) -> String {
+    format!(
+        "l={}|c={:?}|lg={:?}|s={}|t={:?}|tr={:?}|x={}|a={}|inc={:?}|exc={:?}|i={}",
+        opts.limit,
+        opts.country,
+        opts.language,
+        opts.safe_search,
+        opts.topic,
+        opts.time_range,
+        opts.exact_match,
+        include_answer,
+        opts.include_domains,
+        opts.exclude_domains,
+        opts.intent.map(intent_label).unwrap_or("none"),
+    )
 }
 
 /// Aggregate results by host into descending-count facets (ties broken by host
@@ -340,43 +626,48 @@ pub async fn search(
 
     let effective_query = apply_exact_match(&req.query, req.exact_match);
     let zdr = effective_zdr(req.zdr);
-    let opts = SearchOptions {
-        limit: req.limit.unwrap_or(10).min(50),
-        country: req.country.clone(),
-        language: req.language.clone(),
-        safe_search: req.safe_search,
-        topic: req.topic.clone(),
-        time_range: derive_time_range(req.time_range.as_deref(), req.days),
-        exact_match: req.exact_match,
-        // Tenant isolation: thread the verified JWT org_id so private-corpus
-        // providers (TantivyLocalIndex) restrict to this org.
-        org_id: Some(claims.org_id.clone()),
-        include_domains: req.include_domains.clone(),
-        exclude_domains: req.exclude_domains.clone(),
-        // ZDR: SmartSearchRouter must not send this query to an external
-        // paid SERP SaaS provider (Brave/Serper) when the caller flagged
-        // the request zero-retention. See `SearchOptions::zdr`.
-        zdr,
+
+    // Caller intent hint — forwarded to the router through `SearchOptions`.
+    // The rule classifier is still run here, against the *effective* query
+    // (post exact-match quoting) because that is the string the router runs its
+    // own classifier over, so hint and rules stay comparable on the telemetry.
+    let intent_hint_raw = req
+        .intent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let intent_hint = intent_hint_raw.and_then(|raw| {
+        let parsed = parse_intent_hint(raw);
+        if parsed.is_none() {
+            // Truncated: `intent` is caller-controlled, and a mis-wired client
+            // that stuffs the query into it must not tip user content into
+            // logs just because the value failed to parse.
+            let shown: String = raw.chars().take(32).collect();
+            tracing::warn!(intent = %shown, "search: unrecognized `intent` hint; ignoring");
+        }
+        parsed
+    });
+    let intent_hint_label = match (intent_hint_raw, intent_hint) {
+        (None, _) => "none",
+        (Some(_), Some(intent)) => intent_label(intent),
+        (Some(_), None) => "invalid",
     };
+    let intent_rule = classify_intent(&effective_query);
+    // Resolved here, next to the two values it compares, rather than inline in
+    // the event below: the hint is about to be moved into `SearchOptions`, and
+    // the rule verdict is only meaningful against the query as it stood before
+    // any of that.
+    let intent_hint_effect_label =
+        intent_hint_effect(intent_hint_raw.is_some(), intent_hint, intent_rule);
+
+    let opts = build_search_options(&req, &claims.org_id, zdr, intent_hint);
 
     // ── Cache lookup (org-scoped, intent-driven TTL) ─────────────────────────
     // Key encodes only result-affecting params; highlight/facets/format are
     // re-applied per request so those variants share one entry. The org_id
     // segment is a hard tenant-isolation boundary. Billing + events still fire
     // on a hit (below) — only the expensive provider + synthesis are skipped.
-    let params_sig = format!(
-        "l={}|c={:?}|lg={:?}|s={}|t={:?}|tr={:?}|x={}|a={}|inc={:?}|exc={:?}",
-        opts.limit,
-        opts.country,
-        opts.language,
-        opts.safe_search,
-        req.topic,
-        opts.time_range,
-        req.exact_match,
-        req.include_answer,
-        opts.include_domains,
-        opts.exclude_domains,
-    );
+    let params_sig = params_signature(&opts, req.include_answer);
     let cache_key = crate::cache::SearchCache::key(&claims.org_id, &effective_query, &params_sig);
     let scache = state.redis.clone().map(crate::cache::SearchCache::new);
     let from_cache: Option<CachedSearch> = if zdr {
@@ -393,6 +684,19 @@ pub async fn search(
         None => match provider.search(&effective_query, &opts).await {
             Ok(results) => {
                 let provider_name = provider.name().to_string();
+
+                // One `search.upstream` event per upstream call, emitted only
+                // on a cache miss — so "attempted" is the count of these
+                // events, "failed" the subset with outcome=error, and the
+                // cache hit ratio comes off `cache_hit` on the shape event
+                // below. `provider` is the configured provider's own static
+                // name, so it is bounded by construction.
+                tracing::info!(
+                    provider = %provider_name,
+                    outcome = "ok",
+                    hits = results.len(),
+                    "search.upstream"
+                );
 
                 // include_answer — best-effort synthesis; never fail search on it.
                 let (answer, citations) = if req.include_answer {
@@ -443,6 +747,18 @@ pub async fn search(
                 (results, answer, citations, provider_name, false)
             }
             Err(e) => {
+                // Emitted before the early returns below, because a chain that
+                // is permanently blocked upstream produces no results and no
+                // shape event — this is the only place it is visible. The
+                // error class is `ErrorCode`, a closed enum, so it is safe as
+                // a grouping dimension; `e.message` is not (it carries
+                // provider-supplied text) and stays out.
+                tracing::warn!(
+                    provider = provider.name(),
+                    outcome = "error",
+                    error_class = ?e.code,
+                    "search.upstream"
+                );
                 let status = match e.code.http_status() {
                     400 => StatusCode::BAD_REQUEST,
                     401 => StatusCode::UNAUTHORIZED,
@@ -475,8 +791,57 @@ pub async fn search(
 
     // Result diversity: demote host crowding so one domain can't monopolise the
     // visible results (applied outermost — after the provider merge + any rerank).
-    let results = diversify_results(results);
+    let (results, demoted_by_host_cap) = diversify_results(results);
     let count = results.len();
+
+    // Source-quality telemetry. This is the shape of what the caller actually
+    // got, per engine — the signal the CAPTCHA/rate-limit audit had to curl the
+    // container by hand to discover. Emitted before highlight markup is applied
+    // so snippet lengths measure the upstream's text, not our `<mark>` tags.
+    {
+        let mut engine_mix: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        let mut unique_urls: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for result in &results {
+            *engine_mix
+                .entry(search_engine_label(&result.provider))
+                .or_insert(0) += 1;
+            unique_urls.insert(result.url.as_str());
+        }
+        let snippets = snippet_stats(results.iter().map(|r| r.snippet.as_deref()));
+        for (engine, hits) in &engine_mix {
+            tracing::info!(
+                engine = *engine,
+                hits = *hits,
+                cache_hit = cache_hit,
+                "search.engine.contribution"
+            );
+        }
+        tracing::info!(
+            provider = %provider_name,
+            cache_hit = cache_hit,
+            hits_total = count,
+            // Divergence from `hits_total` means the router's merge missed a
+            // duplicate (differing URL normalization between two engines),
+            // which is worth an alert on its own.
+            hits_unique_url = unique_urls.len(),
+            hits_demoted_host_cap = demoted_by_host_cap,
+            engines_contributing = engine_mix.len(),
+            engine_mix = %render_engine_mix(&engine_mix),
+            snippet_min = snippets.min,
+            snippet_median = snippets.median,
+            snippet_max = snippets.max,
+            snippet_missing = snippets.missing,
+            intent_hint = intent_hint_label,
+            // What the hint did, not merely that it arrived: the router routes
+            // on a supplied hint in place of its own classification, so the
+            // countable signal is whether the caller agreed with the rule
+            // verdict beside it or displaced it. See `intent_hint_effect`.
+            intent_hint_effect = intent_hint_effect_label,
+            intent_rule = intent_label(intent_rule),
+            "search.result_shape"
+        );
+    }
 
     // format=context — token-bounded RAG context for Verevon.
     let context = match req.format.as_deref() {
@@ -604,7 +969,7 @@ pub struct ImageSearchResponse {
 /// provider: "searxng" }`.
 pub async fn images(
     State(state): State<AppState>,
-    Extension(_claims): Extension<crate::auth::Claims>,
+    Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<ImageSearchRequest>,
 ) -> impl IntoResponse {
     if req.query.trim().is_empty() {
@@ -648,43 +1013,179 @@ pub async fn images(
 
     let limit = req.limit.unwrap_or(24).clamp(1, 50);
     match provider.search(req.query.trim(), limit).await {
-        Ok(images) => (
-            StatusCode::OK,
-            Json(ImageSearchResponse {
-                query: req.query,
-                provider: "searxng".into(),
-                images,
-            }),
-        )
-            .into_response(),
-        Err(e) => {
-            let status = match e.code.http_status() {
-                400 => StatusCode::BAD_REQUEST,
-                401 => StatusCode::UNAUTHORIZED,
-                403 => StatusCode::FORBIDDEN,
-                429 => StatusCode::TOO_MANY_REQUESTS,
-                502 => StatusCode::BAD_GATEWAY,
-                504 => StatusCode::GATEWAY_TIMEOUT,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                return (
-                    status,
-                    Json(crate::api_error::ApiError::rate_limited(e.message, 60)),
-                )
-                    .into_response();
-            }
+        Ok(images) => {
+            meter_vertical_search(&state, &claims, "images", images.len()).await;
             (
-                status,
-                Json(ErrorBody {
-                    error: e.message,
-                    code: format!("{:?}", e.code).to_uppercase(),
-                    hint: None,
+                StatusCode::OK,
+                Json(ImageSearchResponse {
+                    query: req.query,
+                    provider: "searxng".into(),
+                    images,
                 }),
             )
                 .into_response()
         }
+        Err(e) => vertical_error_response(e),
     }
+}
+
+// ── /v1/search/videos — VIDEOS vertical ──────────────────────────────────────
+
+/// Request body for `POST /v1/search/videos`. Mirrors [`ImageSearchRequest`]:
+/// the web `SmartSearchRouter` has no video concept, so this path talks to
+/// SearXNG's video vertical directly. Same Bearer auth as `/v1/search`.
+///
+/// This route exists because the BFF was already calling
+/// `/api/v1/search/videos`; with no edge route behind it, that call fell
+/// through to SearXNG directly and skipped everything the edge is for — org
+/// scoping, the usage meter, and the error envelope. A vertical the product
+/// ships has to terminate here, even when the handler is thin.
+#[derive(Debug, Deserialize)]
+pub struct VideoSearchRequest {
+    pub query: String,
+    /// Max videos to return. Defaults to 24, capped at 50.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VideoSearchResponse {
+    pub query: String,
+    pub provider: String,
+    pub videos: Vec<VideoResult>,
+}
+
+/// `POST /v1/search/videos` — focused SearXNG video search.
+///
+/// Reuses the configured `searxng_url`. When SearXNG isn't configured the
+/// route returns 501 with a hint (mirrors `/v1/search/images`). The response is
+/// `{ videos: [{ url, title, thumbnail_src, iframe_src, author, length,
+/// published_date, content }], query, provider: "searxng" }`.
+pub async fn videos(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Json(req): Json<VideoSearchRequest>,
+) -> impl IntoResponse {
+    if req.query.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody {
+                error: "query must not be empty".into(),
+                code: "BAD_REQUEST".into(),
+                hint: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let Some(searxng_url) = state.searxng_url.as_deref().filter(|s| !s.is_empty()) else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorBody {
+                error: "video search requires a SearXNG provider".into(),
+                code: "UNSUPPORTED".into(),
+                hint: Some("set SEARXNG_URL (QUARRY_EDGE__SEARXNG_URL) in edge config".into()),
+            }),
+        )
+            .into_response();
+    };
+
+    let provider = match SearXNGVideos::new(searxng_url) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: e.message,
+                    code: "INTERNAL".into(),
+                    hint: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let limit = req.limit.unwrap_or(24).clamp(1, 50);
+    match provider.search(req.query.trim(), limit).await {
+        Ok(videos) => {
+            meter_vertical_search(&state, &claims, "videos", videos.len()).await;
+            (
+                StatusCode::OK,
+                Json(VideoSearchResponse {
+                    query: req.query,
+                    provider: "searxng".into(),
+                    videos,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => vertical_error_response(e),
+    }
+}
+
+/// Meter one billable unit for a vertical search route (images, videos).
+///
+/// `/v1/search/images` shipped without this call, so every image search since
+/// has been served free while `/v1/search` and `/v1/search/similar` each meter
+/// one `SEARCH_QUERY` unit. Nothing in the tree exempts the verticals — no
+/// config flag, no comment, no billing-core rule — so the omission reads as an
+/// oversight rather than a policy, and copying the images handler for videos
+/// would have doubled it. One unit per successful query, matching `similar`,
+/// with `kind` naming the vertical so billing can separate them without
+/// minting a metric code billing-core does not yet know.
+async fn meter_vertical_search(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    kind: &'static str,
+    result_count: usize,
+) {
+    let run_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
+    state
+        .usage
+        .meter(quarry_runtime::UsageEvent::new(
+            run_id.to_string(),
+            claims.org_id.clone(),
+            quarry_runtime::usage_metrics::SEARCH_QUERY,
+            1.0,
+            serde_json::json!({
+                "user_id": claims.user_id,
+                "kind": kind,
+                "result_count": result_count,
+            }),
+        ))
+        .await;
+}
+
+/// Map a runtime SERP failure onto the vertical routes' error response: the
+/// structured rate-limit envelope on 429 (as `/v1/search` does), the plain
+/// `ErrorBody` otherwise. Shared by images and videos so the two cannot drift
+/// into answering the same upstream failure differently.
+fn vertical_error_response(e: quarry_core::error::QuarryError) -> axum::response::Response {
+    let status = match e.code.http_status() {
+        400 => StatusCode::BAD_REQUEST,
+        401 => StatusCode::UNAUTHORIZED,
+        403 => StatusCode::FORBIDDEN,
+        429 => StatusCode::TOO_MANY_REQUESTS,
+        502 => StatusCode::BAD_GATEWAY,
+        504 => StatusCode::GATEWAY_TIMEOUT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return (
+            status,
+            Json(crate::api_error::ApiError::rate_limited(e.message, 60)),
+        )
+            .into_response();
+    }
+    (
+        status,
+        Json(ErrorBody {
+            error: e.message,
+            code: format!("{:?}", e.code).to_uppercase(),
+            hint: None,
+        }),
+    )
+        .into_response()
 }
 
 // ── /v1/search/similar — find-similar (Exa-style) ────────────────────────────
@@ -1118,7 +1619,7 @@ mod tests {
             provider: "x".into(),
             ..Default::default()
         };
-        let out = diversify_results(vec![
+        let (out, demoted) = diversify_results(vec![
             mk("https://a.com/1"),
             mk("https://a.com/2"),
             mk("https://a.com/3"),
@@ -1138,6 +1639,356 @@ mod tests {
                 "https://a.com/4",
                 "https://a.com/5",
             ]
+        );
+        // Demotion is reported for telemetry; nothing is dropped.
+        assert_eq!(demoted, 2);
+        assert_eq!(out.len(), 6);
+    }
+
+    #[test]
+    fn diversify_reports_zero_demotions_when_hosts_are_spread() {
+        let mk = |url: &str| SearchResult {
+            url: url.into(),
+            provider: "x".into(),
+            ..Default::default()
+        };
+        let (out, demoted) = diversify_results(vec![mk("https://a.com/1"), mk("https://b.com/1")]);
+        assert_eq!(demoted, 0);
+        assert_eq!(out.len(), 2);
+    }
+
+    fn search_request(value: serde_json::Value) -> SearchRequest {
+        serde_json::from_value(value).expect("request body deserializes")
+    }
+
+    #[test]
+    fn minimal_body_denies_paid_providers() {
+        // The permission is absent from every request the fleet sends today,
+        // so "absent" is the case that has to be closed.
+        let req = search_request(serde_json::json!({ "query": "rust" }));
+        assert!(!req.allow_paid_providers);
+        assert!(!req.zdr);
+    }
+
+    #[test]
+    fn non_bool_allow_paid_providers_is_rejected_not_coerced() {
+        // `#[serde(default)]` fills in a *missing* field only; a present-but-
+        // wrong value must fail the extractor (axum → 422) rather than be read
+        // as truthy. `null` is in the list because it is the shape a JS client
+        // sends for "unset", and it must not slip past as `false` silently.
+        for bad in [
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+            serde_json::json!("yes"),
+        ] {
+            let shown = bad.to_string();
+            let mut body = serde_json::Map::new();
+            body.insert("query".into(), serde_json::json!("rust"));
+            body.insert("allow_paid_providers".into(), bad);
+            let parsed = serde_json::from_value::<SearchRequest>(serde_json::Value::Object(body));
+            assert!(
+                parsed.is_err(),
+                "non-bool allow_paid_providers must not deserialize: {shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn zdr_forces_paid_providers_closed_even_when_requested() {
+        let req = search_request(serde_json::json!({
+            "query": "rust",
+            "allow_paid_providers": true,
+            "zdr": true,
+        }));
+        let opts = build_search_options(&req, "org_alpha", effective_zdr(req.zdr), None);
+        assert!(
+            !opts.allow_paid_providers,
+            "a ZDR request must never carry paid permission to the router"
+        );
+        assert!(!opts.paid_allowed());
+    }
+
+    #[test]
+    fn paid_permission_is_granted_when_asked_for_outside_zdr() {
+        let req = search_request(serde_json::json!({
+            "query": "rust",
+            "allow_paid_providers": true,
+        }));
+        let opts = build_search_options(&req, "org_alpha", effective_zdr(req.zdr), None);
+        assert!(opts.allow_paid_providers);
+        assert!(opts.paid_allowed());
+    }
+
+    #[test]
+    fn org_scope_comes_from_claims_not_the_body() {
+        let req = search_request(serde_json::json!({ "query": "rust", "org_id": "org_evil" }));
+        let opts = build_search_options(&req, "org_alpha", false, None);
+        assert_eq!(opts.org_id.as_deref(), Some("org_alpha"));
+    }
+
+    #[test]
+    fn intent_hint_reaches_search_options() {
+        let req = search_request(serde_json::json!({ "query": "rust", "intent": "research" }));
+        let hint = req.intent.as_deref().and_then(parse_intent_hint);
+        let opts = build_search_options(&req, "org_alpha", false, hint);
+        assert_eq!(opts.intent, Some(QueryIntent::Research));
+    }
+
+    #[test]
+    fn intent_participates_in_the_cache_signature() {
+        let req = search_request(serde_json::json!({ "query": "rust" }));
+        let none = build_search_options(&req, "org_alpha", false, None);
+        let research = build_search_options(&req, "org_alpha", false, Some(QueryIntent::Research));
+        let navigational =
+            build_search_options(&req, "org_alpha", false, Some(QueryIntent::Navigational));
+
+        // Two requests that differ only by intent get different engines and so
+        // must not be able to read each other's cached results.
+        assert_ne!(
+            params_signature(&research, false),
+            params_signature(&navigational, false)
+        );
+        assert_ne!(
+            params_signature(&research, false),
+            params_signature(&none, false)
+        );
+        // The separation has to survive into the key itself, not just the sig.
+        assert_ne!(
+            crate::cache::SearchCache::key(
+                "org_alpha",
+                "rust",
+                &params_signature(&research, false)
+            ),
+            crate::cache::SearchCache::key(
+                "org_alpha",
+                "rust",
+                &params_signature(&navigational, false)
+            ),
+        );
+        // ...and identical requests must still collide, or nothing ever hits.
+        assert_eq!(
+            params_signature(&research, false),
+            params_signature(
+                &build_search_options(&req, "org_alpha", false, Some(QueryIntent::Research)),
+                false
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn videos_route_is_501_when_searxng_is_unconfigured() {
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let response = videos(
+            State(state),
+            Extension(crate::test_support::claims_for_org("org_alpha")),
+            Json(VideoSearchRequest {
+                query: "nrk nyheter".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["code"], "UNSUPPORTED");
+        assert!(body["hint"].as_str().expect("hint").contains("SEARXNG_URL"));
+    }
+
+    #[tokio::test]
+    async fn videos_route_rejects_a_blank_query() {
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let response = videos(
+            State(state),
+            Extension(crate::test_support::claims_for_org("org_alpha")),
+            Json(VideoSearchRequest {
+                query: "   ".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn intent_hint_parses_router_vocabulary_and_aliases() {
+        assert_eq!(parse_intent_hint("research"), Some(QueryIntent::Research));
+        assert_eq!(parse_intent_hint("  NEWS  "), Some(QueryIntent::Fresh));
+        assert_eq!(parse_intent_hint("Compare"), Some(QueryIntent::Comparative));
+        assert_eq!(parse_intent_hint("general"), Some(QueryIntent::Default));
+        assert_eq!(parse_intent_hint("nav"), Some(QueryIntent::Navigational));
+    }
+
+    #[test]
+    fn intent_hint_unknown_is_dropped_not_guessed() {
+        // Must stay `None` rather than falling back to Default: a hint we can't
+        // read is a contract mismatch worth surfacing, not a Default request.
+        assert!(parse_intent_hint("shopping").is_none());
+        assert!(parse_intent_hint("").is_none());
+    }
+
+    #[test]
+    fn intent_hint_effect_separates_agreement_from_override() {
+        // The rules call this Fresh. A caller that says Fresh too agreed; one
+        // that says Research displaced them — and because the router overrides
+        // rather than seeds, Research is what actually ran. Collapsing the two
+        // into "honored" would erase the whole disagreement signal.
+        let rule = classify_intent("breaking news today");
+        assert_eq!(rule, QueryIntent::Fresh);
+        assert_eq!(
+            intent_hint_effect(true, Some(QueryIntent::Fresh), rule),
+            "used_agreed"
+        );
+        assert_eq!(
+            intent_hint_effect(true, Some(QueryIntent::Research), rule),
+            "used_overrode"
+        );
+    }
+
+    #[test]
+    fn intent_hint_effect_reports_the_intent_the_router_routes_on() {
+        // Honesty check on the field: the value the label calls "used" is the
+        // same one that reaches the router in `SearchOptions::intent`, which
+        // `resolve_intent` adopts verbatim instead of classifying.
+        let req = search_request(serde_json::json!({
+            "query": "breaking news today",
+            "intent": "research",
+        }));
+        let raw = req.intent.as_deref();
+        let hint = raw.and_then(parse_intent_hint);
+        let opts = build_search_options(&req, "org_alpha", false, hint);
+        let rule = classify_intent(&apply_exact_match(&req.query, req.exact_match));
+
+        assert_eq!(opts.intent, Some(QueryIntent::Research));
+        assert_ne!(opts.intent, Some(rule));
+        assert_eq!(
+            intent_hint_effect(raw.is_some(), hint, rule),
+            "used_overrode"
+        );
+    }
+
+    #[test]
+    fn unreadable_hint_is_never_reported_as_used() {
+        // An unparseable hint is dropped before `SearchOptions`, so the router
+        // classified this request itself. Reporting it as used would overstate
+        // the caller's reach; reporting it as "none" would bury a mis-wired
+        // client in the no-hint baseline.
+        let req = search_request(serde_json::json!({ "query": "rust", "intent": "shopping" }));
+        let raw = req.intent.as_deref();
+        let hint = raw.and_then(parse_intent_hint);
+        let opts = build_search_options(&req, "org_alpha", false, hint);
+        let rule = classify_intent(&req.query);
+
+        assert_eq!(opts.intent, None);
+        assert_eq!(intent_hint_effect(raw.is_some(), hint, rule), "invalid");
+        assert_eq!(intent_hint_effect(false, None, rule), "none");
+    }
+
+    #[test]
+    fn intent_hint_effect_labels_stay_a_closed_set() {
+        // The field is a grouping dimension, so every reachable input — valid,
+        // absent or malformed — has to land in this fixed set.
+        const ALLOWED: [&str; 4] = ["none", "invalid", "used_agreed", "used_overrode"];
+        let all = [
+            QueryIntent::Navigational,
+            QueryIntent::Fresh,
+            QueryIntent::Phrase,
+            QueryIntent::Research,
+            QueryIntent::Comparative,
+            QueryIntent::Local,
+            QueryIntent::Code,
+            QueryIntent::Default,
+        ];
+        for rule in all {
+            for supplied in [true, false] {
+                let dropped = intent_hint_effect(supplied, None, rule);
+                assert!(ALLOWED.contains(&dropped), "unbounded label: {dropped}");
+                for hint in all {
+                    let label = intent_hint_effect(supplied, Some(hint), rule);
+                    assert!(ALLOWED.contains(&label), "unbounded label: {label}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn intent_labels_are_distinct_and_stable() {
+        let all = [
+            QueryIntent::Navigational,
+            QueryIntent::Fresh,
+            QueryIntent::Phrase,
+            QueryIntent::Research,
+            QueryIntent::Comparative,
+            QueryIntent::Local,
+            QueryIntent::Code,
+            QueryIntent::Default,
+        ];
+        let labels: std::collections::HashSet<&str> =
+            all.iter().map(|i| intent_label(*i)).collect();
+        assert_eq!(labels.len(), all.len());
+        assert_eq!(intent_label(QueryIntent::Fresh), "fresh");
+    }
+
+    #[test]
+    fn engine_label_clamps_unknown_to_other() {
+        assert_eq!(search_engine_label("searxng"), "searxng");
+        assert_eq!(search_engine_label("tantivy_local"), "tantivy_local");
+        // Anything an adapter invents stays out of the label space.
+        assert_eq!(search_engine_label("searxng-eu-3"), "other");
+        assert_eq!(search_engine_label(""), "other");
+    }
+
+    #[test]
+    fn engine_mix_renders_sorted_and_stable() {
+        let mut mix: std::collections::BTreeMap<&'static str, usize> = Default::default();
+        mix.insert("searxng", 8);
+        mix.insert("brave", 2);
+        assert_eq!(render_engine_mix(&mix), "brave=2,searxng=8");
+        assert_eq!(render_engine_mix(&Default::default()), "");
+    }
+
+    #[test]
+    fn snippet_stats_summarise_distribution() {
+        let stats = snippet_stats(vec![Some("abcde"), Some("a"), Some("abc")]);
+        assert_eq!(
+            stats,
+            SnippetStats {
+                min: 1,
+                median: 3,
+                max: 5,
+                missing: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn snippet_stats_count_blank_as_missing_not_zero_length() {
+        // A blank snippet must not drag `min` to 0 — a shut-out engine would
+        // then look like a terse-but-working one.
+        let stats = snippet_stats(vec![Some("abcd"), Some("   "), None]);
+        assert_eq!(stats.min, 4);
+        assert_eq!(stats.max, 4);
+        assert_eq!(stats.missing, 2);
+    }
+
+    #[test]
+    fn snippet_stats_all_missing_is_zeroed() {
+        let stats = snippet_stats(vec![None, None]);
+        assert_eq!(
+            stats,
+            SnippetStats {
+                min: 0,
+                median: 0,
+                max: 0,
+                missing: 2,
+            }
+        );
+        assert_eq!(
+            snippet_stats(Vec::<Option<&str>>::new()),
+            SnippetStats::default()
         );
     }
 
@@ -1296,5 +2147,72 @@ mod tests {
         let p: Arc<dyn SearchProvider> = Arc::new(ErrProvider);
         let err = p.search("q", &SearchOptions::default()).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::RateLimited);
+    }
+
+    // ── structured facts on citations ───────────────────────────────────────
+
+    fn citation_with_figure() -> Citation {
+        Citation {
+            url: "https://ssb.example/kommunefakta".into(),
+            title: Some("Kommunefakta".into()),
+            rank: 1,
+            provider: "fake".into(),
+            outcome: None,
+            structured: Some(quarry_transform::structured::StructuredData {
+                figures: vec![quarry_transform::structured::KeyFigure {
+                    label: "Folketallet".into(),
+                    value: "729 437".into(),
+                    unit: Some("personer".into()),
+                    period: Some("2. kvartal 2026".into()),
+                    source: quarry_transform::structured::FigureSource::Hydration,
+                }],
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn cached_search_round_trips_a_citation_s_structured_facts() {
+        // The cache is the one place between the answer pipeline and the
+        // client that re-serializes a citation. A field it silently dropped
+        // would make the facts appear only on cache misses — the kind of
+        // difference nobody notices until a user reports a flaky answer.
+        let payload = CachedSearch {
+            provider: "fake".into(),
+            results: vec![r("https://ssb.example/kommunefakta", "K", "s")],
+            answer: Some("Oslo har 729 437 innbyggere.".into()),
+            citations: Some(vec![citation_with_figure()]),
+        };
+        let wire = serde_json::to_string(&payload).unwrap();
+        let back: CachedSearch = serde_json::from_str(&wire).unwrap();
+        let figure = &back.citations.unwrap()[0]
+            .structured
+            .as_ref()
+            .expect("harvest survives the cache")
+            .figures[0];
+        assert_eq!(figure.value, "729 437");
+        assert_eq!(figure.period.as_deref(), Some("2. kvartal 2026"));
+    }
+
+    #[test]
+    fn a_response_without_structured_facts_is_unchanged() {
+        let response = SearchResponse {
+            query: "oslo".into(),
+            provider: "fake".into(),
+            results: vec![],
+            count: 0,
+            answer: Some("…".into()),
+            citations: Some(vec![Citation {
+                structured: None,
+                ..citation_with_figure()
+            }]),
+            context: None,
+            facets: None,
+        };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(
+            !wire.contains("structured"),
+            "the new channel must be invisible when a page had none: {wire}"
+        );
     }
 }
