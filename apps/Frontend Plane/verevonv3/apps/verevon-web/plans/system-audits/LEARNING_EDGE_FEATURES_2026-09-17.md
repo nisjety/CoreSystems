@@ -1,6 +1,6 @@
 # What gives Verevon an edge — external landscape research and build list
 
-> **Execution update — 2026-09-19:** [Q05–Q07](PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) supersedes the older delivery/parse/retry and memory edit/forget findings below. Source isolation, deletion across a background cycle, schema-bearing skill reviews and one delayed retry recovery were verified locally. Historical exhausted events are not all recovered; grounding remains disabled and audit outbox delivery is still unhealthy. [Q08–Q10](PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) tracks the current product recording gate. The research and earlier observations remain historical evidence.
+> **Execution update — 2026-09-19:** [Q05–Q07](../product-recordings/evidence/PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) supersedes the older delivery/parse/retry and memory edit/forget findings below. Source isolation, deletion across a background cycle, schema-bearing skill reviews and one delayed retry recovery were verified locally. Historical exhausted events are not all recovered; grounding remains disabled and audit outbox delivery is still unhealthy. [Q08–Q10](../product-recordings/evidence/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) tracks the current product recording gate. The research and earlier observations remain historical evidence.
 
 Research and design pass, cross-referencing `CACHE_COMPACTION_AUDIT_2026-09-17.md`,
 `LEARNING_SYSTEM_REDESIGN_2026-09-17.md`, the chat design/UX/implementation docs, and

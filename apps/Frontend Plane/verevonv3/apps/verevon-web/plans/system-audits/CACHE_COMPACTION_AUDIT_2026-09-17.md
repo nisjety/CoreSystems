@@ -1,6 +1,6 @@
 # Cache + Conversation Compaction Audit — 2026-09-17
 
-> **Execution update — 2026-09-19:** The design-only status below is historical. [Q01–Q04](PRODUCT_RECORDING_Q01_Q04_2026-09-19.md) records implemented capability selection, native summary round-trip and live threshold/restart verification. These are separate from performance certification: [Q08–Q10](PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) tracks measured latency and recovery. Do not reopen the original gaps without checking those results, or infer a speed target has passed from request acceptance alone.
+> **Execution update — 2026-09-19:** The design-only status below is historical. [Q01–Q04](../product-recordings/evidence/PRODUCT_RECORDING_Q01_Q04_2026-09-19.md) records implemented capability selection, native summary round-trip and live threshold/restart verification. These are separate from performance certification: [Q08–Q10](../product-recordings/evidence/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) tracks measured latency and recovery. Do not reopen the original gaps without checking those results, or infer a speed target has passed from request acceptance alone.
 
 Research and design pass. No code was changed as part of this document. Produced by a
 5-researcher + adversarial-verify + synthesis workflow: 1 external best-practice researcher

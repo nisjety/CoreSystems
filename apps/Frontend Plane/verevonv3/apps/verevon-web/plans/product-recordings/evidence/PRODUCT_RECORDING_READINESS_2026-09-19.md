@@ -22,11 +22,11 @@ The intended experience is: give Verevon a task once, see useful progress, inspe
 
 Read the current-checkout versions of:
 
-- `LEARNING_EDGE_FEATURES_2026-09-17.md`, including sections 5–6.
-- `CACHE_COMPACTION_AUDIT_2026-09-17.md`, including section 7.
-- `AI_FIRST_CREED_STATUS_2026-08-28.md`, including both September 17 updates.
-- Repository-root `VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md`, including sections 21–23 and its product invariants/release gates.
-- `CHAT_PARITY_AUDIT_2026-09-15.md`, including section 0.2 at the end.
+- [Learning edge features](../../system-audits/LEARNING_EDGE_FEATURES_2026-09-17.md), including sections 5–6.
+- [Cache and compaction audit](../../system-audits/CACHE_COMPACTION_AUDIT_2026-09-17.md), including section 7.
+- [AI-first creed status](../../system-audits/AI_FIRST_CREED_STATUS_2026-08-28.md), including both September 17 updates.
+- [Chat workspace implementation plan](../../chat-workspace/VEREVON_CHAT_WORKSPACE_IMPLEMENTATION_PLAN.md), including sections 21–23 and its product invariants/release gates.
+- [Chat parity audit](../../system-audits/CHAT_PARITY_AUDIT_2026-09-15.md), including section 0.2 at the end.
 - The three recording folders, source packs, prompts, control notes, direction notes, manifests, and run logs.
 
 Cross-checked relevant Frontend, Model, and Ingestion source, current container metadata, bounded capability-core logs, saved Playwright failures, and selected tests. Did not rerun the four live business scenarios, redeploy services, modify business records, or record/publish media in this assessment.

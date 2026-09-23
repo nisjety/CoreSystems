@@ -1,6 +1,6 @@
 # Kjøre- og opptakslogg
 
-> **Gjeldende status — 23. september 2026:** Den siste [pass-6-rapporten](../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) og [loggposten nederst](#23092026--pass-6-separat-prosjektstatus-og-privat-prøvefilm) styrer publiseringsstatus. Fire private prøvefilmer finnes fra ulike bygg; prosjektfilmen er nå en lesbar privat prøve, men gjentatte prosjektforsøk har fortsatt feilet. Alle fire oppgaver står på 0/5 kvalifiserte sammenhengende kjøringer, og ingen offentlige medier er godkjent. De eldre kjøringene nedenfor er historikk. Opptak er teknisk mulig med Playwright; de tidligere verktøybegrensningene er historiske. Se [opptaksprosedyren](RECORDING-WORKFLOW.md).
+> **Gjeldende status — 23. september 2026:** Den siste [pass-6-rapporten](evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) og [loggposten nederst](#23092026--pass-6-separat-prosjektstatus-og-privat-prøvefilm) styrer publiseringsstatus. Fire private prøvefilmer finnes; prosjektfilmen er en lesbar prøve fra det siste byggets femte sammenhengende beståtte prosjektløp. Tidligere feilforsøk er bevart som historikk. Alle fire oppgaver står på 0/5 kvalifiserte sammenhengende kjøringer, og ingen offentlige medier er godkjent. Opptak er teknisk mulig med Playwright; de tidligere verktøybegrensningene er historiske. Se [opptaksprosedyren](RECORDING-WORKFLOW.md).
 
 Status ved klargjøring, 14. september 2026:
 - [x] Fire oppgavebeskrivelser
@@ -253,7 +253,7 @@ Etter minne- og kunnskapsrettelsene gikk jeg gjennom resten av systemet (feiltel
 
 ## 19.09.2026 — Q01–Q04: nytt akseptansegrunnlag og rettelser
 
-**Status:** Q01–Q04 er implementert og verifisert i lokal stakk. Siste vedlikeholdte nettleserkjøring (`live-10`) bestod **6 av 6 tester**. Dette er ikke ny godkjenning av alle fire scenarioer eller klart markedsmateriell. Full dokumentasjon, også av mislykkede forsøk: [Q01–Q04 execution record](../../../../docs/PRODUCT_RECORDING_Q01_Q04_2026-09-19.md).
+**Status:** Q01–Q04 er implementert og verifisert i lokal stakk. Siste vedlikeholdte nettleserkjøring (`live-10`) bestod **6 av 6 tester**. Dette er ikke ny godkjenning av alle fire scenarioer eller klart markedsmateriell. Full dokumentasjon, også av mislykkede forsøk: [Q01–Q04 execution record](evidence/PRODUCT_RECORDING_Q01_Q04_2026-09-19.md).
 
 - Q01: innlogget testbruker, aktiv organisasjon, fullført onboarding og HTTP-sjekk før chat. Vite oppdaget tidligere filer og overvåket store, uvedkommende mapper; oppstarten kunne stoppe i flere minutter. Avgrenset skanning/overvåking og erstattet TCP-helsesjekk med HTTP.
 - Q02: PDF, DOCX med tabell, CSV og Markdown er faktisk lest gjennom både dashboard og chat. Ekstraksjonsfeil og fullt nettleserlager beholder utkast og filer og starter ingen inferens. Vedlegg blir ikke automatisk organisasjonskunnskap. Dokumentekstraksjon er midlertidig; etter servergjenåpning er PDF/DOCX tilgjengelig som ærlig navngitt tekstkopi.
@@ -266,7 +266,7 @@ Siste scenario: ca. **43 sekunder** for første utkast og **29 sekunder** for re
 
 ## 23.09.2026 — Gjeldende opptaksstatus etter pass 4
 
-Avsnittene over er historiske kjørelogger fra 14.–19. september. «Godkjent» der betyr kontroll av det konkrete eldre forsøket, ikke godkjenning av et publiseringsbygg eller dagens produktfilmer. Alle nye live-tester i [pass 4](../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS4_2026-09-23.md) brukte bare `gpt-5.6-terra` via `openai-codex-subscription`; eldre logglinjer om Claude er ikke den aktive opptaksruten.
+Avsnittene over er historiske kjørelogger fra 14.–19. september. «Godkjent» der betyr kontroll av det konkrete eldre forsøket, ikke godkjenning av et publiseringsbygg eller dagens produktfilmer. Alle nye live-tester i [pass 4](evidence/PRODUCT_RECORDING_CAPTURE_PASS4_2026-09-23.md) brukte bare `gpt-5.6-terra` via `openai-codex-subscription`; eldre logglinjer om Claude er ikke den aktive opptaksruten.
 
 | Oppgave | Nåværende bevis | Gjenstår |
 | --- | --- | --- |
@@ -279,7 +279,7 @@ Alle fire står på **0/5** kvalifiserte sammenhengende kjøringer; 20/20 offent
 
 ## 23.09.2026 — Pass 5: prioritert abonnementskontroll og prosjektforsøk v21–v25
 
-Dette er gjeldende status etter [pass-5-rapporten](../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS5_2026-09-23.md). Alle nye live-kall brukte bare `gpt-5.6-terra` via `openai-codex-subscription`. Kildekontrollen beholdt høy resonneringsinnsats og ba abonnementstjenesten om prioritert behandling. Den bestod 104/104 merkede semantiske tilfeller og 10/10 uavhengige recheck-kontroller.
+Dette er gjeldende status etter [pass-5-rapporten](evidence/PRODUCT_RECORDING_CAPTURE_PASS5_2026-09-23.md). Alle nye live-kall brukte bare `gpt-5.6-terra` via `openai-codex-subscription`. Kildekontrollen beholdt høy resonneringsinnsats og ba abonnementstjenesten om prioritert behandling. Den bestod 104/104 merkede semantiske tilfeller og 10/10 uavhengige recheck-kontroller.
 
 Prosjektforsøk v21–v25 ga fortsatt ingen komplett bestått førstetur, eksakt REGI-revisjon, gjenåpning eller film. v22 og v24 opprettet kildekontrollerte artefakter, men hele nettleserløpet feilet. v24 avdekket en falsk avvisning i testorakelet av en foreslått dato med tydelig godkjenningsvilkår; denne er rettet. v25s uavhengige recheck fant ytterligere udokumentert innhold, og videre retting rakk ikke fristen. Den raske komprimerte rechecken fra v21 ble forkastet; fullstendig kildegrunnlag og uavhengig kontroll er beholdt.
 
@@ -289,7 +289,7 @@ Alle fire oppgaver står fortsatt på **0/5** sammenhengende kvalifiserte kjøri
 
 Prosjektløpet har nå flere komplette private kjøringer med kildekontrollert prosjektplan, en **egen** intern REGI-statusnote og begge artefakter bevart etter gjenåpning. v30 viste hvorfor en grønn test uten bevaringskontroll ikke var nok: statusnoten overskrev da planens nyeste versjon. Den skjerpede testen avviser dette, og senere beståtte kjøringer bevarer begge. Den firekolonners planen er lesbar ved 1440 × 900. Et bestått v57-råopptak på **137,88 sekunder** fra det siste bygg er klippet til en **34,52-sekunders** privat prøvefilm med norsk tekstspor og tydelig merking av tidskutt; råopptaket er bevart. Det eldre v41-klippet er bevart som historisk prøve. Ingen medier er flyttet til offentlig mappe.
 
-Feilforsøkene er like viktige for status: v34, v36, v40, v42, v45 og v48 viste tidsavbrudd etter nye udokumenterte påstander eller gjentatt note-reparasjon. v47 og v52 ble avvist av for snevre norske nettleserfasiter; disse er rettet, men feilopptakene står fortsatt som feil. v52 inneholdt også en faktisk udokumentert «vedtatt»-merking av en oppgitt aktivitetsdato; lokal kildekontroll og forfatterveiledning er skjerpet. [Pass-6-rapporten](../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) skiller hvert bygg og utfall. Alle live-kall brukte bare `gpt-5.6-terra` via `openai-codex-subscription`, uten automatisk omkjøring.
+Feilforsøkene er like viktige for status: v34, v36, v40, v42, v45 og v48 viste tidsavbrudd etter nye udokumenterte påstander eller gjentatt note-reparasjon. v47 og v52 ble avvist av for snevre norske nettleserfasiter; disse er rettet, men feilopptakene står fortsatt som feil. v52 inneholdt også en faktisk udokumentert «vedtatt»-merking av en oppgitt aktivitetsdato; lokal kildekontroll og forfatterveiledning er skjerpet. [Pass-6-rapporten](evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) skiller hvert bygg og utfall. Alle live-kall brukte bare `gpt-5.6-terra` via `openai-codex-subscription`, uten automatisk omkjøring.
 
 På siste gateway-image `sha256:d5c2ceba6f568d1c018984032cda28cd4bed0a77668830ea0f3883bce91ed9c6` bestod v53–v57 **5/5 sammenhengende private** prosjektforløp med uendrede kilder. Første plan tok 44,0–116,0 sekunder; intern status 29,3–45,5 sekunder. Dette er sterkere privat korrekthetsbevis, men ikke den kvalifiserte publiseringsserien for alle fire oppgaver eller en etablert p95-ytelse.
 

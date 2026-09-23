@@ -11,7 +11,7 @@ All live generation, review and repair used **`gpt-5.6-terra` through `openai-co
 - Corrected result framing: the first take passed its content checks but left the document mostly below the viewport. The second take uses the real workspace divider and scrolls the document into view. Reading holds make the instruction, source, first answer, revision and restored answer inspectable. Holds before submission are excluded from measured task latency. No answer or screen content is fabricated.
 - Added a customer export command with a SHA-256-bound edit plan, chronological cuts, separate Norwegian action-description captions for short/full versions, an actual result poster and visible rehearsal/time-cut disclosure. It preserves the raw file byte for byte, decodes both outputs and verifies media duration. The final caption is bounded by encoded duration, including frame rounding.
 - Fixed the public media approval contract to require an integer pass count of at least five. Missing values, numeric strings, fractions and non-finite values no longer pass through JavaScript comparison coercion.
-- Updated the canonical manifest, README and [recording workflow](../apps/verevon-web/plans/product-recordings/RECORDING-WORKFLOW.md) to the September 22 evidence. Historical runs remain historical; all public media paths remain null.
+- Updated the canonical manifest, README and [recording workflow](../RECORDING-WORKFLOW.md) to the September 22 evidence. Historical runs remain historical; all public media paths remain null.
 
 ## Captured attempts
 

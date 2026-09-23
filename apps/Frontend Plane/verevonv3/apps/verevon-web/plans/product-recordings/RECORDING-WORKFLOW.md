@@ -1,6 +1,6 @@
 # Opptak og publiseringskontroll
 
-Status 23. september 2026: **fire private prøvefilmer finnes; publiseringsgodkjenning mangler**. Prosjektfilmen er en privat prøve fra et tidligere bestått bygg. Siste bygg bestod fem sammenhengende private prosjektprøver, men den kvalifiserte publiseringsserien for alle fire oppgaver mangler. Se [gjeldende opptaksrapport](../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) og [opptaksstatusen](manifest.json). Bruk bare `gpt-5.6-terra` gjennom `openai-codex-subscription`. Testene avviser andre ruter; en manglende forbindelse må løses før opptak.
+Status 23. september 2026: **fire private prøvefilmer finnes; publiseringsgodkjenning mangler**. Prosjektfilmen er en privat prøve fra det siste byggets femte sammenhengende beståtte prosjektløp, men den kvalifiserte publiseringsserien for alle fire oppgaver mangler. Se [gjeldende opptaksrapport](evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) og [opptaksstatusen](manifest.json). Bruk bare `gpt-5.6-terra` gjennom `openai-codex-subscription`. Testene avviser andre ruter; en manglende forbindelse må løses før opptak.
 
 ## Privat prøveopptak
 
@@ -14,7 +14,7 @@ node --experimental-strip-types scripts/capture-product.mjs --mode rehearsal --s
 - `rehearsal` tillater privat feilsøking mens publiseringsportene er åpne. Den gir aldri publiseringsgodkjenning. Automatisk omkjøring er deaktivert.
 - Verktøyet registrerer faktiske Docker-image-ID-er, modell/rute, start/slutt og testresultat i en separat `.run.json`, samt Playwright-rapport i `.json`. Disse er private bevis, ikke mediefiler.
 - Kundetesten bruker eksakt prompt, kildepakke og REGI-oppfølging. Den kontrollerer kildehashene, faktiske svar, ordgrenser, dokumentversjon, kildebevaring, kvittering og gjenlasting fra server. Opptaket har lesepauser og et større resultatpanel; pausene legges ikke til målt svartid.
-- `02-salgsrapport`, `03-kampanje` og `04-prosjektplan` bruker de eksisterende akseptansetestene med kildevisning, større resultatpanel, lesepauser, REGI-oppfølging og gjenlasting. De registrerer også kildehasher, opptaksmarkører og akseptansestatus. Se [pass 6](../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) for gjeldende utfall. Et råopptak fra en feilet test blir aldri en godkjent film.
+- `02-salgsrapport`, `03-kampanje` og `04-prosjektplan` bruker de eksisterende akseptansetestene med kildevisning, større resultatpanel, lesepauser, REGI-oppfølging og gjenlasting. De registrerer også kildehasher, opptaksmarkører og akseptansestatus. Se [pass 6](evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) for gjeldende utfall. Et råopptak fra en feilet test blir aldri en godkjent film.
 
 `video.webm` lagres under testens mappe når nettleserkonteksten lukkes. Hele oppgaven, faktisk ventetid og eventuelle feil beholdes. Opptakstestene lagrer også `capture.json` med opptaksmarkører og akseptansestatus. Se råfilen før redigering; markørene er veggklokketider som må sammenholdes med videobildene.
 

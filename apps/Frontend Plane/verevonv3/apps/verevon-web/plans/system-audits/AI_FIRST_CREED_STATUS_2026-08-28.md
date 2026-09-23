@@ -1,6 +1,6 @@
 # AI-first creed — status, 2026-08-28
 
-> **Execution update — 2026-09-19:** The ratios below describe dated snapshots, not current product coverage. [The readiness assessment](PRODUCT_RECORDING_READINESS_2026-09-19.md) confirmed 167 registered action IDs and eight admitted mutation IDs; neither is universal task parity. [Q05–Q07](PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) verifies isolated scenario execution and scoped inbox/quote reads, with Visma/populated business knowledge still open. [Q08–Q10](PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) records current experience/media readiness. No connected ERP or flawless-product claim follows from the historical percentages.
+> **Execution update — 2026-09-19:** The ratios below describe dated snapshots, not current product coverage. [The readiness assessment](../product-recordings/evidence/PRODUCT_RECORDING_READINESS_2026-09-19.md) confirmed 167 registered action IDs and eight admitted mutation IDs; neither is universal task parity. [Q05–Q07](../product-recordings/evidence/PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) verifies isolated scenario execution and scoped inbox/quote reads, with Visma/populated business knowledge still open. [Q08–Q10](../product-recordings/evidence/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) records current experience/media readiness. No connected ERP or flawless-product claim follows from the historical percentages.
 
 Four clauses, each re-derived from the current code and live databases rather
 than carried forward from the prior audit. Source commands are noted so the

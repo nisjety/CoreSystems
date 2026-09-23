@@ -72,7 +72,7 @@ import type { ActionId } from '@/shared/actions/action-registry'
  * paradigmatic threat for an action that ends sessions and revokes org
  * access, so admitting it on a 2-of-3 vote would understate a real,
  * specifically-identified gap rather than a generic residual doubt. See
- * docs/AI_FIRST_CREED_STATUS_2026-08-28.md for the full evidence trail;
+ * apps/verevon-web/plans/system-audits/AI_FIRST_CREED_STATUS_2026-08-28.md for the full evidence trail;
  * this is a flagged decision point for whoever owns the eligibility bar,
  * not a rejection of the underlying receipt/idempotency infrastructure
  * (which is genuinely solid).

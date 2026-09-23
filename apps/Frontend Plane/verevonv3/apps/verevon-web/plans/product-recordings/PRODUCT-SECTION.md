@@ -1,6 +1,6 @@
 # Produktseksjonen — planlagt, ikke publiseringsklar
 
-**Status 23. september 2026:** Alle fire oppgaver har nå private prøvefilmer på ulike bygg, inkludert en lesbar prosjektplanfilm fra et bestått råopptak. Siste bygg bestod fem sammenhengende private prosjektprøver, men alle fire står fortsatt på 0/5 kvalifiserte sammenhengende **publiseringskjøringer** på ett valgt bygg. Ingen medier er godkjent for offentlig visning. Se [gjeldende opptaksstatus](../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) og [prioritert plan](README.md).
+**Status 23. september 2026:** Alle fire oppgaver har nå private prøvefilmer på ulike bygg, inkludert en lesbar prosjektplanfilm fra et bestått råopptak. Siste bygg bestod fem sammenhengende private prosjektprøver, men alle fire står fortsatt på 0/5 kvalifiserte sammenhengende **publiseringskjøringer** på ett valgt bygg. Ingen medier er godkjent for offentlig visning. Se [gjeldende opptaksstatus](evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md) og [prioritert plan](README.md).
 
 Planlagt innhold for fire faktiske demoer. Dette dokumentet klargjør innhold og medieplassering; det endrer ikke dagens nettside.
 

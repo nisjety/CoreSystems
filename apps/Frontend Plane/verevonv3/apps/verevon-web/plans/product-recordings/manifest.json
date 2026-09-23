@@ -38,7 +38,7 @@
       "currentEvidence": {
         "reviewedOn": "2026-09-22",
         "consecutivePassesOnReleaseBuild": 0,
-        "record": "../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
+        "record": "evidence/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
@@ -86,7 +86,7 @@
       "currentEvidence": {
         "reviewedOn": "2026-09-22",
         "consecutivePassesOnReleaseBuild": 0,
-        "record": "../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
+        "record": "evidence/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
@@ -134,7 +134,7 @@
       "currentEvidence": {
         "reviewedOn": "2026-09-22",
         "consecutivePassesOnReleaseBuild": 0,
-        "record": "../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
+        "record": "evidence/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
@@ -181,7 +181,7 @@
       "currentEvidence": {
         "reviewedOn": "2026-09-23",
         "consecutivePassesOnReleaseBuild": 0,
-        "record": "../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md",
+        "record": "evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
@@ -205,7 +205,7 @@
       "Four private previews exist on different test builds, including a project preview from an earlier passing build; no public media pack is approved."
     ],
     "reviewedOn": "2026-09-23",
-    "evidence": "../../../../docs/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md",
+    "evidence": "evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md",
     "status": "blocked",
     "gates": {
       "trust": "partial",

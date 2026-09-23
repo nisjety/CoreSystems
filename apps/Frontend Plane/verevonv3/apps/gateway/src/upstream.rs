@@ -1640,7 +1640,7 @@ pub(crate) async fn proxy_sse_stream_with_session(
     body: Option<Value>,
     bearer_token: Option<&str>,
     session_bearer: Option<&str>,
-    // See F-14, docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: without this,
+    // See F-14, apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: without this,
     // model-gateway's moderation.rs never sees a bearer for the PII/
     // injection-defense policy lookup and fails closed (redacts
     // unconditionally) on every resumed/replayed chat stream too.
@@ -1678,7 +1678,7 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
     body: Option<Value>,
     bearer_token: Option<&str>,
     data_plane_bearer: Option<&str>,
-    // See F-14, docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: the org's PII and
+    // See F-14, apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: the org's PII and
     // injection-defense policies live in capability-core and are looked up by
     // model-gateway keyed off this bearer. Absent it, moderation.rs fails
     // closed (redacts everything, including PII the user typed themselves)

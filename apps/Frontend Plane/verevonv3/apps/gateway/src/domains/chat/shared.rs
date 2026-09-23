@@ -271,7 +271,7 @@ pub(crate) async fn required_capability_token(
 /// is absent, so degrading to `None` here is safe; it only costs the org's
 /// configured PII/injection-defense policy for this one turn, instead of
 /// leaving that policy permanently unreachable from chat by construction
-/// (see docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9, finding F-14).
+/// (see apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9, finding F-14).
 pub(crate) async fn best_effort_capability_token(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -561,7 +561,7 @@ pub(crate) async fn proxy_model_json_with_session(
 
 /// Same as `proxy_model_json_with_session`, plus the `aud=capability-core`
 /// bearer — needed on the durable browser-event replay read (see F-14,
-/// docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9) so the org's PII/
+/// apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9) so the org's PII/
 /// injection-defense policy is reachable there too, not just on the live
 /// stream. A dedicated wrapper rather than adding the parameter to
 /// `proxy_model_json_with_session` itself: that function has many unrelated
@@ -1045,7 +1045,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): `stream_chat` is the
+    // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): `stream_chat` is the
     // live chat-turn path — this confirms a successfully minted capability
     // bearer reaches model-gateway on it as `x-capability-authorization`,
     // which is what unblocks the org's PII/injection-defense policy lookup.
@@ -1140,7 +1140,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
     }
 
-    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): the chat-stream call
+    // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): the chat-stream call
     // sites must forward `x-capability-authorization` on a successful mint so
     // model-gateway's moderation.rs can consult the org's actual PII/
     // injection-defense policy instead of always failing closed. This exercises

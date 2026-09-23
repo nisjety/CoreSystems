@@ -24,7 +24,7 @@ pub(super) async fn stream_chat(
     let token = shared::model_token(&state, &user, &headers).await;
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
     let ingestion_token = shared::ingestion_token(&state, &user, &headers).await;
-    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): best-effort, not
+    // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): best-effort, not
     // `required_*` — a mint failure must degrade the PII/injection-defense
     // policy lookup (model-gateway fails closed and redacts), not the turn.
     let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
@@ -132,7 +132,7 @@ pub(super) async fn resume_stream(
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
     let session_token = shared::session_token(&state, &user, &headers).await;
-    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
+    // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
     let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let last_event_id = headers
@@ -167,7 +167,7 @@ pub(super) async fn run_events_stream(
 ) -> Response {
     let token = shared::model_token(&state, &user, &headers).await;
     let session_token = shared::session_token(&state, &user, &headers).await;
-    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
+    // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
     let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     // Phase 2: forward `last-event-id` like `resume_stream` already does — a
@@ -228,7 +228,7 @@ pub(super) async fn run_events_replay(
         Ok(token) => token,
         Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
     };
-    // F-14 (docs/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
+    // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): see stream_chat above.
     let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let mut url = format!(
         "{}/v1/runs/{}/events/replay",

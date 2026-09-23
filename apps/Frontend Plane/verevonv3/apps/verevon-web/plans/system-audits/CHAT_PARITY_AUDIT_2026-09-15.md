@@ -1,6 +1,6 @@
 # Verevon Chat — Parity & Edge-Case Audit (2026-09-15)
 
-> **Execution update — 2026-09-19:** [Q01–Q04](PRODUCT_RECORDING_Q01_Q04_2026-09-19.md) records durable attachment/artifact checks; [Q05–Q07](PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) records verified memory edit/forget and source isolation. [Q08–Q10](PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) contains the latest interrupted-stream, stop/continue/regenerate, rendering and recording-gate results. Original findings and their earlier remediation notes below remain historical evidence; they do not establish the latest release gate.
+> **Execution update — 2026-09-19:** [Q01–Q04](../product-recordings/evidence/PRODUCT_RECORDING_Q01_Q04_2026-09-19.md) records durable attachment/artifact checks; [Q05–Q07](../product-recordings/evidence/PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) records verified memory edit/forget and source isolation. [Q08–Q10](../product-recordings/evidence/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) contains the latest interrupted-stream, stop/continue/regenerate, rendering and recording-gate results. Original findings and their earlier remediation notes below remain historical evidence; they do not establish the latest release gate.
 
 > **Scope.** Test, audit and document — no code was changed for this document.
 > Builds on the 2026-08-01 ten-harness study

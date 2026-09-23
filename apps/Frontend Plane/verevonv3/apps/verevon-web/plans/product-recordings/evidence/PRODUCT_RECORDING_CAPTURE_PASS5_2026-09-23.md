@@ -30,4 +30,4 @@ The five private reports and raw failed browser recordings are under `C:/Users/I
 - The next implementation priority is to prevent unsupported claims in the first project draft and make a corrected complete document reliably pass independent recheck within the existing deadline. Recheck must continue to detect changed references, approval state and cross-section conflicts. Then obtain one complete initial/revision/reload journey with the exact source pack and REGI follow-up on a stable build.
 - All four scenarios still have **0/5** consecutive qualified runs on one release build; all **20/20** public media fields remain null. Performance p50/p95, recovery, restart/new-browser durability, device/accessibility and editorial/media checks remain open before publication.
 
-See the maintained [recording plan](../apps/verevon-web/plans/product-recordings/README.md), [workflow](../apps/verevon-web/plans/product-recordings/RECORDING-WORKFLOW.md) and [pass 4 baseline](PRODUCT_RECORDING_CAPTURE_PASS4_2026-09-23.md).
+See the maintained [recording plan](../README.md), [workflow](../RECORDING-WORKFLOW.md) and [pass 4 baseline](PRODUCT_RECORDING_CAPTURE_PASS4_2026-09-23.md).
